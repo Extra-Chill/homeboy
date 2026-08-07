@@ -880,6 +880,127 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 }
 
 #[test]
+fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({
+                "failure_classification": "policy_denied",
+                "diagnostics": [
+                    {
+                        "class": "provider.runtime_unavailable",
+                        "message": "Provider runtime reported an unavailable capability."
+                    },
+                    {
+                        "class": "agent_task.provider_malformed_json",
+                        "message": "Executor wrapper reported malformed provider output."
+                    },
+                    {
+                        "class": "provider.process_exit",
+                        "message": "OpenCode CLI exited with status 0"
+                    },
+                    {
+                        "class": "agent_tool.command_denied",
+                        "message": "Tool 'grep' was denied by the external-directory permission policy.",
+                        "data": {
+                            "tool": "grep",
+                            "permission": "external_directory_read",
+                            "requested_path": "/Users/chubes/Developer/homeboy",
+                            "canonical_path": "/Users/chubes/Developer/homeboy@fix-11827-diagnose-policy-root-cause"
+                        }
+                    },
+                    {
+                        "class": "agent_task.required_output_missing",
+                        "message": "Required output review_form was not produced."
+                    },
+                    {
+                        "class": "agent_task.provider_outcome_contract_violation",
+                        "message": "Provider result violates the required output contract."
+                    }
+                ]
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        let run_id = "run-cli-diagnose-policy-denial";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            ExecutorResultEvidenceFailureExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            },
+        )
+        .expect("run completed with failed outcome");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["root_cause"]["class"], "agent_tool.command_denied");
+        assert_eq!(value["root_cause"]["details"]["tool"], "grep");
+        assert_eq!(
+            value["root_cause"]["details"]["permission"],
+            "external_directory_read"
+        );
+        assert_eq!(
+            value["root_cause"]["details"]["requested_path"],
+            "/Users/chubes/Developer/homeboy"
+        );
+        assert_eq!(
+            value["root_cause"]["details"]["canonical_path"],
+            "/Users/chubes/Developer/homeboy@fix-11827-diagnose-policy-root-cause"
+        );
+        assert!(value["diagnostic_chain"]
+            .as_array()
+            .expect("diagnostic chain")
+            .iter()
+            .any(|diagnostic| diagnostic["class"] == "agent_task.required_output_missing"));
+        assert_eq!(
+            value["diagnostic_chain"]
+                .as_array()
+                .expect("diagnostic chain")[0]["class"],
+            "agent_tool.command_denied"
+        );
+        assert_ne!(value["root_cause"]["class"], "provider.process_exit");
+
+        let (status_value, status_exit_code) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+        })
+        .expect("status loaded");
+
+        assert_eq!(status_exit_code, 0);
+        assert_eq!(
+            status_value["diagnostic_summary"]["class"],
+            "agent_tool.command_denied"
+        );
+        assert_eq!(
+            status_value["diagnostic_summary"]["details"]["tool"],
+            "grep"
+        );
+        assert_eq!(
+            status_value["diagnostic_summary"]["details"]["permission"],
+            "external_directory_read"
+        );
+        assert_eq!(
+            status_value["diagnostic_summary"]["details"]["canonical_path"],
+            "/Users/chubes/Developer/homeboy@fix-11827-diagnose-policy-root-cause"
+        );
+    });
+}
+
+#[test]
 fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
     with_temp_home(|| {
         let evidence_dir = tempfile::tempdir().expect("evidence dir");
@@ -942,6 +1063,25 @@ fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
             .expect("process streams")
             .iter()
             .any(|stream| stream["excerpt"] == "token=[REDACTED]"));
+
+        let (status_value, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+        })
+        .expect("status loaded");
+        assert_eq!(
+            status_value["diagnostic_summary"]["class"],
+            "provider.runtime_unavailable"
+        );
+        assert_eq!(
+            status_value["diagnostic_summary"]["source"],
+            "hydrated_process_stream"
+        );
     });
 }
 
