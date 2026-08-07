@@ -1436,10 +1436,15 @@ pub(super) fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
     if let Some(timeout_ms) = args.timeout_ms {
         plan.options.timeout_ms = Some(timeout_ms);
     }
-    emit_runner_lifecycle_progress(&plan, args.record_run_id.as_deref());
+    // Managed services own durable process logs, so a direct plan invocation
+    // needs a run identity even when the caller did not provide one.
+    let record_run_id = args.record_run_id.or_else(|| {
+        (!plan.services.is_empty()).then(|| format!("run-plan-{}", uuid::Uuid::new_v4()))
+    });
+    emit_runner_lifecycle_progress(&plan, record_run_id.as_deref());
     run_loaded_plan(
         plan,
-        args.record_run_id.as_deref(),
+        record_run_id.as_deref(),
         ExtensionProviderAgentTaskExecutor::discover(),
     )
 }
