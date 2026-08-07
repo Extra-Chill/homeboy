@@ -306,6 +306,7 @@ Manage GitHub pull requests for a component
 | --- | --- |
 | `homeboy git pr create` | Create a new pull request |
 | `homeboy git pr edit` | Edit an existing PR's title or body |
+| `homeboy git pr ready` | Mark a draft PR ready for review. Already-ready PRs are left unchanged |
 | `homeboy git pr find` | Find PRs matching filters |
 | `homeboy git pr readiness` | Explain PR merge readiness without attempting a merge |
 | `homeboy git pr comment` | Post a comment on a PR. Three modes: |
@@ -355,6 +356,23 @@ Edit an existing PR's title or body
 | `-t`, `--title` | `<TITLE>` | New title |
 | `-B`, `--body` | `<BODY>` | New body (markdown) |
 | `--body-file` | `<PATH>` | Read body from a file ("-" for stdin) |
+| `--path` | `<PATH>` | Workspace path to discover the component from a portable homeboy.json |
+
+## `homeboy git pr ready`
+
+```sh
+homeboy git pr ready [OPTIONS] <COMPONENT_ID>
+```
+
+Mark a draft PR ready for review. Already-ready PRs are left unchanged
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<COMPONENT_ID>` | yes | Component ID |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `-n`, `--number` | `<NUMBER>` | PR number |
 | `--path` | `<PATH>` | Workspace path to discover the component from a portable homeboy.json |
 
 ## `homeboy git pr find`

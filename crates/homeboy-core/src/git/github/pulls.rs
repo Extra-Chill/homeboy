@@ -1,5 +1,5 @@
 //! Pull-request primitives via the `gh` CLI: create, edit, find, view, files,
-//! and merge — plus the shared PR-list JSON parser and merge-method validator.
+//! merge, and ready-for-review — plus the shared PR-list JSON parser and merge-method validator.
 
 use std::path::Path;
 use std::process::Command;
@@ -123,6 +123,56 @@ pub fn pr_edit(component_id: Option<&str>, options: PrEditOptions) -> Result<Git
     })
 }
 
+/// Mark a draft pull request ready for review.
+///
+/// The transition is idempotent: an already-ready PR is observed but not mutated.
+pub fn pr_ready(
+    component_id: Option<&str>,
+    number: u64,
+    path: Option<String>,
+) -> Result<GithubPrOutput> {
+    let view = pr_view(component_id, number, path.clone())?;
+    if !view.draft {
+        return Ok(GithubPrOutput {
+            component_id: view.component_id,
+            owner: view.owner,
+            repo: view.repo,
+            action: "pr.ready".to_string(),
+            success: true,
+            number: Some(number),
+            url: Some(view.url),
+            state: Some(view.state),
+            ..Default::default()
+        });
+    }
+
+    let (id, repo, gh) = resolve_component_github(component_id, path.as_deref())?;
+    gh.ensure_ready()?;
+    let repo_flag = format!("{}/{}", repo.owner, repo.repo);
+    gh.run(&pr_ready_args(&repo_flag, number))?;
+    Ok(GithubPrOutput {
+        component_id: id,
+        owner: repo.owner,
+        repo: repo.repo,
+        action: "pr.ready".to_string(),
+        success: true,
+        number: Some(number),
+        url: Some(view.url),
+        state: Some(view.state),
+        ..Default::default()
+    })
+}
+
+fn pr_ready_args(repo: &str, number: u64) -> Vec<String> {
+    vec![
+        "pr".to_string(),
+        "ready".to_string(),
+        number.to_string(),
+        "-R".to_string(),
+        repo.to_string(),
+    ]
+}
+
 /// Find PRs matching the given filter.
 pub fn pr_find(component_id: Option<&str>, options: PrFindOptions) -> Result<GithubFindOutput> {
     let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
@@ -144,7 +194,7 @@ pub fn pr_find(component_id: Option<&str>, options: PrFindOptions) -> Result<Git
         "--limit".into(),
         limit.to_string(),
         "--json".into(),
-        "number,title,url,state,baseRefName,headRefName".into(),
+        "number,title,url,state,isDraft,baseRefName,headRefName".into(),
     ];
     if let Some(base) = &options.base {
         args.push("--base".into());
@@ -400,6 +450,8 @@ pub(super) fn parse_pr_list_json(raw: &str) -> Result<Vec<GithubFindItem>> {
         title: String,
         url: String,
         state: String,
+        #[serde(default, rename = "isDraft")]
+        is_draft: bool,
     }
 
     let parsed: Vec<RawPr> = serde_json::from_str(raw.trim())
@@ -411,6 +463,7 @@ pub(super) fn parse_pr_list_json(raw: &str) -> Result<Vec<GithubFindItem>> {
             title: p.title,
             body: String::new(),
             url: p.url,
+            is_draft: p.is_draft,
             state: p.state,
             state_reason: String::new(),
             closed_at: String::new(),
@@ -433,13 +486,23 @@ mod tests {
     #[test]
     fn parse_pr_list_extracts_all_entries() {
         let raw = r#"[
-            {"number":10,"title":"feat: x","url":"u10","state":"OPEN"},
+            {"number":10,"title":"feat: x","url":"u10","state":"OPEN","isDraft":true},
             {"number":11,"title":"chore: y","url":"u11","state":"OPEN"}
         ]"#;
         let items = parse_pr_list_json(raw).unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].number, 10);
+        assert!(items[0].is_draft);
+        assert!(!items[1].is_draft);
         assert_eq!(items[1].state, "OPEN");
+    }
+
+    #[test]
+    fn pr_ready_uses_the_explicit_github_transition() {
+        assert_eq!(
+            pr_ready_args("Extra-Chill/homeboy", 42),
+            ["pr", "ready", "42", "-R", "Extra-Chill/homeboy"]
+        );
     }
 
     #[test]

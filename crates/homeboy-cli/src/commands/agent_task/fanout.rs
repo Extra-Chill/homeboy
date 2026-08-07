@@ -1776,6 +1776,8 @@ struct BatchCookSpec {
     max_attempts: u32,
     #[serde(default)]
     no_finalize: bool,
+    #[serde(default)]
+    draft_pr: bool,
     #[serde(default = "default_base")]
     base: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1928,6 +1930,7 @@ impl BatchCookSpec {
                 },
                 max_attempts: self.max_attempts,
                 no_finalize: self.no_finalize,
+                draft_pr: self.draft_pr,
                 base: self.base.clone(),
                 task_base_sha,
                 head: self.head.clone(),
@@ -2098,6 +2101,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
                 .gate_package_artifacts,
             max_attempts: default_max_attempts(),
             no_finalize: false,
+            draft_pr: false,
             base: args.base.clone(),
             head: Some(branch),
             title: Some(format!("Fix {}", issue.key)),
