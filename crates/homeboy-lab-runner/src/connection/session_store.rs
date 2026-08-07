@@ -241,7 +241,7 @@ fn record_partial_peer_projection(runner_id: &str, reason_code: &'static str, de
         reason_code,
         timeout_seconds: 0,
         detail: format!(
-            "{detail}; status is partial. Run `homeboy runner reconcile {runner_id}` to select or repair the authoritative session."
+            "{detail}; status is partial. Run `homeboy runner connect {runner_id}` to re-establish and validate the authoritative session."
         ),
     });
 }
@@ -1274,6 +1274,33 @@ mod tests {
             .expect("project bounded peers"),
             StatusPeerSession::Truncated
         ));
+    }
+
+    #[test]
+    fn partial_peer_session_recovery_guidance_reconnects_instead_of_reconciling() {
+        let _ = crate::readonly_probe::take_degradations();
+        let root = TempDir::new().expect("session directory");
+        for index in 0..9 {
+            let peer = session(&format!("peer-{index}"), "lease-live");
+            write_session_at(&root.path().join(format!("peer-{index}.json")), &peer)
+                .expect("write peer session");
+        }
+
+        assert!(matches!(
+            status_peer_session_in_with(&root.path().to_path_buf(), "current", |_| true)
+                .expect("project bounded peers"),
+            StatusPeerSession::Truncated
+        ));
+
+        record_partial_peer_projection("runner-a", "probe_truncated", "nine peers".to_string());
+        let guidance = crate::readonly_probe::take_degradations()
+            .into_iter()
+            .find(|degradation| degradation.runner_id.as_deref() == Some("runner-a"))
+            .expect("partial peer guidance");
+        assert!(guidance.detail.contains("homeboy runner connect runner-a"));
+        assert!(!guidance
+            .detail
+            .contains("homeboy runner reconcile runner-a"));
     }
 
     #[test]
