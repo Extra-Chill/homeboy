@@ -708,37 +708,41 @@ pub(super) fn reconcile_records(dry_run: bool) -> CmdResult<Value> {
 }
 
 /// Group active-run ids by liveness classification for a scannable triage view.
+///
+/// The bucket names, the "no classification means active" default, and the
+/// reconcilability of each bucket all come from [`AgentTaskLiveness`] itself
+/// rather than from a hand-rolled match here. The previous version restated the
+/// four-way mapping in the CLI, which is precisely the duplication #W3-4 is
+/// about: an orchestrator reading `liveness: "suspect"` had to reimplement the
+/// same table to know whether it was allowed to reconcile.
 fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport) -> Value {
     use agent_task_service_direct::AgentTaskLiveness;
 
-    let mut active = Vec::new();
-    let mut stale = Vec::new();
-    let mut suspect = Vec::new();
-    let mut unreconciled = Vec::new();
+    let mut buckets = serde_json::Map::new();
+    for liveness in AgentTaskLiveness::ALL {
+        buckets.insert(liveness.as_str().to_string(), Value::Array(Vec::new()));
+    }
 
     for run in &report.runs {
-        let bucket = match run.liveness {
-            Some(AgentTaskLiveness::Active) | None => &mut active,
-            Some(AgentTaskLiveness::Stale) => &mut stale,
-            Some(AgentTaskLiveness::Suspect) => &mut suspect,
-            Some(AgentTaskLiveness::Unreconciled) => &mut unreconciled,
-        };
-        bucket.push(json!({
+        // A run with no classification (the `all`/`latest` filters do not
+        // classify) is treated as active — the behaviour the previous
+        // `Some(Active) | None` arm encoded.
+        let liveness = run.liveness.unwrap_or(AgentTaskLiveness::Active);
+        let entry = json!({
             "run_id": run.run_id,
             "state": run.state,
             "source": run.source,
             "last_update": run.last_update,
             "last_update_age_minutes": run.last_update_age_minutes,
             "stale_reason": run.stale_reason,
-        }));
+            "reconcilable": liveness.is_reconcilable(),
+        });
+        if let Some(Value::Array(bucket)) = buckets.get_mut(liveness.as_str()) {
+            bucket.push(entry);
+        }
     }
 
-    json!({
-        "active": active,
-        "stale": stale,
-        "suspect": suspect,
-        "unreconciled": unreconciled,
-    })
+    Value::Object(buckets)
 }
 
 fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {

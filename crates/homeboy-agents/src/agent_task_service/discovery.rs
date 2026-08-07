@@ -106,7 +106,18 @@ pub enum AgentTaskLiveness {
 }
 
 impl AgentTaskLiveness {
-    pub(super) fn as_str(self) -> &'static str {
+    /// Every classification, in report order. Exported so a consumer can render
+    /// the full bucket set without hardcoding the four names.
+    pub const ALL: [AgentTaskLiveness; 4] = [
+        AgentTaskLiveness::Active,
+        AgentTaskLiveness::Stale,
+        AgentTaskLiveness::Suspect,
+        AgentTaskLiveness::Unreconciled,
+    ];
+
+    /// The wire label for this classification — the same string the enum
+    /// serializes to.
+    pub fn as_str(self) -> &'static str {
         match self {
             AgentTaskLiveness::Active => "active",
             AgentTaskLiveness::Stale => "stale",
@@ -116,7 +127,14 @@ impl AgentTaskLiveness {
     }
 
     /// Whether this classification is a candidate for safe reconcile/cancel.
-    pub(super) fn is_reconcilable(self) -> bool {
+    ///
+    /// This is the decision-relevant predicate over the classification, and it
+    /// is public — and emitted as `liveness_reconcilable` next to `liveness` —
+    /// so a consumer holding `liveness: "suspect"` does not have to hardcode
+    /// which of the four values mean "you may safely reconcile this" (#W3-4).
+    /// The mapping is exactly: `Active` is not reconcilable; `Stale`,
+    /// `Suspect`, and `Unreconciled` are.
+    pub fn is_reconcilable(self) -> bool {
         matches!(
             self,
             AgentTaskLiveness::Stale | AgentTaskLiveness::Suspect | AgentTaskLiveness::Unreconciled
@@ -130,6 +148,10 @@ pub struct AgentTaskLivenessSummary {
     pub stale: usize,
     pub suspect: usize,
     pub unreconciled: usize,
+    /// How many of the above are candidates for safe reconcile/cancel, computed
+    /// from [`AgentTaskLiveness::is_reconcilable`] rather than by re-summing the
+    /// buckets a consumer would otherwise have to know the meaning of (#W3-4).
+    pub reconcilable: usize,
     /// Convenience hint: the safe command path to reconcile stale-running
     /// records without manual state edits.
     pub reconcile_command: &'static str,
@@ -165,6 +187,13 @@ pub struct AgentTaskDiscoveryRun {
     /// Populated for the `active` filter; `None` for `all`/`latest` lists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liveness: Option<AgentTaskLiveness>,
+    /// Sibling of [`Self::liveness`]: whether that classification is a
+    /// candidate for safe reconcile/cancel. Emitted so an orchestrator reading
+    /// `liveness: "suspect"` does not have to hardcode which of the four values
+    /// mean "you may reconcile this" (#W3-4). Always present exactly when
+    /// `liveness` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness_reconcilable: Option<bool>,
     /// Where this run executes: `local`, `remote`, or `runner:<id>`. Lets an
     /// operator trace the runner process for Lab/offloaded runs.
     pub source: String,
@@ -385,11 +414,16 @@ fn liveness_summary_for_records(
         ..Default::default()
     };
     for record in records {
-        match classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now) {
+        let liveness =
+            classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
+        match liveness {
             AgentTaskLiveness::Active => summary.active += 1,
             AgentTaskLiveness::Stale => summary.stale += 1,
             AgentTaskLiveness::Suspect => summary.suspect += 1,
             AgentTaskLiveness::Unreconciled => summary.unreconciled += 1,
+        }
+        if liveness.is_reconcilable() {
+            summary.reconcilable += 1;
         }
     }
     summary
@@ -544,6 +578,7 @@ fn discovery_run(
         ),
         retryable: metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_RETRYABLE),
         liveness,
+        liveness_reconcilable: liveness.map(AgentTaskLiveness::is_reconcilable),
         source,
         last_update,
         last_update_age_minutes,
