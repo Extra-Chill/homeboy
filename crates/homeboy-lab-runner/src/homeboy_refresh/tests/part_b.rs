@@ -316,54 +316,61 @@ fn ssh_dev_sync_rejects_darwin_binary_before_upload() {
     })));
 }
 
-/// A Darwin controller cannot produce a Linux binary, so the refusal must land
-/// before the compile rather than after it (#8963).
 #[test]
-fn ssh_dev_sync_source_build_is_refused_before_compilation_on_darwin() {
-    let runner = super::super::super::Runner {
-        id: "homeboy-lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: Some("lab-server".to_string()),
-        workspace_root: Some("/home/chubes/Developer".to_string()),
-        settings: Default::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: Default::default(),
-    };
+fn ssh_source_snapshot_plan_builds_natively_without_cross_compilation() {
+    let source = tempfile::tempdir().expect("source");
+    std::fs::write(
+        source.path().join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\n",
+    )
+    .expect("manifest");
+    std::fs::create_dir_all(source.path().join("target")).expect("target");
+    std::fs::write(source.path().join("target/local"), "controller binary").expect("target output");
+    let snapshot = build_runner_source_snapshot(source.path(), "/runner/ws").expect("snapshot");
+    let script = source_snapshot_build_script(&snapshot);
+    let archive = std::process::Command::new("tar")
+        .args(["-tf"])
+        .arg(snapshot.archive.path())
+        .output()
+        .expect("list snapshot archive");
 
-    let result = validate_dev_sync_source_build_for_runner(&runner);
-
-    if cfg!(target_os = "macos") {
-        let err = result.expect_err("darwin controller source build rejected for an SSH runner");
-        assert!(err.message.contains("Darwin controller"));
-        let tried = err.details["tried"].as_array().expect("tried remediation");
-        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(|hint| {
-            hint.contains("runner refresh-homeboy") && hint.contains("--ref main --reconnect")
-        })));
-    } else {
-        result.expect("a non-Darwin controller can build for an SSH runner");
-    }
+    assert!(snapshot
+        .remote_archive
+        .starts_with("/runner/ws/_homeboy_binaries/dev-source/"));
+    assert_eq!(
+        snapshot.build_slot,
+        format!(
+            "/runner/ws/_homeboy_binaries/dev/{}",
+            &snapshot.sha256[..16]
+        )
+    );
+    assert!(script.contains("cargo build --release --bin homeboy"));
+    assert!(script.contains("runner_native_build_not_elf"));
+    assert!(!script.contains(source.path().to_str().expect("utf8 source")));
+    assert!(!String::from_utf8_lossy(&archive.stdout).contains("target/local"));
 }
 
-/// The preflight is scoped to SSH runners; a local runner runs the controller's
-/// own architecture and must keep building from source.
 #[test]
-fn local_dev_sync_source_build_is_always_allowed() {
-    let runner = super::super::super::Runner {
-        id: "lab-local".to_string(),
-        kind: RunnerKind::Local,
-        server_id: None,
-        workspace_root: Some("/tmp/homeboy".to_string()),
-        settings: Default::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: Default::default(),
+fn ssh_source_snapshot_requires_matching_source_binary_and_slot_identity() {
+    let snapshot = PreparedRunnerSourceSnapshot {
+        archive: tempfile::NamedTempFile::new().expect("archive"),
+        sha256: "a".repeat(64),
+        size_bytes: 1,
+        remote_archive: "/runner/ws/_homeboy_binaries/dev-source/aaaaaaaaaaaaaaaa.tar".to_string(),
+        build_slot: "/runner/ws/_homeboy_binaries/dev/aaaaaaaaaaaaaaaa".to_string(),
     };
-
-    validate_dev_sync_source_build_for_runner(&runner)
-        .expect("local runner accepts a controller-local source build");
+    let binary = "b".repeat(64);
+    let stdout = format!(
+        "HOMEBOY_DEV_SOURCE_SHA256={}\nHOMEBOY_DEV_BINARY_SHA256={binary}\nHOMEBOY_DEV_BINARY_PATH={}/homeboy\n",
+        snapshot.sha256, snapshot.build_slot
+    );
+    assert_eq!(
+        verify_source_snapshot_build(&snapshot, &stdout).expect("verified"),
+        (format!("{}/homeboy", snapshot.build_slot), binary)
+    );
+    let error = verify_source_snapshot_build(&snapshot, &stdout.replace('a', "c"))
+        .expect_err("mismatched source rejected");
+    assert!(error.message.contains("sealed source snapshot"));
 }
 
 #[test]
