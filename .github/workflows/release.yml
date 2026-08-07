@@ -1338,35 +1338,12 @@ jobs:
             echo "::warning::Recovery control binary was built from the release target commit ${TARGET_SHA}; a publisher fix merged after ${RELEASE_TAG} cannot be bootstrapped by this run (#10519). Re-dispatch from an updated default branch if recovery keeps failing in the publisher."
           fi
 
-      # ── Publication gate: the declared asset set is the contract (#11749) ──
-      #
-      # The step below is what turns the draft into a published release. Every
-      # asset check that existed before this one ran AFTER it — `verify-published`
-      # detects an incomplete release and re-drafts it, which is compensation,
-      # not prevention. Compensation requires the compensating job to run, and
-      # the runs that produce incomplete releases are exactly the runs that do
-      # not get that far: v0.323.1 published 2 of 14 assets and stayed live,
-      # v0.333.0 published 7 of 13 with no Linux binary at all.
-      #
-      # So publication is now conditional on the complete declared asset set,
-      # checked immediately before it happens. If the inventory cannot satisfy
-      # `dist-workspace.toml`, this job fails and the release stays a draft —
-      # a failed run is strictly better than a published release that 404s for
-      # the platforms it dropped, because a draft is recoverable and a bad
-      # `latest` is what pinned this controller 453 commits behind.
-      #
-      # `REQUIRE_ANNOUNCE_ASSETS: false` because cargo-dist attaches
-      # `dist-manifest.json` when it announces, which has not happened yet at
-      # this point. `verify-published` still re-checks the full inventory,
-      # `dist-manifest.json` included, once the release is live.
-      - name: Gate publication on the declared asset set
-        env:
-          RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
-          EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
-          REQUIRE_ANNOUNCE_ASSETS: 'false'
-        run: |
-          bash .github/release-asset-completeness.sh
-
+      # `github.release` owns the public transition. It creates an absent
+      # release as a draft, or reconciles an existing draft, then validates the
+      # declared artifacts before changing `draft=false`. A workflow-level
+      # remote inventory gate cannot run first: absent-release recovery has no
+      # object to inspect yet. Keep that lifecycle and its validation together
+      # in the finalizer so both recovery states use the same fail-closed path.
       - name: Finish Homeboy release pipeline at tag
         uses: Extra-Chill/homeboy-action@v2
         with:

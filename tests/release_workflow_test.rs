@@ -2088,49 +2088,41 @@ fn asset_contract_pre_publication_still_requires_every_platform_archive() {
     );
 }
 
-/// #8687's guard is `verify-published`, and it runs AFTER `host` has already
-/// published. Detect-then-revert is compensation, and compensation only works
-/// if the compensating job runs — the runs that ship incomplete releases are
-/// precisely the runs that never get there.
-///
-/// So the contract must also be a PRECONDITION of publication, evaluated
-/// immediately before the finalizer that flips the draft flag. This is the
-/// existing guard moved upstream of the act it guards, not a second guard
-/// beside it: `verify-published` is deliberately left intact below.
+/// The finalizer owns the public transition. It is the only layer that can
+/// support both recovery states: an existing draft can be reconciled, while an
+/// absent Release must first be created as a draft before any remote inventory
+/// exists. A workflow-level `gh release view` gate before the finalizer makes
+/// the latter state unrecoverable (#11881).
 #[test]
-fn publication_is_gated_on_the_declared_asset_set_before_it_happens() {
+fn finalizer_owns_fail_closed_publication_for_absent_and_existing_draft_recovery() {
     let workflow = release_workflow();
     let host = job_section(workflow, "host");
 
-    let gate = release_step_block(host, "name: Gate publication on the declared asset set");
     assert!(
-        gate.contains("release-asset-completeness.sh"),
-        "the gate must evaluate the shared asset contract; got:\n{gate}"
+        !host.contains("name: Gate publication on the declared asset set"),
+        "a remote inventory gate before finalization cannot recover a tag with no GitHub Release"
     );
     assert!(
-        gate.contains("REQUIRE_ANNOUNCE_ASSETS: 'false'"),
-        "the pre-publication gate runs before announce attaches dist-manifest.json; got:\n{gate}"
+        !host.contains("bash .github/release-asset-completeness.sh"),
+        "the host must not inspect a remote Release before the owning finalizer can create its draft"
     );
     assert!(
-        gate.contains("EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}"),
-        "the pre-publication gate must consume cargo-dist's planned asset contract; got:\n{gate}"
+        host.contains("github.release` owns the public transition"),
+        "the workflow must document why the finalizer owns both recovery states"
     );
-
-    let gate_at = host
-        .find("name: Gate publication on the declared asset set")
-        .expect("publication gate must exist");
-    let publish_at = host
-        .find("name: Finish Homeboy release pipeline at tag")
-        .expect("finalizer must exist");
     assert!(
-        gate_at < publish_at,
-        "the asset contract must be checked BEFORE the finalizer publishes, otherwise it \
-         is detection after the fact — which is exactly what #8687 shipped and what let \
-         v0.323.1 and v0.333.0 stay live and incomplete"
+        host.contains("release-from-artifacts:"),
+        "the finalizer must receive the artifact authority it validates before publishing"
     );
 
-    // Moving the check upstream must not remove the containment that catches a
-    // release which somehow reaches `published` anyway.
+    let finalizer = release_step_block(host, "name: Finish Homeboy release pipeline at tag");
+    assert!(
+        finalizer.contains("release-head: 'true'"),
+        "the finalizer must finish the existing tagged release rather than prepare another tag"
+    );
+
+    // Independent post-publication containment remains responsible for releases
+    // published outside the finalizer.
     assert!(
         workflow.contains("verify-published:"),
         "the post-publication containment guard must be retained, not replaced"
