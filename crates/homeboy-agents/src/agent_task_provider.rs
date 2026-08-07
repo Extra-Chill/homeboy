@@ -50,6 +50,7 @@ mod outcome_normalization;
 mod resolution;
 mod runner_readiness;
 mod runtime_preflight_checks;
+mod runtime_readiness;
 mod runtime_tool_resolution;
 mod runtime_types;
 mod secret_types;
@@ -87,6 +88,9 @@ pub(crate) use resolution::{
 pub use runtime_preflight_checks::{
     ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,
     RuntimePreflightReadiness,
+};
+pub use runtime_readiness::{
+    preflight_plan_provider_runtime_readiness_with_providers, ProviderRuntimeReadinessCache,
 };
 pub(crate) use runtime_tool_resolution::resolve_runtime_tools;
 pub use runtime_types::*;

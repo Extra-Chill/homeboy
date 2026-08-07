@@ -418,7 +418,7 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
         crate::agent_task_config_materialization::materialize_provider_config_refs(Value::Object(
             defaults::load_config().settings.into_iter().collect(),
         ))?;
-    super::command_runner::run_provider_readiness_invocation(provider, &effective_config).map_err(
+    let verdict = super::command_runner::run_provider_readiness_invocation(provider, &effective_config).map_err(
         |message| {
             Error::validation_invalid_argument(
                 "backend",
@@ -435,6 +435,23 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
             )
         },
     )?;
+    if !verdict.ready {
+        return Err(Error::validation_invalid_argument(
+            "backend",
+            format!(
+                "agent-task backend '{backend}' is registered but configured readiness failed for provider '{}': {}",
+                provider.id,
+                if verdict.reason.is_empty() {
+                    "provider-owned readiness check failed"
+                } else {
+                    &verdict.reason
+                }
+            ),
+            Some(backend.to_string()),
+            (!verdict.remediation.is_empty()).then(|| vec![verdict.remediation]),
+        )
+        .with_retryable(verdict.retryable));
+    }
 
     Ok(())
 }

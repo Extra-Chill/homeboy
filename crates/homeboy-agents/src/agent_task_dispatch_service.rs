@@ -206,6 +206,11 @@ where
     catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
+    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
+        &plan,
+        catalog.providers(),
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    )?;
     run_dispatch_plan(
         plan,
         request.run_id.as_deref(),
@@ -240,6 +245,12 @@ where
     preflight_plan_provider_config_with_providers(
         &plan,
         &AgentTaskProviderCatalog::discover().providers,
+    )?;
+    let catalog = AgentTaskProviderCatalog::discover();
+    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
+        &plan,
+        catalog.providers(),
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
     )?;
     run_dispatch_plan(
         plan,
