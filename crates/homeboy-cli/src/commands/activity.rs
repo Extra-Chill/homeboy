@@ -4,7 +4,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::core::activity::{
-    self, ActivityEvidenceRef, ActivityItem, ActivityReport, ActivityScope, ActivityState,
+    self, ActivityEvidenceRef, ActivityItem, ActivityOptions, ActivityReport, ActivityScope,
+    ActivityState,
 };
 use homeboy::core::notification_payload::{
     NotifyAction, NotifyAttachment, NotifyEventKind, NotifyPayload, NotifySubject,
@@ -44,9 +45,18 @@ pub struct ActivityListArgs {
     /// Include older completed records instead of active + recent.
     #[arg(long)]
     all: bool,
+    /// Skip connected Lab runners and report only controller-local records.
+    ///
+    /// Runner federation is on by default because a freshly-offloaded run's
+    /// durable record lives on the runner, so a controller-local answer silently
+    /// omits it. The remote query is bounded by the shared read-only probe
+    /// deadline and a runner that does not answer only marks the result
+    /// `partial` — but a latency-sensitive caller can opt out here.
+    #[arg(long = "no-runners")]
+    no_runners: bool,
 }
 
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Debug)]
 pub struct ActivityWatchArgs {
     /// Activity id, observation run id, agent-task run id, or runner job id.
     pub id: String,
@@ -85,6 +95,11 @@ pub struct ActivityWatchOutput {
     pub command: &'static str,
     pub id: String,
     pub state: ActivityState,
+    /// Always `false`: the activity poller is deliberately non-reconciling,
+    /// unlike `runs watch`'s `StorePoller`. Emitted so a consumer polling this
+    /// (including through the `agent-task watch` alias) knows the poll is not
+    /// itself advancing the record it is watching (#W3-15).
+    pub reconciled: bool,
     pub terminal: bool,
     pub timed_out: bool,
     pub waited_secs: u64,
@@ -107,6 +122,7 @@ pub fn run(args: ActivityArgs) -> CmdResult<ActivityOutput> {
         .unwrap_or(ActivityCommand::List(ActivityListArgs {
             limit: 20,
             all: false,
+            no_runners: false,
         })) {
         ActivityCommand::List(args) => list(args),
         ActivityCommand::Show { id } => show(&id),
@@ -128,6 +144,10 @@ pub fn render_activity_summary(payload: &serde_json::Value) -> Option<String> {
         counts.get("failed")?.as_u64()?,
         counts.get("stale")?.as_u64()?,
     ));
+    // A partial answer that renders identically to a complete one is worse than
+    // no answer: the operator reads "nothing is running" when the truth is
+    // "a runner did not answer". Name the runners that were unreachable.
+    lines.extend(unreachable_runner_lines(report));
     if items.is_empty() {
         lines.push("No active or recent Homeboy activity.".to_string());
         return Some(format!("{}\n", lines.join("\n")));
@@ -183,13 +203,48 @@ pub fn render_activity_summary(payload: &serde_json::Value) -> Option<String> {
     Some(format!("{}\n", lines.join("\n")))
 }
 
+/// Render the "this answer is incomplete" lines for a report, naming each
+/// connected runner that failed to return its work.
+fn unreachable_runner_lines(report: &serde_json::Value) -> Vec<String> {
+    if report.get("partial").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        "partial: one or more sources did not answer; work may be missing from this list."
+            .to_string(),
+    ];
+    let runners = report
+        .pointer("/runner_federation/runners")
+        .and_then(serde_json::Value::as_array);
+    for runner in runners.into_iter().flatten() {
+        if runner.get("queried").and_then(serde_json::Value::as_bool) != Some(false)
+            || runner.get("connected").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            continue;
+        }
+        let id = runner
+            .get("runner_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-");
+        let reason = runner
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("did not answer");
+        lines.push(format!("  unreachable runner: {id}: {reason}"));
+    }
+    lines
+}
+
 fn list(args: ActivityListArgs) -> CmdResult<ActivityOutput> {
     let scope = if args.all {
         ActivityScope::All
     } else {
         ActivityScope::ActiveRecent
     };
-    let report = activity::activity_report(scope, args.limit)?;
+    let options = ActivityOptions {
+        federate_runners: !args.no_runners && ActivityOptions::default().federate_runners,
+    };
+    let report = activity::activity_report_with(scope, args.limit, options)?;
     let actionable = actionable_for_activity_report(&report);
     Ok((
         ActivityOutput::Report(Box::new(ActivityReportOutput { report, actionable })),
@@ -228,6 +283,19 @@ impl WatchPoller for ActivityPoller {
     fn is_terminal(&self, item: &ActivityItem) -> bool {
         !activity::is_active(item.state)
     }
+}
+
+/// `agent-task watch` is an alias for this command, not a second watch loop.
+///
+/// The cook notification already hands operators `homeboy activity watch
+/// {cook_id}` (`agent_task_notify.rs`), and the alias-resolution fallback that
+/// makes a cook id resolve here already exists
+/// (`agent_task_lifecycle::activity_provider::record_for_id`). Building a
+/// separate `agent-task watch` loop would mean two poll loops, two terminality
+/// predicates, and two notification paths over the same records; the cheapest
+/// correct implementation is to route the alias straight into this one (#W3-15).
+pub fn watch_alias(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
+    watch(args)
 }
 
 fn watch(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
@@ -281,6 +349,7 @@ fn watch_output(
             command: "activity.watch",
             id: args.id,
             state: item.state,
+            reconciled: false,
             terminal: !timed_out,
             timed_out,
             waited_secs: waited.as_secs(),
@@ -636,6 +705,49 @@ mod tests {
         }
     }
 
+    /// `agent-task watch` is an alias, not a second implementation: it must
+    /// parse into the very same `ActivityWatchArgs` this command's own `watch`
+    /// subcommand does, flag for flag (#W3-15).
+    #[test]
+    fn agent_task_watch_is_an_alias_for_activity_watch() {
+        use crate::cli_surface::Commands;
+        use crate::commands::agent_task::{AgentTaskArgs, AgentTaskCommand};
+
+        let argv = |root: &'static str| {
+            vec![
+                "homeboy",
+                root,
+                "watch",
+                "cook-1",
+                "--interval",
+                "5s",
+                "--timeout",
+                "30m",
+            ]
+        };
+
+        let activity = Cli::try_parse_from(argv("activity")).expect("activity watch parses");
+        let Commands::Activity(ActivityArgs {
+            command: Some(ActivityCommand::Watch(direct)),
+        }) = activity.command
+        else {
+            panic!("activity watch resolves to the watch subcommand");
+        };
+
+        let aliased = Cli::try_parse_from(argv("agent-task")).expect("agent-task watch parses");
+        let Commands::AgentTask(AgentTaskArgs {
+            command: AgentTaskCommand::Watch(alias),
+        }) = aliased.command
+        else {
+            panic!("agent-task watch resolves to the alias");
+        };
+
+        assert_eq!(alias.id, direct.id);
+        assert_eq!(alias.interval, direct.interval);
+        assert_eq!(alias.timeout, direct.timeout);
+        assert_eq!(alias.notify, direct.notify);
+    }
+
     #[test]
     fn activity_reads_do_not_reconcile_stale_running_records() {
         with_isolated_home(|_| {
@@ -655,6 +767,7 @@ mod tests {
             list(ActivityListArgs {
                 limit: 1,
                 all: false,
+                no_runners: true,
             })
             .expect("list activity");
             show(&run.id).expect("show activity");
@@ -668,6 +781,7 @@ mod tests {
             list(ActivityListArgs {
                 limit: 1,
                 all: false,
+                no_runners: true,
             })
             .expect("repeat list activity");
 
@@ -677,6 +791,37 @@ mod tests {
                 .expect("run exists");
             assert_eq!(after, before);
             assert_eq!(after.status, RunStatus::Running.as_str());
+        });
+    }
+
+    /// The non-reconciling contract above is now *declared* in the output, not
+    /// only enforced by that test. `activity show <id>` and `agent-task status
+    /// <id> --bridge` can legitimately report different states for the same run
+    /// at the same instant, and the reconciling one changes what the other
+    /// returns next; `reconciled` is how a consumer tells them apart (#W3-15).
+    #[test]
+    fn every_activity_surface_declares_itself_unreconciled() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("activity-reconciled-flag").build())
+                .expect("running run");
+
+            for output in [
+                list(ActivityListArgs {
+                    limit: 5,
+                    all: false,
+                    no_runners: true,
+                })
+                .expect("list activity")
+                .0,
+                show(&run.id).expect("show activity").0,
+            ] {
+                let ActivityOutput::Report(report) = output else {
+                    panic!("list/show return reports");
+                };
+                assert!(!report.report.reconciled);
+            }
         });
     }
 
@@ -709,6 +854,10 @@ mod tests {
             panic!("watch returns a watch output");
         };
         // The wire shape is unchanged by the shared-loop extraction.
+        assert!(
+            !output.reconciled,
+            "the activity poller must never reconcile"
+        );
         assert_eq!(output.command, "activity.watch");
         assert_eq!(output.schema, activity::ACTIVITY_REPORT_SCHEMA);
         assert_eq!(output.id, "run-1");

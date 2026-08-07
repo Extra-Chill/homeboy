@@ -842,11 +842,10 @@ fn discovery_lists_durable_runs_with_operator_commands() {
         assert_eq!(report.record_health.conflicting, 0);
         assert!(!report.truncated);
         assert!(report.limit.is_none());
-        assert!(report
-            .lab_discovery
-            .runner_scoped_command
-            .contains("--runner"));
-        assert!(report.lab_discovery.fallback_command.contains("runs list"));
+        // The prose apology this replaced told operators to go run a second,
+        // runner-scoped command themselves. Discovery now points at the surface
+        // that federates runner-resident records instead (#W3-15).
+        assert!(report.federated_command.contains("homeboy activity"));
         assert_eq!(run.run_id, "run-discovery-list");
         assert_eq!(run.state, AgentTaskRunState::Queued);
         assert_eq!(run.repo.as_deref(), Some("homeboy"));
@@ -944,6 +943,49 @@ fn discovery_active_reads_runner_backed_record_without_reconciliation() {
     });
 }
 
+/// #W3-4: `is_reconcilable` is now public and emitted as `liveness_reconcilable`,
+/// and the CLI's hand-rolled four-way bucketing was replaced by it. This pins
+/// the predicate against the bucketing it replaced for **all four** variants:
+/// the CLI grouped `Some(Active) | None` into `active` and everything else into
+/// a named non-active bucket, so "not in the active bucket" must be exactly
+/// "reconcilable". Any divergence here is a behaviour change.
+#[test]
+fn is_reconcilable_matches_the_replaced_cli_bucketing_for_every_variant() {
+    for (liveness, expected) in [
+        (AgentTaskLiveness::Active, false),
+        (AgentTaskLiveness::Stale, true),
+        (AgentTaskLiveness::Suspect, true),
+        (AgentTaskLiveness::Unreconciled, true),
+    ] {
+        assert_eq!(
+            liveness.is_reconcilable(),
+            expected,
+            "{liveness:?} reconcilability"
+        );
+        // The CLI's `active` bucket was `Some(Active) | None`; a classified run
+        // lands in the `active` bucket exactly when it is not reconcilable.
+        assert_eq!(
+            liveness.as_str() == "active",
+            !liveness.is_reconcilable(),
+            "{liveness:?} bucket membership"
+        );
+        // The wire label the CLI keys buckets by is the same string the enum
+        // serializes to, so bucketing by `as_str()` cannot drift from `liveness`.
+        assert_eq!(
+            serde_json::to_value(liveness).expect("serialize liveness"),
+            serde_json::Value::String(liveness.as_str().to_string())
+        );
+    }
+
+    // An unclassified run (the `all`/`latest` filters do not classify) defaults
+    // to Active, which is what the replaced `None` arm did.
+    assert!(!Option::<AgentTaskLiveness>::None
+        .unwrap_or(AgentTaskLiveness::Active)
+        .is_reconcilable());
+
+    assert_eq!(AgentTaskLiveness::ALL.len(), 4);
+}
+
 #[test]
 fn discovery_active_classifies_liveness_and_source() {
     with_isolated_home(|_| {
@@ -983,9 +1025,18 @@ fn discovery_active_classifies_liveness_and_source() {
         assert_eq!(stale.liveness, Some(AgentTaskLiveness::Stale));
         assert_eq!(stale.source, "runner:homeboy-lab");
 
+        // The reconcilable predicate travels with the classification, so a
+        // consumer never has to map the four values itself (#W3-4).
+        assert_eq!(queued.liveness_reconcilable, Some(false));
+        assert_eq!(stale.liveness_reconcilable, Some(true));
+
         let summary = report.liveness_summary.expect("active summary present");
         assert!(summary.active >= 1);
         assert_eq!(summary.stale, 1);
+        assert_eq!(
+            summary.reconcilable,
+            summary.stale + summary.suspect + summary.unreconciled
+        );
         assert_eq!(
             summary.reconcile_command,
             "homeboy agent-task active --reconcile --dry-run"

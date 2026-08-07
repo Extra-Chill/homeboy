@@ -1,12 +1,22 @@
 //! Activity reporting — aggregates in-flight and recent work from observation
-//! runs, agent-task records, and daemon jobs into a single
-//! deduplicated report, and resolves individual items by id.
+//! runs, agent-task records, daemon jobs, and runner-resident records into a
+//! single deduplicated report, and resolves individual items by id.
 //!
 //! The data model lives in [`model`], multi-source dedup/reconciliation in
 //! [`collector`], shared leaf helpers in [`action_helpers`], and each source
 //! adapter in its own submodule (`observation`, `daemon_jobs`,
-//! `agent_task_provider`). This root retains only report
+//! `runner_sessions`, `agent_task_provider`). This root retains only report
 //! assembly and id resolution (#9794).
+//!
+//! ## This is a read model, not a reconciler
+//!
+//! Every source here is read without writing. That is a deliberate contract,
+//! and it is *observable*: `agent-task status <id>` is a reconciling read that
+//! writes, and `runs watch` reconciles on purpose. So `activity show <id>` and
+//! `agent-task status <id>` can legitimately report different states for the
+//! same run at the same instant, and calling one changes what the other
+//! returns. [`ActivityReport::reconciled`] is emitted as `false` so a consumer
+//! can tell which kind of answer it is holding (#W3-15).
 
 use std::collections::BTreeSet;
 
@@ -25,6 +35,7 @@ mod model;
 
 mod daemon_jobs;
 mod observation;
+mod runner_sessions;
 
 pub use model::*;
 
@@ -35,7 +46,61 @@ pub(crate) use collector::ActivityCollector;
 
 pub const ACTIVITY_REPORT_SCHEMA: &str = "homeboy/activity-report/v1";
 
+/// Environment opt-out for runner federation. Any of `0`/`false`/`no`/`off`
+/// disables it; anything else (including absence) leaves it on.
+pub const ACTIVITY_FEDERATE_RUNNERS_ENV: &str = "HOMEBOY_ACTIVITY_FEDERATE_RUNNERS";
+
+/// Source-selection policy for one activity report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivityOptions {
+    /// Consult connected Lab runners for records that are resident on them.
+    ///
+    /// **Default-on**, deliberately. The alternative — an opt-in flag — means
+    /// the default answer to "what is happening right now" silently omits
+    /// offloaded work, which is exactly the failure this source exists to fix;
+    /// an operator cannot pass a flag for a gap they do not know is there. The
+    /// cost is bounded rather than avoided: the source short-circuits entirely
+    /// when no runner layer is registered, performs no network at all for a
+    /// runner with no connected session, and runs the one query it does make
+    /// under the shared read-only probe deadline. See the `runner_sessions`
+    /// module for the full bound.
+    ///
+    /// A latency-sensitive caller opts out with `--no-runners` or
+    /// [`ACTIVITY_FEDERATE_RUNNERS_ENV`].
+    pub federate_runners: bool,
+}
+
+impl Default for ActivityOptions {
+    fn default() -> Self {
+        Self {
+            federate_runners: federate_runners_from(
+                std::env::var(ACTIVITY_FEDERATE_RUNNERS_ENV).ok().as_deref(),
+            ),
+        }
+    }
+}
+
+/// Resolve the federation switch from a raw override. Split from the
+/// environment read so the default-on contract is deterministically testable.
+fn federate_runners_from(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+            .unwrap_or_default(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
 pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityReport> {
+    activity_report_with(scope, limit, ActivityOptions::default())
+}
+
+pub fn activity_report_with(
+    scope: ActivityScope,
+    limit: usize,
+    options: ActivityOptions,
+) -> Result<ActivityReport> {
     let mut collector = ActivityCollector::default();
     observation::collect(&mut collector, limit)?;
     // Items and record health come from one pass over the durable agent-task
@@ -46,8 +111,15 @@ pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityRep
         collector.insert(item);
     }
     daemon_jobs::collect(&mut collector)?;
+    // Runner federation is last on purpose: every controller-local source is
+    // already collected before any remote probe is attempted, so the remote
+    // bound can only ever add to a complete local answer — it can never delay
+    // or lose one.
+    let federation = runner_sessions::collect(&mut collector, options.federate_runners);
     let mut report = report_from_items(collector.items(scope, limit), "activity");
     report.agent_task_record_health = agent_task_record_health;
+    report.partial = federation.partial;
+    report.runner_federation = federation;
     Ok(report)
 }
 
@@ -70,25 +142,45 @@ pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityRep
 /// observation projection. Probing the authoritative lifecycle source first
 /// keeps `show`/`watch` agreeing with `list`, where the lifecycle projection
 /// wins the same id (#10308).
-fn resolve_activity_item(id: &str) -> Result<Option<ActivityItem>> {
+fn resolve_activity_item(id: &str) -> Result<(Option<ActivityItem>, ActivityRunnerFederation)> {
+    resolve_activity_item_with(id, ActivityOptions::default())
+}
+
+fn resolve_activity_item_with(
+    id: &str,
+    options: ActivityOptions,
+) -> Result<(Option<ActivityItem>, ActivityRunnerFederation)> {
     // Bounded, indexed probes for the id shapes `show`/`watch` are called with.
     // A failing probe (missing store, etc.) must not abort resolution — treat it
     // as "not found here" and continue so a partial-source outage still resolves
     // the id from another provider.
+    //
+    // All three are controller-local, so none of them federates and none of them
+    // returns a federation record: a hit here costs no remote work at all.
     if let Ok(Some(item)) = agent_task_provider::probe_by_id(id) {
-        return Ok(Some(item));
+        return Ok((Some(item), ActivityRunnerFederation::default()));
     }
     if let Ok(Some(item)) = observation::probe_by_id(id) {
-        return Ok(Some(item));
+        return Ok((Some(item), ActivityRunnerFederation::default()));
     }
     if let Ok(Some(item)) = daemon_jobs::probe_by_id(id) {
-        return Ok(Some(item));
+        return Ok((Some(item), ActivityRunnerFederation::default()));
     }
 
     // Fallback: aggregate the bounded report and resolve cross-refs (agent-task
     // run ids, runner job ids mirrored onto observation runs, etc.).
-    let report = activity_report(ActivityScope::All, 1000)?;
-    Ok(resolve_item(&report.items, id).cloned())
+    //
+    // This is the one path where runner federation genuinely earns its latency:
+    // a freshly-offloaded run's durable record lives on the runner, so the three
+    // controller-local probes above are *guaranteed* to miss it. Disabling
+    // federation here would make `homeboy activity watch <cook-id>` — the exact
+    // command the cook notification hands the operator — permanently report
+    // "activity item not found" for the window that matters most.
+    let report = activity_report_with(ActivityScope::All, 1000, options)?;
+    Ok((
+        resolve_item(&report.items, id).cloned(),
+        report.runner_federation,
+    ))
 }
 
 fn activity_item_not_found(id: &str) -> Error {
@@ -103,18 +195,37 @@ fn activity_item_not_found(id: &str) -> Error {
 }
 
 pub fn show_activity(id: &str) -> Result<ActivityReport> {
-    let Some(item) = resolve_activity_item(id)? else {
+    show_activity_with(id, ActivityOptions::default())
+}
+
+/// `show_activity` with an explicit federation policy.
+///
+/// The daemon needs this: its HTTP surface runs on a single-threaded accept
+/// loop, and the three controller-local probes always miss for a
+/// runner-resident id, so the default would fall through to a bounded runner
+/// probe and stall every other route for its duration.
+pub fn show_activity_with(id: &str, options: ActivityOptions) -> Result<ActivityReport> {
+    let (item, federation) = resolve_activity_item_with(id, options)?;
+    let Some(item) = item else {
         return Err(activity_item_not_found(id));
     };
     // Record health is a full-corpus diagnostic owned by `activity list`.
     // Attaching it here re-read every durable agent-task record just to answer
     // one id, so it stays null — the report shape carries the field either way
     // (#10308).
-    Ok(report_from_items(vec![item], "activity.show"))
+    let mut report = report_from_items(vec![item], "activity.show");
+    // A `show` that had to fall back through the federation inherits its
+    // partiality: an id resolved while a runner was unreachable is answered from
+    // an incomplete corpus, and the caller is entitled to know that.
+    report.partial = federation.partial;
+    report.runner_federation = federation;
+    Ok(report)
 }
 
 pub fn resolve_activity(id: &str) -> Result<ActivityItem> {
-    resolve_activity_item(id)?.ok_or_else(|| activity_item_not_found(id))
+    resolve_activity_item(id)?
+        .0
+        .ok_or_else(|| activity_item_not_found(id))
 }
 
 fn resolve_item<'a>(items: &'a [ActivityItem], id: &str) -> Option<&'a ActivityItem> {
@@ -189,6 +300,12 @@ fn report_from_items(mut items: Vec<ActivityItem>, command: &'static str) -> Act
         command,
         counts,
         items,
+        // Activity never reconciles. This is a constant rather than a parameter
+        // because there is no activity path that writes; if one is ever added
+        // it must set this, not silently inherit `false` (#W3-15).
+        reconciled: false,
+        partial: false,
+        runner_federation: ActivityRunnerFederation::default(),
         agent_task_record_health: Value::Null,
         next_actions,
     }
@@ -604,5 +721,52 @@ mod tests {
         assert_eq!(report.counts.total, 0);
         assert!(report.items.is_empty());
         assert!(report.next_actions.is_empty());
+    }
+
+    /// Runner federation is on unless explicitly disabled. An operator cannot
+    /// pass a flag for a gap they do not know exists, so the default answer to
+    /// "what is happening right now" must include offloaded work.
+    #[test]
+    fn runner_federation_is_default_on_and_explicitly_opt_out() {
+        assert!(federate_runners_from(None));
+        assert!(federate_runners_from(Some("")));
+        assert!(federate_runners_from(Some("1")));
+        assert!(federate_runners_from(Some("yes")));
+        for disabled in ["0", "false", "no", "off", " OFF ", "False"] {
+            assert!(
+                !federate_runners_from(Some(disabled)),
+                "{disabled:?} must disable federation"
+            );
+        }
+    }
+
+    /// `activity` is a read model. The flag is emitted so a consumer can tell
+    /// this answer apart from `agent-task status`, which reconciles as it reads
+    /// and therefore *changes* what a later `activity show` returns.
+    #[test]
+    fn activity_reports_are_marked_unreconciled() {
+        let report = report_from_items(vec![item("run-1", ActivityState::Running)], "activity");
+        assert!(!report.reconciled);
+    }
+
+    /// A report with no runner degradation is complete, not partial — and an
+    /// unreachable runner must never turn into a command failure.
+    #[test]
+    fn a_local_only_report_is_complete_and_names_no_runners() {
+        with_isolated_home(|_| {
+            ObservationStore::open_initialized().expect("store");
+            let report = activity_report_with(
+                ActivityScope::All,
+                10,
+                ActivityOptions {
+                    federate_runners: false,
+                },
+            )
+            .expect("activity report");
+
+            assert!(!report.partial);
+            assert!(!report.runner_federation.enabled);
+            assert!(report.runner_federation.runners.is_empty());
+        });
     }
 }

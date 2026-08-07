@@ -245,6 +245,16 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::RunNext => run::run_next(),
         AgentTaskCommand::Submit(submit_args) => run::submit(submit_args),
         AgentTaskCommand::Status(status_args) => status::status(status_args),
+        // Alias, not a second watch loop: route straight into `activity watch`,
+        // which already resolves cook ids, durable run ids, observation run ids
+        // and runner job ids across every activity source (#W3-15).
+        AgentTaskCommand::Watch(watch_args) => {
+            let (output, exit_code) = crate::commands::activity::watch_alias(watch_args)?;
+            Ok((
+                serde_json::to_value(output).unwrap_or(Value::Null),
+                exit_code,
+            ))
+        }
         AgentTaskCommand::List(list_args) => status::list_runs(
             agent_task_service::AgentTaskDiscoveryFilter::All,
             list_args.into(),

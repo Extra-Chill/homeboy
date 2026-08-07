@@ -31,6 +31,7 @@ Run generic agent task plans
 | `homeboy agent-task run-next` | Claim and execute the oldest queued durable run |
 | `homeboy agent-task submit` | Persist an agent-task plan and return a durable run id without executing it |
 | `homeboy agent-task status` | Read durable run status |
+| `homeboy agent-task watch` | Poll a run until it reaches a terminal state |
 | `homeboy agent-task list` | List durable runs, newest first |
 | `homeboy agent-task active` | List queued and running durable runs, newest first |
 | `homeboy agent-task reconcile` | Preview or apply reconciliation for one durable run |
@@ -334,6 +335,26 @@ Read durable run status
 | `--full` | flag | _no help text_ |
 | `--strict-subject-exit` | flag | Exit nonzero when the inspected Cook needs follow-up action |
 | `--no-runner-probe` | flag | _no help text_ |
+
+## `homeboy agent-task watch`
+
+```sh
+homeboy agent-task watch [OPTIONS] <ID>
+```
+
+Poll a run until it reaches a terminal state.
+
+This is an alias for `homeboy activity watch` — the same command the cook completion notification already points at — so a cook id, durable run id, observation run id, or runner job id all resolve here, including records still resident on a Lab runner. Unlike `agent-task status`, the underlying read does not reconcile.
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<ID>` | yes | Activity id, observation run id, agent-task run id, or runner job id |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--timeout` | `<TIMEOUT>` | Maximum time to wait before giving up (e.g. `30m`, `2h`, `7d`) |
+| `--interval` | `<INTERVAL>` | Delay between status polls (e.g. `2s`, `1m`) |
+| `--notify` | flag | Emit a local completion notification when the item reaches a terminal state |
 
 ## `homeboy agent-task list`
 

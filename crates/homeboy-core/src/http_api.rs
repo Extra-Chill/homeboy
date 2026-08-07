@@ -270,13 +270,36 @@ where
             "command": "api.bench.runs",
             "runs": list_runs(&request.path, Some("bench"), job_store)?,
         }),
+        // Deliberately does NOT federate runner-resident records. The daemon
+        // serves this on a single-threaded accept loop, so a bounded runner
+        // probe -- 15s per connected runner -- would stall `/health`, `daemon
+        // status`, and the reverse-broker routes remote runners depend on.
+        // The CLI federates by default because it can afford to wait; the
+        // daemon cannot. `homeboy activity` remains the federated surface.
         HttpEndpoint::Activity => json!({
             "command": "api.activity.list",
-            "activity": activity::activity_report(activity_scope_for_path(&request.path), activity_limit_for_path(&request.path))?,
+            "activity": activity::activity_report_with(
+                activity_scope_for_path(&request.path),
+                activity_limit_for_path(&request.path),
+                activity::ActivityOptions {
+                    federate_runners: false,
+                    ..activity::ActivityOptions::default()
+                },
+            )?,
         }),
+        // Same reasoning as `Activity` above: the fallback path in
+        // `resolve_activity_item` is *guaranteed* to reach federation for a
+        // runner-resident id, so leaving it on would let one lookup stall the
+        // whole daemon.
         HttpEndpoint::ActivityItem { id } => json!({
             "command": "api.activity.show",
-            "activity": activity::show_activity(id)?,
+            "activity": activity::show_activity_with(
+                id,
+                activity::ActivityOptions {
+                    federate_runners: false,
+                    ..activity::ActivityOptions::default()
+                },
+            )?,
         }),
         HttpEndpoint::AgentTaskRun { id } => agent_task_run(id)?,
         HttpEndpoint::Jobs => {

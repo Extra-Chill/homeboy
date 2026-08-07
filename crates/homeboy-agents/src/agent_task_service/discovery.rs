@@ -12,6 +12,11 @@ use homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES;
 use homeboy_core::{Error, Result};
 use serde_json::Value;
 
+/// The cross-location surface that federates controller-local records with
+/// records resident on connected Lab runners.
+pub const FEDERATED_DISCOVERY_COMMAND: &str =
+    "homeboy activity list   # federates controller-local records with runner-resident ones";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTaskDiscoveryFilter {
     All,
@@ -44,6 +49,16 @@ pub struct AgentTaskDiscoveryOptions {
 pub struct AgentTaskDiscoveryReport {
     pub schema: &'static str,
     pub filter: &'static str,
+    /// Whether this surface reconciled while reading.
+    ///
+    /// Discovery is a pure read over the durable records — always `false`.
+    /// `agent_task_lifecycle::status()` is by contrast a reconciling read that
+    /// *writes*, so it and this list can legitimately report different states
+    /// for the same run at the same instant, and calling that one changes what
+    /// this one returns next. Emitting the flag lets a consumer tell which kind
+    /// of answer it is holding rather than inferring it from the command name
+    /// (#W3-15).
+    pub reconciled: bool,
     pub count: usize,
     /// Total matching runs before any `--limit` cap was applied. Equals `count`
     /// when no limit truncated the list; larger when results were capped so an
@@ -68,37 +83,16 @@ pub struct AgentTaskDiscoveryReport {
     /// glance. Only populated for the `active` filter; `None` elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liveness_summary: Option<AgentTaskLivenessSummary>,
-    /// Operator guidance explaining how to find Lab/offloaded runs that this
-    /// local discovery pass may not see. A freshly offloaded Lab cook's durable
-    /// record lives on the runner, so a local `agent-task list/active/latest`
-    /// can miss it; this note documents the correct runner-scoped command and
-    /// the `homeboy runs list` fallback (#5681).
-    pub lab_discovery: AgentTaskLabDiscoveryHint,
-}
-
-/// Guidance describing where Lab/offloaded agent-task runs are discoverable.
-/// Local discovery (`agent-task list/active/latest` without `--runner`) only
-/// sees runs whose durable records live on this controller; a run offloaded to
-/// a Lab runner is recorded on that runner until it reports back. This hint
-/// gives operators the exact runner-scoped command plus the cross-location
-/// fallback so a freshly-offloaded run is never "lost" (#5681).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct AgentTaskLabDiscoveryHint {
-    pub note: &'static str,
-    pub runner_scoped_command: &'static str,
-    pub fallback_command: &'static str,
-}
-
-impl Default for AgentTaskLabDiscoveryHint {
-    fn default() -> Self {
-        Self {
-            note: "This list covers runs whose durable records live on this controller. A run offloaded to a Lab runner is recorded on that runner until it reports back, so a freshly-offloaded run may not appear here yet.",
-            runner_scoped_command:
-                "homeboy --runner <runner-id> agent-task list   # discover runs resident on a specific Lab runner",
-            fallback_command:
-                "homeboy runs list   # cross-location fallback that includes offloaded runs",
-        }
-    }
+    /// The federated surface that *does* see runner-resident runs.
+    ///
+    /// This field replaces the `lab_discovery` prose hint, which apologised for
+    /// a gap instead of closing it: it told operators that a freshly-offloaded
+    /// run's durable record lives on the runner and that they should go run a
+    /// second, runner-scoped command themselves. `homeboy activity` now
+    /// federates connected Lab runners directly, so the correct answer is a
+    /// command that already includes them rather than an explanation of why
+    /// this one does not (#W3-15, was #5681).
+    pub federated_command: &'static str,
 }
 
 /// Coarse liveness classification for an active (queued/running) run. The
@@ -122,7 +116,18 @@ pub enum AgentTaskLiveness {
 }
 
 impl AgentTaskLiveness {
-    pub(super) fn as_str(self) -> &'static str {
+    /// Every classification, in report order. Exported so a consumer can render
+    /// the full bucket set without hardcoding the four names.
+    pub const ALL: [AgentTaskLiveness; 4] = [
+        AgentTaskLiveness::Active,
+        AgentTaskLiveness::Stale,
+        AgentTaskLiveness::Suspect,
+        AgentTaskLiveness::Unreconciled,
+    ];
+
+    /// The wire label for this classification — the same string the enum
+    /// serializes to.
+    pub fn as_str(self) -> &'static str {
         match self {
             AgentTaskLiveness::Active => "active",
             AgentTaskLiveness::Stale => "stale",
@@ -132,7 +137,14 @@ impl AgentTaskLiveness {
     }
 
     /// Whether this classification is a candidate for safe reconcile/cancel.
-    pub(super) fn is_reconcilable(self) -> bool {
+    ///
+    /// This is the decision-relevant predicate over the classification, and it
+    /// is public — and emitted as `liveness_reconcilable` next to `liveness` —
+    /// so a consumer holding `liveness: "suspect"` does not have to hardcode
+    /// which of the four values mean "you may safely reconcile this" (#W3-4).
+    /// The mapping is exactly: `Active` is not reconcilable; `Stale`,
+    /// `Suspect`, and `Unreconciled` are.
+    pub fn is_reconcilable(self) -> bool {
         matches!(
             self,
             AgentTaskLiveness::Stale | AgentTaskLiveness::Suspect | AgentTaskLiveness::Unreconciled
@@ -146,6 +158,10 @@ pub struct AgentTaskLivenessSummary {
     pub stale: usize,
     pub suspect: usize,
     pub unreconciled: usize,
+    /// How many of the above are candidates for safe reconcile/cancel, computed
+    /// from [`AgentTaskLiveness::is_reconcilable`] rather than by re-summing the
+    /// buckets a consumer would otherwise have to know the meaning of (#W3-4).
+    pub reconcilable: usize,
     /// Convenience hint: the safe command path to reconcile stale-running
     /// records without manual state edits.
     pub reconcile_command: &'static str,
@@ -181,6 +197,13 @@ pub struct AgentTaskDiscoveryRun {
     /// Populated for the `active` filter; `None` for `all`/`latest` lists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liveness: Option<AgentTaskLiveness>,
+    /// Sibling of [`Self::liveness`]: whether that classification is a
+    /// candidate for safe reconcile/cancel. Emitted so an orchestrator reading
+    /// `liveness: "suspect"` does not have to hardcode which of the four values
+    /// mean "you may reconcile this" (#W3-4). Always present exactly when
+    /// `liveness` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness_reconcilable: Option<bool>,
     /// Where this run executes: `local`, `remote`, or `runner:<id>`. Lets an
     /// operator trace the runner process for Lab/offloaded runs.
     pub source: String,
@@ -297,6 +320,9 @@ fn discovery_report(
             AgentTaskDiscoveryFilter::Active => "active",
             AgentTaskDiscoveryFilter::Latest => "latest",
         },
+        // Constant rather than a parameter: there is no discovery path that
+        // writes. If one is ever added it must set this, not inherit `false`.
+        reconciled: false,
         count: runs.len(),
         total,
         limit: effective_limit,
@@ -305,7 +331,7 @@ fn discovery_report(
         runs,
         record_health,
         liveness_summary,
-        lab_discovery: AgentTaskLabDiscoveryHint::default(),
+        federated_command: FEDERATED_DISCOVERY_COMMAND,
     })
 }
 
@@ -401,11 +427,16 @@ fn liveness_summary_for_records(
         ..Default::default()
     };
     for record in records {
-        match classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now) {
+        let liveness =
+            classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
+        match liveness {
             AgentTaskLiveness::Active => summary.active += 1,
             AgentTaskLiveness::Stale => summary.stale += 1,
             AgentTaskLiveness::Suspect => summary.suspect += 1,
             AgentTaskLiveness::Unreconciled => summary.unreconciled += 1,
+        }
+        if liveness.is_reconcilable() {
+            summary.reconcilable += 1;
         }
     }
     summary
@@ -560,6 +591,7 @@ fn discovery_run(
         ),
         retryable: metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_RETRYABLE),
         liveness,
+        liveness_reconcilable: liveness.map(AgentTaskLiveness::is_reconcilable),
         source,
         last_update,
         last_update_age_minutes,
