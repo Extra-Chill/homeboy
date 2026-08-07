@@ -4540,7 +4540,13 @@ fn cook_batch_aggregate_outcome_matrix_distinguishes_success_partial_and_failure
         status: status.to_string(),
         exit_code,
         result: None,
-        error: (exit_code != 0).then(|| "infrastructure admission failed".to_string()),
+        error: (exit_code != 0).then(|| {
+            AgentTaskCookCellError::declared(
+                "agent_task.infrastructure_admission_denied",
+                "infrastructure admission failed",
+                false,
+            )
+        }),
     };
 
     for (name, cells, status, exit_code) in [
@@ -9516,10 +9522,11 @@ fn resume_cook_batch_reports_a_child_with_no_recipe_as_unresumable() {
         assert_eq!(result.value.failed, 1);
         let cell = &result.value.cooks[0];
         assert_eq!(cell.exit_code, 1);
-        assert!(cell
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("no durable recipe")));
+        // The structured envelope keeps the code an orchestrator routes on,
+        // not just the prose it used to carry.
+        let error = cell.error.as_ref().expect("unresumable child reports why");
+        assert_eq!(error.code, "validation.invalid_argument");
+        assert!(error.message.contains("no durable recipe"));
     });
 }
 

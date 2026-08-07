@@ -1,5 +1,7 @@
 use super::*;
 
+use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
+
 pub(crate) mod schemas {
     pub(crate) const RUN: &str = "homeboy/agent-task-run/v1";
     pub(crate) const RUN_LOG: &str = "homeboy/agent-task-run-log/v2";
@@ -1179,6 +1181,92 @@ impl From<AgentTaskRunState> for RunExecutionState {
             AgentTaskRunState::PartialFailure => RunExecutionState::PartialFailure,
             AgentTaskRunState::Failed => RunExecutionState::Failed,
             AgentTaskRunState::Cancelled => RunExecutionState::Cancelled,
+        }
+    }
+}
+
+/// Projection of a run's aggregate state onto the canonical cross-runtime
+/// vocabulary, `RunLifecycleStatus`.
+///
+/// This exists so a consumer that only ever sees a serialized run — a
+/// persisted report, an HTTP response, a chat-plane message — can decide
+/// success, terminality, and retry without a process exit code. Rendering the
+/// state as `format!("{:?}", record.state)` and calling that a status, which is
+/// what several command boundaries still do, gives a machine consumer a
+/// `Debug` string it cannot branch on.
+///
+/// Written as an exhaustive match so a new `AgentTaskRunState` variant is a
+/// compile error here rather than a silent `Unknown`. It is pinned by test to
+/// agree with composing the two existing projections
+/// (`AgentTaskRunState -> RunExecutionState -> RunLifecycleStatus`), so this is
+/// a shortcut through them, not a second opinion.
+impl From<AgentTaskRunState> for RunLifecycleStatus {
+    fn from(state: AgentTaskRunState) -> Self {
+        match state {
+            AgentTaskRunState::Queued => RunLifecycleStatus::Queued,
+            AgentTaskRunState::Running => RunLifecycleStatus::Running,
+            AgentTaskRunState::Succeeded => RunLifecycleStatus::Succeeded,
+            // A stopped run that still holds a recoverable candidate is
+            // terminal and not successful. `PartialFailure` matches what the
+            // `RunExecutionState` projection above already says about it.
+            AgentTaskRunState::CandidateRecoverable => RunLifecycleStatus::PartialFailure,
+            AgentTaskRunState::PartialRecoverable => RunLifecycleStatus::PartialFailure,
+            AgentTaskRunState::PartialFailure => RunLifecycleStatus::PartialFailure,
+            AgentTaskRunState::Failed => RunLifecycleStatus::Failed,
+            AgentTaskRunState::Cancelled => RunLifecycleStatus::Cancelled,
+        }
+    }
+}
+
+#[cfg(test)]
+mod run_state_lifecycle_projection_tests {
+    use super::*;
+
+    /// The direct projection must never diverge from composing the two that
+    /// already existed. If it did, `record.state` and
+    /// `record.lifecycle.execution.state` would classify the same run
+    /// differently.
+    #[test]
+    fn the_direct_projection_agrees_with_the_composed_one() {
+        for state in [
+            AgentTaskRunState::Queued,
+            AgentTaskRunState::Running,
+            AgentTaskRunState::Succeeded,
+            AgentTaskRunState::CandidateRecoverable,
+            AgentTaskRunState::PartialRecoverable,
+            AgentTaskRunState::PartialFailure,
+            AgentTaskRunState::Failed,
+            AgentTaskRunState::Cancelled,
+        ] {
+            let composed = RunLifecycleStatus::from(RunExecutionState::from(state));
+
+            assert_eq!(
+                RunLifecycleStatus::from(state),
+                composed,
+                "{state:?} must project identically through both routes"
+            );
+        }
+    }
+
+    /// Run terminality already has one definition. The projection must not
+    /// become a second.
+    #[test]
+    fn the_projection_agrees_with_run_state_terminality() {
+        for state in [
+            AgentTaskRunState::Queued,
+            AgentTaskRunState::Running,
+            AgentTaskRunState::Succeeded,
+            AgentTaskRunState::CandidateRecoverable,
+            AgentTaskRunState::PartialRecoverable,
+            AgentTaskRunState::PartialFailure,
+            AgentTaskRunState::Failed,
+            AgentTaskRunState::Cancelled,
+        ] {
+            assert_eq!(
+                RunLifecycleStatus::from(state).is_terminal(),
+                state.is_terminal(),
+                "{state:?} terminality must match AgentTaskRunState::is_terminal"
+            );
         }
     }
 }

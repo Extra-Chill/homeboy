@@ -39,6 +39,8 @@ use homeboy::agents::agent_tasks::{
 };
 use homeboy::core::{config, worktree, Error, Result};
 
+use crate::commands::utils::response::{CommandNextAction, CommandNextActionKind};
+
 use super::super::CmdResult;
 use super::args::{
     AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand,
@@ -1362,11 +1364,15 @@ fn batch_cook_result(
         .iter()
         .zip(&plan.cooks)
         .map(|(cell, cook)| {
+            // A child with no Cook report is the case that most needs
+            // structure: its `error` envelope is the only thing the caller
+            // gets, so it is passed through whole rather than rendered.
             let cell_result = cell
                 .result
                 .as_ref()
                 .map(|result| serde_json::to_value(result).unwrap_or(Value::Null))
                 .unwrap_or_else(|| serde_json::json!({ "error": cell.error }));
+            let lifecycle = cell.lifecycle();
             serde_json::json!({
                 "cook_id": cook.cook_id,
                 "run_id": cook.run_id(),
@@ -1374,6 +1380,12 @@ fn batch_cook_result(
                 "head": cook.head,
                 "workspace_materialization": cook.workspace_materialization,
                 "exit_code": cell.exit_code,
+                // The closed-vocabulary classification, so a caller reading
+                // this envelope out of a file or an HTTP response can decide
+                // completion and retry without a process exit code.
+                "lifecycle_status": lifecycle.lifecycle_status,
+                "terminal": lifecycle.terminal,
+                "retryable": lifecycle.retryable,
                 "result": cell_result,
             })
         })
@@ -1514,7 +1526,16 @@ fn cook_batch_inner(
             "plan": plan,
             "run_result": run_result,
             "commands": cook_batch_commands(&args),
-            "next_actions": cook_batch_next_actions(status, args.run_plan, blocked),
+            // `run_result.is_some()` rather than `args.run_plan`: the durable
+            // batch record the status/artifacts/resume commands read only
+            // exists once the plan actually ran.
+            "next_actions": cook_batch_next_actions(
+                &args,
+                &plan.fanout_id,
+                status,
+                run_result.is_some(),
+                &worktrees,
+            ),
         }),
         exit_code,
     ))
@@ -2697,32 +2718,137 @@ fn worktree_create_command(args: &AgentTaskFanoutCookBatchArgs, branch: &str) ->
     ]
 }
 
+fn cook_batch_plan_command(args: &AgentTaskFanoutCookBatchArgs) -> String {
+    format!(
+        "homeboy agent-task fanout cook-batch --repo {} --dry-run {}",
+        args.repo,
+        args.issues.join(" ")
+    )
+}
+
+fn cook_batch_run_command(args: &AgentTaskFanoutCookBatchArgs) -> String {
+    format!(
+        "homeboy agent-task fanout cook-batch --repo {} --run-plan {}",
+        args.repo,
+        args.issues.join(" ")
+    )
+}
+
+/// The command map for a cook-batch envelope.
+///
+/// `status` and `retry` used to live here as English sentences — "inspect each
+/// cook result under plan.cooks and use agent-task status <run-id>" — in a map
+/// whose every other entry was an executable command line. They are gone:
+/// [`cook_batch_next_actions`] now emits both as typed, executable
+/// [`CommandNextAction`]s bound to the ids this run actually produced, which is
+/// what the prose was gesturing at.
+///
+/// `resume_from_plan` stays prose because it genuinely is not one command: it
+/// requires the caller to write `.plan` to a file first. Naming a command that
+/// cannot be executed as-is would be worse than saying so.
 fn cook_batch_commands(args: &AgentTaskFanoutCookBatchArgs) -> Value {
-    let issues = args.issues.join(" ");
     serde_json::json!({
-        "plan": format!("homeboy agent-task fanout cook-batch --repo {} --dry-run {}", args.repo, issues),
-        "run": format!("homeboy agent-task fanout cook-batch --repo {} --run-plan {}", args.repo, issues),
-        "status": "inspect each cook result under plan.cooks and use agent-task status <run-id>",
-        "retry": "rerun this cook-batch after fixing provider/worktree blockers, or rerun the blocked issue URL only",
+        "plan": cook_batch_plan_command(args),
+        "run": cook_batch_run_command(args),
         "resume_from_plan": "save .plan to JSON and run homeboy agent-task fanout run-plan --input @batch-cook-plan.json",
     })
 }
 
-fn cook_batch_next_actions(status: &str, run_plan: bool, blocked: usize) -> Vec<String> {
-    if blocked > 0 {
-        return vec![
-            "repair worktree queue blockers reported under worktrees.rows".to_string(),
-            "rerun the same cook-batch command; created worktrees are recorded and blocked rows carry retry commands".to_string(),
+/// Executable next actions for a cook-batch envelope.
+///
+/// # Why these are typed
+///
+/// The sibling `agent-task status` command emits [`CommandNextAction`]s with
+/// [`CommandNextActionKind`]s and real command lines. This one emitted
+/// sentences addressed to a human — "repair worktree queue blockers reported
+/// under worktrees.rows" — which an orchestrator cannot execute, cannot
+/// classify, and cannot even reliably parse an id out of.
+///
+/// # Why the branches differ
+///
+/// `homeboy agent-task fanout status|artifacts|resume <fanout_id>` all read a
+/// durable batch record, and that record is only persisted once the plan is
+/// actually run (`persist_fanout_run_batch_record`). Offering them for a
+/// dry run or a blocked plan would name commands that fail. Each branch
+/// therefore emits only what is executable at that point.
+fn cook_batch_next_actions(
+    args: &AgentTaskFanoutCookBatchArgs,
+    fanout_id: &str,
+    status: &str,
+    executed: bool,
+    worktrees: &worktree::WorktreeQueueCreateOutput,
+) -> Vec<CommandNextAction> {
+    let blocked_rows = worktrees
+        .rows
+        .iter()
+        .filter(|row| {
+            !matches!(
+                row.status,
+                worktree::WorktreeQueueCreateStatus::Created
+                    | worktree::WorktreeQueueCreateStatus::Queued
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if !blocked_rows.is_empty() {
+        // Every blocked row already carries the exact command that would
+        // create it. Emitting that is the difference between "repair the
+        // blockers" and something an orchestrator can run.
+        let mut actions = blocked_rows
+            .iter()
+            .map(|row| {
+                CommandNextAction::new(
+                    format!("create blocked worktree {}", row.handle),
+                    format!("homeboy {}", row.command.join(" ")),
+                )
+                .with_kind(CommandNextActionKind::Repair)
+            })
+            .collect::<Vec<_>>();
+        // Created worktrees are recorded, so the same command is idempotent
+        // over the ones that already succeeded.
+        actions.push(
+            CommandNextAction::new(
+                "rerun this cook-batch once the worktrees exist",
+                cook_batch_run_command(args),
+            )
+            .with_kind(CommandNextActionKind::Repair),
+        );
+        return actions;
+    }
+
+    if executed {
+        let mut actions = vec![
+            CommandNextAction::new(
+                "show batch status",
+                format!("homeboy agent-task fanout status {fanout_id}"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+            CommandNextAction::new(
+                "list batch artifacts",
+                format!("homeboy agent-task fanout artifacts {fanout_id}"),
+            )
+            .with_kind(CommandNextActionKind::Artifacts),
         ];
+        // Resume idempotently harvests children that stopped short of
+        // finalization. A batch that already succeeded has nothing to harvest,
+        // so offering it there would be noise rather than an action.
+        if status != "succeeded" {
+            actions.push(
+                CommandNextAction::new(
+                    "resume children that stopped short of finalization",
+                    format!("homeboy agent-task fanout resume {fanout_id}"),
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
+        }
+        return actions;
     }
-    if run_plan {
-        return vec![format!(
-            "batch execution {status}; inspect run_result.result.cooks for PR/finalization outcomes"
-        )];
-    }
+
     vec![
-        "review plan.cooks and provider_readiness_command before execution".to_string(),
-        "rerun with --run-plan or save plan to JSON and run homeboy agent-task fanout run-plan --input @batch-cook-plan.json".to_string(),
+        CommandNextAction::new("re-plan this cook-batch", cook_batch_plan_command(args))
+            .with_kind(CommandNextActionKind::Show),
+        CommandNextAction::new("execute this cook-batch", cook_batch_run_command(args))
+            .with_kind(CommandNextActionKind::Repair),
     ]
 }
 
@@ -4235,7 +4361,208 @@ fi
                 .as_str()
                 .expect("resume command")
                 .contains("fanout run-plan"));
+            // The prose entries are gone: a typed next action covers both.
+            assert!(
+                value["commands"]["status"].is_null(),
+                "prose `status` sentence must not survive beside typed actions"
+            );
+            assert!(
+                value["commands"]["retry"].is_null(),
+                "prose `retry` sentence must not survive beside typed actions"
+            );
+            let actions = value["next_actions"]
+                .as_array()
+                .expect("typed next actions")
+                .clone();
+            assert!(!actions.is_empty());
+            for action in &actions {
+                assert!(
+                    action["command"]
+                        .as_str()
+                        .expect("every next action names a command")
+                        .starts_with("homeboy "),
+                    "next action must be executable, got {action}"
+                );
+                assert!(action["kind"].is_string(), "next action must carry a kind");
+            }
         });
+    }
+
+    fn worktree_row(
+        handle: &str,
+        status: worktree::WorktreeQueueCreateStatus,
+    ) -> worktree::WorktreeQueueCreateRow {
+        worktree::WorktreeQueueCreateRow {
+            branch: format!("fix/{handle}"),
+            handle: handle.to_string(),
+            status,
+            command: vec![
+                "worktree".to_string(),
+                "create".to_string(),
+                "homeboy".to_string(),
+                "--branch".to_string(),
+                format!("fix/{handle}"),
+                "--from".to_string(),
+                "origin/main".to_string(),
+            ],
+            retry_after_seconds: None,
+            active_lock_holder: None,
+            path: None,
+            error: None,
+        }
+    }
+
+    fn worktree_output(
+        rows: Vec<worktree::WorktreeQueueCreateRow>,
+    ) -> worktree::WorktreeQueueCreateOutput {
+        worktree::WorktreeQueueCreateOutput {
+            schema: "homeboy/worktree-queue-create/v1",
+            repo: "homeboy".to_string(),
+            base_ref: "origin/main".to_string(),
+            dry_run: false,
+            rows,
+        }
+    }
+
+    fn action_commands(actions: &[CommandNextAction]) -> Vec<String> {
+        actions
+            .iter()
+            .map(|action| action.command.clone())
+            .collect()
+    }
+
+    /// Every emitted action must be a command, not an instruction. This is the
+    /// property the prose versions failed.
+    fn assert_every_action_is_executable(actions: &[CommandNextAction]) {
+        for action in actions {
+            assert!(
+                action.command.starts_with("homeboy "),
+                "next action `{}` is not an executable command",
+                action.command
+            );
+            assert!(
+                action.kind.is_some(),
+                "next action `{}` carries no kind",
+                action.command
+            );
+        }
+    }
+
+    /// A blocked row already carries the exact command that creates it. The
+    /// old text — "repair worktree queue blockers reported under
+    /// worktrees.rows" — asked a human to go find that command by hand.
+    #[test]
+    fn blocked_worktrees_emit_the_exact_command_that_unblocks_each_row() {
+        let worktrees = worktree_output(vec![
+            worktree_row(
+                "homeboy@fix-a",
+                worktree::WorktreeQueueCreateStatus::Created,
+            ),
+            worktree_row("homeboy@fix-b", worktree::WorktreeQueueCreateStatus::Failed),
+        ]);
+
+        let actions = cook_batch_next_actions(
+            &cook_batch_args(),
+            "issue-wave",
+            "blocked",
+            false,
+            &worktrees,
+        );
+
+        assert_every_action_is_executable(&actions);
+        let commands = action_commands(&actions);
+        assert!(
+            commands
+                .iter()
+                .any(|command| command
+                    .contains("worktree create homeboy --branch fix/homeboy@fix-b")),
+            "the blocked row's own command must be offered: {commands:?}"
+        );
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command.contains("fix/homeboy@fix-a")),
+            "a created row is not a blocker: {commands:?}"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| command.contains("--run-plan")),
+            "the rerun command must be named: {commands:?}"
+        );
+    }
+
+    /// `fanout status|artifacts|resume` read a durable batch record that only
+    /// exists once the plan ran. Offering them before that names commands that
+    /// fail.
+    #[test]
+    fn batch_record_commands_are_only_offered_once_the_batch_has_run() {
+        let worktrees = worktree_output(vec![worktree_row(
+            "homeboy@fix-a",
+            worktree::WorktreeQueueCreateStatus::Created,
+        )]);
+
+        let planned = cook_batch_next_actions(
+            &cook_batch_args(),
+            "issue-wave",
+            "planned",
+            false,
+            &worktrees,
+        );
+        assert_every_action_is_executable(&planned);
+        assert!(
+            !action_commands(&planned)
+                .iter()
+                .any(|command| command.contains("fanout status")
+                    || command.contains("fanout resume")
+                    || command.contains("fanout artifacts")),
+            "a plan that never ran has no batch record to inspect"
+        );
+
+        let executed = cook_batch_next_actions(
+            &cook_batch_args(),
+            "issue-wave",
+            "partial_failure",
+            true,
+            &worktrees,
+        );
+        assert_every_action_is_executable(&executed);
+        let commands = action_commands(&executed);
+        assert!(commands
+            .iter()
+            .any(|command| command == "homeboy agent-task fanout status issue-wave"));
+        assert!(commands
+            .iter()
+            .any(|command| command == "homeboy agent-task fanout artifacts issue-wave"));
+        assert!(
+            commands
+                .iter()
+                .any(|command| command == "homeboy agent-task fanout resume issue-wave"),
+            "an incomplete batch must offer resume: {commands:?}"
+        );
+    }
+
+    /// Resume harvests children that stopped short of finalization. A batch
+    /// that already succeeded has none, so offering it would be noise.
+    #[test]
+    fn a_succeeded_batch_is_not_offered_a_resume() {
+        let worktrees = worktree_output(vec![worktree_row(
+            "homeboy@fix-a",
+            worktree::WorktreeQueueCreateStatus::Created,
+        )]);
+
+        let actions = cook_batch_next_actions(
+            &cook_batch_args(),
+            "issue-wave",
+            "succeeded",
+            true,
+            &worktrees,
+        );
+
+        assert_every_action_is_executable(&actions);
+        assert!(!action_commands(&actions)
+            .iter()
+            .any(|command| command.contains("fanout resume")));
     }
 
     #[test]
@@ -4269,7 +4596,11 @@ fi
                         status: "failed".to_string(),
                         exit_code: 1,
                         result: None,
-                        error: Some("controller admission failed".to_string()),
+                        error: Some(agent_task_service::AgentTaskCookCellError::declared(
+                            "agent_task.controller_admission_denied",
+                            "controller admission failed",
+                            false,
+                        )),
                     },
                 ],
             },
