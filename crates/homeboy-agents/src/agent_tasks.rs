@@ -490,8 +490,8 @@ pub mod service {
         AgentTaskPromotionJobPhase, AgentTaskPromotionRequest, AgentTaskRetryServiceResult,
         AgentTaskRunResult, CookActivityProbe, CookBatchJobDriver, CookContinuationState,
         CookProgressEvent, CookProviderActivity, CookSupervisionTick, CookSupervisor,
-        AGENT_TASK_COOK_BATCH_JOB_TYPE,
-        AGENT_TASK_COOK_BATCH_JOB_VERSION, AGENT_TASK_PROMOTION_JOB_TYPE,
-        AGENT_TASK_PROMOTION_JOB_VERSION, DETACHED_BATCH_COORDINATOR_ENV,
+        AGENT_TASK_COOK_BATCH_JOB_TYPE, AGENT_TASK_COOK_BATCH_JOB_VERSION,
+        AGENT_TASK_PROMOTION_JOB_TYPE, AGENT_TASK_PROMOTION_JOB_VERSION,
+        DETACHED_BATCH_COORDINATOR_ENV,
     };
 }
