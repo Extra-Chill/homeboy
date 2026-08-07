@@ -16,6 +16,40 @@ use crate::paths::{
 use crate::test_support::with_isolated_home;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+#[test]
+fn canonical_or_normalized_local_path_resolves_symlink_identity() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("temp root");
+    let target = root.path().join("target");
+    std::fs::create_dir(&target).expect("create target");
+    let alias = root.path().join("alias");
+    symlink(&target, &alias).expect("symlink target");
+
+    assert_eq!(
+        crate::paths::canonical_or_normalized_local_path(&target),
+        crate::paths::canonical_or_normalized_local_path(&alias)
+    );
+}
+
+#[test]
+fn canonical_or_normalized_local_path_preserves_nonexistent_path_normalization() {
+    assert_eq!(
+        crate::paths::canonical_or_normalized_local_path("/missing/root/../workload.bench.mjs"),
+        PathBuf::from("/missing/workload.bench.mjs")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn canonical_or_normalized_local_path_resolves_the_var_alias() {
+    assert_eq!(
+        crate::paths::canonical_or_normalized_local_path("/var"),
+        crate::paths::canonical_or_normalized_local_path("/private/var")
+    );
+}
+
 #[test]
 fn join_remote_path_allows_absolute_paths_without_base() {
     assert_eq!(
