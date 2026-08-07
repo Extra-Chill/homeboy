@@ -100,6 +100,7 @@ try {
 	assert.equal(fs.existsSync(scriptPath), true, `provider command target should exist: ${scriptPath}`);
 
 	const mockCliPath = path.join(root, 'mock-codex.cjs');
+	const failedCliPath = path.join(root, 'mock-codex-failed.cjs');
 	const declaredArtifactCliPath = path.join(root, 'mock-codex-declared-artifacts.cjs');
 	const omittedModelCliPath = path.join(root, 'mock-codex-without-model.cjs');
 	fs.writeFileSync(omittedModelCliPath, `#!/usr/bin/env node
@@ -117,6 +118,11 @@ assert.equal(process.env.UNDECLARED_SECRET, undefined);
 process.stdout.write(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN || 'missing secret');
 process.stderr.write(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN || 'missing secret');
 process.exit(0);
+`);
+	fs.writeFileSync(failedCliPath, `#!/usr/bin/env node
+process.stdout.write('Codex partial output');
+process.stderr.write('Codex provider failure');
+process.exit(23);
 `);
 	fs.writeFileSync(declaredArtifactCliPath, `#!/usr/bin/env node
 const fs = require('node:fs');
@@ -210,6 +216,35 @@ process.exit(0);
 	assert.equal(missingDeclaredResult.status, 'failed');
 	assert.equal(missingDeclaredResult.failure_code, 'agent_task.declared_artifact_harvest_failed');
 	assert.equal(missingDeclaredResult.diagnostics.some((diagnostic) => diagnostic.class === 'agent_task.required_declared_artifact_missing'), true);
+	const failedRun = spawnSync(process.execPath, [scriptPath], {
+		encoding: 'utf8',
+		input: JSON.stringify({
+			...request,
+			task_id: 'codex-nonzero-exit',
+			executor: {
+				...request.executor,
+				config: {
+					...request.executor.config,
+					command: process.execPath,
+					command_args: [failedCliPath, 'exec'],
+				},
+			},
+			artifact_declarations: [
+				{ name: 'patch', required: true },
+				{ name: 'agent_result', required: true },
+				{ name: 'transcript', required: true },
+			],
+		}),
+	});
+	assert.equal(failedRun.status, 0, failedRun.stderr);
+	const failedOutcome = JSON.parse(failedRun.stdout);
+	assert.equal(failedOutcome.status, 'failed');
+	assert.equal(failedOutcome.failure_code, 'agent_task.codex_failed');
+	assert.equal(failedOutcome.metadata.exit_code, 23);
+	assert.equal(failedOutcome.artifacts.every((artifact) => artifact.schema === 'homeboy/agent-task-artifact/v1' && artifact.uri.startsWith('file:')), true);
+	assert.equal(failedOutcome.evidence_refs.every((ref) => ref.uri.startsWith('file:') && !Object.hasOwn(ref, 'path')), true);
+	assert.deepEqual(failedOutcome.artifacts.map((artifact) => artifact.name).sort(), ['codex-stderr', 'codex-stdout']);
+	assertStrictAgentTaskOutcome(failedOutcome);
 	const runResult = spawnSync(process.execPath, [scriptPath], {
 		encoding: 'utf8',
 		env: {
@@ -257,3 +292,25 @@ process.exit(0);
 }
 
 process.stdout.write('Codex agent task executor boundary passed\n');
+
+function assertStrictAgentTaskOutcome(outcome) {
+	assert.equal(outcome.schema, 'homeboy/agent-task-outcome/v1');
+	assert.equal(typeof outcome.task_id, 'string');
+	assert.equal(typeof outcome.status, 'string');
+	assert.equal(typeof outcome.summary, 'string');
+	assert.equal(Array.isArray(outcome.artifacts), true);
+	assert.equal(Array.isArray(outcome.evidence_refs), true);
+	for (const artifact of outcome.artifacts) {
+		assert.equal(artifact.schema, 'homeboy/agent-task-artifact/v1');
+		assert.equal(typeof artifact.id, 'string');
+		assert.equal(typeof artifact.kind, 'string');
+		assert.equal(typeof artifact.uri, 'string');
+		assert.equal(new URL(artifact.uri).protocol, 'file:');
+		assert.equal(Number.isInteger(artifact.size_bytes), true);
+	}
+	for (const ref of outcome.evidence_refs) {
+		assert.equal(typeof ref.kind, 'string');
+		assert.equal(typeof ref.uri, 'string');
+		assert.equal(new URL(ref.uri).protocol, 'file:');
+	}
+}

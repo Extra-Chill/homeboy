@@ -40,6 +40,10 @@ try {
 	assert.equal(report.artifact_schema, 'example/report/v1');
 	assert.equal(report.artifact_type, 'report');
 	assert.equal(report.required, true);
+	assert.equal(report.schema, 'homeboy/agent-task-artifact/v1');
+	assert.equal(new URL(report.uri).protocol, 'file:');
+	assert.equal(report.url, report.uri);
+	assert.equal(report.size_bytes, Buffer.byteLength('# Report\n'));
 	assert.equal(report.sha256, crypto.createHash('sha256').update('# Report\n').digest('hex'));
 	assert.deepEqual(report.metadata, { source: 'agent' });
 	assert.equal(fs.readFileSync(report.path, 'utf8'), '# Report\n');
@@ -63,7 +67,18 @@ try {
 		cwd: workspace,
 		artifactDir: artifacts,
 	});
-	assert.equal(missingPath.errors[0].code, 'invalid_path');
+	assert.deepEqual(missingPath, { artifacts: [], evidence_refs: [], errors: [], missing: { required: [], optional: [] } });
+	const pathlessWithoutArtifactRoot = harvestDeclaredArtifacts({
+		request: { artifact_declarations: [{ name: 'candidate', required: true }] },
+		cwd: workspace,
+	});
+	assert.deepEqual(pathlessWithoutArtifactRoot, { artifacts: [], evidence_refs: [], errors: [], missing: { required: [], optional: [] } });
+	const emptyPath = harvestDeclaredArtifacts({
+		request: { artifact_declarations: [{ name: 'empty-path', path: '', required: true }] },
+		cwd: workspace,
+		artifactDir: artifacts,
+	});
+	assert.equal(emptyPath.errors[0].code, 'invalid_path');
 	const collision = harvestDeclaredArtifacts({
 		request: { artifact_declarations: [{ name: 'same/name', path: 'report.md' }, { name: 'same-name', path: 'report.md' }] },
 		cwd: workspace,

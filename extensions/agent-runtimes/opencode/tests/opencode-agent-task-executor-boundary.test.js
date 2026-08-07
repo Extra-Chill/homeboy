@@ -629,6 +629,7 @@ process.exit(${attempt.status});
 	assert.equal(transcript.includes('refresh-token-must-not-leak'), false);
 	assert.match(transcript, /\[redacted\]/);
 	assert.equal(artifactResult.artifacts.some((artifact) => artifact.name === 'opencode-runtime-stdout'), true);
+	assert.equal(artifactResult.artifacts.every((artifact) => artifact.schema === 'homeboy/agent-task-artifact/v1' && artifact.url === artifact.uri && Number.isInteger(artifact.size_bytes)), true);
 	assert.equal(artifactResult.evidence_refs.every((ref) => ref.uri.startsWith('file://')), true);
 	assert.equal(artifactResult.evidence_refs.some((ref) => Object.hasOwn(ref, 'path')), false);
 	const runtimeStdout = fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'opencode-runtime-stdout').path, 'utf8');
@@ -672,6 +673,9 @@ process.exit(0);
 	assert.equal(declaredReport.artifact_type, 'report');
 	assert.equal(declaredReport.metadata.source, 'opencode');
 	assert.equal(declaredReport.bytes, Buffer.byteLength('# OpenCode report\n'));
+	assert.equal(declaredReport.schema, 'homeboy/agent-task-artifact/v1');
+	assert.equal(declaredReport.url, declaredReport.uri);
+	assert.equal(declaredReport.size_bytes, Buffer.byteLength('# OpenCode report\n'));
 	assert.match(declaredReport.sha256, /^[a-f0-9]{64}$/);
 	assert.deepEqual(fs.readFileSync(path.join(declaredScreenshots.path, 'image.bin')), Buffer.from([0, 255, 1, 254]));
 	assert.equal(declaredOpenCodeResult.diagnostics.some((diagnostic) => diagnostic.class === 'agent_task.optional_declared_artifact_missing'), true);
@@ -699,8 +703,9 @@ process.exit(0);
 			config: { ...request.executor.config, command_args: [noOpDeclaredArtifactCliPath] },
 		},
 	}, { env: fixtureEnv });
-	assert.equal(missingPathOpenCodeResult.status, 'failed');
-	assert.equal(missingPathOpenCodeResult.diagnostics.some((diagnostic) => diagnostic.class === 'agent_task.declared_artifact_invalid_path'), true);
+	assert.equal(missingPathOpenCodeResult.status, 'succeeded');
+	assert.equal(missingPathOpenCodeResult.diagnostics.some((diagnostic) => diagnostic.class === 'agent_task.declared_artifact_invalid_path'), false);
+	assert.equal(missingPathOpenCodeResult.artifacts.some((artifact) => artifact.name === 'missing-path'), false);
 
 	const largePatchCliPath = path.join(root, 'mock-opencode-large-patch.cjs');
 	fs.writeFileSync(largePatchCliPath, `#!/usr/bin/env node

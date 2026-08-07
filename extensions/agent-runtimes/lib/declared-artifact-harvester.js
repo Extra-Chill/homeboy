@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { AGENT_TASK_ARTIFACT_SCHEMA } = require('../../agent-task-contracts');
 
 const DEFAULT_BUDGET = { maxBytes: 50 * 1024 * 1024, maxFiles: 1_000, maxNodes: 2_000, maxDepth: 32 };
 
@@ -12,15 +14,20 @@ function harvestDeclaredArtifacts({ request = {}, config = {}, cwd = '', artifac
 	if (declarations.length === 0) {
 		return emptyResult();
 	}
+	// Declarations without a source path describe candidates; they are not files to capture.
+	const sourcedDeclarations = declarations.filter((declaration) => declaration.path !== undefined && declaration.path !== null);
+	if (sourcedDeclarations.length === 0) {
+		return emptyResult();
+	}
 	const workspaceRoot = realDirectory(cwd);
 	const root = schedulerArtifactRoot(artifactDir);
 	if (!workspaceRoot || !root) {
-		return captureFailure(declarations, !workspaceRoot ? 'workspace_root' : 'artifact_root', !workspaceRoot ? 'The declared artifact workspace root does not exist.' : 'The scheduler-owned artifact root must be an existing non-symlink directory.');
+		return captureFailure(sourcedDeclarations, !workspaceRoot ? 'workspace_root' : 'artifact_root', !workspaceRoot ? 'The declared artifact workspace root does not exist.' : 'The scheduler-owned artifact root must be an existing non-symlink directory.');
 	}
 	const result = emptyResult();
-	const destinations = declarationDestinations(declarations, request.task_id);
+	const destinations = declarationDestinations(sourcedDeclarations, request.task_id);
 	const prepared = [];
-	for (const declaration of declarations) {
+	for (const declaration of sourcedDeclarations) {
 		if (!validDeclaredPath(declaration.path)) {
 			if (declaration.required) {
 				result.errors.push({ artifact: declaration.name, code: 'invalid_path', message: 'Required declared artifacts need an explicit workspace-relative path.' });
@@ -63,15 +70,20 @@ function harvestDeclaredArtifacts({ request = {}, config = {}, cwd = '', artifac
 			copyStagedEntries(stage, destination, collected.entries);
 			verifyRetainedPath(root, stage, destination);
 			const digest = collected.directory ? digestTree(collected.entries) : collected.entries[0].digest;
+			const uri = pathToFileURL(destination).href;
 			const artifact = {
+				schema: AGENT_TASK_ARTIFACT_SCHEMA,
 				id: declaration.id || declaration.name,
 				name: declaration.name,
 				kind: declaration.kind || declaration.artifact_type || declaration.type || (collected.directory ? 'directory' : 'file'),
 				...(declaration.artifact_type ? { artifact_type: declaration.artifact_type } : {}),
 				...(declaration.artifact_schema || declaration.schema ? { artifact_schema: declaration.artifact_schema || declaration.schema } : {}),
 				path: destination,
+				uri,
+				url: uri,
 				required: declaration.required === true,
 				bytes: collected.bytes,
+				size_bytes: collected.bytes,
 				sha256: digest,
 				file_count: collected.entries.filter((entry) => !entry.directory).length,
 				node_count: collected.entries.length,
@@ -80,7 +92,7 @@ function harvestDeclaredArtifacts({ request = {}, config = {}, cwd = '', artifac
 				...(plainObject(declaration.metadata) ? { metadata: declaration.metadata } : {}),
 			};
 			result.artifacts.push(artifact);
-			result.evidence_refs.push({ kind: artifact.kind, label: artifact.name, uri: `file://${destination}`, sha256: digest });
+			result.evidence_refs.push({ kind: artifact.kind, label: artifact.name, uri, sha256: digest });
 		} catch (error) {
 			result.errors.push({ artifact: declaration.name, code: 'capture_failed', message: error.message });
 		}

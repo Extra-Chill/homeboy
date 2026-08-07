@@ -4,6 +4,7 @@
  * Internal dependencies
  */
 const {
+	AGENT_TASK_ARTIFACT_SCHEMA,
 	AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
 	agentTaskProviderContractFields,
 	agentTaskPolicyToolPermissions,
@@ -26,6 +27,7 @@ const { applyOpenCodeRuntimeTools } = require('../../lib/runtime-tool-adapter');
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
 const OPENCODE_PROVIDER_ID = 'opencode.agent-task-executor';
 const OPENCODE_PROVIDER_LABEL = 'OpenCode agent task executor';
@@ -468,7 +470,7 @@ function missingDeclaredArtifacts(request = {}, artifacts = []) {
 function declaredArtifactRequirements(request = {}) {
 	const expected = arrayValue(request.expected_artifacts).map((name) => ({ name: String(name), required: true }));
 	const declared = arrayValue(request.artifact_declarations || request.executor?.artifact_declarations)
-		.filter((artifact) => artifact && typeof artifact === 'object' && artifact.required === true)
+		.filter((artifact) => artifact && typeof artifact === 'object' && artifact.required === true && typeof artifact.path === 'string' && artifact.path !== '')
 		.map((artifact) => ({ name: artifact.name || artifact.id || artifact.output_key, kind: artifact.kind, required: true }))
 		.filter((artifact) => artifact.name);
 	return [...expected, ...declared];
@@ -860,11 +862,15 @@ function collectOpenCodeArtifacts(context = {}, structured = {}) {
 			return;
 		}
 		const artifact = {
+			schema: AGENT_TASK_ARTIFACT_SCHEMA,
 			id: requirement.name,
 			name: requirement.name,
 			kind: requirement.kind || fallbackKind,
 			path: filePath,
+			uri: fileUri(filePath),
+			url: fileUri(filePath),
 			bytes: Buffer.byteLength(artifactContent),
+			size_bytes: Buffer.byteLength(artifactContent),
 		};
 		artifacts.push(artifact);
 		evidence_refs.push({ kind: artifact.kind, label: requirement.name, uri: fileUri(filePath) });
@@ -970,12 +976,16 @@ function collectOpenCodeRuntimeLogs(context = {}) {
 			continue;
 		}
 		const artifact = {
+			schema: AGENT_TASK_ARTIFACT_SCHEMA,
 			id: `opencode-runtime-${stream}`,
 			name: `opencode-runtime-${stream}`,
 			kind: 'opencode-runtime-log',
 			stream,
 			path: filePath,
+			uri: fileUri(filePath),
+			url: fileUri(filePath),
 			bytes,
+			size_bytes: bytes,
 		};
 		artifacts.push(artifact);
 		evidence_refs.push({ kind: artifact.kind, label: `OpenCode ${stream}`, uri: fileUri(filePath) });
@@ -990,13 +1000,13 @@ function collectOpenCodeProgressEvents(context = {}) {
 	}
 	const bytes = fs.statSync(filePath).size;
 	return {
-		artifacts: [{ id: 'progress_events', name: 'progress_events', kind: 'agent-task-progress', path: filePath, bytes }],
+		artifacts: [{ schema: AGENT_TASK_ARTIFACT_SCHEMA, id: 'progress_events', name: 'progress_events', kind: 'agent-task-progress', path: filePath, uri: fileUri(filePath), url: fileUri(filePath), bytes, size_bytes: bytes }],
 		evidence_refs: [{ kind: 'agent-task-progress', label: 'OpenCode progress events', uri: fileUri(filePath) }],
 	};
 }
 
 function fileUri(filePath) {
-	return `file://${filePath}`;
+	return pathToFileURL(filePath).href;
 }
 
 function mergeEvidence(primary = {}, secondary = {}) {

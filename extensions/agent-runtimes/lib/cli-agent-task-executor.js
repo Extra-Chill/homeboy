@@ -6,12 +6,14 @@
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
 /**
  * Internal dependencies
  */
 const {
 	AGENT_TASK_REQUEST_SCHEMA,
+	AGENT_TASK_ARTIFACT_SCHEMA,
 } = require('../../agent-task-contracts');
 const {
 	normalizeAgentTaskOutcome,
@@ -192,9 +194,21 @@ function createCliAgentTaskExecutor(spec) {
 			const filePath = path.join(artifactDir, `${safeFileSegment(request.task_id)}-${artifactProvider}-${stream}.txt`);
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
 			fs.writeFileSync(filePath, content);
-			const artifact = { id: `${artifactProvider}-${stream}`, name: `${artifactProvider}-${stream}`, kind: 'provider-process-stream', stream, path: filePath, bytes: Buffer.byteLength(content) };
+			const artifact = {
+				schema: AGENT_TASK_ARTIFACT_SCHEMA,
+				id: `${artifactProvider}-${stream}`,
+				name: `${artifactProvider}-${stream}`,
+				kind: 'provider-process-stream',
+				stream,
+				path: filePath,
+				uri: pathToFileURL(filePath).href,
+				url: pathToFileURL(filePath).href,
+				bytes: Buffer.byteLength(content),
+				size_bytes: Buffer.byteLength(content),
+				metadata: { stream },
+			};
 			artifacts.push(artifact);
-			evidence_refs.push({ kind: 'provider-process-stream', label: `${artifactProvider} ${stream}`, path: filePath });
+			evidence_refs.push({ kind: 'provider-process-stream', label: `${artifactProvider} ${stream}`, uri: artifact.uri });
 		}
 		return { artifacts, evidence_refs };
 	}
