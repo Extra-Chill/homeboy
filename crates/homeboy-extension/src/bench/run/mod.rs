@@ -838,13 +838,20 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
     }
 
     #[test]
-    fn classifies_timeout_and_assertion_failures() {
+    fn classifies_timeout_assertion_and_worker_failures() {
         let timeout = classify_bench_failure(false, 124, "", None).expect("timeout");
         assert_eq!(timeout.kind, "timeout");
 
         let assertion = classify_bench_failure(false, 1, "expected button to be visible", None)
             .expect("assertion");
         assert_eq!(assertion.kind, "assertion_failure");
+
+        let worker =
+            classify_bench_failure(false, 1, "recipe-run failed: unresolved_local_url", None)
+                .expect("worker exception");
+        assert_eq!(worker.kind, "worker_exception");
+        assert_eq!(worker.phase, "workload");
+        assert_eq!(worker.status, "error");
     }
 
     #[test]

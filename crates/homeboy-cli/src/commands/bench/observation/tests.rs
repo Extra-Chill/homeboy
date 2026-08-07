@@ -5,6 +5,7 @@ use homeboy::core::engine::run_dir::{self, RunDir};
 use homeboy::core::observation::ObservationStore;
 use homeboy::runner::runners::{LabRunnerReadiness, LabRunnerReadinessState};
 use homeboy_extension::bench::artifact::BenchArtifact;
+use homeboy_extension::bench::run::BenchRunFailure;
 use homeboy_extension::bench::{parse_bench_results_str, BenchResults, BenchRunWorkflowResult};
 
 use super::*;
@@ -587,6 +588,80 @@ fn bench_observation_rewrites_invocation_artifacts_to_persisted_paths() {
             persisted_results_json["scenarios"][0]["artifacts"]["semantic"]["path"],
             persisted_path
         );
+    });
+}
+
+#[test]
+fn bench_observation_persists_nested_failure_diagnostics_before_cleanup() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let run_dir = RunDir::create().expect("run dir");
+        let diagnostic = run_dir
+            .path()
+            .join("invocations/inv-worker/artifacts/recipe-run-failure-diagnostics.json");
+        fs::create_dir_all(diagnostic.parent().expect("diagnostic parent")).expect("mkdir");
+        fs::write(&diagnostic, br#"{"code":"unresolved_local_url"}"#).expect("diagnostic");
+        let child_artifact = diagnostic.parent().unwrap().join("child-transcript.json");
+        fs::write(&child_artifact, b"{}" as &[u8]).expect("child artifact");
+
+        let args = bench_args();
+        let observation = start(BenchObservationStart {
+            component_id: "homeboy",
+            component_label: "homeboy",
+            source_path: home.path(),
+            args: &args,
+            selected_scenarios: &[],
+            rig_id: None,
+            rig_snapshot: None,
+            run_dir: &run_dir,
+        })
+        .expect("start observation");
+        let run_id = observation.run_id().to_string();
+        let mut workflow = BenchRunWorkflowResult {
+            status: "failed".to_string(),
+            component: "homeboy".to_string(),
+            exit_code: 1,
+            iterations: 1,
+            results: None,
+            gate_results: Vec::new(),
+            gate_failures: Vec::new(),
+            baseline_comparison: None,
+            hints: None,
+            failure: Some(BenchRunFailure {
+                component_id: "homeboy".to_string(),
+                component_path: None,
+                scenario_id: None,
+                exit_code: 1,
+                stderr_tail: "recipe-run failed with exit 1".to_string(),
+                failure_classification: None,
+                responsiveness: None,
+                memory_sample: None,
+                diagnostics: Vec::new(),
+            }),
+            diagnostics: Vec::new(),
+        };
+
+        finish_success(Some(observation), &mut workflow, &run_dir).expect("observation summary");
+        run_dir.cleanup();
+
+        let artifacts = ObservationStore::open_initialized()
+            .expect("store")
+            .list_artifacts(&run_id)
+            .expect("artifacts");
+        let diagnostic = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "bench_failure_diagnostic")
+            .expect("persisted diagnostic");
+        assert_eq!(
+            fs::read_to_string(&diagnostic.path).expect("read diagnostic"),
+            r#"{"code":"unresolved_local_url"}"#
+        );
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "bench_failure_artifact"));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "bench_failure_stderr"));
     });
 }
 

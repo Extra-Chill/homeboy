@@ -34,7 +34,19 @@ pub(crate) fn classify_bench_failure(
         return Some(classification("timeout", "bench", "timeout", None));
     }
 
-    Some(classification("assertion_failure", "bench", "failed", None))
+    if stderr_lower.contains("assert") || stderr_lower.contains("expected ") {
+        return Some(classification("assertion_failure", "bench", "failed", None));
+    }
+
+    Some(classification(
+        "worker_exception",
+        "workload",
+        "error",
+        stderr
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(str::to_string),
+    ))
 }
 
 pub(crate) fn classification(

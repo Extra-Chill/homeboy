@@ -24,7 +24,9 @@ use serde_json::Value;
 use super::{run_owner_pid, running_status_note, ArtifactRecord, RunRecord, RunStatus};
 use crate::artifact_address::{ArtifactAddress, ArtifactAddressKind};
 use crate::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
-use crate::artifact_ref::{artifact_ref_from_record, ArtifactRef, EvidenceRef};
+use crate::artifact_ref::{
+    artifact_ref_from_record, evidence_ref_for_artifact, ArtifactRef, EvidenceRef,
+};
 use crate::artifacts::{generic_matrix_summary_from_artifacts, GenericMatrixSummary};
 use crate::evidence_manifest::{
     BlockingCondition, BlockingSeverity, EvidenceConfidence, EvidenceManifest,
@@ -111,7 +113,8 @@ pub fn build_run_evidence_report<S: Serialize>(
 
     let metadata = evidence_metadata(&run.metadata_json);
     let artifact_index = evidence_artifact_index(&artifacts);
-    let failure = evidence_failure_summary(&run);
+    let mut failure = evidence_failure_summary(&run);
+    failure.diagnostic = failure_diagnostic_artifact(&artifacts);
     let retention = evidence_retention(&artifact_root, &run.id);
     let evidence_links = evidence_links(&artifacts);
     let homeboy_provenance = evidence_homeboy_provenance(&run);
@@ -268,6 +271,9 @@ pub struct EvidenceFailureSummary {
     pub hints: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_command_failures: Vec<Value>,
+    /// The deepest persisted failure diagnostic selected by the producer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<EvidenceRef>,
     /// Runner-owned terminal diagnostics projected into controller evidence.
     /// Missing for local and pre-projection records to preserve their schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -737,10 +743,30 @@ pub fn evidence_failure_summary(run: &RunRecord) -> EvidenceFailureSummary {
         gate_failures: string_array(metadata.get("gate_failures")),
         hints: string_array(metadata.get("hints")),
         child_command_failures: child_command_failures(metadata),
+        diagnostic: None,
         runner_failure: metadata
             .pointer("/lab/failure")
             .and_then(RunnerFailureEvidence::from_metadata),
     }
+}
+
+fn failure_diagnostic_artifact(artifacts: &[ArtifactRecord]) -> Option<EvidenceRef> {
+    artifacts
+        .iter()
+        .filter(|artifact| artifact.metadata_json["failure_diagnostic"] == Value::Bool(true))
+        .max_by_key(|artifact| {
+            artifact.metadata_json["failure_diagnostic_rank"]
+                .as_u64()
+                .unwrap_or_default()
+        })
+        .map(|artifact| {
+            evidence_ref_for_artifact(
+                artifact,
+                "Failure diagnostic",
+                Some("failure_diagnostic".to_string()),
+                Some("failure.diagnostic".to_string()),
+            )
+        })
 }
 
 fn child_command_failures(metadata: &Value) -> Vec<Value> {
@@ -1239,6 +1265,37 @@ mod tests {
         assert_eq!(manifest.source, Some(EvidenceManifestSource::Derived));
         assert_eq!(manifest.status.state, EvidenceManifestState::Passed);
         assert!(report.evidence_manifest_errors.is_empty());
+    }
+
+    #[test]
+    fn evidence_links_the_marked_deepest_failure_diagnostic() {
+        let mut run = sample_run();
+        run.status = "fail".to_string();
+        let mut diagnostic = local_file_artifact();
+        diagnostic.id = "nested-diagnostic".to_string();
+        diagnostic.kind = "bench_failure_diagnostic".to_string();
+        diagnostic.metadata_json =
+            serde_json::json!({ "failure_diagnostic": true, "failure_diagnostic_rank": 2 });
+        let mut stderr = local_file_artifact();
+        stderr.id = "runner-stderr".to_string();
+        stderr.metadata_json =
+            serde_json::json!({ "failure_diagnostic": true, "failure_diagnostic_rank": 0 });
+
+        let report = build_run_evidence_report(RunEvidenceReportInputs {
+            command: "runs.evidence",
+            run,
+            run_summary: serde_json::json!({}),
+            artifacts: vec![stderr, diagnostic],
+            artifact_root: PathBuf::from("/tmp/artifacts"),
+            disk_budget: sample_disk_budget(),
+        });
+
+        let diagnostic = report.failure.diagnostic.expect("failure diagnostic link");
+        assert_eq!(diagnostic.kind, "artifact");
+        assert_eq!(
+            diagnostic.artifact.expect("artifact ref").id,
+            "nested-diagnostic"
+        );
     }
 
     fn local_file_artifact() -> ArtifactRecord {
