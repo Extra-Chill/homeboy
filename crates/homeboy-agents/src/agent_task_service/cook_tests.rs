@@ -2298,6 +2298,93 @@ impl CandidateAdoptionFixture {
 }
 
 #[test]
+fn continuation_finalizes_applied_green_candidate_despite_recoverable_artifact_diagnostic() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
+        use crate::agent_task_scheduler::{
+            AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+        };
+
+        let run_id = "cook-applied-recoverable-artifact";
+        let mut options = batch_cook_options(
+            "cook-applied-recoverable-artifact",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.initial_run_id = run_id.to_string();
+        options.no_finalize = false;
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+            .expect("submit terminal attempt");
+        agent_task_lifecycle::record_run_aggregate(
+            run_id,
+            &options.initial_plan,
+            &AgentTaskAggregate {
+                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: options.initial_plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::PartialRecoverable,
+                totals: AgentTaskAggregateTotals {
+                    succeeded: 1,
+                    ..Default::default()
+                },
+                outcomes: vec![AgentTaskOutcome {
+                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "provider".to_string(),
+                    status: AgentTaskOutcomeStatus::Succeeded,
+                    summary: Some("provider completed".to_string()),
+                    failure_classification: None,
+                    artifacts: vec![AgentTaskArtifact {
+                        id: "unprojected-provider-artifact".to_string(),
+                        kind: "patch".to_string(),
+                        ..Default::default()
+                    }],
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: test_review_form_outputs(),
+                    workflow: None,
+                    follow_up: None,
+                    metadata: Value::Null,
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .expect("persist recoverable aggregate");
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion(run_id)).expect("serialize applied promotion"),
+        )
+        .expect("persist green promotion");
+
+        assert!(
+            agent_task_lifecycle::terminal_artifact_projection_readiness(run_id)
+                .expect("read artifact projection")
+                .is_some()
+        );
+        let recipe = super::super::load_recipe(&options.cook_id).expect("load recipe");
+        super::super::reconcile_recipe_attempt_for_continuation(&recipe, run_id)
+            .expect("green applied candidate does not need provider artifact replay");
+
+        let finalizations = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&finalizations);
+        let result =
+            run_cook_with_finalizer(options, UnusedExecutor, move |_, finalized_run, _| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(finalized_run, run_id);
+                Ok(serde_json::json!({"status": "review_ready"}))
+            })
+            .expect("continue through finalization");
+
+        assert_eq!(result.value.status, "review_ready");
+        assert_eq!(finalizations.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
 fn cook_persists_controller_admission_timeout_before_provider_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-admission-timeout";
