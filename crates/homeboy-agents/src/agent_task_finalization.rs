@@ -335,14 +335,26 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     });
     options.review_dossier.evidence.dedup();
     let body = render_review_dossier(&options.review_dossier, &options.review_profile);
-    let (action, pr) = match existing {
-        Some(existing) => (
-            "updated",
-            backend.update_pr(&options.path, existing.number, &options.title, &body)?,
-        ),
+    let (action, pr, draft) = match existing {
+        Some(existing) => {
+            let draft = existing.is_draft;
+            (
+                "updated",
+                backend.update_pr(&options.path, existing.number, &options.title, &body)?,
+                draft,
+            )
+        }
         None => (
             "created",
-            backend.create_pr(&options.path, &options.base, &head, &options.title, &body)?,
+            backend.create_pr(
+                &options.path,
+                &options.base,
+                &head,
+                &options.title,
+                &body,
+                options.draft_pr,
+            )?,
+            options.draft_pr,
         ),
     };
 
@@ -360,7 +372,11 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         &options,
         intent,
         &head,
-        "review_ready",
+        if draft {
+            "draft_published"
+        } else {
+            "review_ready"
+        },
         action,
         Some(pr.number),
         Some(pr.url),

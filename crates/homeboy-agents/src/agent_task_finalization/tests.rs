@@ -41,6 +41,7 @@ struct MockBackend {
     committed: bool,
     pushed: bool,
     created: bool,
+    created_draft: bool,
     create_calls: u8,
     changed_files_calls: u8,
     commit_calls: u8,
@@ -252,16 +253,19 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         _head: &str,
         _title: &str,
         body: &str,
+        draft: bool,
     ) -> Result<AgentTaskPrRef> {
         if self.create_error {
             return Err(Error::git_command_failed("gh pr create failed"));
         }
         self.created = true;
+        self.created_draft = draft;
         self.create_calls += 1;
         self.last_body = body.to_string();
         Ok(AgentTaskPrRef {
             number: 123,
             url: "https://github.com/Extra-Chill/homeboy/pull/123".to_string(),
+            is_draft: draft,
         })
     }
 
@@ -277,6 +281,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         Ok(AgentTaskPrRef {
             number,
             url: format!("https://github.com/Extra-Chill/homeboy/pull/{}", number),
+            is_draft: false,
         })
     }
 
@@ -782,6 +787,7 @@ fn updates_existing_pr_for_same_branch() {
         existing_pr: Some(AgentTaskPrRef {
             number: 77,
             url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+            is_draft: false,
         }),
         ..Default::default()
     };
@@ -793,6 +799,64 @@ fn updates_existing_pr_for_same_branch() {
     assert_eq!(report.pr_number, Some(77));
     assert!(backend.updated);
     assert!(!backend.created);
+}
+
+#[test]
+fn draft_policy_creates_a_draft_pr_and_reports_draft_published() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        ..Default::default()
+    };
+    let mut finalization = options();
+    finalization.draft_pr = true;
+
+    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
+
+    assert!(backend.created_draft);
+    assert_eq!(report.status, "draft_published");
+    assert_eq!(report.finalization_outcome.status, "draft_published");
+}
+
+#[test]
+fn draft_policy_preserves_an_existing_ready_pr() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        existing_pr: Some(AgentTaskPrRef {
+            number: 77,
+            url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+            is_draft: false,
+        }),
+        ..Default::default()
+    };
+    let mut finalization = options();
+    finalization.draft_pr = true;
+
+    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
+
+    assert!(!backend.created);
+    assert!(backend.updated);
+    assert_eq!(report.status, "review_ready");
+}
+
+#[test]
+fn draft_policy_reconciles_an_existing_draft_pr() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        existing_pr: Some(AgentTaskPrRef {
+            number: 77,
+            url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+            is_draft: true,
+        }),
+        ..Default::default()
+    };
+    let mut finalization = options();
+    finalization.draft_pr = true;
+
+    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
+
+    assert!(!backend.created);
+    assert!(backend.updated);
+    assert_eq!(report.status, "draft_published");
 }
 
 #[test]
@@ -849,6 +913,7 @@ fn already_pushed_clean_committed_candidate_updates_open_pr_once() {
         existing_pr: Some(AgentTaskPrRef {
             number: 77,
             url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+            is_draft: false,
         }),
         ..Default::default()
     };
@@ -1619,6 +1684,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
         backend.existing_pr = Some(AgentTaskPrRef {
             number: 123,
             url: "https://github.com/Extra-Chill/homeboy/pull/123".to_string(),
+            is_draft: false,
         });
         let repeated = finalize_pr_with_backend(finalization_options, &mut backend)
             .expect("existing PR is reused");
@@ -2161,6 +2227,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
             "master".to_string(),
             "trunk".to_string(),
         ],
+        draft_pr: false,
     }
 }
 

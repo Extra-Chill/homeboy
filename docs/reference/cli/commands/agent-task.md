@@ -146,6 +146,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
 | `--max-attempts` | `<N>` | Maximum Cook attempts before giving up. Each attempt re-runs the agent and gates; a later attempt can recover from a transient failure. Set --max-provider-executions to at least this value and --max-same-provider-retries to at least one less so gate and required review-form remediation remain possible (default 3) |
 | `--no-finalize` | flag | Stop after the work is verified but before opening the pull request, leaving the committed change on the worktree branch for manual review or a later `agent-task review`/finalize |
+| `--draft-pr` | flag | Complete normal verified finalization but create a draft pull request. Existing pull requests retain their current draft or ready state |
 | `--full` | flag | Return the complete cook report, including nested promotion and gate evidence |
 | `--no-progress` | flag | Suppress intermediate Cook progress lines after the durable run identity. The final result still contains status and evidence commands for orchestration |
 | `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against (default `main`) |

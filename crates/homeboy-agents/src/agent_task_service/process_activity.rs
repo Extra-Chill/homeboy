@@ -32,13 +32,19 @@ pub const MAX_ACTIVITY_COMMAND_CHARS: usize = 200;
 /// the walk that already answers "what is this tree doing" is the cheapest
 /// place to also answer "how much is it holding". One `ps` still, one column
 /// wider.
-pub const PS_ACTIVITY_FORMAT: &str = "pid=,ppid=,rss=,etime=,args=";
+pub const PS_ACTIVITY_FORMAT: &str = "pid=,ppid=,stat=,rss=,etime=,args=";
 
 /// One row of the process table, as sampled from `ps`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessActivityRow {
     pub pid: u32,
     pub ppid: u32,
+    /// Process state as reported by `ps`, when the projection carried one.
+    ///
+    /// A zombie keeps its PID, command, ancestry, and elapsed time after it has
+    /// exited. It is useful as a bridge while walking to live children, but is
+    /// never activity to report or a process to count for resource supervision.
+    pub state: Option<String>,
     /// Resident set size in KiB, when the projection carried one.
     ///
     /// `None` rather than `0` when the column is absent: a `ps` that did not
@@ -139,11 +145,10 @@ impl ProviderActivitySample {
 /// every platform, including ones where the probe itself returns nothing.
 ///
 /// Two projections parse here: the current [`PS_ACTIVITY_FORMAT`]
-/// (`pid ppid rss etime args`) and the original memory-free
-/// `pid ppid etime args`. Tolerating both is not backwards compatibility
-/// theatre — durable evidence and recovery commands recorded before the `rss`
-/// column existed are still read back, and a `ps` that silently drops a column
-/// must narrow the sample rather than discard every row in it.
+/// (`pid ppid stat rss etime args`), the original memory projection (`pid ppid
+/// rss etime args`), and the memory-free `pid ppid etime args`. A `ps` that
+/// silently drops a column must narrow the sample rather than discard every row
+/// in it.
 pub fn parse_process_activity_rows(ps_output: &str) -> Vec<ProcessActivityRow> {
     ps_output
         .lines()
@@ -156,6 +161,27 @@ fn parse_process_activity_row(line: &str) -> Option<ProcessActivityRow> {
     let pid = fields.next()?.parse().ok()?;
     let ppid = fields.next()?.parse().ok()?;
     let third = fields.next()?;
+    if is_ps_state(third) {
+        let fourth = fields.next()?;
+        let (rss_kib, elapsed_seconds, leading_fields) = match fourth.parse::<u64>().ok() {
+            Some(rss) => match fields.next().and_then(parse_ps_elapsed_seconds) {
+                Some(elapsed) => (Some(rss), elapsed, 5),
+                None => (None, parse_ps_elapsed_seconds(fourth)?, 4),
+            },
+            None => (None, parse_ps_elapsed_seconds(fourth)?, 4),
+        };
+        let command = remainder_after_fields(line, leading_fields)
+            .trim()
+            .to_string();
+        return Some(ProcessActivityRow {
+            pid,
+            ppid,
+            state: Some(third.to_string()),
+            rss_kib,
+            elapsed_seconds,
+            command,
+        });
+    }
     // `rss` is a bare integer and `etime` is `[[dd-]hh:]mm:ss`, which overlap
     // only when `etime` is a bare seconds count. Prefer the wider projection
     // when the field after a numeric third field is itself a valid `etime`,
@@ -176,10 +202,23 @@ fn parse_process_activity_row(line: &str) -> Option<ProcessActivityRow> {
     Some(ProcessActivityRow {
         pid,
         ppid,
+        state: None,
         rss_kib,
         elapsed_seconds,
         command,
     })
+}
+
+/// POSIX `ps stat` starts with a one-letter process state; any following
+/// characters are flags such as session-leader or foreground-process-group.
+fn is_ps_state(field: &str) -> bool {
+    matches!(field.as_bytes().first(), Some(byte) if byte.is_ascii_alphabetic() || *byte == b'?')
+}
+
+fn is_defunct(row: &ProcessActivityRow) -> bool {
+    row.state
+        .as_deref()
+        .is_some_and(|state| state.starts_with('Z') || state.starts_with('X'))
 }
 
 /// Skip `count` whitespace-separated fields and return the rest of the line.
@@ -268,16 +307,22 @@ pub fn select_provider_activity(
         .into_iter()
         .filter(|(row, _)| !excluded.contains(&row.pid))
         .collect();
-    let descendant_count = descendants.len();
+    // A zombie can retain live descendants in the sampled tree, so it remains
+    // in the graph traversal but never becomes the reported activity.
+    let live_descendants: Vec<(&ProcessActivityRow, usize)> = descendants
+        .into_iter()
+        .filter(|(row, _)| !is_defunct(row))
+        .collect();
+    let descendant_count = live_descendants.len();
     // Footprint is a property of the whole tree, not of the one process that
     // best answers "what is it doing": a provider that spawned four linkers is
     // holding what the linkers hold. Homeboy's own descendants are counted too
     // — they are still occupying this host's memory.
-    let tree_rss_kib = descendants
+    let tree_rss_kib = live_descendants
         .iter()
         .filter_map(|(row, _)| row.rss_kib)
         .reduce(u64::saturating_add);
-    let selected = descendants
+    let selected = live_descendants
         .iter()
         .filter(|(row, _)| !row.command.is_empty())
         .filter(|(row, _)| !is_homeboy_process(&row.command))
@@ -488,12 +533,13 @@ mod tests {
 
     #[test]
     fn parses_the_resident_set_size_column_of_the_current_projection() {
-        let ps = "4242 100 1048576 06:12 cargo test -q -p homeboy-agents\n";
+        let ps = "4242 100 S 1048576 06:12 cargo test -q -p homeboy-agents\n";
 
         let rows = parse_process_activity_rows(ps);
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pid, 4242);
+        assert_eq!(rows[0].state.as_deref(), Some("S"));
         assert_eq!(rows[0].rss_kib, Some(1_048_576));
         assert_eq!(rows[0].elapsed_seconds, 372);
         assert_eq!(rows[0].command, "cargo test -q -p homeboy-agents");
@@ -511,6 +557,41 @@ mod tests {
         assert_eq!(rows[0].rss_kib, None);
         assert_eq!(rows[0].elapsed_seconds, 372);
         assert_eq!(rows[0].command, "cargo test -q");
+    }
+
+    #[test]
+    fn a_stateful_projection_without_memory_narrows_the_row_instead_of_dropping_it() {
+        let ps = "4242 100 S 06:12 cargo test -q\n";
+
+        let rows = parse_process_activity_rows(ps);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state.as_deref(), Some("S"));
+        assert_eq!(rows[0].rss_kib, None);
+        assert_eq!(rows[0].elapsed_seconds, 372);
+        assert_eq!(rows[0].command, "cargo test -q");
+    }
+
+    #[test]
+    fn a_defunct_root_is_not_reported_when_its_descendants_are_live() {
+        // A reaped provider launcher can remain as a zombie while its children
+        // finish work. Keep it as a graph bridge, but report the live command
+        // and count only processes that can still consume host resources.
+        let ps = concat!(
+            "100 1 Z 0 02:54 <defunct>\n",
+            "200 100 S 524288 02:53 opencode run --format json\n",
+            "300 200 R 262144 00:12 cargo test -q -p homeboy-agents\n",
+        );
+        let rows = parse_process_activity_rows(ps);
+
+        let sample = select_provider_activity(&rows, 1, &[]);
+
+        let activity = sample.activity.expect("live descendant is observable");
+        assert_eq!(activity.pid, 200);
+        assert_eq!(activity.command, "opencode run --format json");
+        assert_eq!(activity.descendant_count, 2);
+        assert_eq!(sample.descendant_count, 2);
+        assert_eq!(sample.tree_rss_kib, Some(786_432));
     }
 
     #[test]
