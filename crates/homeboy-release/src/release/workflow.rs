@@ -51,11 +51,24 @@ pub fn run_command_with_workspace(
     mut input: ReleaseCommandInput,
     recovery_owner_run_ref: Option<&str>,
 ) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
-    if let Some(readiness) = input.readiness.as_mut() {
+    let readiness_owner_run_ref = if let Some(readiness) = input.readiness.as_mut() {
         let owner_run_ref = format!(
             "release-readiness-{}-{}",
             input.component_id, readiness.source.commit
         );
+        let operation_ref = format!("operation://{owner_run_ref}");
+        if !readiness.evidence_refs.contains(&operation_ref) {
+            readiness.evidence_refs.push(operation_ref.clone());
+        }
+        for gate in readiness
+            .gate_results
+            .iter_mut()
+            .filter(|gate| gate.status == "failed")
+        {
+            if !gate.evidence_refs.contains(&operation_ref) {
+                gate.evidence_refs.push(operation_ref.clone());
+            }
+        }
         super::operation_record::OperationRecordStore::create(
             &super::operation_record::OperationRecord {
                 owner_run_ref: owner_run_ref.clone(),
@@ -69,9 +82,9 @@ pub fn run_command_with_workspace(
                 path: None,
                 source_sha: readiness.source.commit.clone(),
                 cleanup_policy: "retain".to_string(),
-                lifecycle_state: "validated".to_string(),
-                terminal_disposition: Some("succeeded".to_string()),
-                finalization_status: "completed".to_string(),
+                lifecycle_state: "running".to_string(),
+                terminal_disposition: None,
+                finalization_status: "pending".to_string(),
                 finalization_lease: None,
                 finalization_lease_started_ms: None,
                 attempt_count: 1,
@@ -87,14 +100,55 @@ pub fn run_command_with_workspace(
                 )]),
             },
         )?;
-        readiness
-            .evidence_refs
-            .push(format!("operation://{owner_run_ref}"));
-    }
+        Some(owner_run_ref)
+    } else {
+        None
+    };
     let readiness = input.readiness.clone();
-    let (mut output, exit_code) = run_command_with_workspace_inner(input, recovery_owner_run_ref)?;
-    output.result.readiness = readiness;
-    Ok((output, exit_code))
+    match run_command_with_workspace_inner(input, recovery_owner_run_ref) {
+        Ok((mut output, exit_code)) => {
+            if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
+                complete_readiness_operation(owner_run_ref, exit_code == 0, None)?;
+            }
+            output.result.readiness = readiness;
+            Ok((output, exit_code))
+        }
+        Err(error) => {
+            if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
+                complete_readiness_operation(owner_run_ref, false, Some(error.to_string()))?;
+                return Err(error.with_hint(format!(
+                    "Readiness evidence retained at operation://{owner_run_ref}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn complete_readiness_operation(
+    owner_run_ref: &str,
+    succeeded: bool,
+    error: Option<String>,
+) -> Result<()> {
+    super::operation_record::OperationRecordStore::update(owner_run_ref, |record| {
+        let mut record = record.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "owner_run_ref",
+                "release readiness operation record does not exist",
+                Some(owner_run_ref.to_string()),
+                None,
+            )
+        })?;
+        record.lifecycle_state = "finalized".to_string();
+        record.terminal_disposition =
+            Some(if succeeded { "succeeded" } else { "failed" }.to_string());
+        record.finalization_status = "completed".to_string();
+        if let Some(error) = error {
+            record.continuation_evidence.push(error);
+        }
+        Ok(record)
+    })?;
+    Ok(())
 }
 
 fn run_command_with_workspace_inner(
@@ -1013,9 +1067,12 @@ mod tests {
     use super::*;
     use crate::release::types::ReleasePhase;
     use crate::release::{
-        ReleaseRollbackEvidence, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+        ReleasePreflightPlacement, ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope,
+        ReleaseReadinessGateResult, ReleaseRollbackEvidence, ReleaseRunResult, ReleaseStepResult,
+        ReleaseStepStatus,
     };
     use homeboy_core::plan::{PlanStep, PlanStepStatus, PlanValues};
+    use homeboy_core::test_support::with_isolated_home;
 
     #[test]
     fn batch_status_bucket_rolls_up_non_released_outcomes_as_failed() {
@@ -1026,6 +1083,70 @@ mod tests {
         assert_eq!(batch_status_bucket("missing"), BatchStatusBucket::Failed);
         assert_eq!(batch_status_bucket("partial"), BatchStatusBucket::Failed);
         assert_eq!(batch_status_bucket("unknown"), BatchStatusBucket::Failed);
+    }
+
+    #[test]
+    fn failed_readiness_is_durable_and_blocks_controller_mutation() {
+        with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            setup_release_range_fixture(temp.path(), "1.2.3", 1);
+            let source =
+                String::from_utf8_lossy(&run_in(temp.path(), &["git", "rev-parse", "HEAD"]).stdout)
+                    .trim()
+                    .to_string();
+            let version_before = std::fs::read_to_string(temp.path().join("VERSION"))
+                .expect("read version before release");
+            let readiness = ReleaseReadinessEnvelope {
+                source: ReleasePreflightSourceIdentity {
+                    commit: source.clone(),
+                },
+                placement: ReleasePreflightPlacement::default(),
+                runner_id: Some("lab-test".to_string()),
+                evidence_refs: vec!["evidence://lint".to_string()],
+                provenance: Default::default(),
+                gate_results: vec![ReleaseReadinessGateResult {
+                    gate: "lint".to_string(),
+                    status: "failed".to_string(),
+                    reason: Some("portable dispatch failed".to_string()),
+                    source_sha: Some(source.clone()),
+                    runner_id: Some("lab-test".to_string()),
+                    evidence_refs: Vec::new(),
+                }],
+            };
+
+            let error = run_command_with_workspace(
+                ReleaseCommandInput {
+                    component_id: "fixture".to_string(),
+                    path_override: Some(temp.path().to_string_lossy().to_string()),
+                    readiness: Some(readiness),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect_err("failed readiness must stop release before controller mutation");
+
+            let owner = format!("release-readiness-fixture-{source}");
+            assert!(error.hints.iter().any(|hint| hint.message
+                == format!("Readiness evidence retained at operation://{owner}")));
+            let record = super::super::operation_record::OperationRecordStore::load(&owner)
+                .expect("load operation record")
+                .expect("readiness record is retained");
+            assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
+            assert_eq!(record.finalization_status, "completed");
+            assert_eq!(
+                record.attributes["readiness"]["gate_results"][0]["evidence_refs"][0],
+                format!("operation://{owner}")
+            );
+            assert_eq!(
+                std::fs::read_to_string(temp.path().join("VERSION")).expect("read version after"),
+                version_before
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&run_in(temp.path(), &["git", "rev-parse", "HEAD"]).stdout)
+                    .trim(),
+                source
+            );
+        });
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, Result};
+use homeboy_core::git;
 use homeboy_extension as extension;
 use homeboy_extension::{self, ExtensionManifest};
 
@@ -28,20 +29,32 @@ pub(super) fn resolve_extensions(component: &Component) -> Result<Vec<ExtensionM
     Ok(extensions)
 }
 
-/// Capture configuration and resolved extension revisions before portable work.
+/// Capture immutable identities for the dependency and extension resolutions
+/// that release will consume before portable work begins.
 pub fn readiness_provenance(component: &Component) -> Result<ReleaseReadinessProvenance> {
     let mut provenance = ReleaseReadinessProvenance::default();
     for dependency in &component.dependency_stack {
-        if let Some(revision) = &dependency.update {
-            provenance
-                .dependencies
-                .insert(dependency.package.clone(), revision.clone());
-        }
+        let upstream = component::resolve_effective(Some(&dependency.upstream), None, None)?;
+        let revision = git::get_head_commit(&upstream.local_path)?;
+        provenance
+            .dependencies
+            .insert(dependency.package.clone(), revision);
     }
     for extension in resolve_extensions(component)? {
+        let path = extension.extension_path.as_deref().ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "resolved extension '{}' has no materialized path",
+                extension.id
+            ))
+        })?;
+        let manifest = std::path::Path::new(path).join(format!("{}.json", extension.id));
+        let revision =
+            homeboy_engine_primitives::content_hash::sha256_file(&manifest).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(manifest.display().to_string()))
+            })?;
         provenance
             .extensions
-            .insert(extension.id, extension.version);
+            .insert(extension.id, format!("sha256:{revision}"));
     }
     Ok(provenance)
 }

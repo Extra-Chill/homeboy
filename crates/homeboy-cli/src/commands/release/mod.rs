@@ -632,17 +632,33 @@ fn run_portable_preflight_with(
             path: &component.local_path,
             requested_runner_id: runner_id,
             placement: args.preflight_placement,
-        })?;
-        resolved_runner_id = child.runner_id.clone().or(resolved_runner_id);
-        evidence_refs.extend(child.evidence_refs.iter().cloned());
-        gate_results.push(ReleaseReadinessGateResult {
-            gate: gate.to_string(),
-            status: if child.passed { "passed" } else { "failed" }.to_string(),
-            reason: None,
-            source_sha: Some(commit.clone()),
-            runner_id: child.runner_id,
-            evidence_refs: child.evidence_refs,
         });
+        match child {
+            Ok(child) => {
+                resolved_runner_id = child.runner_id.clone().or(resolved_runner_id);
+                evidence_refs.extend(child.evidence_refs.iter().cloned());
+                gate_results.push(ReleaseReadinessGateResult {
+                    gate: gate.to_string(),
+                    status: if child.passed { "passed" } else { "failed" }.to_string(),
+                    reason: None,
+                    source_sha: Some(commit.clone()),
+                    runner_id: child.runner_id,
+                    evidence_refs: child.evidence_refs,
+                });
+            }
+            Err(error) => {
+                // Keep dispatch failures alongside other gate outcomes. The
+                // retained readiness operation makes this error durable.
+                gate_results.push(ReleaseReadinessGateResult {
+                    gate: gate.to_string(),
+                    status: "failed".to_string(),
+                    reason: Some(format!("portable dispatch failed: {error}")),
+                    source_sha: Some(commit.clone()),
+                    runner_id: runner_id.map(str::to_string),
+                    evidence_refs: Vec::new(),
+                });
+            }
+        }
     }
     // Package preflight owns release-specific lockfile and local-dependency
     // guards. No portable review command exposes that contract yet, so retain
@@ -1258,6 +1274,7 @@ fn resolve_component_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     fn args(components: &[&str]) -> ReleaseExecuteArgs {
         ReleaseExecuteArgs {
@@ -1695,5 +1712,121 @@ jobs:
                 "runner-artifact://lab-runner-7/review.json".to_string(),
             ]
         );
+    }
+
+    struct RecordingPortableDispatcher {
+        calls: RefCell<Vec<String>>,
+        failing_gate: Option<&'static str>,
+    }
+
+    impl PortableStageDispatcher for RecordingPortableDispatcher {
+        fn dispatch(
+            &self,
+            request: PortableStageRequest<'_>,
+        ) -> homeboy::core::Result<PortableStageChildResult> {
+            self.calls.borrow_mut().push(request.gate.to_string());
+            if self.failing_gate == Some(request.gate) {
+                return Err(homeboy::core::Error::internal_unexpected(format!(
+                    "{} dispatcher unavailable",
+                    request.gate
+                )));
+            }
+            Ok(PortableStageChildResult {
+                passed: true,
+                runner_id: Some("test-runner".to_string()),
+                evidence_refs: vec![format!("evidence://{}", request.gate)],
+            })
+        }
+    }
+
+    fn portable_preflight_fixture() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q", "--initial-branch", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(
+            temp.path().join("homeboy.json"),
+            r#"{
+                "id": "fixture",
+                "components": { "fixture": { "type": "fixture", "path": "." } }
+            }"#,
+        )
+        .expect("write config");
+        std::fs::write(temp.path().join("README.md"), "fixture\n").expect("write fixture");
+        run(&["add", "."]);
+        run(&["commit", "-qm", "initial"]);
+        temp
+    }
+
+    fn portable_preflight_args(path: &std::path::Path) -> ReleaseExecuteArgs {
+        let mut args = args(&["fixture"]);
+        args.path = Some(path.to_string_lossy().to_string());
+        args.preflight_placement = ReleasePreflightPlacementArg::Lab;
+        args
+    }
+
+    #[test]
+    fn portable_preflight_does_not_dispatch_skipped_stages() {
+        let temp = portable_preflight_fixture();
+        let dispatcher = RecordingPortableDispatcher {
+            calls: RefCell::new(Vec::new()),
+            failing_gate: None,
+        };
+
+        let readiness = run_portable_preflight_with(
+            &dispatcher,
+            &portable_preflight_args(temp.path()),
+            "fixture",
+            &["lint".to_string()],
+        )
+        .expect("preflight should complete")
+        .expect("lab preflight is enabled");
+
+        assert_eq!(*dispatcher.calls.borrow(), vec!["audit", "test"]);
+        assert_eq!(readiness.gate_results[1].gate, "lint");
+        assert_eq!(readiness.gate_results[1].status, "skipped");
+    }
+
+    #[test]
+    fn portable_dispatch_error_is_a_failed_gate_and_later_gates_run() {
+        let temp = portable_preflight_fixture();
+        let dispatcher = RecordingPortableDispatcher {
+            calls: RefCell::new(Vec::new()),
+            failing_gate: Some("lint"),
+        };
+
+        let readiness = run_portable_preflight_with(
+            &dispatcher,
+            &portable_preflight_args(temp.path()),
+            "fixture",
+            &[],
+        )
+        .expect("dispatch failure is retained as a gate result")
+        .expect("lab preflight is enabled");
+
+        assert_eq!(*dispatcher.calls.borrow(), vec!["audit", "lint", "test"]);
+        let lint = readiness
+            .gate_results
+            .iter()
+            .find(|gate| gate.gate == "lint")
+            .expect("lint result");
+        assert_eq!(lint.status, "failed");
+        assert!(lint
+            .reason
+            .as_deref()
+            .expect("failure reason")
+            .contains("dispatcher unavailable"));
+        assert!(readiness
+            .gate_results
+            .iter()
+            .any(|gate| gate.gate == "test" && gate.status == "passed"));
     }
 }

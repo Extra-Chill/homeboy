@@ -100,6 +100,7 @@ fn run_with_plan_inner(
     staging_source_sha: Option<&str>,
 ) -> Result<(ReleasePlan, ReleaseRun)> {
     let mut results: Vec<ReleaseStepResult> = Vec::new();
+    ensure_readiness_passed(options)?;
 
     let initial_plan = build_initial_preflight_plan(component_id, options);
     let mut timer = PhaseTimer::new();
@@ -139,32 +140,6 @@ fn run_with_plan_inner(
         initial_executable_preflight_ids().iter().copied().collect();
 
     super::preflight_identity::revalidate(&preflight_component, &preflight_source)?;
-    if let Some(readiness) = options.readiness.as_ref() {
-        let failed = readiness
-            .gate_results
-            .iter()
-            .filter(|gate| gate.status == "failed")
-            .map(|gate| gate.gate.as_str())
-            .collect::<Vec<_>>();
-        if !failed.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "release.preflight",
-                format!(
-                    "Portable release preflight failed for: {}",
-                    failed.join(", ")
-                ),
-                Some(readiness.source.commit.clone()),
-                Some(
-                    readiness
-                        .evidence_refs
-                        .iter()
-                        .map(|reference| format!("Inspect durable readiness evidence: {reference}"))
-                        .collect(),
-                ),
-            ));
-        }
-    }
-
     timer.time("package", || {
         super::execution_plan::execute_plan_steps_at_source(
             &release_plan.plan.steps,
@@ -180,6 +155,36 @@ fn run_with_plan_inner(
     restore_checkout_after_failed_run(checkout_guard, &mut run)?;
 
     Ok((release_plan, run))
+}
+
+fn ensure_readiness_passed(options: &ReleaseOptions) -> Result<()> {
+    let Some(readiness) = options.readiness.as_ref() else {
+        return Ok(());
+    };
+    let failed = readiness
+        .gate_results
+        .iter()
+        .filter(|gate| gate.status == "failed")
+        .map(|gate| gate.gate.as_str())
+        .collect::<Vec<_>>();
+    if failed.is_empty() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "release.preflight",
+        format!(
+            "Portable release preflight failed for: {}",
+            failed.join(", ")
+        ),
+        Some(readiness.source.commit.clone()),
+        Some(
+            readiness
+                .evidence_refs
+                .iter()
+                .map(|reference| format!("Inspect durable readiness evidence: {reference}"))
+                .collect(),
+        ),
+    ))
 }
 
 /// Wrap the accumulated step results into a `ReleaseRun` with an overall
