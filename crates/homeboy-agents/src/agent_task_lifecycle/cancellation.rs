@@ -1,7 +1,105 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_INITIAL_CANCELLATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn install_after_initial_cancellation_for_test(hook: impl FnOnce() + 'static) {
+    AFTER_INITIAL_CANCELLATION.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn run_after_initial_cancellation_for_test() {
+    #[cfg(test)]
+    AFTER_INITIAL_CANCELLATION.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
+    let requested_run_id = sanitize_run_id(run_id);
+    let mut resolved_run_id = resolve_run_id(&requested_run_id)?;
+    // Index publication is independent from parent cancellation. Re-resolve
+    // after each mutation until the Cook alias is stable, so every attempt that
+    // became authoritative during this operation receives cancellation too.
+    for pass in 0..3 {
+        let record = cancel_resolved_run(&resolved_run_id, reason)?;
+        if pass == 0 {
+            run_after_initial_cancellation_for_test();
+        }
+        let resolved_after_cancellation = resolve_run_id(&requested_run_id)?;
+        if resolved_after_cancellation == resolved_run_id {
+            return Ok(record);
+        }
+        resolved_run_id = resolved_after_cancellation;
+    }
+    Err(Error::internal_unexpected(format!(
+        "Cook alias '{}' changed repeatedly while cancellation was in progress",
+        requested_run_id
+    )))
+}
+
+fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
+    // Cook IDs are stable aliases. Match status and logs by following an
+    // materialized attempt once one exists; before then the handoff parent is
+    // the direct record and remains cancellable.
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let detached_child = record
+        .metadata
+        .get("detached_cook_handoff")
+        .and_then(serde_json::Value::as_object)
+        .filter(|handoff| {
+            handoff.get("state").and_then(serde_json::Value::as_str) == Some("pending")
+        })
+        .and_then(|handoff| {
+            Some((
+                u32::try_from(handoff.get("child_pid")?.as_u64()?).ok()?,
+                handoff.get("child_start_identity").cloned(),
+            ))
+        });
+    if let Some((pid, start_identity)) = detached_child {
+        let start_identity = start_identity.and_then(|value| serde_json::from_value(value).ok());
+        let Some(start_identity) = start_identity else {
+            return Err(Error::validation_invalid_argument(
+                "detached_cook_handoff.child_start_identity",
+                "detached Cook child has no verifiable start identity",
+                Some(record.run_id.clone()),
+                None,
+            ));
+        };
+        match homeboy_core::process::process_identity_state_with_start_identity(
+            pid,
+            None,
+            Some(&start_identity),
+        ) {
+            homeboy_core::process::ProcessIdentityState::Live => {
+                let termination = homeboy_core::process::terminate_process_tree(pid)?;
+                record.ensure_metadata_object().insert(
+                    "detached_cook_handoff_cancellation".to_string(),
+                    json!({
+                        "child_pid": pid,
+                        "signal": termination.signal,
+                        "signalled_pids": termination.signalled_pids,
+                        "killed_pids": termination.killed_pids,
+                    }),
+                );
+                store::write_record(&record)?;
+            }
+            homeboy_core::process::ProcessIdentityState::Dead => {}
+            homeboy_core::process::ProcessIdentityState::IdentityMismatch
+            | homeboy_core::process::ProcessIdentityState::Unverifiable => {
+                return Err(Error::validation_invalid_argument(
+                    "detached_cook_handoff.child_start_identity",
+                    "refusing to signal a detached Cook child without an exact process identity match",
+                    Some(record.run_id.clone()),
+                    None,
+                ));
+            }
+        }
+    }
     // Service ownership is independent of the scheduler process. Reconcile the
     // durable ledger before terminalizing so an interrupted controller cannot
     // leave a runner-local preview alive after its run is cancelled.
@@ -267,6 +365,8 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
             }
         }
 
+        let detached_handoff_parent =
+            record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id;
         let metadata = record.ensure_metadata_object();
         terminalize_running_provider_executions(metadata, &cancelled_at);
         metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
@@ -275,6 +375,10 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
             "cancel_reason".to_string(),
             json!(reason.unwrap_or("cancel requested")),
         );
+        if detached_handoff_parent {
+            metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
+                json!("cancelled");
+        }
         metadata.remove("live_cancellation");
         metadata.remove("live_cancellation_unsupported");
         match &cancellation {
@@ -610,6 +714,90 @@ fn terminalize_running_provider_executions(
             execution["state"] = json!("cancelled");
             execution["finished_at"] = json!(finished_at);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_propagates_when_a_cook_index_appears_mid_cancellation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-index-switch-during-cancel";
+            record_detached_cook_handoff_parent(cook_id).expect("persist handoff parent");
+            let attempt_id = "cook-index-switch-during-cancel-attempt-1";
+            let plan = AgentTaskPlan::new("index-switch-attempt", Vec::new());
+            submit_plan(&plan, Some(attempt_id)).expect("persist attempt");
+            install_after_initial_cancellation_for_test({
+                let cook_id = cook_id.to_string();
+                let attempt_id = attempt_id.to_string();
+                move || {
+                    record_cook_attempt(&cook_id, 1, &attempt_id)
+                        .expect("publish Cook index during cancellation");
+                }
+            });
+
+            let cancelled = cancel_run(cook_id, None).expect("cancel Cook across index switch");
+
+            assert_eq!(cancelled.run_id, attempt_id);
+            assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+            assert_eq!(
+                exact_record(attempt_id)
+                    .expect("read cancelled attempt")
+                    .state,
+                AgentTaskRunState::Cancelled
+            );
+        });
+    }
+
+    #[test]
+    fn cancellation_never_signals_a_pid_with_a_mismatched_start_identity() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-pid-reuse-safety";
+            record_detached_cook_handoff_parent(cook_id).expect("persist handoff parent");
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn child");
+            let identity = homeboy_core::process::process_start_identity(child.id())
+                .expect("inspect child identity")
+                .expect("child identity is present");
+            record_detached_cook_handoff_child(cook_id, child.id(), identity)
+                .expect("persist child identity");
+            store::mutate_record(cook_id, |record| {
+                record.metadata["detached_cook_handoff"]["child_start_identity"] =
+                    json!({ "platform": "linux", "starttime_ticks": 0 });
+                true
+            })
+            .expect("replace identity with a mismatched fixture");
+
+            assert!(cancel_run(cook_id, None).is_err());
+            assert_eq!(
+                homeboy_core::process::process_identity_state(child.id(), None),
+                homeboy_core::process::ProcessIdentityState::Live,
+                "a mismatched persisted identity must not signal the live PID"
+            );
+            let _ = homeboy_core::process::terminate_process_tree(child.id());
+            let _ = child.wait();
+        });
+    }
+
+    #[test]
+    fn cancelled_pre_spawn_fence_blocks_an_unattached_child_before_materialization() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-launcher-died-before-child-attachment";
+            record_detached_cook_handoff_parent(cook_id).expect("persist pre-spawn parent");
+            cancel_run(cook_id, None).expect("cancel parent after launcher loss");
+
+            assert!(require_detached_cook_handoff_fence_open(cook_id).is_err());
+            assert!(!cook_index_exists(cook_id).expect("inspect absent Cook index"));
+            assert!(
+                !run_record_exists(&cook_attempt_run_id(cook_id, 1))
+                    .expect("inspect absent materialized attempt"),
+                "an unattached child must observe the durable fence before it can materialize"
+            );
+        });
     }
 }
 
