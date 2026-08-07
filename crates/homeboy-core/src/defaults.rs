@@ -340,9 +340,18 @@ fn default_automatic_retention_max_run_seconds() -> u64 {
 /// `controller_runtime::AdmissionTimings::load`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControllerAdmissionConfig {
-    /// Initial interval between durable queue observations while waiting.
+    /// Initial interval between durable queue observations while waiting, and
+    /// the interval the waiter returns to whenever the queue moves.
     #[serde(default = "default_admission_queue_poll_ms")]
     pub queue_poll_ms: u64,
+
+    /// Ceiling for the exponential backoff applied to a waiter that is not at
+    /// the head of the queue and whose position has not moved.
+    ///
+    /// The effective sleep is additionally clamped to `queue_heartbeat_ms`, so
+    /// raising this can never let a waiter sleep through its own lease renewal.
+    #[serde(default = "default_admission_queue_poll_max_ms")]
+    pub queue_poll_max_ms: u64,
 
     /// Lifetime granted to a queue entry by each heartbeat. A waiter that stops
     /// renewing within this window is reclaimed as crashed.
@@ -374,6 +383,7 @@ impl Default for ControllerAdmissionConfig {
     fn default() -> Self {
         Self {
             queue_poll_ms: default_admission_queue_poll_ms(),
+            queue_poll_max_ms: default_admission_queue_poll_max_ms(),
             queue_lease_ms: default_admission_queue_lease_ms(),
             queue_heartbeat_ms: default_admission_queue_heartbeat_ms(),
             queue_wait_timeout_ms: default_admission_queue_wait_timeout_ms(),
@@ -384,6 +394,13 @@ impl Default for ControllerAdmissionConfig {
 
 fn default_admission_queue_poll_ms() -> u64 {
     250
+}
+
+/// Backoff ceiling for a waiter whose position has not moved. Well under the
+/// 5s heartbeat, so the clamp in `AdmissionTimings::sanitized` is not what
+/// bounds this in the default configuration.
+fn default_admission_queue_poll_max_ms() -> u64 {
+    2_000
 }
 
 fn default_admission_queue_lease_ms() -> u64 {

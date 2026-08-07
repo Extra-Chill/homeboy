@@ -55,6 +55,7 @@ const ADMISSION_QUEUE_SCHEMA: &str = "homeboy/controller-admission-queue/v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AdmissionTimings {
     poll: Duration,
+    poll_max: Duration,
     lease: Duration,
     heartbeat: Duration,
     wait_timeout: Duration,
@@ -72,8 +73,8 @@ impl AdmissionTimings {
     /// passes through this lock: an implausible value must degrade to a safe
     /// timing, not fail the whole orchestrator closed.
     ///
-    /// The clamp chain establishes `floor <= poll <= heartbeat <= lease / 2`.
-    /// Each link is load-bearing:
+    /// The clamp chain establishes `floor <= poll <= poll_max <= heartbeat <=
+    /// lease / 2`. Each link is load-bearing:
     ///
     /// * A zero interval would spin on the durable queue file rather than wait.
     /// * A waiter renews its lease on the heartbeat and is reclaimed as crashed
@@ -83,6 +84,8 @@ impl AdmissionTimings {
     ///   lease keeps one slow queue write from expiring a live waiter.
     /// * The loop can only heartbeat when it wakes, so a sleep longer than the
     ///   heartbeat would let a waiter sleep through its own renewal deadline.
+    ///   Bounding `poll_max` by the heartbeat is what makes backoff unable to
+    ///   cost a waiter the queue slot it is backing off to keep.
     fn sanitized(config: &crate::defaults::ControllerAdmissionConfig) -> Self {
         let floor = crate::defaults::MIN_ADMISSION_INTERVAL_MS;
         let lease = config.queue_lease_ms.max(floor);
@@ -90,14 +93,41 @@ impl AdmissionTimings {
             .queue_heartbeat_ms
             .clamp(floor, (lease / 2).max(floor));
         let poll = config.queue_poll_ms.clamp(floor, heartbeat);
+        let poll_max = config.queue_poll_max_ms.clamp(poll, heartbeat);
         Self {
             poll: Duration::from_millis(poll),
+            poll_max: Duration::from_millis(poll_max),
             lease: Duration::from_millis(lease),
             heartbeat: Duration::from_millis(heartbeat),
             wait_timeout: Duration::from_millis(config.queue_wait_timeout_ms),
             busy_wait: Duration::from_millis(config.busy_wait_ms),
         }
     }
+}
+
+/// Next sleep for a waiter whose queue position did not move.
+///
+/// FIFO position is what grants admission, so a waiter that is not at the head
+/// gains nothing by re-reading the durable queue every 250ms — at the default
+/// timeout that is 2,400 reads and 2,400 wakeups per waiter, multiplied across
+/// the whole submission wave. The interval doubles up to the configured
+/// ceiling, and the caller resets it to `poll` the moment the queue moves, so a
+/// waiter converges back to a tight poll exactly as its turn approaches.
+fn next_admission_backoff(current: Duration, timings: &AdmissionTimings) -> Duration {
+    current.saturating_mul(2).min(timings.poll_max)
+}
+
+/// Render a wait in the unit an operator reasons in. "600000ms" tells nobody
+/// anything; "10m0s" does.
+fn format_admission_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds == 0 {
+        return format!("{}ms", duration.as_millis());
+    }
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    format!("{}m{}s", seconds / 60, seconds % 60)
 }
 
 fn admission_queue_lease() -> Duration {
@@ -1469,6 +1499,8 @@ fn acquire_queued_admission_lock_with_timeout(
     let timings = AdmissionTimings::load();
     let started = std::time::Instant::now();
     let mut last_heartbeat = std::time::Instant::now();
+    let mut backoff = timings.poll;
+    let mut observed_position = None;
     loop {
         let status = admission_status(request_id)?;
         if status["state"] == "none" {
@@ -1477,27 +1509,28 @@ fn acquire_queued_admission_lock_with_timeout(
                     .with_retryable(true),
             );
         }
+        let position = status["position"].as_u64();
         if started.elapsed() >= wait_timeout {
-            // Name the holder before the waiter is removed: an expired wait
-            // whose diagnostic cannot say who held admission is unactionable
-            // (#9373).
-            let owner = admission_owner_summary(path);
-            let evidence = admission_contention_evidence(path);
-            remove_admission_request(path, request_id)?;
-            let mut error = Error::internal_unexpected(format!(
-                "controller generation admission queue wait exceeded {}ms; current owner: {owner}",
-                wait_timeout.as_millis()
-            ))
-            .with_retryable(true);
-            error.details["controller_admission"] = evidence;
-            error.details["request_id"] = json!(request_id);
-            return Err(error);
+            return Err(admission_wait_timeout_error(
+                path,
+                request_id,
+                started.elapsed(),
+                wait_timeout,
+                position,
+            )?);
         }
         if last_heartbeat.elapsed() >= timings.heartbeat {
             heartbeat_admission_waiter(path, request_id)?;
             last_heartbeat = std::time::Instant::now();
         }
-        if status["position"].as_u64() == Some(1) {
+        // The queue moved, so this waiter is closer to its turn: return to a
+        // tight poll rather than sleeping through the handoff it is waiting for.
+        if position != observed_position {
+            backoff = timings.poll;
+            observed_position = position;
+        }
+        let at_head = position == Some(1);
+        if at_head {
             wait_at_admission_head();
             match acquire_admission_lock_for(path, request_id) {
                 Ok(lock) => {
@@ -1512,8 +1545,85 @@ fn acquire_queued_admission_lock_with_timeout(
                 Err(error) => return Err(error),
             }
         }
-        std::thread::sleep(timings.poll);
+        // The head polls at the floor: it is next to be admitted and the
+        // critical section it is waiting on is short (selection plus durable
+        // record creation). Only a waiter that is not yet at the head, and
+        // whose position has not moved, backs off — that is the waiter for whom
+        // re-reading the durable queue is pure cost.
+        let sleep = if at_head { timings.poll } else { backoff };
+        // Never overshoot the deadline: backing off must not make the reported
+        // wait longer than the timeout the operator configured.
+        std::thread::sleep(sleep.min(wait_timeout.saturating_sub(started.elapsed())));
+        if !at_head {
+            backoff = next_admission_backoff(backoff, &timings);
+        }
     }
+}
+
+/// Build the error for a queued request that never reached the head.
+///
+/// This is the silent-partial-failure path: fan out a wave larger than the
+/// admission lock can drain and the waiters that lose simply return
+/// `retryable: true` with nothing actually retrying them. The error's job is
+/// therefore to be impossible to misread — how long it waited, how many
+/// requests were ahead of it, who held the lock, the command that resumes it,
+/// and the knob that widens the window.
+///
+/// Deliberately *not* auto-retried. Re-enqueueing after a timeout appends to
+/// the tail, so the waiter that already waited longest would be sent to the
+/// back — punishing seniority under exactly the sustained contention that
+/// produced the timeout, and risking indefinite starvation on a global lock. A
+/// retry belongs one layer up, where a durable run record makes it observable
+/// and countable instead of an invisible in-process loop.
+fn admission_wait_timeout_error(
+    path: &Path,
+    request_id: &str,
+    waited: Duration,
+    wait_timeout: Duration,
+    position: Option<u64>,
+) -> Result<Error> {
+    // Name the holder before the waiter is removed: an expired wait whose
+    // diagnostic cannot say who held admission is unactionable (#9373).
+    let owner = admission_owner_summary(path);
+    let evidence = admission_contention_evidence(path);
+    let queue_depth = evidence["waiting_requests"].as_u64().unwrap_or_default();
+    remove_admission_request(path, request_id)?;
+
+    let ahead = position.map(|position| position.saturating_sub(1));
+    let ahead_summary = match ahead {
+        Some(1) => "1 other waiter".to_string(),
+        Some(ahead) => format!("{ahead} other waiters"),
+        None => "an unknown number of other waiters".to_string(),
+    };
+    let retry_command = format!("homeboy agent-task retry {request_id} --run");
+    // The millisecond form of the timeout is retained verbatim so existing
+    // operator greps and assertions on this message keep matching.
+    let mut error = Error::internal_unexpected(format!(
+        "controller generation admission queue wait exceeded {}ms; request `{request_id}` waited {} behind {ahead_summary} without ever reaching the head of the queue ({queue_depth} request(s) in the queue including this one); current owner: {owner}",
+        wait_timeout.as_millis(),
+        format_admission_duration(waited),
+    ))
+    .with_retryable(true)
+    .with_hint(format!(
+        "This request was never admitted, so no task work was dispatched for it. Resume it with: {retry_command} (for cook submissions the admission request ID is the agent-task run ID)."
+    ))
+    .with_hint(
+        "Admission is FIFO: re-running the identical command queues behind the current owner instead of racing it.",
+    )
+    .with_hint(format!(
+        "If a whole submission wave times out, the wave is larger than admission can drain in {}. Widen it with: homeboy config set /controller_admission/queue_wait_timeout_ms <milliseconds>",
+        format_admission_duration(wait_timeout),
+    ));
+    error.details["controller_admission"] = evidence;
+    error.details["request_id"] = json!(request_id);
+    error.details["waited_ms"] = json!(waited.as_millis() as u64);
+    error.details["wait_timeout_ms"] = json!(wait_timeout.as_millis() as u64);
+    error.details["waiters_ahead"] = json!(ahead);
+    error.details["queue_depth"] = json!(queue_depth);
+    error.details["retry_command"] = json!(retry_command);
+    // Explicit: nothing retried this for you.
+    error.details["automatic_retry"] = json!(false);
+    Ok(error)
 }
 
 fn admission_cancelled_error(request_id: &str) -> Error {
@@ -3095,6 +3205,185 @@ mod tests {
         });
     }
 
+    /// A timeout that returns `retryable: true` with nobody retrying it is the
+    /// silent partial failure in a fanned-out wave. The error has to say what
+    /// happened and what to run next, or 11 of 12 cooks vanish quietly.
+    #[test]
+    fn queue_timeout_names_the_wait_the_waiters_ahead_and_the_retry_command() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = runtime_root().expect("runtime root");
+            let lock = root.join(ADMISSION_LOCK_DIR);
+            let first = admit_current_for("first").expect("admit first owner");
+            enqueue_admission_request(&lock, "queued-behind").expect("enqueue waiting request");
+
+            let error = acquire_queued_admission_lock_with_timeout(
+                &lock,
+                "queued-behind",
+                Duration::ZERO,
+                &|| Ok(false),
+            )
+            .expect_err("zero timeout expires deterministically");
+
+            // The wait is reported, along with how many requests were ahead.
+            // Not asserted as an exact figure: the elapsed wait is real wall
+            // clock, so pinning it would be a timing flake.
+            assert!(error.message.contains(" waited "), "{}", error.message);
+            assert!(
+                error.details["waited_ms"].is_u64(),
+                "{}",
+                error.details["waited_ms"]
+            );
+            assert_eq!(error.details["waiters_ahead"], 1);
+            assert_eq!(error.details["queue_depth"], 2);
+            assert_eq!(error.details["wait_timeout_ms"], 0);
+            assert_eq!(error.details["request_id"], "queued-behind");
+
+            // The failure is explicitly not self-healing, and names its retry.
+            assert_eq!(error.details["automatic_retry"], false);
+            assert_eq!(
+                error.details["retry_command"],
+                "homeboy agent-task retry queued-behind --run"
+            );
+            let hints = error
+                .hints
+                .iter()
+                .map(|hint| hint.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                hints.contains("homeboy agent-task retry queued-behind --run"),
+                "{hints}"
+            );
+            assert!(
+                hints.contains("/controller_admission/queue_wait_timeout_ms"),
+                "{hints}"
+            );
+
+            // The owner is still named, and the waiter is gone from the queue.
+            assert!(
+                error.message.contains("current owner:"),
+                "{}",
+                error.message
+            );
+            assert_eq!(
+                admission_status("queued-behind").expect("waiter removed")["state"],
+                "none"
+            );
+            drop(first);
+        });
+    }
+
+    /// The backoff exists to cut poll cost for waiters that cannot be admitted
+    /// yet. It must never grow past the heartbeat, because a waiter that sleeps
+    /// through its own lease renewal is reclaimed as crashed — which would lose
+    /// the FIFO slot the queue exists to protect.
+    #[test]
+    fn queue_backoff_grows_but_never_outlives_the_heartbeat() {
+        let timings =
+            AdmissionTimings::sanitized(&crate::defaults::ControllerAdmissionConfig::default());
+
+        let mut interval = timings.poll;
+        let mut observed = vec![interval];
+        for _ in 0..12 {
+            interval = next_admission_backoff(interval, &timings);
+            observed.push(interval);
+        }
+
+        assert_eq!(observed[0], Duration::from_millis(250));
+        assert_eq!(observed[1], Duration::from_millis(500));
+        assert_eq!(observed[2], Duration::from_millis(1_000));
+        assert_eq!(observed[3], Duration::from_millis(2_000));
+        // Saturated at the ceiling, not growing without bound.
+        assert!(observed
+            .iter()
+            .all(|interval| *interval <= timings.poll_max));
+        assert_eq!(*observed.last().expect("intervals"), timings.poll_max);
+        assert!(
+            timings.poll_max <= timings.heartbeat,
+            "backoff ceiling {:?} must not outlive the heartbeat {:?}",
+            timings.poll_max,
+            timings.heartbeat
+        );
+
+        // Even an operator asking for an absurd ceiling cannot break that.
+        let greedy = AdmissionTimings::sanitized(&crate::defaults::ControllerAdmissionConfig {
+            queue_poll_max_ms: 10 * 60 * 1_000,
+            ..crate::defaults::ControllerAdmissionConfig::default()
+        });
+        assert!(greedy.poll_max <= greedy.heartbeat);
+        assert_eq!(
+            next_admission_backoff(greedy.heartbeat, &greedy),
+            greedy.poll_max
+        );
+    }
+
+    /// The wait strategy changed; the fairness contract did not. Ownership is
+    /// gated on being the head of the durable queue, re-checked under the queue
+    /// lock, so no amount of backoff or wakeup ordering lets a later request
+    /// barge ahead of an earlier one.
+    #[test]
+    fn only_the_head_of_the_queue_may_claim_ownership() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = runtime_root().expect("runtime root");
+            let lock = root.join(ADMISSION_LOCK_DIR);
+            for request_id in ["head", "middle", "tail"] {
+                enqueue_admission_request(&lock, request_id).expect("enqueue request");
+            }
+
+            assert_eq!(
+                admission_status("head").expect("head status")["position"],
+                1
+            );
+            assert_eq!(
+                admission_status("middle").expect("middle status")["position"],
+                2
+            );
+            assert_eq!(
+                admission_status("tail").expect("tail status")["position"],
+                3
+            );
+
+            // Neither trailing request can take ownership while `head` waits,
+            // however eagerly it polls.
+            for barging in ["middle", "tail"] {
+                assert!(
+                    !claim_admission_owner(&lock, barging, "barging-token", &|| Ok(false))
+                        .expect("claim attempt resolves"),
+                    "{barging} must not claim admission ahead of the queue head"
+                );
+                assert!(
+                    admission_status(barging).expect("queue unchanged")["owner"].is_null(),
+                    "a rejected claim must not publish an owner"
+                );
+            }
+
+            assert!(
+                claim_admission_owner(&lock, "head", "head-token", &|| Ok(false))
+                    .expect("head claim resolves"),
+                "the queue head must be admitted"
+            );
+            assert_eq!(
+                admission_status("head").expect("head admitted")["state"],
+                "admitted"
+            );
+        });
+    }
+
+    #[test]
+    fn admission_durations_render_in_operator_units() {
+        assert_eq!(format_admission_duration(Duration::ZERO), "0ms");
+        assert_eq!(
+            format_admission_duration(Duration::from_millis(250)),
+            "250ms"
+        );
+        assert_eq!(format_admission_duration(Duration::from_secs(30)), "30s");
+        assert_eq!(
+            format_admission_duration(Duration::from_secs(10 * 60)),
+            "10m0s"
+        );
+        assert_eq!(format_admission_duration(Duration::from_secs(605)), "10m5s");
+    }
+
     /// Config must reproduce the historical hardcoded constants exactly, so
     /// making these tunable cannot move behaviour out of the box.
     #[test]
@@ -3115,6 +3404,7 @@ mod tests {
             crate::defaults::save_config(&crate::defaults::HomeboyConfig {
                 controller_admission: crate::defaults::ControllerAdmissionConfig {
                     queue_poll_ms: 40,
+                    queue_poll_max_ms: 600,
                     queue_lease_ms: 4_000,
                     queue_heartbeat_ms: 800,
                     queue_wait_timeout_ms: 90_000,
@@ -3126,6 +3416,7 @@ mod tests {
 
             let timings = AdmissionTimings::load();
             assert_eq!(timings.poll, Duration::from_millis(40));
+            assert_eq!(timings.poll_max, Duration::from_millis(600));
             assert_eq!(timings.lease, Duration::from_millis(4_000));
             assert_eq!(timings.heartbeat, Duration::from_millis(800));
             assert_eq!(timings.wait_timeout, Duration::from_millis(90_000));
@@ -3165,12 +3456,14 @@ mod tests {
 
         let zeroed = AdmissionTimings::sanitized(&crate::defaults::ControllerAdmissionConfig {
             queue_poll_ms: 0,
+            queue_poll_max_ms: 0,
             queue_lease_ms: 0,
             queue_heartbeat_ms: 0,
             queue_wait_timeout_ms: 0,
             busy_wait_ms: 0,
         });
         assert!(zeroed.poll >= floor, "a zero poll would spin, not wait");
+        assert!(zeroed.poll_max >= floor);
         assert!(zeroed.heartbeat >= floor);
         assert!(zeroed.lease >= floor);
         assert!(zeroed.poll <= zeroed.heartbeat);
