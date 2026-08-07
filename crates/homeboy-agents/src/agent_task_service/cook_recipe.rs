@@ -866,6 +866,17 @@ pub fn reconcile_recipe_attempt_for_continuation(
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
     let record = agent_task_lifecycle::status(run_id)?;
     validate_recipe_attempt_record(recipe, run_id, &record)?;
+    // Promotion has copied and verified the selected artifact into the
+    // controller-owned destination. Once its gates are green, finalization no
+    // longer consumes the provider aggregate's artifact transport.
+    let finalized_candidate = super::cook_promotion::persisted_promotion_for_attempt(run_id)?
+        .is_some_and(|promotion| {
+            promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+                && promotion.finalization_eligible(false)
+        });
+    if finalized_candidate {
+        return Ok(record);
+    }
     if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness(run_id)? {
         return Err(Error::validation_invalid_argument(
             "cook_continuation.artifact_projection",
