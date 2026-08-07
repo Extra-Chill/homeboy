@@ -93,6 +93,14 @@ mod provider_rotation_tests {
                 root.display().to_string(),
                 "provider workspace config follows the isolated attempt root"
             );
+            assert!(
+                request
+                    .executor
+                    .config
+                    .get("workspace_permission_root")
+                    .is_none(),
+                "scheduler must not add provider-owned config without a capability declaration"
+            );
             assert_eq!(
                 request.executor.config["cwd"],
                 root.display().to_string(),
@@ -257,7 +265,7 @@ mod provider_rotation_tests {
             observed_roots: Arc::clone(&observed_roots),
             calls: AtomicUsize::new(0),
         })
-        .with_run_id("run-8081");
+        .with_run_id("cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874");
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
         plan.tasks[0].executor.model = Some("primary-model".to_string());
@@ -273,8 +281,15 @@ mod provider_rotation_tests {
         // `reserve_provider_execution` reads the record before it will let a
         // provider execute, so without this every task fails admission with
         // "agent-task run record not found" instead of rotating.
-        crate::agent_tasks::lifecycle::submit_plan(&plan, Some("run-8081")).expect("submit plan");
-        crate::agent_tasks::lifecycle::mark_running("run-8081").expect("mark running");
+        crate::agent_tasks::lifecycle::submit_plan(
+            &plan,
+            Some("cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874"),
+        )
+        .expect("submit plan");
+        crate::agent_tasks::lifecycle::mark_running(
+            "cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874",
+        )
+        .expect("mark running");
 
         let aggregate = scheduler.run(plan);
 
@@ -306,7 +321,10 @@ mod provider_rotation_tests {
             .sha256
             .as_deref()
             .is_some_and(|sha256| sha256.len() == 64));
-        assert_eq!(candidate.metadata["run_id"], "run-8081");
+        assert_eq!(
+            candidate.metadata["run_id"],
+            "cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874"
+        );
         assert_eq!(candidate.metadata["task_id"], "task-1");
         let patch = fs::read_to_string(candidate.path.as_deref().expect("candidate path"))
             .expect("candidate patch remains available");
@@ -314,7 +332,7 @@ mod provider_rotation_tests {
         assert!(candidate
             .path
             .as_deref()
-            .is_some_and(|path| path.contains("agent-task/attempt-patches/run-8081/task-1")));
+            .is_some_and(|path| path.contains("agent-task/attempt-patches/cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874/task-1")));
         // The first attempt left an uncommitted candidate (captured above as a
         // promoted patch artifact), so scheduler cleanup retains its checkout for
         // lifecycle cleanup rather than force-removing it (#8579). The second,

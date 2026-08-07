@@ -3,6 +3,10 @@ use super::*;
 pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
 pub const AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA: &str =
     "homeboy/agent-task-provider-capability-contract/v1";
+/// Provider accepts `executor.config.workspace_permission_root` as the exact
+/// task workspace path used for runtime permission policy.
+pub const AGENT_TASK_PROVIDER_CAPABILITY_WORKSPACE_PERMISSION_ROOT_V1: &str =
+    "workspace_permission_root/v1";
 
 /// Shared request/outcome schema identifiers carried by provider capability
 /// contracts. Flattened into parents so the on-wire JSON keeps the
