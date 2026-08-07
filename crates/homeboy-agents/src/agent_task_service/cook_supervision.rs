@@ -350,6 +350,30 @@ mod tests {
     }
 
     #[test]
+    fn live_descendant_activity_does_not_mask_worktree_progress() {
+        // Process identity and worktree progress are independent signals: a
+        // live descendant may stay the same while newly written files reset the
+        // no-progress clock on that heartbeat.
+        let mut supervisor = supervisor(vec![AgentSupervisionBudget::new(
+            AgentSupervisionMetric::NoProgressSeconds,
+            60,
+            AgentSupervisionAction::Stop,
+        )]);
+        let mut initial = activity(15, 100, 2);
+        initial.files_changed = Some(0);
+        supervisor.observe(&initial);
+
+        let mut progressed = activity(90, 100, 2);
+        progressed.files_changed = Some(1);
+
+        let tick = supervisor.observe(&progressed);
+
+        assert_eq!(tick.sample.child_processes, Some(2));
+        assert_eq!(tick.sample.no_progress_seconds, Some(0));
+        assert!(!tick.stop_now);
+    }
+
+    #[test]
     fn a_commit_is_progress_even_though_it_clears_the_pending_edit_count() {
         // A provider that commits leaves a clean tree. Watching `files_changed`
         // alone would read that as having undone its work and start a stall

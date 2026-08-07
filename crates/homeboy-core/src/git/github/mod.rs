@@ -66,7 +66,9 @@ pub use client::{gh_probe_succeeds, github_token_from_env_or_gh};
 pub use issues::{issue_close, issue_comment, issue_create, issue_edit, issue_find};
 
 // Pull-request operations.
-pub use pulls::{pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_merge, pr_view};
+pub use pulls::{
+    pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_merge, pr_ready, pr_view,
+};
 
 // Fleet operations.
 pub use fleet::pr_fleet;

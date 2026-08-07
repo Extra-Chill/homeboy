@@ -8,12 +8,12 @@
 //! | purpose | vocabulary it recognized |
 //! |---|---|
 //! | batch totals | `queued`, `running`/`in_flight`, `cancelled`, `timed_out` |
-//! | exit code `0` | `queued`, `running`, `in_flight`, `review_ready`, `green_no_finalize` |
+//! | exit code `0` | `queued`, `running`, `in_flight`, `review_ready`, `draft_published`, `green_no_finalize` |
 //! | terminality | everything except `queued`, `running`, `in_flight` |
 //!
 //! Three lists over one open vocabulary have to agree by hand, and they did
 //! not: `cancelled` and `timed_out` were known only to the batch list, and
-//! `review_ready`/`green_no_finalize` only to the exit-code list. This module
+//! `review_ready`/`draft_published`/`green_no_finalize` only to the exit-code list. This module
 //! is the one place the vocabulary is written down, so the three call sites
 //! classify against the same enum instead of three divergent string literals.
 //!
@@ -63,6 +63,8 @@ pub enum CookStatus {
     Completed,
     /// Finished with a candidate ready for review.
     ReviewReady,
+    /// Finished with a verified draft pull request published for review.
+    DraftPublished,
     /// Gates were green but finalization was intentionally not performed.
     GreenNoFinalize,
     /// A verified provider review intentionally produced no candidate patch.
@@ -119,6 +121,7 @@ impl CookStatus {
             "in_flight" => Self::InFlight,
             "completed" => Self::Completed,
             "review_ready" => Self::ReviewReady,
+            "draft_published" => Self::DraftPublished,
             "green_no_finalize" => Self::GreenNoFinalize,
             "intentional_no_change" => Self::IntentionalNoChange,
             "no_changes" => Self::NoChanges,
@@ -150,6 +153,7 @@ impl CookStatus {
             Self::InFlight => "in_flight",
             Self::Completed => "completed",
             Self::ReviewReady => "review_ready",
+            Self::DraftPublished => "draft_published",
             Self::GreenNoFinalize => "green_no_finalize",
             Self::IntentionalNoChange => "intentional_no_change",
             Self::NoChanges => "no_changes",
@@ -198,6 +202,7 @@ impl CookStatus {
                 | Self::Running
                 | Self::InFlight
                 | Self::ReviewReady
+                | Self::DraftPublished
                 | Self::GreenNoFinalize
                 | Self::IntentionalNoChange
         )
@@ -281,6 +286,7 @@ mod tests {
         for status in [
             "completed",
             "review_ready",
+            "draft_published",
             "green_no_finalize",
             "intentional_no_change",
             "no_changes",
@@ -347,6 +353,7 @@ mod tests {
             CookStatus::InFlight,
             CookStatus::Completed,
             CookStatus::ReviewReady,
+            CookStatus::DraftPublished,
             CookStatus::GreenNoFinalize,
             CookStatus::IntentionalNoChange,
             CookStatus::NoChanges,
@@ -388,6 +395,7 @@ mod tests {
             "running",
             "in_flight",
             "review_ready",
+            "draft_published",
             "green_no_finalize",
             "intentional_no_change",
         ] {

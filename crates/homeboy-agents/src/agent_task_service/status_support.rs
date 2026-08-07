@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
@@ -594,11 +595,11 @@ pub fn hydrate_evidence_summary(task_id: &str, evidence: &AgentTaskEvidenceRef) 
         "kind": evidence.kind,
         "label": evidence.label,
         "uri": evidence.uri,
-        "summary": evidence_json_summary(&redacted),
+        "summary": evidence_json_summary(&redacted, Path::new(path).parent()),
     }))
 }
 
-fn evidence_json_summary(value: &Value) -> Value {
+fn evidence_json_summary(value: &Value, stream_root: Option<&Path>) -> Value {
     json!({
         "status": find_string_field(value, &["status", "state"]),
         "failure_classification": find_string_field(value, &["failure_classification", "failure_class", "classification", "class", "code", "kind"]),
@@ -608,6 +609,142 @@ fn evidence_json_summary(value: &Value) -> Value {
         "stderr_excerpt": find_string_field(value, &["stderr", "stderr_excerpt"]).map(|text| excerpt(&text)),
         "stdout_excerpt": find_string_field(value, &["stdout", "stdout_excerpt"]).map(|text| excerpt(&text)),
         "diagnostics": first_diagnostics(value),
+        "process_streams": process_stream_summaries(value, stream_root),
+    })
+}
+
+/// Project executor process output without requiring a provider-specific wrapper
+/// schema. The compact preview keeps malformed wrapper evidence actionable while
+/// preserving a stable, bounded default diagnose payload.
+fn process_stream_summaries(value: &Value, stream_root: Option<&Path>) -> Value {
+    const LIMIT: usize = 600;
+    let mut streams = Vec::new();
+    collect_process_stream_summaries(value, &mut streams, LIMIT, stream_root);
+    Value::Array(streams)
+}
+
+fn collect_process_stream_summaries(
+    value: &Value,
+    streams: &mut Vec<Value>,
+    limit: usize,
+    stream_root: Option<&Path>,
+) {
+    if streams.len() >= 2 {
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            for name in ["stdout", "stderr"] {
+                if streams.len() >= 2 {
+                    return;
+                }
+                if let Some(text) = map.get(name).and_then(Value::as_str) {
+                    streams.push(json!({
+                        "name": name,
+                        "source": "inline",
+                        "status": "available",
+                        "excerpt": excerpt_with_limit(text, limit),
+                    }));
+                } else if let Some(uri) = map.get(&format!("{name}_uri")).and_then(Value::as_str) {
+                    streams.push(process_stream_file_summary(
+                        name,
+                        "uri",
+                        uri,
+                        limit,
+                        stream_root,
+                    ));
+                } else if let Some(path) = map.get(&format!("{name}_path")).and_then(Value::as_str)
+                {
+                    streams.push(process_stream_file_summary(
+                        name,
+                        "path",
+                        path,
+                        limit,
+                        stream_root,
+                    ));
+                }
+            }
+            for nested in map.values() {
+                collect_process_stream_summaries(nested, streams, limit, stream_root);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_process_stream_summaries(nested, streams, limit, stream_root);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn process_stream_file_summary(
+    name: &str,
+    source: &str,
+    reference: &str,
+    limit: usize,
+    stream_root: Option<&Path>,
+) -> Value {
+    let unavailable = |error: &str| {
+        json!({
+            "name": name,
+            "source": source,
+            "reference": reference,
+            "status": "unavailable",
+            "error": error,
+        })
+    };
+    let path = if source == "uri" {
+        let Some(path) = reference.strip_prefix("file://") else {
+            return unavailable("unsupported_uri");
+        };
+        PathBuf::from(path)
+    } else {
+        if reference.contains("://") {
+            return unavailable("unsupported_uri");
+        }
+        PathBuf::from(reference)
+    };
+    if reference.contains('\0') || !path.is_absolute() {
+        return unavailable("invalid_path");
+    }
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return unavailable("not_regular_file"),
+        Err(error) => return unavailable(&error.kind().to_string()),
+    };
+    if metadata.file_type().is_symlink() {
+        return unavailable("not_regular_file");
+    }
+    let Some(stream_root) = stream_root else {
+        return unavailable("untrusted_path");
+    };
+    let root = match stream_root.canonicalize() {
+        Ok(root) => root,
+        Err(_) => return unavailable("untrusted_path"),
+    };
+    let path = match path.canonicalize() {
+        Ok(path) if path.starts_with(&root) => path,
+        Ok(_) => return unavailable("untrusted_path"),
+        Err(error) => return unavailable(&error.kind().to_string()),
+    };
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) => return unavailable(&error.kind().to_string()),
+    };
+    let mut bytes = Vec::with_capacity(limit + 1);
+    if let Err(error) = file.take((limit + 1) as u64).read_to_end(&mut bytes) {
+        return unavailable(&error.kind().to_string());
+    }
+    let truncated = bytes.len() > limit;
+    bytes.truncate(limit);
+    let excerpt = RedactionPolicy::default().redact_string(&String::from_utf8_lossy(&bytes));
+    json!({
+        "name": name,
+        "source": source,
+        "reference": reference,
+        "status": "available",
+        "excerpt": excerpt,
+        "truncated": truncated,
     })
 }
 
@@ -675,12 +812,15 @@ fn first_diagnostics(value: &Value) -> Value {
 }
 
 fn excerpt(text: &str) -> String {
-    const LIMIT: usize = 600;
+    excerpt_with_limit(text, 600)
+}
+
+fn excerpt_with_limit(text: &str, limit: usize) -> String {
     let trimmed = text.trim();
-    if trimmed.chars().count() <= LIMIT {
+    if trimmed.chars().count() <= limit {
         trimmed.to_string()
     } else {
-        let prefix: String = trimmed.chars().take(LIMIT).collect();
+        let prefix: String = trimmed.chars().take(limit).collect();
         format!("{prefix}...")
     }
 }
@@ -753,6 +893,64 @@ mod tests {
             error.details["context"],
             "agent_task.evidence.hydrate.read: evidence.json"
         );
+    }
+
+    #[test]
+    fn process_stream_summaries_hydrate_file_uris_with_redaction_and_a_byte_limit() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let stream = directory.path().join("provider.stderr");
+        fs::write(&stream, format!("token=raw-secret\n{}", "x".repeat(700))).expect("write stream");
+
+        let streams = process_stream_summaries(
+            &json!({ "stderr_uri": format!("file://{}", stream.display()) }),
+            Some(directory.path()),
+        );
+        let stream = &streams.as_array().expect("stream array")[0];
+
+        assert_eq!(stream["source"], "uri");
+        assert_eq!(stream["status"], "available");
+        assert_eq!(stream["truncated"], true);
+        assert!(stream["excerpt"]
+            .as_str()
+            .expect("stream excerpt")
+            .contains("token=[REDACTED]"));
+        assert!(!stream["excerpt"]
+            .as_str()
+            .expect("stream excerpt")
+            .contains("raw-secret"));
+    }
+
+    #[test]
+    fn process_stream_summaries_reject_unsafe_or_unreadable_references() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let streams = process_stream_summaries(
+            &json!({
+                "stdout_uri": "https://example.test/provider.stdout",
+                "stderr_path": directory.path(),
+            }),
+            Some(directory.path()),
+        );
+        let streams = streams.as_array().expect("stream array");
+
+        assert_eq!(streams[0]["error"], "unsupported_uri");
+        assert_eq!(streams[1]["error"], "not_regular_file");
+    }
+
+    #[test]
+    fn process_stream_summaries_do_not_follow_paths_outside_the_evidence_directory() {
+        let evidence_directory = tempfile::tempdir().expect("evidence directory");
+        let stream_directory = tempfile::tempdir().expect("stream directory");
+        let stream = stream_directory.path().join("provider.stderr");
+        fs::write(&stream, "private stream").expect("write stream");
+
+        let streams = process_stream_summaries(
+            &json!({ "stderr_path": stream }),
+            Some(evidence_directory.path()),
+        );
+
+        assert_eq!(streams[0]["status"], "unavailable");
+        assert_eq!(streams[0]["error"], "untrusted_path");
+        assert!(streams[0].get("excerpt").is_none());
     }
 
     #[test]

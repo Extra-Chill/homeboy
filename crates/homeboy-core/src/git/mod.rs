@@ -40,11 +40,12 @@ pub use github::push_markdown_body_file_arg;
 pub use github::{
     gh_probe_succeeds, github_token_from_env_or_gh, issue_close, issue_comment, issue_create,
     issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_fleet,
-    pr_merge, pr_readiness, pr_reconcile_mergeability, pr_view, GithubFindItem, GithubFindOutput,
-    GithubIssueOutput, GithubPrOutput, GithubPrReadinessOutput, GithubPrView, IssueCloseOptions,
-    IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions,
-    IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions, PrMergeReadiness,
-    PrMergeabilityReconcileOptions, PrMergeabilityReconcileOutput, PrReadinessBlocker, PrState,
+    pr_merge, pr_readiness, pr_ready, pr_reconcile_mergeability, pr_view, GithubFindItem,
+    GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrReadinessOutput, GithubPrView,
+    IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
+    IssueFindOptions, IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions,
+    PrMergeReadiness, PrMergeabilityReconcileOptions, PrMergeabilityReconcileOutput,
+    PrReadinessBlocker, PrState,
 };
 pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
 pub use github_types::{

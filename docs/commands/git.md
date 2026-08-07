@@ -167,6 +167,7 @@ Use `close --reason not-planned` for intentional wontfix decisions. Homeboy's re
 ```sh
 homeboy git pr create <component_id> --base <base> --head <head> --title <title> [--body <body> | --body-file <path>] [--draft]
 homeboy git pr edit <component_id> --number <n> [--title <title>] [--body <body> | --body-file <path>]
+homeboy git pr ready <component_id> --number <n>
 homeboy git pr find <component_id> [--base <base>] [--head <head>] [--state open|closed|merged|all] [--limit <n>]
 homeboy git pr readiness <component_id> --number <n>
 homeboy git pr comment <component_id> --number <n> [comment mode flags]
@@ -185,6 +186,8 @@ homeboy git pr readiness homeboy --number 123 --output /tmp/pr-readiness.json
 ### PR Merge Readiness
 
 `homeboy git pr readiness` is a read-only explanation command. It fetches GitHub PR metadata with `gh pr view`, reports GitHub's raw `mergeStateStatus`, and adds a Homeboy interpretation without attempting a merge as the discovery mechanism.
+
+`homeboy git pr ready` performs the explicit draft-to-ready-for-review transition. It observes an already-ready PR without changing it, so retries do not issue another GitHub mutation.
 
 The command exits `0` only when the interpreted state is `mergeable_now` and no blockers are present. Other interpreted states exit nonzero so automation can gate on readiness while still reading the structured JSON result from `--output`.
 

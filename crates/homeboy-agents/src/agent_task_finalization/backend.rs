@@ -371,6 +371,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         Ok(output.items.into_iter().next().map(|item| AgentTaskPrRef {
             number: item.number,
             url: item.url,
+            is_draft: item.is_draft,
         }))
     }
 
@@ -381,6 +382,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         head: &str,
         title: &str,
         body: &str,
+        draft: bool,
     ) -> Result<AgentTaskPrRef> {
         let output = pr_create(
             None,
@@ -389,13 +391,14 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 head: head.to_string(),
                 title: title.to_string(),
                 body: body.to_string(),
-                draft: false,
+                draft,
                 path: Some(path.to_string()),
             },
         )?;
         Ok(AgentTaskPrRef {
             number: output.number.unwrap_or_default(),
             url: output.url.unwrap_or_default(),
+            is_draft: draft,
         })
     }
 
@@ -418,6 +421,8 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         Ok(AgentTaskPrRef {
             number,
             url: output.url.unwrap_or_default(),
+            // Editing a PR's body and title never changes its review state.
+            is_draft: false,
         })
     }
 
