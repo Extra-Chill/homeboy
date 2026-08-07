@@ -430,6 +430,21 @@ fn hydrate_file_evidence_ref(uri: &str) -> Result<HydratedContent> {
 fn hydrate_local_path_evidence_ref(path: &Path) -> Result<HydratedContent> {
     let metadata =
         fs::metadata(path).map_err(|error| file_evidence_io_error("metadata", path, error))?;
+    if metadata.is_dir() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|error| file_evidence_io_error("read_dir", path, error))?
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect::<Vec<_>>();
+        entries.sort();
+        return Ok(HydratedContent {
+            source: "directory".to_string(),
+            truncated: false,
+            bytes_read: None,
+            omitted_bytes: None,
+            content: json!({ "path": path, "entries": entries }),
+        });
+    }
     if !metadata.is_file() {
         return Err(homeboy_core::Error::validation_invalid_argument(
             "evidence_ref",
@@ -1023,6 +1038,22 @@ mod tests {
         assert_eq!(
             error.details["context"],
             format!("agent_task.evidence.hydrate.metadata: {}", path.display())
+        );
+    }
+
+    #[test]
+    fn directory_evidence_lists_artifact_root_entries() {
+        let directory = tempfile::tempdir().expect("artifact directory");
+        fs::write(directory.path().join("runtime.log"), "runtime").expect("write runtime log");
+        fs::create_dir(directory.path().join("nested")).expect("create nested directory");
+
+        let hydrated =
+            hydrate_local_path_evidence_ref(directory.path()).expect("hydrate directory");
+
+        assert_eq!(hydrated.source, "directory");
+        assert_eq!(
+            hydrated.content["entries"],
+            json!(["nested", "runtime.log"])
         );
     }
 
