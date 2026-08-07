@@ -57,6 +57,7 @@ pub(in crate::commands::bench) fn start(
                 start.component_id,
                 start.args,
                 start.rig_id,
+                metadata.get("execution_provenance"),
             ))
             .cwd_path(start.source_path)
             .current_homeboy_version()
