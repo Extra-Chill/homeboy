@@ -140,6 +140,7 @@ pub use homeboy_lab_contract::materialization_currency;
 pub mod matrix_artifact_summary;
 pub use homeboy_lab_contract::notification_payload;
 pub use homeboy_lab_contract::notification_route;
+pub mod notification_route_resolver;
 pub mod notify;
 pub mod notify_outbox;
 pub mod observation;

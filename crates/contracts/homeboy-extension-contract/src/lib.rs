@@ -100,7 +100,11 @@ pub mod manifest_test_config;
 pub mod manifest_toolchain_config;
 pub mod notification_transport_config;
 pub use notification_transport_config::{
-    NotificationTransportConfig, NotificationTransportDescriptor, NOTIFICATION_TRANSPORT_SCHEMA,
+    NotificationRouteResolverConfig, NotificationRouteResolverRequest,
+    NotificationRouteResolverResponse, NotificationRouteResolverStatus,
+    NotificationTransportConfig, NotificationTransportDescriptor,
+    NOTIFICATION_ROUTE_RESOLVER_REQUEST_SCHEMA, NOTIFICATION_ROUTE_RESOLVER_SCHEMA,
+    NOTIFICATION_TRANSPORT_SCHEMA,
 };
 pub mod runner_contract;
 pub mod runtime_helper;
