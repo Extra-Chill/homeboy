@@ -4,6 +4,52 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.334.0] - 2026-08-07
+
+### Added
+- list recoverable jobs
+- local differential test verdict with a sha-keyed baseline cache
+- answer "is my fix released yet?" with contains and gap
+- materialize script files [AI: OpenAI GPT-5.6 Sol via OpenCode general coding subagent - implemented runner script materialization, tests, and docs]
+- add per-task gate profiles [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- add bounded global snapshot [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- read JSON pointers [AI: OpenAI GPT-5.6 Sol via OpenCode - used to inspect config pointer behavior, implement targeted reads, and run focused verification]
+- discover notification transports [AI: OpenAI GPT-5.6 Sol via OpenCode: traced transport contracts and implemented tested discovery]
+
+### Changed
+- define the running-staleness threshold once
+- ratchet the audit suppression baseline so it can only shrink
+- remove the dead --wait global flag
+- materialize the controller fixture on read, not per home
+- skip the duplicated pre-test lint on every Test shard
+- cover proxy-free session fixture
+
+### Fixed
+- converge when stop ownership disappears
+- honor readiness cleanup budget
+- bind preview host claims to the ingress host authority
+- recover stale SSH diagnostics [AI: OpenAI GPT-5.6 Sol via OpenCode general coding subagent used to implement, test, and document this change]
+- converge selected runners under controller lease (#11771) [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- complete session test fixtures [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- fall back to the newest installable release instead of 404ing
+- enforce the argv separator rule with a source guard
+- gate publication on the complete declared asset set
+- preserve explicit AI disclosure [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- reconcile retained active counts [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- ignore root-generated artifacts [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- reject extension parity on an uncommitted controller checkout
+- report every terminal run state as terminal in liveness
+- unbreak main -- 9 RunnerSession literals missing proxy_forward
+- add the missing proxy_forward initializers
+- stop rebuilding the workspace on every cargo invocation
+- restore warning-clean staging [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- avoid lazy notification result [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- restore warning-clean Clippy baseline
+- report invalid installed manifests [AI: OpenAI GPT-5.6 Sol via OpenCode; used to implement and test manifest diagnostics]
+- retain explicit exec durability
+- forward controller proxy to SSH sessions
+- stop reading forwarded remote arguments as Homeboy's own
+
 ## [0.333.0] - 2026-08-06
 
 ### Added

@@ -88,6 +88,37 @@ fn pr_readiness_flags_parse() {
 }
 
 #[test]
+fn pr_ready_flags_parse() {
+    let cli = TestCli::try_parse_from([
+        "git",
+        "pr",
+        "ready",
+        "homeboy",
+        "--number",
+        "5805",
+        "--path",
+        "/tmp/homeboy",
+    ])
+    .expect("pr ready flags parse");
+
+    match cli.command {
+        GitCommand::Pr(PrArgs {
+            command:
+                PrCommand::Ready {
+                    component_id,
+                    number,
+                    path_args: ComponentPathArgs { path },
+                },
+        }) => {
+            assert_eq!(component_id, "homeboy");
+            assert_eq!(number, 5805);
+            assert_eq!(path.as_deref(), Some("/tmp/homeboy"));
+        }
+        _ => panic!("expected pr ready command"),
+    }
+}
+
+#[test]
 fn issue_find_path_flag_parses() {
     let cli =
         TestCli::try_parse_from(["git", "issue", "find", "homeboy", "--path", "/tmp/homeboy"])

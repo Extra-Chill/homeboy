@@ -1040,6 +1040,7 @@ where
             gates: args.gates.into(),
             max_attempts: args.max_attempts,
             no_finalize: args.no_finalize,
+            draft_pr: args.draft_pr,
             base: args.base,
             task_base_sha,
             head: args.head,

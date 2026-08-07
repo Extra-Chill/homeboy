@@ -162,7 +162,7 @@ exit 1
 }
 
 #[test]
-fn changed_scope_baseline_verdict_matches_an_identical_merge_tree() {
+fn scoped_zero_findings_do_not_compare_unrelated_legacy_baseline() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
         let run_git = |args: &[&str]| {
@@ -191,7 +191,6 @@ fn changed_scope_baseline_verdict_matches_an_identical_merge_tree() {
             .expect("candidate source");
         run_git(&["add", "."]);
         run_git(&["commit", "-q", "-m", "candidate"]);
-        run_git(&["branch", "merge-candidate"]);
 
         let component = routed_lint_component(
             home.path(),
@@ -199,6 +198,7 @@ fn changed_scope_baseline_verdict_matches_an_identical_merge_tree() {
             r#"#!/bin/sh
 if [ -n "$HOMEBOY_LINT_GLOB" ]; then
   printf '[]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+  printf '[{"tool":"phpcs","status":"passed","finding_count":0},{"tool":"phpstan","status":"passed","finding_count":0}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
   exit 0
 else
   printf '[{"tool":"phpcs","message":"known","fingerprint":"known","file":"untouched.php"},{"tool":"phpstan","message":"relocated","fingerprint":"relocated","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
@@ -223,60 +223,50 @@ fi
         )
         .expect("PR workflow result");
 
-        let merge_tree = std::process::Command::new("git")
-            .args(["rev-parse", "merge-candidate^{tree}"])
-            .current_dir(source.path())
-            .output()
-            .expect("merge tree");
-        let head_tree = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD^{tree}"])
-            .current_dir(source.path())
-            .output()
-            .expect("head tree");
-        assert_eq!(
-            head_tree.stdout, merge_tree.stdout,
-            "trees must be identical"
-        );
+        assert_eq!(pr_result.status, "passed");
+        assert_eq!(pr_result.exit_code, 0);
+        assert!(pr_result.findings.as_ref().is_some_and(Vec::is_empty));
+        assert!(pr_result.baseline_comparison.is_none());
+        let provenance = pr_result
+            .baseline_provenance
+            .as_ref()
+            .expect("scoped baseline provenance");
+        assert!(!provenance.compared);
+        assert_eq!(provenance.files, vec!["legacy.php"]);
+        assert_eq!(provenance.tools, vec!["phpcs", "phpstan"]);
+        assert_eq!(provenance.scope, "changed");
+        assert!(provenance.baseline_key.starts_with("lint:"));
+        assert_ne!(provenance.baseline_key, "lint");
 
-        let merge_result = run_main_lint_workflow(
+        let mut save_args = lint_args();
+        save_args.changed_since = Some("baseline".to_string());
+        save_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        save_args.baseline_flags.baseline = true;
+        run_main_lint_workflow(
             &component,
             source.path(),
-            lint_args(),
-            &RunDir::create().expect("merge run dir"),
+            save_args,
+            &RunDir::create().expect("scoped baseline run dir"),
         )
-        .expect("merge workflow result");
+        .expect("save scoped baseline");
 
-        assert_eq!(pr_result.status, "failed");
-        assert_eq!(merge_result.status, "failed");
-        assert_eq!(
-            pr_result
-                .baseline_comparison
-                .as_ref()
-                .expect("PR baseline comparison")
-                .new_items
-                .iter()
-                .map(|item| item.fingerprint.as_str())
-                .collect::<Vec<_>>(),
-            merge_result
-                .baseline_comparison
-                .as_ref()
-                .expect("merge baseline comparison")
-                .new_items
-                .iter()
-                .map(|item| item.fingerprint.as_str())
-                .collect::<Vec<_>>(),
-            "the PR gate must predict the full-scope verdict for the same tree"
-        );
-        assert_eq!(
-            pr_result
-                .baseline_comparison
-                .as_ref()
-                .expect("PR baseline comparison")
-                .new_items
-                .len(),
-            1,
-            "the untouched baseline finding remains accepted"
-        );
+        let mut compare_args = lint_args();
+        compare_args.changed_since = Some("baseline".to_string());
+        compare_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        let scoped_baseline_result = run_main_lint_workflow(
+            &component,
+            source.path(),
+            compare_args,
+            &RunDir::create().expect("scoped comparison run dir"),
+        )
+        .expect("compare scoped baseline");
+        assert!(scoped_baseline_result
+            .baseline_provenance
+            .as_ref()
+            .is_some_and(|provenance| provenance.compared));
+        assert!(scoped_baseline_result
+            .baseline_comparison
+            .is_some_and(|comparison| comparison.new_items.is_empty()));
     });
 }
 
@@ -473,13 +463,11 @@ exit 0
             .producer_summaries
             .iter()
             .any(|producer| producer.step.as_deref() == Some("js") && producer.status == "error"));
-        assert_eq!(
-            workflow
-                .baseline_comparison
-                .as_ref()
-                .map(|comparison| comparison.new_items.len()),
-            Some(0)
-        );
+        assert!(workflow.baseline_comparison.is_none());
+        assert!(workflow
+            .baseline_provenance
+            .as_ref()
+            .is_some_and(|provenance| !provenance.compared));
     });
 }
 

@@ -432,6 +432,38 @@ mod tests {
             panic!("Cook command");
         };
         assert_eq!(explicit.to_worktree.as_deref(), Some("homeboy@existing"));
+
+        let draft = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the issue",
+            "--to-worktree",
+            "homeboy@existing",
+            "--draft-pr",
+        ])
+        .expect("draft Cook parses");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = draft.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(draft) = agent_task.command else {
+            panic!("Cook command");
+        };
+        assert!(draft.draft_pr);
+
+        assert!(crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the issue",
+            "--to-worktree",
+            "homeboy@existing",
+            "--no-finalize",
+            "--draft-pr",
+        ])
+        .is_err());
     }
 }
 
@@ -495,6 +527,10 @@ pub struct AgentTaskCookArgs {
     /// a later `agent-task review`/finalize.
     #[arg(long = "no-finalize")]
     pub no_finalize: bool,
+    /// Complete normal verified finalization but create a draft pull request.
+    /// Existing pull requests retain their current draft or ready state.
+    #[arg(long = "draft-pr", conflicts_with = "no_finalize")]
+    pub draft_pr: bool,
     /// Return the complete cook report, including nested promotion and gate evidence.
     #[arg(long)]
     pub full: bool,

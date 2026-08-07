@@ -1378,6 +1378,7 @@ pub(crate) fn cook_finalization_options(
         manual_finalization: false,
         expected_candidate_sha: None,
         protected_branches: options.protected_branches.clone(),
+        draft_pr: options.draft_pr,
     })
 }
 
@@ -1642,7 +1643,10 @@ fn completed_finalization_receipt_for_recovery(
         let Some(value) = record.metadata.get("cook_finalization") else {
             continue;
         };
-        if value["status"] != "review_ready" {
+        if !matches!(
+            value["status"].as_str(),
+            Some("review_ready" | "draft_published")
+        ) {
             continue;
         }
         // Normal Cook finalization receipts intentionally have a lightweight,
@@ -1971,6 +1975,7 @@ fn manual_finalization_options(
             "master".to_string(),
             "trunk".to_string(),
         ],
+        draft_pr: false,
     })
 }
 

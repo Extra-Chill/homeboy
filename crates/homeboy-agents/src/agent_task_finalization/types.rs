@@ -264,12 +264,15 @@ pub struct AgentTaskPrFinalizationOptions {
     /// A recovered manual preflight may only publish the immutable candidate it validated.
     pub expected_candidate_sha: Option<String>,
     pub protected_branches: Vec<String>,
+    /// Create a draft PR for a new publication. Existing PR state is preserved.
+    pub draft_pr: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTaskPrRef {
     pub number: u64,
     pub url: String,
+    pub is_draft: bool,
 }
 
 /// The complete Git candidate classification, determined before finalization
@@ -373,6 +376,7 @@ pub trait AgentTaskPrFinalizationBackend {
         head: &str,
         title: &str,
         body: &str,
+        draft: bool,
     ) -> Result<AgentTaskPrRef>;
     fn update_pr(
         &mut self,
