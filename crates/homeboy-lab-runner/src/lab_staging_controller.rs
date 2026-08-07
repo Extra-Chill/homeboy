@@ -7,7 +7,7 @@ use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -2201,6 +2201,136 @@ impl LabStagingCancellationToken {
     }
 }
 
+/// Total wait budget for a Lab staging poll loop when the durable agent-task
+/// plan carries no absolute execution deadline at all. Legacy plans serialize
+/// `execution_budget.deadline_unix_ms` as `None`, so this is the only bound
+/// they get. It is deliberately generous — a remote runner job legitimately
+/// runs for hours — because the purpose here is to stop an *infinite* spin,
+/// not to second-guess a long build.
+const LAB_STAGING_POLL_FALLBACK_BUDGET: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Floor applied to a plan-derived budget. When the plan deadline has already
+/// expired the remote job is being torn down anyway, and the useful thing to do
+/// is observe its terminal transition rather than abandon a job that is one
+/// poll away from finishing. This keeps that grace bounded.
+const LAB_STAGING_POLL_MIN_BUDGET: Duration = Duration::from_secs(30);
+
+/// First backoff step. Matches the flat 200ms these loops used before bounding,
+/// so a job that settles immediately is observed just as fast as it was.
+const LAB_STAGING_POLL_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Ceiling for exponential backoff. Caps a permanently-failing poll at roughly
+/// 0.2 requests/second instead of the 5/second an unbounded flat 200ms sleep
+/// produced.
+const LAB_STAGING_POLL_MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Longest uninterrupted sleep slice. Backoff grows the *total* wait between
+/// polls, but cancellation is still observed at this granularity, so growing
+/// backoff cannot regress cancellation responsiveness.
+const LAB_STAGING_POLL_CANCELLATION_SLICE: Duration = Duration::from_millis(200);
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Remaining wall-clock budget for polling on behalf of `request`.
+///
+/// The authoritative source is the durable agent-task plan's execution budget:
+/// `deadline_unix_ms` is documented as the absolute instant "at which the
+/// entire task lifecycle must stop ... not reset for retries, provider
+/// rotation, or a remote runner handoff". A Lab staging observation *is* that
+/// remote runner handoff, so the controller must not outlive it.
+///
+/// Per-task `limits.execution_deadline_unix_ms` is the same value propagated by
+/// the scheduler; it is consulted as a fallback so a plan whose `options` were
+/// stripped in transit still yields a real budget. Per-attempt `timeout_ms` is
+/// deliberately *not* used — it bounds a single provider attempt, not the whole
+/// remote job, and treating it as a poll budget would abandon jobs that are
+/// still legitimately running.
+fn staging_poll_budget(request: &LabStagingExecutionRequest) -> Duration {
+    let now = now_unix_ms();
+    let plan = &request.durable_agent_task_plan;
+    let remaining_ms = plan
+        .options
+        .execution_budget
+        .remaining_deadline_ms(now)
+        .or_else(|| {
+            plan.tasks
+                .iter()
+                .filter_map(|task| task.limits.execution_deadline_unix_ms)
+                .max()
+                .map(|deadline| deadline.saturating_sub(now))
+        });
+    match remaining_ms {
+        Some(remaining) => Duration::from_millis(remaining).max(LAB_STAGING_POLL_MIN_BUDGET),
+        None => LAB_STAGING_POLL_FALLBACK_BUDGET,
+    }
+}
+
+/// Sleep up to `interval`, waking early if cancellation is observed.
+///
+/// Returns `true` when cancellation was seen. Sleeping in
+/// `LAB_STAGING_POLL_CANCELLATION_SLICE` slices keeps worst-case cancellation
+/// latency fixed regardless of how far backoff has grown.
+fn sleep_unless_cancelled(
+    interval: Duration,
+    cancellation: Option<&LabStagingCancellationToken>,
+) -> bool {
+    let mut remaining = interval;
+    while !remaining.is_zero() {
+        if cancellation.is_some_and(LabStagingCancellationToken::is_cancelled) {
+            return true;
+        }
+        let slice = remaining.min(LAB_STAGING_POLL_CANCELLATION_SLICE);
+        std::thread::sleep(slice);
+        remaining = remaining.saturating_sub(slice);
+    }
+    cancellation.is_some_and(LabStagingCancellationToken::is_cancelled)
+}
+
+fn next_staging_poll_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(LAB_STAGING_POLL_MAX_BACKOFF)
+}
+
+/// Terminal error for a poll loop that burned its whole budget.
+///
+/// Classified retryable: exhausting the budget says nothing about whether the
+/// underlying condition is permanent, and the remote job may well still be in
+/// flight, so the caller's own retry policy — not this loop — decides what
+/// happens next.
+fn staging_poll_deadline_error(
+    waiting_for: &str,
+    runner_job_id: &str,
+    waited: Duration,
+    budget: Duration,
+    last_error: Option<&Error>,
+) -> Error {
+    let mut error = Error::new(
+        homeboy_core::error::ErrorCode::InternalUnexpected,
+        format!(
+            "Lab staging gave up waiting for {waiting_for} on runner job `{runner_job_id}` after {:.1}s (budget {:.1}s)",
+            waited.as_secs_f64(),
+            budget.as_secs_f64()
+        ),
+        json!({
+            "lab_staging_poll_timeout": {
+                "waiting_for": waiting_for,
+                "runner_job_id": runner_job_id,
+                "waited_ms": waited.as_millis() as u64,
+                "budget_ms": budget.as_millis() as u64,
+                "last_error": last_error.map(|error| error.message.clone()),
+            },
+        }),
+    );
+    error.retryable = Some(true);
+    error.with_hint(format!(
+        "The remote job may still be running. Inspect it with `homeboy runner job logs <runner-id> {runner_job_id}` before re-dispatching."
+    ))
+}
+
 /// Lab's narrow execution seam. Its production implementation will call the
 /// existing offload stages; the durable driver owns only lifecycle mechanics.
 pub(crate) trait LabStagingExecutionAdapter: Send + Sync {
@@ -2525,10 +2655,16 @@ impl ProductionLabStagingOperations {
         cancellation: Option<&LabStagingCancellationToken>,
     ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
         if request.recipe.tunnel_mode == crate::RunnerTunnelMode::DirectSsh {
+            // Same plan-derived budget and the same cancellation token as the
+            // reverse-broker branch below, so neither transport can outlive the
+            // agent-task lifecycle it is observing on behalf of.
+            let cancelled = || cancellation.is_some_and(LabStagingCancellationToken::is_cancelled);
             let observed = crate::execution::observe_daemon_job_until_terminal(
                 &request.recipe.runner_id,
                 runner_job_id,
                 None,
+                staging_poll_budget(request),
+                &cancelled,
             )?;
             return Ok(homeboy_core::api_jobs::RunnerJobLogSnapshot {
                 job: observed.job,
@@ -2546,6 +2682,13 @@ impl ProductionLabStagingOperations {
                     None,
                 )
             })?;
+        // A non-terminal job is polled until it settles, but never past the
+        // plan's own execution budget: a remote job that never reaches a
+        // terminal status would otherwise pin this controller worker forever.
+        let budget = staging_poll_budget(request);
+        let started = Instant::now();
+        let deadline = started + budget;
+        let mut backoff = LAB_STAGING_POLL_INITIAL_BACKOFF;
         loop {
             if cancellation.is_some_and(LabStagingCancellationToken::is_cancelled) {
                 return Err(Self::cancellation_error());
@@ -2558,7 +2701,25 @@ impl ProductionLabStagingOperations {
             .map(|(job, events)| homeboy_core::api_jobs::RunnerJobLogSnapshot { job, events })
             {
                 Ok(snapshot) if snapshot.job.status.is_terminal() => return Ok(snapshot),
-                Ok(_) => std::thread::sleep(Duration::from_millis(200)),
+                Ok(_) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(staging_poll_deadline_error(
+                            "a terminal runner job status",
+                            runner_job_id,
+                            started.elapsed(),
+                            budget,
+                            None,
+                        ));
+                    }
+                    // Never sleep past the deadline, so the budget is honoured
+                    // to within one poll rather than one backoff interval.
+                    let interval = backoff.min(deadline - now);
+                    if sleep_unless_cancelled(interval, cancellation) {
+                        return Err(Self::cancellation_error());
+                    }
+                    backoff = next_staging_poll_backoff(backoff);
+                }
                 Err(mut error) => {
                     error.retryable = error.retryable.or(Some(true));
                     return Err(error);
@@ -3549,6 +3710,58 @@ impl StageExecutionAdapter {
         Error::internal_unexpected("Lab staging was cancelled before the next durable stage")
     }
 
+    /// Retry a retryable observation failure until it succeeds, cancellation
+    /// arrives, or `budget` is spent.
+    ///
+    /// Before bounding, a permanently-failing retryable observation — a daemon
+    /// that keeps answering with malformed JSON, for instance — spun here at
+    /// 5 requests/second forever, holding a controller-job worker slot and a
+    /// runtime-generation pin until an external cancel arrived. Backoff grows
+    /// so a long outage is polled cheaply; the budget guarantees the loop ends.
+    fn observe_runner_within_budget(
+        &self,
+        request: &LabStagingExecutionRequest,
+        checkpoint: &LabStagingCheckpoint,
+        runner_job_id: &str,
+        cancellation: &LabStagingCancellationToken,
+        budget: Duration,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let deadline = started + budget;
+        let mut backoff = LAB_STAGING_POLL_INITIAL_BACKOFF;
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(Self::cancellation_error());
+            }
+            match self
+                .operations
+                .observe_runner(request, checkpoint, runner_job_id, cancellation)
+            {
+                Ok(()) => return Ok(()),
+                Err(error) if error.retryable == Some(true) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(staging_poll_deadline_error(
+                            "a successful runner job observation",
+                            runner_job_id,
+                            started.elapsed(),
+                            budget,
+                            Some(&error),
+                        ));
+                    }
+                    // Never sleep past the deadline, so the budget is honoured
+                    // to within one observation rather than one backoff step.
+                    let interval = backoff.min(deadline - now);
+                    if sleep_unless_cancelled(interval, Some(cancellation)) {
+                        return Err(Self::cancellation_error());
+                    }
+                    backoff = next_staging_poll_backoff(backoff);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     fn execute_with_checkpoint<F>(
         &self,
         request: &LabStagingExecutionRequest,
@@ -3640,23 +3853,13 @@ impl StageExecutionAdapter {
                                         "Lab staging observation has no final runner job identity",
                                     )
                                 })?;
-                            loop {
-                                if cancellation.is_cancelled() {
-                                    return Err(Self::cancellation_error());
-                                }
-                                match self.operations.observe_runner(
-                                    request,
-                                    &checkpoint,
-                                    runner_job_id,
-                                    cancellation,
-                                ) {
-                                    Ok(()) => break,
-                                    Err(error) if error.retryable == Some(true) => {
-                                        std::thread::sleep(Duration::from_millis(200));
-                                    }
-                                    Err(error) => return Err(error),
-                                }
-                            }
+                            self.observe_runner_within_budget(
+                                request,
+                                &checkpoint,
+                                runner_job_id,
+                                cancellation,
+                                staging_poll_budget(request),
+                            )?;
                             LabStagingStageEffect::Observe
                         }
                         LabStagingPhase::Completed => {
@@ -4032,7 +4235,7 @@ mod tests {
     use homeboy_core::lab_contract::LabCommandContract;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Drop whatever adapter a previous test installed. The registry is a
     /// process global, so tests that assert the "no adapter installed" branch
@@ -4628,6 +4831,14 @@ mod tests {
         recovered_runner_job_id: Mutex<Option<String>>,
         active_staging_jobs: AtomicUsize,
         fail_observation: Mutex<bool>,
+        /// Retryable observation failures still to emit before succeeding.
+        /// `usize::MAX` never decrements, modelling a permanent failure.
+        retryable_observation_failures: AtomicUsize,
+        /// Emit a non-retryable observation failure instead of a retryable one.
+        non_retryable_observation: AtomicBool,
+        observation_calls: AtomicUsize,
+        /// Cancel on this observation (1-based). Zero never cancels.
+        cancel_after_observations: AtomicUsize,
     }
 
     impl RecordedStageOperations {
@@ -4670,6 +4881,31 @@ mod tests {
 
         fn fail_observation_once(&self) {
             *self.fail_observation.lock().expect("observation lock") = true;
+        }
+
+        fn fail_observation_retryably_forever(&self) {
+            self.retryable_observation_failures
+                .store(usize::MAX, Ordering::SeqCst);
+        }
+
+        fn fail_observation_retryably(&self, times: usize) {
+            self.retryable_observation_failures
+                .store(times, Ordering::SeqCst);
+        }
+
+        fn fail_observation_non_retryably(&self) {
+            self.retryable_observation_failures
+                .store(usize::MAX, Ordering::SeqCst);
+            self.non_retryable_observation.store(true, Ordering::SeqCst);
+        }
+
+        fn cancel_on_observation(&self, observation: usize) {
+            self.cancel_after_observations
+                .store(observation, Ordering::SeqCst);
+        }
+
+        fn observation_calls(&self) -> usize {
+            self.observation_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -4794,13 +5030,28 @@ mod tests {
             _request: &LabStagingExecutionRequest,
             _checkpoint: &LabStagingCheckpoint,
             runner_job_id: &str,
-            _cancellation: &LabStagingCancellationToken,
+            cancellation: &LabStagingCancellationToken,
         ) -> Result<()> {
             assert_eq!(runner_job_id, "runner-job-1");
             self.record("observe");
+            let observation = self.observation_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let cancel_at = self.cancel_after_observations.load(Ordering::SeqCst);
+            if cancel_at != 0 && observation >= cancel_at {
+                cancellation.cancel();
+            }
             if std::mem::take(&mut *self.fail_observation.lock().expect("observation lock")) {
                 let mut error = Error::internal_unexpected("simulated daemon observation outage");
                 error.retryable = Some(true);
+                return Err(error);
+            }
+            let remaining = self.retryable_observation_failures.load(Ordering::SeqCst);
+            if remaining > 0 {
+                if remaining != usize::MAX {
+                    self.retryable_observation_failures
+                        .store(remaining - 1, Ordering::SeqCst);
+                }
+                let mut error = Error::internal_unexpected("simulated daemon observation outage");
+                error.retryable = Some(!self.non_retryable_observation.load(Ordering::SeqCst));
                 return Err(error);
             }
             Ok(())
@@ -5698,6 +5949,251 @@ mod tests {
 
         assert_eq!(completed.phase, LabStagingPhase::Completed);
         assert_eq!(operations.calls(), ["validate", "observe", "observe"]);
+    }
+
+    fn observe_checkpoint() -> LabStagingCheckpoint {
+        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+        checkpoint.phase = LabStagingPhase::ObserveRunner;
+        checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
+        checkpoint.workspace_id = Some("workspace-1".to_string());
+        checkpoint.runtime_id = Some("runtime-1".to_string());
+        checkpoint.hydration_id = Some("hydration-1".to_string());
+        checkpoint.final_runner_job_id = Some("runner-job-1".to_string());
+        checkpoint
+    }
+
+    /// The core regression: before bounding, this observation spun at 5
+    /// requests/second forever and only an external cancel could stop it.
+    #[test]
+    fn a_permanently_retryable_observation_stops_at_the_deadline() {
+        let operations = Arc::new(RecordedStageOperations::default());
+        operations.fail_observation_retryably_forever();
+        let adapter = StageExecutionAdapter::new(operations.clone());
+        let budget = Duration::from_millis(600);
+
+        let started = Instant::now();
+        let error = adapter
+            .observe_runner_within_budget(
+                &execution_request(),
+                &observe_checkpoint(),
+                "runner-job-1",
+                &LabStagingCancellationToken::default(),
+                budget,
+            )
+            .expect_err("a permanently failing observation must not loop forever");
+        let elapsed = started.elapsed();
+
+        // It waited out the budget rather than abandoning a transient failure
+        // early, and it stopped rather than spinning.
+        assert!(
+            elapsed >= budget,
+            "gave up after {elapsed:?}, before the {budget:?} budget"
+        );
+        assert!(
+            elapsed < budget * 4,
+            "overshot the {budget:?} budget by too much: {elapsed:?}"
+        );
+
+        // Retryable: exhausting the budget does not prove the failure is
+        // permanent, so the caller's retry policy decides what happens next.
+        assert_eq!(error.retryable, Some(true));
+        let timeout = &error.details["lab_staging_poll_timeout"];
+        assert_eq!(timeout["runner_job_id"], "runner-job-1");
+        assert_eq!(
+            timeout["waiting_for"],
+            "a successful runner job observation"
+        );
+        assert_eq!(timeout["budget_ms"], 600);
+        assert!(timeout["waited_ms"].as_u64().expect("waited_ms") >= 600);
+        assert!(
+            error.message.contains("runner-job-1"),
+            "error must name what it waited on: {}",
+            error.message
+        );
+
+        // Backoff, not a flat 200ms: a flat interval would have produced ~3
+        // observations here, exponential backoff produces strictly fewer.
+        assert!(
+            operations.observation_calls() <= 4,
+            "expected exponential backoff, saw {} observations",
+            operations.observation_calls()
+        );
+    }
+
+    /// Backoff must never be allowed to delay a cancellation response.
+    #[test]
+    fn observation_cancellation_is_prompt_even_under_backoff() {
+        let operations = Arc::new(RecordedStageOperations::default());
+        operations.fail_observation_retryably_forever();
+        operations.cancel_on_observation(2);
+        let adapter = StageExecutionAdapter::new(operations.clone());
+        let cancellation = LabStagingCancellationToken::default();
+
+        let started = Instant::now();
+        let error = adapter
+            .observe_runner_within_budget(
+                &execution_request(),
+                &observe_checkpoint(),
+                "runner-job-1",
+                &cancellation,
+                // A budget far longer than the test may wait for.
+                Duration::from_secs(600),
+            )
+            .expect_err("cancellation must surface as an error");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancellation took {elapsed:?}; it must be observed within a sleep slice"
+        );
+        assert!(
+            error.message.contains("cancelled"),
+            "expected a cancellation error, got: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_slow_but_eventually_successful_observation_still_completes() {
+        let operations = Arc::new(RecordedStageOperations::default());
+        operations.fail_observation_retryably(3);
+        let adapter = StageExecutionAdapter::new(operations.clone());
+
+        adapter
+            .observe_runner_within_budget(
+                &execution_request(),
+                &observe_checkpoint(),
+                "runner-job-1",
+                &LabStagingCancellationToken::default(),
+                Duration::from_secs(60),
+            )
+            .expect("a transient outage must not be made fatal");
+
+        assert_eq!(operations.observation_calls(), 4);
+    }
+
+    /// Bounding the loop must not start retrying failures that were always
+    /// meant to be terminal.
+    #[test]
+    fn a_non_retryable_observation_failure_is_not_retried() {
+        let operations = Arc::new(RecordedStageOperations::default());
+        operations.fail_observation_non_retryably();
+        let adapter = StageExecutionAdapter::new(operations.clone());
+
+        let error = adapter
+            .observe_runner_within_budget(
+                &execution_request(),
+                &observe_checkpoint(),
+                "runner-job-1",
+                &LabStagingCancellationToken::default(),
+                Duration::from_secs(60),
+            )
+            .expect_err("a non-retryable failure must surface immediately");
+
+        assert_eq!(operations.observation_calls(), 1);
+        assert!(error
+            .message
+            .contains("simulated daemon observation outage"));
+    }
+
+    #[test]
+    fn staging_poll_budget_prefers_the_plan_execution_deadline() {
+        let mut request = execution_request();
+        request
+            .durable_agent_task_plan
+            .options
+            .execution_budget
+            .deadline_unix_ms = Some(now_unix_ms() + 900_000);
+
+        let budget = staging_poll_budget(&request);
+
+        assert!(
+            budget > Duration::from_secs(870) && budget <= Duration::from_secs(900),
+            "expected roughly the plan's remaining 900s, got {budget:?}"
+        );
+    }
+
+    #[test]
+    fn staging_poll_budget_floors_an_expired_plan_deadline() {
+        let mut request = execution_request();
+        request
+            .durable_agent_task_plan
+            .options
+            .execution_budget
+            .deadline_unix_ms = Some(now_unix_ms().saturating_sub(60_000));
+
+        // An expired plan deadline still buys a bounded grace to observe the
+        // remote job's terminal transition instead of abandoning it instantly.
+        assert_eq!(staging_poll_budget(&request), LAB_STAGING_POLL_MIN_BUDGET);
+    }
+
+    #[test]
+    fn staging_poll_budget_falls_back_when_the_plan_carries_no_deadline() {
+        let request = execution_request();
+
+        assert_eq!(
+            request
+                .durable_agent_task_plan
+                .options
+                .execution_budget
+                .deadline_unix_ms,
+            None
+        );
+        assert_eq!(
+            staging_poll_budget(&request),
+            LAB_STAGING_POLL_FALLBACK_BUDGET
+        );
+    }
+
+    #[test]
+    fn staging_poll_backoff_grows_exponentially_and_caps() {
+        let mut backoff = LAB_STAGING_POLL_INITIAL_BACKOFF;
+        let mut seen = vec![backoff];
+        for _ in 0..12 {
+            backoff = next_staging_poll_backoff(backoff);
+            seen.push(backoff);
+        }
+
+        assert_eq!(seen[0], Duration::from_millis(200));
+        assert_eq!(seen[1], Duration::from_millis(400));
+        assert_eq!(seen[2], Duration::from_millis(800));
+        assert_eq!(*seen.last().expect("backoff"), LAB_STAGING_POLL_MAX_BACKOFF);
+        assert!(seen
+            .iter()
+            .all(|step| *step <= LAB_STAGING_POLL_MAX_BACKOFF));
+    }
+
+    #[test]
+    fn sleep_unless_cancelled_returns_as_soon_as_cancellation_is_observed() {
+        let cancellation = LabStagingCancellationToken::default();
+        cancellation.cancel();
+
+        let started = Instant::now();
+        assert!(sleep_unless_cancelled(
+            Duration::from_secs(30),
+            Some(&cancellation)
+        ));
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "an already-cancelled token must not sleep out the interval"
+        );
+    }
+
+    #[test]
+    fn sleep_unless_cancelled_sleeps_the_whole_interval_without_cancellation() {
+        let interval = Duration::from_millis(500);
+        let started = Instant::now();
+
+        assert!(!sleep_unless_cancelled(
+            interval,
+            Some(&LabStagingCancellationToken::default())
+        ));
+
+        assert!(
+            started.elapsed() >= interval,
+            "slicing the sleep must not shorten it"
+        );
     }
 
     #[test]
