@@ -13,7 +13,7 @@
 //! its failure modes. This source therefore *reuses* the existing bounded probe
 //! rather than inventing one:
 //!
-//! * It calls [`RunnerEvidenceProvider::statuses_indexed`], the latency-bounded
+//! * It calls `RunnerEvidenceProvider::statuses_indexed`, the latency-bounded
 //!   read introduced for exactly this caller (#9522): one `/jobs` query against
 //!   the already-connected session, **no** generation reconcile (which issues
 //!   one blocking HTTP call per draining generation and can take minutes).

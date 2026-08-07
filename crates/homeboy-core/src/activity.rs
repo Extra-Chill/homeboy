@@ -62,8 +62,8 @@ pub struct ActivityOptions {
     /// cost is bounded rather than avoided: the source short-circuits entirely
     /// when no runner layer is registered, performs no network at all for a
     /// runner with no connected session, and runs the one query it does make
-    /// under the shared read-only probe deadline. See
-    /// [`super::activity::runner_sessions`] for the full bound.
+    /// under the shared read-only probe deadline. See the `runner_sessions`
+    /// module for the full bound.
     ///
     /// A latency-sensitive caller opts out with `--no-runners` or
     /// [`ACTIVITY_FEDERATE_RUNNERS_ENV`].
