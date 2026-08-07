@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib.sh"
+
 OPERATIONS_RESULTS="${OPERATIONS_RESULTS:-}"
 HAS_QUALITY_COMMANDS=true
 HAS_OPERATIONS_COMMANDS=true
@@ -28,6 +32,18 @@ fi
 validate_results_json "Quality command" "${RESULTS:-}"
 validate_results_json "Operations command" "${OPERATIONS_RESULTS}"
 
+emit_terminal_diagnostics() {
+  local command diagnostic
+
+  while IFS= read -r command; do
+    [ -n "${command}" ] || continue
+    while IFS= read -r diagnostic; do
+      [ -n "${diagnostic}" ] || continue
+      printf '::error::homeboy %s terminal diagnostic: %s\n' "${command}" "${diagnostic}"
+    done < <(observation_terminal_diagnostics "${HOMEBOY_OBSERVATIONS_DIR:-}" "${command}")
+  done < <(jq -r 'to_entries[] | select(.value == "fail") | .key' <<< "${RESULTS:-{}}" 2>/dev/null || true)
+}
+
 if [ -z "${RESULTS:-}" ] || [ "${RESULTS}" = "{}" ]; then
   HAS_QUALITY_COMMANDS=false
 
@@ -52,6 +68,7 @@ FAILED=false
 # Check quality command results
 if [ "${HAS_QUALITY_COMMANDS}" = true ]; then
   if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "fail")' > /dev/null; then
+    emit_terminal_diagnostics
     echo "::error::One or more quality commands failed"
     FAILED=true
   fi

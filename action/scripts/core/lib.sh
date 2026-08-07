@@ -261,6 +261,36 @@ valid_command_result_output() {
     ' "${output_file}" >/dev/null 2>&1
 }
 
+# Observations retain terminal errors when a command fails before it can write
+# its command-result envelope. Keep diagnostics single-line and redact common
+# credential forms before sending them to GitHub logs or summaries.
+observation_terminal_diagnostics() {
+  local observation_dir="$1"
+  local command="$2"
+  local command_kind
+  command_kind="$(quality_base_command "${command}")"
+
+  [ -d "${observation_dir}" ] || return 0
+
+  find "${observation_dir}" -type f -name runs.json -print0 2>/dev/null \
+    | while IFS= read -r -d '' runs_file; do
+        jq -r --arg kind "${command_kind}" '
+          if type == "array" then . else [] end
+          | .[]
+          | select(.status == "error" and .kind == $kind)
+          | .metadata_json.error?
+          | select(type == "string" and length > 0)
+          | .[:1000]
+          | gsub("(?i)(bearer[[:space:]]+)[^[:space:]]+"; "\\1[REDACTED]")
+          | gsub("(?i)((token|password|secret|api[_-]?key)[=:][[:space:]]*)[^[:space:]]+"; "\\1[REDACTED]")
+          | gsub("(?i)gh[opsu]_[A-Za-z0-9_]+"; "[REDACTED]")
+          | gsub("(?i)github_pat_[A-Za-z0-9_]+"; "[REDACTED]")
+          | gsub("[\\r\\n]+"; " ")
+        ' "${runs_file}" 2>/dev/null || true
+      done \
+    | sort -u
+}
+
 review_subcommand_run_command() {
   local cmd="$1"
   local component_id="$2"

@@ -12,6 +12,19 @@ SUMMARY_FILE="${TMPDIR}/summary.md"
 ENV_FILE="${TMPDIR}/github-env"
 ARGS_FILE="${TMPDIR}/homeboy-args"
 mkdir -p "${BIN_DIR}" "${OUTPUT_DIR}"
+mkdir -p "${TMPDIR}/observations"
+
+cat > "${TMPDIR}/observations/runs.json" <<'JSON'
+[
+  {
+    "kind": "test",
+    "status": "error",
+    "metadata_json": {
+      "error": "Invalid argument 'structured_sidecar': structured sidecar `test.failures` must be a JSON array for schema v1"
+    }
+  }
+]
+JSON
 
 cat > "${BIN_DIR}/homeboy" <<'STUB'
 #!/usr/bin/env bash
@@ -45,6 +58,7 @@ export SCOPE_MODE="changed"
 export SCOPE_BASE_REF="abc123base"
 export GITHUB_ENV="${ENV_FILE}"
 export GITHUB_STEP_SUMMARY="${SUMMARY_FILE}"
+export HOMEBOY_OBSERVATIONS_DIR="${TMPDIR}/observations"
 
 bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
 
@@ -64,6 +78,8 @@ grep -F -- "- Scope mode: \`changed\`" "${DIGEST_FILE}" >/dev/null
 grep -F -- "- Scope base ref: \`abc123base\`" "${DIGEST_FILE}" >/dev/null
 grep -F "homeboy review lint wordpress --path . --changed-since abc123base" "${DIGEST_FILE}" >/dev/null
 grep -F "homeboy review test wordpress --path . --changed-since abc123base" "${DIGEST_FILE}" >/dev/null
+grep -F "### Terminal diagnostics" "${DIGEST_FILE}" >/dev/null
+grep -F "structured sidecar \`test.failures\` must be a JSON array for schema v1" "${DIGEST_FILE}" >/dev/null
 
 grep -Fx -- "report" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "failure-digest" "${ARGS_FILE}" >/dev/null

@@ -4,6 +4,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENFORCE_STATUS="${SCRIPT_DIR}/enforce-final-status.sh"
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "${TMPDIR}"' EXIT
+
+mkdir -p "${TMPDIR}/observations"
+cat > "${TMPDIR}/observations/runs.json" <<'JSON'
+[
+  {
+    "kind": "test",
+    "status": "error",
+    "metadata_json": {
+      "error": "Invalid argument 'structured_sidecar': structured sidecar `test.failures` must be a JSON array for schema v1"
+    }
+  }
+]
+JSON
 
 assert_exit() {
   local expected="$1"
@@ -28,7 +43,13 @@ assert_exit 1 "malformed quality results fail closed" \
   env RESULTS='{"review test":"fail"}}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
 assert_exit 1 "failing quality results fail" \
-  env RESULTS='{"review test":"fail"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+  env RESULTS='{"review test":"fail"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' HOMEBOY_OBSERVATIONS_DIR="${TMPDIR}/observations" bash "${ENFORCE_STATUS}"
+
+output="$(env RESULTS='{"review test":"fail"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' HOMEBOY_OBSERVATIONS_DIR="${TMPDIR}/observations" bash "${ENFORCE_STATUS}" 2>&1 || true)"
+case "${output}" in
+  *"structured sidecar \`test.failures\` must be a JSON array for schema v1"*) printf 'PASS: final status renders observation terminal diagnostics\n' ;;
+  *) printf 'FAIL: final status omitted observation terminal diagnostics; got: %s\n' "${output}"; exit 1 ;;
+esac
 
 assert_exit 1 "timed out quality results fail with their classification" \
   env RESULTS='{"review test":"timeout"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"

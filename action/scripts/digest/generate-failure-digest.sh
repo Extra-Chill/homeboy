@@ -99,6 +99,27 @@ append_differential_evidence() {
   done <<< "${rows}"
 }
 
+append_terminal_diagnostics() {
+  local digest_file="$1"
+  local diagnostics=""
+  local command diagnostic
+
+  while IFS= read -r command; do
+    [ -n "${command}" ] || continue
+    while IFS= read -r diagnostic; do
+      [ -n "${diagnostic}" ] || continue
+      printf '::error::homeboy %s terminal diagnostic: %s\n' "${command}" "${diagnostic}"
+      diagnostics+="- \`homeboy ${command}\`: ${diagnostic}"$'\n'
+    done < <(observation_terminal_diagnostics "${HOMEBOY_OBSERVATIONS_DIR:-}" "${command}")
+  done < <(jq -r 'to_entries[] | select(.value == "fail") | .key' <<< "${RESULTS_JSON}" 2>/dev/null || true)
+
+  [ -n "${diagnostics}" ] || return 0
+  {
+    printf '\n### Terminal diagnostics\n'
+    printf '%s' "${diagnostics}"
+  } >> "${digest_file}"
+}
+
 if [ -z "${OUTPUT_DIR}" ] || [ ! -d "${OUTPUT_DIR}" ]; then
   echo "No output directory available; skipping failure digest"
   exit 0
@@ -149,6 +170,7 @@ fi
 
 append_local_reproduction_commands "${DIGEST_FILE}"
 append_differential_evidence "${DIGEST_FILE}"
+append_terminal_diagnostics "${DIGEST_FILE}"
 
 if [ -n "${GITHUB_ENV:-}" ]; then
   echo "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" >> "${GITHUB_ENV}"
