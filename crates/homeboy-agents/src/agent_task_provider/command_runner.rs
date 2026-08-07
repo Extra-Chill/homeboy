@@ -1655,12 +1655,31 @@ pub(crate) fn render_provider_command_display(provider: &AgentTaskExecutorProvid
     String::new()
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderReadinessInvocationResult {
+    pub ready: bool,
+    pub classification: String,
+    pub retryable: bool,
+    pub remediation: String,
+    pub reason: String,
+    pub cache_key: String,
+    pub identity: Value,
+}
+
 pub fn run_provider_readiness_invocation(
     provider: &AgentTaskExecutorProvider,
     effective_config: &Value,
-) -> Result<(), String> {
+) -> Result<ProviderReadinessInvocationResult, String> {
     let Some(invocation) = provider.readiness_invocation.as_ref() else {
-        return Ok(());
+        return Ok(ProviderReadinessInvocationResult {
+            ready: true,
+            classification: "ready".to_string(),
+            retryable: false,
+            remediation: String::new(),
+            reason: String::new(),
+            cache_key: String::new(),
+            identity: Value::Null,
+        });
     };
     let Some((program, args, cwd)) = invocation_command_parts(provider, invocation) else {
         return Err(format!(
@@ -1682,6 +1701,26 @@ pub fn run_provider_readiness_invocation(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // Runtime readiness receives no ambient credentials. Providers explicitly
+    // declare the small environment surface their bounded probe needs.
+    let allowlist = invocation
+        .extra
+        .get("env_allowlist")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
+        .collect::<Vec<_>>();
+    command.env_clear();
+    for name in ["PATH", "HOME"] {
+        if let Some(value) = std::env::var_os(name) {
+            // PATH locates the declared executable and HOME resolves an
+            // explicitly configured ~/ executable; neither is a credential.
+            command.env(name, value);
+        }
+    }
+    command.envs(allowlist);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -1750,29 +1789,25 @@ pub fn run_provider_readiness_invocation(
         ));
     }
     let stdout = stdout_buffer.lock().expect("stdout buffer").clone();
-    let result: Value = serde_json::from_slice(&stdout).map_err(|_| {
+    let result_value: Value = serde_json::from_slice(&stdout).map_err(|_| {
         format!(
             "provider '{}' readiness invocation returned malformed JSON",
             provider.id
         )
     })?;
-    if result.get("schema").and_then(Value::as_str) != Some(PROVIDER_READINESS_RESULT_SCHEMA) {
+    if result_value.get("schema").and_then(Value::as_str) != Some(PROVIDER_READINESS_RESULT_SCHEMA)
+    {
         return Err(format!(
             "provider '{}' readiness invocation returned an unsupported result schema",
             provider.id
         ));
     }
-    if result.get("ready").and_then(Value::as_bool) != Some(true) {
-        let message = result
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("provider-owned readiness check failed");
-        return Err(format!(
-            "provider '{}' readiness failed: {message}",
+    serde_json::from_value(result_value).map_err(|_| {
+        format!(
+            "provider '{}' readiness invocation returned an invalid result",
             provider.id
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
