@@ -102,12 +102,13 @@ pub fn run_command_with_workspace(
         None
     };
     let readiness = input.readiness.clone();
+    let readiness_succeeded = readiness.as_ref().map(readiness_is_valid).unwrap_or(false);
     match run_command_with_workspace_inner(input, recovery_owner_run_ref) {
         Ok((mut output, exit_code)) => {
             if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
                 complete_readiness_operation(
                     owner_run_ref,
-                    true,
+                    readiness_succeeded,
                     serde_json::json!({
                         "exit_code": exit_code,
                         "status": output.result.status,
@@ -121,7 +122,7 @@ pub fn run_command_with_workspace(
             if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
                 complete_readiness_operation(
                     owner_run_ref,
-                    false,
+                    readiness_succeeded,
                     serde_json::json!({ "error": error.to_string() }),
                 )?;
                 return Err(error.with_hint(format!(
@@ -131,6 +132,20 @@ pub fn run_command_with_workspace(
             Err(error)
         }
     }
+}
+
+fn readiness_is_valid(readiness: &super::types::ReleaseReadinessEnvelope) -> bool {
+    readiness
+        .gate_results
+        .iter()
+        .filter(|gate| matches!(gate.status.as_str(), "passed" | "failed"))
+        .all(|gate| {
+            gate.status == "passed"
+                && gate.source_sha.as_deref() == Some(readiness.source.commit.as_str())
+                && gate.provenance.as_ref().is_some_and(|provenance| {
+                    !super::types::ReleaseReadinessProvenance::is_empty(provenance)
+                })
+        })
 }
 
 fn complete_readiness_operation(
@@ -1103,6 +1118,21 @@ mod tests {
         }
     }
 
+    fn successful_readiness(source: &str) -> ReleaseReadinessEnvelope {
+        let mut readiness = failed_readiness(source);
+        let gate = &mut readiness.gate_results[0];
+        gate.status = "passed".to_string();
+        gate.reason = None;
+        gate.provenance = Some(super::super::types::ReleaseReadinessProvenance {
+            dependencies: std::collections::BTreeMap::from([(
+                "dependency".to_string(),
+                "locked-sha".to_string(),
+            )]),
+            extensions: Default::default(),
+        });
+        readiness
+    }
+
     #[test]
     fn batch_status_bucket_rolls_up_non_released_outcomes_as_failed() {
         // Issue #6916: a failed component must not be counted as released.
@@ -1300,6 +1330,57 @@ mod tests {
                 SKIPPED_RELEASE_EXIT_CODE
             );
             assert_eq!(record.attributes["downstream_release"]["status"], "skipped");
+        });
+    }
+
+    #[test]
+    fn failed_readiness_remains_failed_for_dry_run() {
+        with_isolated_home(|_| {
+            run_command_with_workspace(
+                ReleaseCommandInput {
+                    component_id: "fixture".to_string(),
+                    dry_run: true,
+                    readiness: Some(failed_readiness("dry-run-source")),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect_err("failed readiness blocks dry-run planning");
+            let record = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "fixture",
+                false,
+            )
+            .expect("records")
+            .pop()
+            .expect("record");
+            assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
+            assert!(record.attributes["downstream_release"]["error"].is_string());
+        });
+    }
+
+    #[test]
+    fn successful_readiness_remains_succeeded_after_downstream_error() {
+        with_isolated_home(|_| {
+            run_command_with_workspace(
+                ReleaseCommandInput {
+                    component_id: "missing-component".to_string(),
+                    readiness: Some(successful_readiness("success-source")),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect_err("missing component is downstream of validated readiness");
+            let record = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "missing-component",
+                false,
+            )
+            .expect("records")
+            .pop()
+            .expect("record");
+            assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
+            assert!(record.attributes["downstream_release"]["error"].is_string());
         });
     }
 

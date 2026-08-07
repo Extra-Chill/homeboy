@@ -471,10 +471,18 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
                         homeboy::core::Error::validation_invalid_argument(
                             "reference",
                             "release readiness operation does not exist",
-                            Some(reference),
+                            Some(reference.clone()),
                             None,
                         )
                     })?;
+                if record.operation != "release_readiness" {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "reference",
+                        "operation reference is not a release readiness record",
+                        Some(reference),
+                        None,
+                    ));
+                }
                 return Ok((
                     ReleaseCommandOutput::ReadinessShow(ReleaseReadinessShowOutput {
                         variant: "readiness-show",
@@ -1989,6 +1997,43 @@ jobs:
                 panic!("expected readiness show output");
             };
             assert_eq!(output.record.owner_run_ref, record.owner_run_ref);
+        });
+    }
+
+    #[test]
+    fn readiness_show_rejects_non_readiness_operation_records() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let record = release::operation_record::OperationRecord {
+                owner_run_ref: "not-readiness".to_string(),
+                operation: "provider_workspace".to_string(),
+                subject: "fixture".to_string(),
+                provider: "lab".to_string(),
+                handle: "commit".to_string(),
+                path: None,
+                source_sha: "commit".to_string(),
+                cleanup_policy: "retain".to_string(),
+                lifecycle_state: "finalized".to_string(),
+                terminal_disposition: Some("succeeded".to_string()),
+                finalization_status: "completed".to_string(),
+                finalization_lease: None,
+                finalization_lease_started_ms: None,
+                attempt_count: 1,
+                continuation_evidence: Vec::new(),
+                attributes: Default::default(),
+            };
+            release::operation_record::OperationRecordStore::create(&record).expect("record");
+            let error = match run(ReleaseArgs {
+                command: Some(ReleaseSubcommand::Readiness(ReleaseReadinessArgs {
+                    command: ReleaseReadinessCommand::Show {
+                        reference: record.owner_run_ref,
+                    },
+                })),
+                execute: args(&[]),
+            }) {
+                Ok(_) => panic!("non-readiness records are rejected"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
         });
     }
 
