@@ -2437,6 +2437,29 @@ fn force_stop_matching_idle_lease_retires_a_reused_pid_without_signaling() {
     child.wait().expect("reap test process");
 }
 
+#[cfg(unix)]
+#[test]
+fn termination_revalidation_classifies_lost_ownership_as_absent_without_signaling() {
+    let _home = HomeGuard::new();
+    let mut child = spawn_force_stop_test_process(None);
+    let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
+    state.startup_token = "ownership-that-disappeared".to_string();
+    write_daemon_state_for_test(&state);
+    let path = state_path().expect("state path");
+    let identity = DaemonLeaseIdentity::from_state(&state);
+
+    let target = stop::revalidate_exact_termination_target(&path, &identity, &state)
+        .expect("lost ownership is a safe terminal classification");
+
+    assert_eq!(target, stop::ExactTerminationTarget::Absent);
+    assert!(
+        pid_is_running(child.id()),
+        "the unowned PID must not be signaled"
+    );
+    child.kill().expect("cleanup test process");
+    child.wait().expect("reap test process");
+}
+
 #[test]
 fn ordinary_stop_retires_a_live_unowned_stale_lease_without_signaling() {
     let _home = HomeGuard::new();

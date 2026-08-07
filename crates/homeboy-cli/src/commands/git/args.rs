@@ -220,6 +220,18 @@ pub(super) enum PrCommand {
         #[command(flatten)]
         path_args: ComponentPathArgs,
     },
+    /// Mark a draft PR ready for review. Already-ready PRs are left unchanged.
+    Ready {
+        /// Component ID
+        component_id: String,
+
+        /// PR number
+        #[arg(short, long)]
+        number: u64,
+
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
+    },
     /// Find PRs matching filters
     Find {
         /// Component ID

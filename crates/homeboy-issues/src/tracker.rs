@@ -200,6 +200,7 @@ mod tests {
             title: "t".into(),
             body: String::new(),
             url: "u".into(),
+            is_draft: false,
             state: state.into(),
             state_reason: state_reason.into(),
             closed_at: String::new(),

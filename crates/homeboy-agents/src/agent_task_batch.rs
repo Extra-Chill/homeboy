@@ -434,7 +434,9 @@ fn refresh_dependency_graph_with_finalization_statuses(
             AgentTaskRunState::Succeeded => match finalization_status.as_deref() {
                 // A review-ready candidate is a valid stack base. Its exact head
                 // is bound by the action receipt before the dependent is resumed.
-                Some("merged" | "review_ready") => AgentTaskDependencyState::Succeeded,
+                Some("merged" | "review_ready" | "draft_published") => {
+                    AgentTaskDependencyState::Succeeded
+                }
                 Some("rejected") => AgentTaskDependencyState::Rejected,
                 _ => AgentTaskDependencyState::AwaitingAcceptance,
             },

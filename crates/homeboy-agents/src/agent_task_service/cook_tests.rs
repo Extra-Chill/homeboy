@@ -2000,6 +2000,7 @@ fn batch_cook_options(
         gates: VerifyGateOptions::default(),
         max_attempts: 1,
         no_finalize: true,
+        draft_pr: false,
         base: "main".to_string(),
         task_base_sha: None,
         head: None,
@@ -4277,6 +4278,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 gates: VerifyGateOptions::default(),
                 max_attempts: 1,
                 no_finalize: true,
+                draft_pr: false,
                 base: "main".to_string(),
                 task_base_sha: None,
                 head: None,
@@ -6464,12 +6466,14 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         _head: &str,
         _title: &str,
         body: &str,
+        draft: bool,
     ) -> Result<AgentTaskPrRef> {
         self.created = true;
         self.body = body.to_string();
         Ok(AgentTaskPrRef {
             number: 8058,
             url: "https://github.com/Extra-Chill/homeboy/pull/8058".to_string(),
+            is_draft: draft,
         })
     }
     fn update_pr(
@@ -7272,6 +7276,7 @@ fn promotion_claim_options(cook_id: &str, run_id: &str) -> AgentTaskCookServiceO
         gates: VerifyGateOptions::default(),
         max_attempts: 1,
         no_finalize: true,
+        draft_pr: false,
         base: "main".to_string(),
         task_base_sha: None,
         head: None,
@@ -7682,6 +7687,7 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             },
             max_attempts: 1,
             no_finalize: false,
+            draft_pr: false,
             base: "main".to_string(),
             task_base_sha: Some("task-candidate-base".to_string()),
             head: Some("fix/8058".to_string()),
@@ -7836,13 +7842,13 @@ fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
         assert!(normal_backend.created);
 
         let generic_receipt =
-            serde_json::json!({ "status": "review_ready", "pr": { "number": 42 } });
+            serde_json::json!({ "status": "draft_published", "pr": { "number": 42 } });
         agent_task_lifecycle::record_cook_finalization(run_id, generic_receipt.clone())
             .expect("persist generic normal receipt");
         let mut recovery_backend = CaptureBackend::default();
         let recovered =
             recover_cook_pr_with_backend(cook_id, Vec::new(), false, &mut recovery_backend)
-                .expect("normal finalization receipt takes precedence over stale manual intent");
+                .expect("draft finalization receipt takes precedence over stale manual intent");
         assert_eq!(recovered, generic_receipt);
         assert!(!recovery_backend.created);
     });
@@ -8374,6 +8380,7 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
             },
             max_attempts: 1,
             no_finalize: false,
+            draft_pr: false,
             base: "main".to_string(),
             task_base_sha: Some("task-candidate-base".to_string()),
             head: Some("fix/8058".to_string()),

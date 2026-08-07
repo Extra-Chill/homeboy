@@ -216,6 +216,7 @@ fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCook
         retry_budget: serde_json::json!({ "max_attempts": options.max_attempts, "execution_budget": options.initial_plan.options.execution_budget }),
         finalization: serde_json::json!({
             "no_finalize": options.no_finalize,
+            "draft_pr": options.draft_pr,
             "base": options.base,
             "head": options.head,
             "title": options.title,
@@ -1350,6 +1351,15 @@ fn reconstruct_recipe_options(
             })? as u32,
         no_finalize: serde_json::from_value(field("no_finalize")?)
             .map_err(recipe_value_error("no_finalize"))?,
+        // Recipes persisted before draft publication existed retain ready-PR behavior.
+        draft_pr: recipe
+            .finalization
+            .get("draft_pr")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(recipe_value_error("draft_pr"))?
+            .unwrap_or(false),
         base: serde_json::from_value(field("base")?).map_err(recipe_value_error("base"))?,
         task_base_sha: serde_json::from_value(field("task_base_sha")?)
             .map_err(recipe_value_error("task_base_sha"))?,

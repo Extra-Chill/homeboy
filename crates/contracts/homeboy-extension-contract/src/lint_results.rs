@@ -33,6 +33,8 @@ pub struct LintCommandOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_comparison: Option<BaselineComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_provenance: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub formatting_findings: Option<crate::lint_result::FormattingFindings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub findings: Option<Vec<HomeboyFinding>>,

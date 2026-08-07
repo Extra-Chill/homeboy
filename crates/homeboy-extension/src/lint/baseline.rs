@@ -22,6 +22,70 @@ pub struct LintBaselineMetadata {
     pub findings_count: usize,
 }
 
+/// The exact lint population a baseline is allowed to describe.
+///
+/// A changed-file run must never compare itself with an unscoped run: the
+/// latter contains findings the former deliberately did not ask producers to
+/// inspect. The digest is used as the persisted key while this full value is
+/// returned as provenance for humans and automation.
+#[derive(Debug, Clone, Serialize)]
+pub struct LintBaselineProvenance {
+    pub baseline_key: String,
+    pub compared: bool,
+    pub files: Vec<String>,
+    pub tools: Vec<String>,
+    pub scope: String,
+    pub category: Option<String>,
+    pub errors_only: bool,
+    pub sniffs: Option<String>,
+    pub exclude_sniffs: Option<String>,
+}
+
+impl LintBaselineProvenance {
+    pub fn new(
+        files: Vec<String>,
+        tools: Vec<String>,
+        scope: impl Into<String>,
+        category: Option<String>,
+        errors_only: bool,
+        sniffs: Option<String>,
+        exclude_sniffs: Option<String>,
+    ) -> Self {
+        let mut files = files;
+        files.sort();
+        files.dedup();
+        let mut tools = tools;
+        tools.sort();
+        tools.dedup();
+        let scope = scope.into();
+        let identity = serde_json::json!({
+            "files": files,
+            "tools": tools,
+            "scope": scope,
+            "category": category,
+            "errors_only": errors_only,
+            "sniffs": sniffs,
+            "exclude_sniffs": exclude_sniffs,
+        });
+        let digest = homeboy_engine_primitives::content_hash::sha256_hex(
+            serde_json::to_string(&identity)
+                .expect("lint baseline provenance is serializable")
+                .as_bytes(),
+        );
+        Self {
+            baseline_key: format!("{BASELINE_KEY}:{digest}"),
+            compared: false,
+            files,
+            tools,
+            scope,
+            category,
+            errors_only,
+            sniffs,
+            exclude_sniffs,
+        }
+    }
+}
+
 struct LintFingerprint<'a>(&'a HomeboyFinding);
 
 impl Fingerprintable for LintFingerprint<'_> {
@@ -46,6 +110,15 @@ impl Fingerprintable for LintFingerprint<'_> {
 
 pub type LintBaseline = generic::Baseline<LintBaselineMetadata>;
 pub type BaselineComparison = generic::Comparison;
+
+fn config(source_path: &Path, provenance: Option<&LintBaselineProvenance>) -> BaselineConfig {
+    BaselineConfig::new(
+        source_path,
+        provenance
+            .map(|provenance| provenance.baseline_key.as_str())
+            .unwrap_or(BASELINE_KEY),
+    )
+}
 
 pub fn parse_findings_file(path: &Path) -> homeboy_core::error::Result<Vec<HomeboyFinding>> {
     if !path.exists() {
@@ -102,7 +175,16 @@ pub fn save_baseline(
     component_id: &str,
     findings: &[HomeboyFinding],
 ) -> homeboy_core::error::Result<std::path::PathBuf> {
-    let config = BaselineConfig::new(source_path, BASELINE_KEY);
+    save_baseline_for_scope(source_path, component_id, findings, None)
+}
+
+pub fn save_baseline_for_scope(
+    source_path: &Path,
+    component_id: &str,
+    findings: &[HomeboyFinding],
+    provenance: Option<&LintBaselineProvenance>,
+) -> homeboy_core::error::Result<std::path::PathBuf> {
+    let config = config(source_path, provenance);
     let metadata = LintBaselineMetadata {
         findings_count: findings.len(),
     };
@@ -111,7 +193,14 @@ pub fn save_baseline(
 }
 
 pub fn load_baseline(source_path: &Path) -> Option<LintBaseline> {
-    let config = BaselineConfig::new(source_path, BASELINE_KEY);
+    load_baseline_for_scope(source_path, None)
+}
+
+pub fn load_baseline_for_scope(
+    source_path: &Path,
+    provenance: Option<&LintBaselineProvenance>,
+) -> Option<LintBaseline> {
+    let config = config(source_path, provenance);
     generic::load::<LintBaselineMetadata>(&config).unwrap_or_default()
 }
 
