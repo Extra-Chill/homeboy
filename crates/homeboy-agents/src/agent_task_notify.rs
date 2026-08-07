@@ -858,6 +858,84 @@ pub fn controller_action_failed(
     );
 }
 
+// ---------------------------------------------------------------------------
+// Daemon reconcile (W3-10)
+// ---------------------------------------------------------------------------
+
+/// Generic subject class for a durable agent-task run.
+const RUN_SUBJECT_KIND: &str = "agent_task_run";
+
+/// Attribution recorded on the reconcile-level exactly-once marker.
+const RUN_RECONCILED_DELIVERED_BY: &str = "daemon-reconcile";
+
+fn run_reconciled_payload(
+    run_id: &str,
+    state: &str,
+    liveness: &str,
+    reason: Option<&str>,
+) -> NotifyPayload {
+    NotifyPayload::new(
+        NotifyEventKind::NeedsAttention,
+        NotifySubject::new(RUN_SUBJECT_KIND, run_id),
+    )
+    .with_fact("State", state)
+    .with_fact("Liveness", liveness)
+    .with_optional_fact("Reason", reason.map(str::to_string))
+    .with_action(
+        NotifyAction::new("status", format!("homeboy agent-task status {run_id}"))
+            .with_kind("show"),
+    )
+    .with_action(
+        NotifyAction::new("diagnose", format!("homeboy agent-task diagnose {run_id}"))
+            .with_kind("repair"),
+    )
+}
+
+/// The daemon reconciled an orphaned `running` record.
+///
+/// This is terminal for the run — its owner is gone and the record has been
+/// cancelled — so it reaches a configured default transport. Before the
+/// daemon drove reconciliation this outcome had no notification at all,
+/// because it had no producer: the record simply stayed `running` until
+/// somebody ran the command by hand.
+///
+/// Claimed once per run through the same marker the cook terminal event uses,
+/// so a reconcile that repeats across daemon restarts announces once.
+pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<&str>) {
+    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification(
+        run_id,
+        RUN_RECONCILED_DELIVERED_BY,
+    )
+    .unwrap_or(false);
+    if !claimed {
+        return;
+    }
+    let payload = run_reconciled_payload(run_id, state, liveness, reason);
+    let event = NotifyEvent::lifecycle(NotifyEventKind::NeedsAttention, run_id, state)
+        .with_title(format!("run reconciled — {run_id}"))
+        .with_payload(payload);
+    let route = effective_route(run_id);
+    let dispatch = notify_outbox::dispatch_with_outbox(
+        &event.with_route(route.as_ref()),
+        Some(NotifyOnceMarker::new(
+            RUN_SUBJECT_KIND,
+            run_id,
+            RUN_RECONCILED_DELIVERED_BY,
+        )),
+    );
+    match dispatch.disposition {
+        NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
+            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification(
+                run_id,
+                RUN_RECONCILED_DELIVERED_BY,
+            );
+        }
+        NotifyOutboxDisposition::Dropped => {
+            let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim(run_id);
+        }
+    }
+}
+
 /// Stable snake_case labels for the controller state vocabulary.
 ///
 /// The enum's `Debug` rendering is not a contract; these labels are what a

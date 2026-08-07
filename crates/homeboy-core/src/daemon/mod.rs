@@ -32,6 +32,7 @@ mod completion_tracker;
 mod control;
 pub mod controller_job_driver;
 mod daemon_lease;
+pub mod orchestration;
 mod patch_capture;
 pub mod recovery_actions;
 mod remote_runner;
@@ -1142,10 +1143,12 @@ where
     let (local_shutdown_tx, local_shutdown_rx) = mpsc::channel();
     let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
     let (schedule_shutdown_tx, schedule_shutdown_rx) = mpsc::channel();
+    let (orchestration_shutdown_tx, orchestration_shutdown_rx) = mpsc::channel();
     let local_child_reconciler =
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
     let schedule_ticker = spawn_schedule_ticker(schedule_shutdown_rx);
+    let orchestration_reconciler = spawn_orchestration_reconciler(orchestration_shutdown_rx);
 
     let mut accepted = 0;
     let mut serve_result = Ok(());
@@ -1172,9 +1175,11 @@ where
     let _ = local_shutdown_tx.send(());
     let _ = completion_shutdown_tx.send(());
     let _ = schedule_shutdown_tx.send(());
+    let _ = orchestration_shutdown_tx.send(());
     let _ = local_child_reconciler.join();
     let _ = completion_notifier.join();
     let _ = schedule_ticker.join();
+    let _ = orchestration_reconciler.join();
     serve_result.map(|()| state)
 }
 
@@ -1240,6 +1245,81 @@ fn schedule_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()
 
     loop {
         let _ = ticker.dispatch_due(chrono::Utc::now(), std::sync::Arc::clone(&runner));
+        if shutdown.recv_timeout(interval).is_ok() {
+            return;
+        }
+    }
+}
+
+/// Environment variable overriding how often the daemon reconciles orphaned
+/// agent-task orchestration state, in seconds. Defaults to
+/// [`ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS`].
+///
+/// This is a *recovery* cadence, not a progress one. Both mechanisms it drives
+/// only act on records that durable state already proves are stuck — an
+/// orphaned `running` run whose owner died, a controller wait whose subject is
+/// already terminal — so polling faster only shortens the window in which a
+/// stuck record stays stuck. It is deliberately slower than the five-second
+/// completion tick because each pass reads every active run and every parked
+/// controller.
+const ORCHESTRATION_TICK_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_ORCHESTRATION_TICK_SECS";
+const ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS: u64 = 60;
+
+/// Setting the tick interval to zero disables daemon-driven orchestration
+/// recovery, for operators who would rather drive
+/// `homeboy agent-task active --reconcile --apply` and
+/// `homeboy agent-task controller resume` themselves. Matches the schedule
+/// ticker's convention.
+fn orchestration_tick_interval() -> Option<std::time::Duration> {
+    parse_orchestration_tick_interval(
+        std::env::var(ORCHESTRATION_TICK_INTERVAL_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Interval parsing, split from the environment read so it can be tested
+/// without mutating process-wide state under parallel tests.
+fn parse_orchestration_tick_interval(configured: Option<&str>) -> Option<std::time::Duration> {
+    let seconds = configured
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS);
+    (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
+}
+
+/// Drive the orchestration mechanisms that previously only advanced when a
+/// human typed a command.
+///
+/// `reconcile_stale_active_runs` had exactly two callers — `cleanup` and
+/// `agent-task active --reconcile --apply` — so a detached cook whose owner
+/// died stayed `running` forever. Controller waits had none at all.
+fn spawn_orchestration_reconciler(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let Some(interval) = orchestration_tick_interval() else {
+            // Disabled: still consume the shutdown signal so the join at
+            // teardown returns promptly.
+            let _ = shutdown.recv();
+            return;
+        };
+        orchestration_tick_loop(interval, shutdown)
+    })
+}
+
+/// One pass per mechanism, per interval.
+///
+/// The two mechanisms are isolated from each other and from the loop: a
+/// reconcile that panics costs one pass, not the tick and not the daemon.
+/// Overlap is impossible by construction — the sleep happens after both
+/// passes return, exactly as the schedule ticker does it — and across
+/// processes the daemon owner lock already guarantees a single ticker.
+fn orchestration_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
+    loop {
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_stale_active_runs();
+        });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_controller_waits();
+        });
         if shutdown.recv_timeout(interval).is_ok() {
             return;
         }
@@ -3762,6 +3842,65 @@ mod tests {
                 start.elapsed()
             );
         });
+    }
+
+    /// The orchestration tick follows the schedule ticker's conventions:
+    /// env override, unparseable falls back to the default, zero disables.
+    #[test]
+    fn orchestration_tick_interval_defaults_and_can_be_disabled() {
+        assert_eq!(
+            super::parse_orchestration_tick_interval(None),
+            Some(Duration::from_secs(
+                super::ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS
+            ))
+        );
+        assert_eq!(
+            super::parse_orchestration_tick_interval(Some(" 15 ")),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            super::parse_orchestration_tick_interval(Some("0")),
+            None,
+            "zero disables daemon-driven orchestration recovery"
+        );
+        assert_eq!(
+            super::parse_orchestration_tick_interval(Some("nonsense")),
+            Some(Duration::from_secs(
+                super::ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS
+            )),
+            "an unparseable value falls back to the default rather than disabling"
+        );
+    }
+
+    #[test]
+    fn orchestration_tick_loop_exits_promptly_on_shutdown() {
+        crate::test_support::with_isolated_home(|_| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let handle = std::thread::spawn(move || {
+                super::orchestration_tick_loop(Duration::from_secs(300), rx);
+            });
+
+            std::thread::sleep(Duration::from_millis(50));
+            tx.send(()).expect("send shutdown");
+
+            let start = Instant::now();
+            handle.join().expect("ticker thread joins");
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "shutdown must not wait out the poll interval, took {:?}",
+                start.elapsed()
+            );
+        });
+    }
+
+    /// The daemon is long-lived and shared: one mechanism panicking must cost
+    /// one pass, not the tick and not the process.
+    #[test]
+    fn a_panicking_tick_body_is_contained() {
+        let mut ran_after = false;
+        super::isolated_tick(|| panic!("tick body exploded"));
+        super::isolated_tick(|| ran_after = true);
+        assert!(ran_after, "a later pass must still run");
     }
 
     #[test]
