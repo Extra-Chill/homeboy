@@ -414,7 +414,7 @@ fn successful_adoption(payload: &Value) -> bool {
         && adoption.get("terminal_error").is_none_or(Value::is_null)
         && matches!(
             adoption.pointer("/result/status").and_then(Value::as_str),
-            Some("review_ready" | "green_no_finalize")
+            Some("review_ready" | "draft_published" | "green_no_finalize")
         )
 }
 
@@ -427,12 +427,14 @@ fn has_finalized_pr(payload: &Value) -> bool {
     .into_iter()
     .flatten()
     .any(|finalization| {
-        finalization.get("status").and_then(Value::as_str) == Some("review_ready")
-            && finalization
-                .get("pr_url")
-                .or_else(|| finalization.get("pull_request_url"))
-                .and_then(Value::as_str)
-                .is_some_and(|url| !url.trim().is_empty())
+        matches!(
+            finalization.get("status").and_then(Value::as_str),
+            Some("review_ready" | "draft_published")
+        ) && finalization
+            .get("pr_url")
+            .or_else(|| finalization.get("pull_request_url"))
+            .and_then(Value::as_str)
+            .is_some_and(|url| !url.trim().is_empty())
     })
 }
 

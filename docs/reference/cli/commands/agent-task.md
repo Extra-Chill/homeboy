@@ -89,7 +89,7 @@ homeboy agent-task cook [OPTIONS]
 
 Submit an agent task, run its gates, and open a pull request.
 
-Provide the work with one `--prompt` and optional `--goal` framing, point `--to-worktree` at the existing worktree to edit (that checkout is authoritative — the agent's changes, the `--verify` gates, and the PR all operate on it), and give one or more `--verify` commands that must pass in that worktree before promotion. Cook then commits, runs the deterministic gates, and finalizes a `--base`-targeted PR (use `--no-finalize` to stop before opening the PR). Repeatable `--verify` gates all run; the run retries up to `--max-attempts` times. Use `agent-task fanout cook-batch` for independent task waves.
+Provide the work with one `--prompt` and optional `--goal` framing, point `--to-worktree` at the existing worktree to edit (that checkout is authoritative — the agent's changes, the `--verify` gates, and the PR all operate on it), and give one or more `--verify` commands that must pass in that worktree before promotion. Cook then commits, runs the deterministic gates, and finalizes a `--base`-targeted PR (use `--no-finalize` to stop before opening the PR or `--draft-pr` to publish the verified PR as a draft). Repeatable `--verify` gates all run; the run retries up to `--max-attempts` times. Use `agent-task fanout cook-batch` for independent task waves.
 
 WAIT POLICY: Cook always persists a durable run id before materialization, so a returned command is not by itself proof of a completed cook.
 
@@ -146,6 +146,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
 | `--max-attempts` | `<N>` | Maximum Cook attempts before giving up. Each attempt re-runs the agent and gates; a later attempt can recover from a transient failure. Set --max-provider-executions to at least this value and --max-same-provider-retries to at least one less so gate and required review-form remediation remain possible (default 3) |
 | `--no-finalize` | flag | Stop after the work is verified but before opening the pull request, leaving the committed change on the worktree branch for manual review or a later `agent-task review`/finalize |
+| `--draft-pr` | flag | Complete verified commit, push, and PR finalization while creating a draft PR. Retries preserve an existing PR's draft or ready state. After acceptance evidence is attached, use `homeboy git pr ready <component> --number <number>` to mark it ready for review. |
 | `--full` | flag | Return the complete cook report, including nested promotion and gate evidence |
 | `--no-progress` | flag | Suppress intermediate Cook progress lines after the durable run identity. The final result still contains status and evidence commands for orchestration |
 | `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against (default `main`) |

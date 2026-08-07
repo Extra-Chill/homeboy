@@ -428,7 +428,9 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         let success = value
             .get("status")
             .and_then(Value::as_str)
-            .is_some_and(|status| matches!(status, "review_ready" | "validated"));
+            .is_some_and(|status| {
+                matches!(status, "review_ready" | "draft_published" | "validated")
+            });
         return Ok((value, i32::from(!success)));
     }
     let mut run_id = args
@@ -549,13 +551,17 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         manual_finalization: args.manual_finalization,
         expected_candidate_sha: None,
         protected_branches: args.protected_branches,
+        draft_pr: false,
     };
     let report = if args.preflight {
         homeboy::agents::agent_tasks::finalization::preflight_pr(options)?
     } else {
         finalize_pr(options)?
     };
-    let exit_code = if matches!(report.status.as_str(), "review_ready" | "validated") {
+    let exit_code = if matches!(
+        report.status.as_str(),
+        "review_ready" | "draft_published" | "validated"
+    ) {
         0
     } else {
         1

@@ -393,7 +393,10 @@ fn cook_lifecycle_projection(
     };
     let publication = if !reported_success {
         "blocked"
-    } else if matches!(status.as_str(), "review_ready" | "green_no_finalize") {
+    } else if matches!(
+        status.as_str(),
+        "review_ready" | "draft_published" | "green_no_finalize"
+    ) {
         "completed"
     } else if matches!(status.as_str(), "gate_failed" | "finalization_failed") {
         "blocked"
@@ -443,7 +446,7 @@ fn finalization_state(record: &Value) -> String {
         .pointer("/metadata/cook_finalization/status")
         .and_then(Value::as_str)
         .map(|status| match status {
-            "review_ready" => "completed".to_string(),
+            "review_ready" | "draft_published" => "completed".to_string(),
             "failed" | "finalization_failed" => "finalization_failed".to_string(),
             "pending" | "finalization_pending" => "finalization_pending".to_string(),
             other => other.to_string(),

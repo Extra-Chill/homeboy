@@ -1900,6 +1900,7 @@ fn lab_run_retry_keeps_a_retryable_cook_failure_attached_to_its_recipe() {
             gates: Default::default(),
             max_attempts: 2,
             no_finalize: true,
+            draft_pr: false,
             base: "main".to_string(),
             task_base_sha: None,
             head: None,

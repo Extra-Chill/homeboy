@@ -781,6 +781,11 @@ promotes the selected patch into the target worktree, runs deterministic gates,
 retries red gates within the configured budget, then commits, pushes, and opens or
 updates a PR.
 
+Use `--draft-pr` to retain that verified commit/push/PR workflow while creating a
+draft PR. A retry updates an existing PR but preserves its observed draft or ready
+state; after acceptance evidence is attached, use `homeboy git pr ready <component>
+--number <number>` for the explicit ready-for-review transition.
+
 `--goal` is one-line Cook framing metadata, recorded on the durable plan and its
 single provider task. Pair explicit work with `--prompt`; `--goal` never creates
 an additional task. A goal without explicit work supplies the one provider task.
