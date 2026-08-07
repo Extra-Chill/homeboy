@@ -1771,6 +1771,45 @@ impl AgentTaskCookAttemptDispatcher for RouteObservingAttemptDispatcher {
     }
 }
 
+/// Records which children were actually dispatched.
+///
+/// The property under test — that a coordinator does not run a child twice —
+/// is about work *started*, not about what a report says afterwards. A cell can
+/// be shaped correctly for the wrong reason, so this observes the dispatch
+/// boundary directly.
+#[derive(Debug)]
+struct DispatchCountingAttemptDispatcher {
+    dispatched: Arc<Mutex<Vec<String>>>,
+}
+
+impl AgentTaskCookAttemptDispatcher for DispatchCountingAttemptDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(serde_json::json!({ "kind": "test-dispatch-counter" }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        _plan: AgentTaskPlan,
+        run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        self.dispatched
+            .lock()
+            .expect("dispatched children")
+            .push(run_id.to_string());
+        agent_task_lifecycle::record_detached_lab_run(
+            agent_task_lifecycle::DetachedLabRunRecord {
+                run_id,
+                runner_id: "fixture-lab",
+                runner_job_id: "fixture-job",
+                remote_workspace: "/runner/workspace",
+                remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+            },
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct AdmissionFailingAttemptDispatcher {
     message: &'static str,
@@ -4099,6 +4138,286 @@ fn cook_batch_children_inherit_the_callers_notification_route() {
             .status()
             .expect("run process-isolated cook batch route propagation");
     assert!(status.success());
+}
+
+/// Build a batch of children that observe their own dispatch.
+///
+/// Admission is materialized up front exactly as the sibling batch cases do:
+/// the batch owns concurrent dispatch, not concurrent controller admission.
+fn dispatch_counting_batch(
+    cook_ids: &[&str],
+    dispatched: &Arc<Mutex<Vec<String>>>,
+) -> Vec<AgentTaskCookServiceOptions> {
+    let cooks = cook_ids
+        .iter()
+        .map(|cook_id| {
+            batch_cook_options(
+                cook_id,
+                Arc::new(DispatchCountingAttemptDispatcher {
+                    dispatched: Arc::clone(dispatched),
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    for cook in &cooks {
+        agent_task_lifecycle::submit_plan(&cook.initial_plan, Some(&cook.initial_run_id))
+            .expect("submit attempt");
+    }
+    cooks
+}
+
+/// Leave a durable terminal record under a child's Cook id.
+///
+/// `batch_cook_options` deliberately gives a child a different `cook_id` and
+/// `initial_run_id` so ordering bugs stay visible, while real fanout children
+/// carry the same value for both (`cook-<id>`). The durable-terminality check
+/// keys on `cook_id`, so a record has to exist there for these cases to
+/// exercise what production exercises.
+///
+/// Terminality is reached through `cancel_run` rather than a synthesized state
+/// because that is the one established path a durable owner uses to stop a
+/// child, so the fixture and the mechanism under test cannot drift apart.
+fn terminalize_cook_alias(cook: &AgentTaskCookServiceOptions) {
+    agent_task_lifecycle::submit_plan(&cook.initial_plan, Some(&cook.cook_id))
+        .expect("submit cook alias");
+    agent_task_lifecycle::cancel_run(&cook.cook_id, Some("already finished"))
+        .expect("terminalize the cook alias");
+    assert!(
+        agent_task_lifecycle::status(&cook.cook_id)
+            .expect("cook alias is readable")
+            .state
+            .is_terminal(),
+        "the fixture must actually be durably terminal, or it proves nothing"
+    );
+}
+
+#[test]
+fn a_daemon_owned_cook_batch_never_re_runs_a_durably_terminal_child() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let status = context
+            .controller_runtime_command(homeboy_core::test_support::TestBinary::CurrentTest)
+            .args([
+                "--ignored",
+                "--exact",
+                "agent_task_service::cook::tests::a_daemon_owned_cook_batch_never_re_runs_a_durably_terminal_child_process",
+            ])
+            .status()
+            .expect("run process-isolated daemon-owned cook batch");
+    assert!(status.success());
+}
+
+/// The correctness property that matters most. A coordinator recovered by its
+/// durable owner must carry the wave forward, never start a child that already
+/// finished — that would mean a second provider attempt, and for a finalized
+/// child, a second pull request.
+#[test]
+#[ignore = "invoked by a_daemon_owned_cook_batch_never_re_runs_a_durably_terminal_child"]
+fn a_daemon_owned_cook_batch_never_re_runs_a_durably_terminal_child_process() {
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let cooks = dispatch_counting_batch(&["done", "fresh"], &dispatched);
+    terminalize_cook_alias(&cooks[0]);
+
+    let result = run_cook_batch_with_control(
+        AgentTaskCookBatchOptions {
+            batch_id: "fixture-daemon-owned-batch".to_string(),
+            cooks,
+            max_concurrency: 2,
+        },
+        UnusedExecutor,
+        AgentTaskCookBatchControl::daemon_owned(),
+    )
+    .expect("batch completes");
+
+    // The dispatch boundary is the proof: the finished child was never started.
+    let dispatched = dispatched.lock().expect("dispatched children").clone();
+    assert_eq!(dispatched, vec!["fresh-run".to_string()]);
+
+    // The finished child still occupies its slot in the report, with the state
+    // it actually reached, so `total` and per-child ordering are unchanged.
+    assert_eq!(result.value.total, 2);
+    assert_eq!(result.value.cooks[0].cook_id, "done");
+    assert_eq!(result.value.cooks[0].status, "cancelled");
+    assert!(result.value.cooks[0].result.is_none());
+    assert_eq!(result.value.cooks[1].cook_id, "fresh");
+}
+
+#[test]
+fn an_unowned_cook_batch_still_runs_every_child() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let status = context
+        .controller_runtime_command(homeboy_core::test_support::TestBinary::CurrentTest)
+        .args([
+            "--ignored",
+            "--exact",
+            "agent_task_service::cook::tests::an_unowned_cook_batch_still_runs_every_child_process",
+        ])
+        .status()
+        .expect("run process-isolated unowned cook batch");
+    assert!(status.success());
+}
+
+/// The other half of the contract, and the one that protects every existing
+/// caller: without a durable owner the coordinator behaves exactly as it always
+/// has. A coordinator that skipped durably-terminal children unconditionally
+/// would silently change what a re-run of `fanout run-plan` does.
+#[test]
+#[ignore = "invoked by an_unowned_cook_batch_still_runs_every_child"]
+fn an_unowned_cook_batch_still_runs_every_child_process() {
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let cooks = dispatch_counting_batch(&["done", "fresh"], &dispatched);
+    terminalize_cook_alias(&cooks[0]);
+
+    let result = run_cook_batch(
+        AgentTaskCookBatchOptions {
+            batch_id: "fixture-unowned-batch".to_string(),
+            cooks,
+            max_concurrency: 2,
+        },
+        UnusedExecutor,
+    )
+    .expect("batch completes");
+
+    // Asserted on the cell's provenance rather than on the dispatch list,
+    // because what must not change is that the unowned coordinator *ran the
+    // child* — whatever the child then decided. A cell observed from durable
+    // state is the one shape that carries neither a report nor an error, so its
+    // absence is exactly the property.
+    let done = &result.value.cooks[0];
+    assert_eq!(done.cook_id, "done");
+    assert!(
+        done.result.is_some() || done.error.is_some(),
+        "an unowned coordinator answers to nobody, so it must not start skipping \
+         work on durable state it was never told to consult: {done:?}"
+    );
+}
+
+#[test]
+fn cancelling_a_daemon_owned_cook_batch_stops_it_starting_further_children() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let status = context
+            .controller_runtime_command(homeboy_core::test_support::TestBinary::CurrentTest)
+            .args([
+                "--ignored",
+                "--exact",
+                "agent_task_service::cook::tests::cancelling_a_daemon_owned_cook_batch_stops_it_starting_further_children_process",
+            ])
+            .status()
+            .expect("run process-isolated cook batch cancellation");
+    assert!(status.success());
+}
+
+/// Cancellation has to reach children that have no lifecycle record yet.
+///
+/// An unclaimed child has nothing for `cancel_run` to terminalize, so a
+/// coordinator that only read child records would keep starting fresh cooks
+/// after the wave was cancelled — which is why the durable marker exists and
+/// why this asserts on the dispatch boundary rather than on the report.
+#[test]
+#[ignore = "invoked by cancelling_a_daemon_owned_cook_batch_stops_it_starting_further_children"]
+fn cancelling_a_daemon_owned_cook_batch_stops_it_starting_further_children_process() {
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let cooks = dispatch_counting_batch(&["first", "second"], &dispatched);
+    let batch_id = "fixture-cancelled-batch";
+    crate::agent_task_batch::persist_fanout_run_batch(
+        batch_id,
+        batch_id,
+        &cooks
+            .iter()
+            .map(|cook| crate::agent_task_batch::FanoutRunBatchChild {
+                task_id: cook.cook_id.clone(),
+                run_id: cook.initial_run_id.clone(),
+            })
+            .collect::<Vec<_>>(),
+        serde_json::json!({}),
+    )
+    .expect("persist batch record");
+    crate::agent_task_batch::record_coordinator_cancellation(batch_id, "operator cancelled")
+        .expect("record cancellation");
+
+    let result = run_cook_batch_with_control(
+        AgentTaskCookBatchOptions {
+            batch_id: batch_id.to_string(),
+            cooks,
+            max_concurrency: 2,
+        },
+        UnusedExecutor,
+        AgentTaskCookBatchControl::daemon_owned(),
+    )
+    .expect("a cancelled batch still returns a complete report");
+
+    assert!(
+        dispatched.lock().expect("dispatched children").is_empty(),
+        "no provider attempt may start after the wave is cancelled"
+    );
+    assert_eq!(result.value.total, 2);
+    for cell in &result.value.cooks {
+        assert_eq!(cell.status, "cancelled");
+        assert_eq!(cell.exit_code, 1);
+    }
+    assert_eq!(result.value.cancelled, 2);
+}
+
+#[test]
+fn a_daemon_owned_cook_batch_publishes_each_child_as_it_terminalizes() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let status = context
+            .controller_runtime_command(homeboy_core::test_support::TestBinary::CurrentTest)
+            .args([
+                "--ignored",
+                "--exact",
+                "agent_task_service::cook::tests::a_daemon_owned_cook_batch_publishes_each_child_as_it_terminalizes_process",
+            ])
+            .status()
+            .expect("run process-isolated cook batch publication");
+    assert!(status.success());
+}
+
+/// The daemon supervises from durable state, so a child's outcome has to reach
+/// the batch record as it happens rather than only when the whole coordinator
+/// returns — otherwise a wave that died at child nine of ten would checkpoint
+/// as having finished nothing.
+#[test]
+#[ignore = "invoked by a_daemon_owned_cook_batch_publishes_each_child_as_it_terminalizes"]
+fn a_daemon_owned_cook_batch_publishes_each_child_as_it_terminalizes_process() {
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let cooks = dispatch_counting_batch(&["first", "second"], &dispatched);
+    let batch_id = "fixture-published-batch";
+    crate::agent_task_batch::persist_fanout_run_batch(
+        batch_id,
+        batch_id,
+        &cooks
+            .iter()
+            .map(|cook| crate::agent_task_batch::FanoutRunBatchChild {
+                task_id: cook.cook_id.clone(),
+                run_id: cook.initial_run_id.clone(),
+            })
+            .collect::<Vec<_>>(),
+        serde_json::json!({}),
+    )
+    .expect("persist batch record");
+
+    run_cook_batch_with_control(
+        AgentTaskCookBatchOptions {
+            batch_id: batch_id.to_string(),
+            cooks,
+            max_concurrency: 1,
+        },
+        UnusedExecutor,
+        AgentTaskCookBatchControl::daemon_owned(),
+    )
+    .expect("batch completes");
+
+    let record = crate::agent_task_batch::read_batch_record(batch_id).expect("read batch record");
+    let finalizations = record.metadata["child_finalizations"]
+        .as_object()
+        .expect("child finalizations are published");
+    // Keyed the same way `resume_cook_batch` keys them, so a live coordinator
+    // and a resumed one converge on one view rather than two.
+    assert!(finalizations.contains_key("first-run"), "{finalizations:?}");
+    assert!(
+        finalizations.contains_key("second-run"),
+        "{finalizations:?}"
+    );
 }
 
 #[test]

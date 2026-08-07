@@ -1062,13 +1062,84 @@ pub fn compile_cook_attempt_with_readiness_cache(
     Ok(options)
 }
 
+/// Whether a batch coordinator answers to a durable owner outside its process.
+///
+/// # Why every field defaults to off
+///
+/// The coordinator this controls has, until now, been an unconditionally
+/// blocking thread pool: `std::thread::scope` joins before returning, with no
+/// cancellation, no checkpoint, and no way for anything outside the process to
+/// stop it or observe its progress. That is exactly the behaviour every
+/// existing caller depends on, so [`Default`] reproduces it byte for byte and
+/// only a caller that has a durable owner — today, the daemon-owned controller
+/// job — opts in.
+///
+/// Each flag is durable-state-driven rather than a process-local token, because
+/// the owner and the coordinator are in different processes: the daemon owns
+/// the job, and a detached child runs the batch. A shared `AtomicBool` cannot
+/// cross that boundary; the batch record can.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentTaskCookBatchControl {
+    /// Stop starting new children once the durable batch record carries a
+    /// coordinator cancellation.
+    ///
+    /// This bounds the *claim* loop, not a child already in flight. Stopping
+    /// in-flight work stays with `agent_task_lifecycle::cancel_run`, the one
+    /// established cancellation path, which the durable owner drives per child.
+    pub honour_durable_cancellation: bool,
+    /// Report a child whose durable record is already terminal instead of
+    /// running it a second time.
+    ///
+    /// This is the property that lets a coordinator be re-entered after its
+    /// owner recovered it. It is also what makes cancellation drain promptly:
+    /// a cancelled child is terminal, so it is observed rather than started.
+    pub skip_durably_terminal_children: bool,
+    /// Persist each child's terminal outcome into the durable batch record as
+    /// it happens, so an owner outside this process can checkpoint against it
+    /// instead of waiting for the whole batch to return.
+    pub publish_child_terminalization: bool,
+}
+
+impl AgentTaskCookBatchControl {
+    /// The control a coordinator owned by a durable controller job runs under.
+    pub fn daemon_owned() -> Self {
+        Self {
+            honour_durable_cancellation: true,
+            skip_durably_terminal_children: true,
+            publish_child_terminalization: true,
+        }
+    }
+}
+
 /// Runs independently durable cooks with bounded concurrency while preserving
 /// input order for callers that join their own metadata onto the results.
 /// Batch-cook fanout is the first caller; other cook coordinators can migrate
 /// by compiling their own `AgentTaskCookServiceOptions` and using this runner.
+///
+/// This is the unowned coordinator: it runs to completion or dies with its
+/// caller. A caller with a durable owner uses [`run_cook_batch_with_control`].
 pub fn run_cook_batch<E>(
     options: AgentTaskCookBatchOptions,
     executor: E,
+) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone + Send,
+{
+    run_cook_batch_with_control(options, executor, AgentTaskCookBatchControl::default())
+}
+
+/// Run a cook batch under a control that a durable owner can observe and stop.
+///
+/// The concurrency ceiling and the wall-clock budget are the caller's, exactly
+/// as before: this adds a cancellation check and a durable-terminality check to
+/// the claim loop and nothing else. In particular it does not re-derive the
+/// ceiling resolved by `resolve_batch_concurrency`, and it does not introduce a
+/// second deadline — the batch `CookDeadline` is still captured once here and
+/// re-bound onto every worker.
+pub fn run_cook_batch_with_control<E>(
+    options: AgentTaskCookBatchOptions,
+    executor: E,
+    control: AgentTaskCookBatchControl,
 ) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>>
 where
     E: AgentTaskExecutorAdapter + Clone + Send,
@@ -1084,6 +1155,7 @@ where
     }
 
     let workers = options.max_concurrency.max(1).min(total);
+    let batch_id = Arc::new(options.batch_id.clone());
     let cooks = Arc::new(options.cooks);
     let next = Arc::new(Mutex::new(0usize));
     let (tx, rx) = mpsc::channel();
@@ -1097,6 +1169,7 @@ where
     let cook_deadline = capture_cook_deadline();
     std::thread::scope(|scope| {
         for _ in 0..workers {
+            let batch_id = Arc::clone(&batch_id);
             let cooks = Arc::clone(&cooks);
             let next = Arc::clone(&next);
             let tx = tx.clone();
@@ -1115,23 +1188,53 @@ where
                             index
                         };
                         let cook = cooks[index].clone();
-                        let cell = match run_cook(cook.clone(), executor.clone()) {
-                            Ok(result) => AgentTaskCookBatchCellReport {
-                                cook_id: cook.cook_id,
-                                initial_run_id: cook.initial_run_id,
-                                status: result.value.status.clone(),
-                                exit_code: result.exit_code,
-                                result: Some(result.value),
-                                error: None,
-                            },
-                            Err(error) => AgentTaskCookBatchCellReport {
-                                cook_id: cook.cook_id,
-                                initial_run_id: cook.initial_run_id,
-                                status: "failed".to_string(),
-                                exit_code: 1,
-                                result: None,
-                                error: Some(error.to_string()),
-                            },
+                        // Claimed, but not yet started. Everything between here
+                        // and `run_cook` is the coordinator refusing to begin
+                        // work it should not begin: work its owner cancelled, or
+                        // work a previous coordinator already finished.
+                        //
+                        // The claim still happens so the child keeps its slot in
+                        // the report. A cancelled or already-terminal child is
+                        // reported, never silently dropped, so `total` and the
+                        // per-child ordering are the same shape callers already
+                        // join their own metadata onto.
+                        let cell = match claim_disposition(&batch_id, &cook, control) {
+                            ClaimDisposition::Run => {
+                                let cell = match run_cook(cook.clone(), executor.clone()) {
+                                    Ok(result) => AgentTaskCookBatchCellReport {
+                                        cook_id: cook.cook_id.clone(),
+                                        initial_run_id: cook.initial_run_id.clone(),
+                                        status: result.value.status.clone(),
+                                        exit_code: result.exit_code,
+                                        result: Some(result.value),
+                                        error: None,
+                                    },
+                                    Err(error) => AgentTaskCookBatchCellReport {
+                                        cook_id: cook.cook_id.clone(),
+                                        initial_run_id: cook.initial_run_id.clone(),
+                                        status: "failed".to_string(),
+                                        exit_code: 1,
+                                        result: None,
+                                        error: Some(error.to_string()),
+                                    },
+                                };
+                                // Published as each child terminalizes rather
+                                // than once at the end, so a durable owner can
+                                // checkpoint against real progress instead of
+                                // learning everything at once when the
+                                // coordinator returns — or nothing at all if it
+                                // never does.
+                                if control.publish_child_terminalization {
+                                    let _ = crate::agent_task_batch::record_child_finalization(
+                                        &batch_id,
+                                        &cell.initial_run_id,
+                                        child_finalization_value(&cell),
+                                    );
+                                }
+                                cell
+                            }
+                            ClaimDisposition::AlreadyTerminal(cell)
+                            | ClaimDisposition::Cancelled(cell) => cell,
                         };
                         let _ = tx.send((index, cell));
                     })
@@ -1149,6 +1252,92 @@ where
         options.batch_id,
         cells.into_iter().flatten().collect(),
     ))
+}
+
+/// What the coordinator does with a child it has just claimed.
+///
+/// Extracted so the one correctness property that matters can be asserted
+/// directly rather than inferred from a nest of conditions inside a worker
+/// closure: **no variant other than `Run` starts provider work**, and `Run` is
+/// unreachable for a child whose durable record is already terminal.
+#[derive(Debug)]
+enum ClaimDisposition {
+    /// Nothing durable objects. Start the cook.
+    Run,
+    /// A previous coordinator already carried this child to a terminal state.
+    /// Report what it observed; never run it again.
+    AlreadyTerminal(AgentTaskCookBatchCellReport),
+    /// The batch was cancelled before this child was started.
+    Cancelled(AgentTaskCookBatchCellReport),
+}
+
+/// Decide a claimed child's fate from durable state alone.
+///
+/// Order matters. Durable terminality is checked *first*, because a child that
+/// a cancellation already terminalized must be reported with the state it
+/// actually reached — `cancelled`, `succeeded`, whatever it was — rather than
+/// overwritten with a generic cancellation cell that would lose the outcome.
+fn claim_disposition(
+    batch_id: &str,
+    cook: &AgentTaskCookServiceOptions,
+    control: AgentTaskCookBatchControl,
+) -> ClaimDisposition {
+    if control.skip_durably_terminal_children {
+        if let Some(state) = durably_terminal_child_state(&cook.cook_id) {
+            return ClaimDisposition::AlreadyTerminal(observed_child_cell(cook, state));
+        }
+    }
+    if control.honour_durable_cancellation
+        && crate::agent_task_batch::coordinator_is_cancelled(batch_id)
+    {
+        return ClaimDisposition::Cancelled(AgentTaskCookBatchCellReport {
+            cook_id: cook.cook_id.clone(),
+            initial_run_id: cook.initial_run_id.clone(),
+            status: CookStatus::Cancelled.as_str().to_string(),
+            exit_code: 1,
+            result: None,
+            error: Some("batch cancelled before this child was started".to_string()),
+        });
+    }
+    ClaimDisposition::Run
+}
+
+/// The terminal state this child already reached, if it reached one.
+///
+/// A child with no durable record has not started, which is the overwhelmingly
+/// common case on a first run: `persist_initial_recipe` writes a recipe, not a
+/// lifecycle record, so a fresh batch reads `None` here for every child. An
+/// unreadable record is also `None` — the coordinator's job is to run work, and
+/// a transient read failure must not be turned into a silent skip.
+fn durably_terminal_child_state(cook_id: &str) -> Option<agent_task_lifecycle::AgentTaskRunState> {
+    let record = agent_task_lifecycle::status(cook_id).ok()?;
+    record.state.is_terminal().then_some(record.state)
+}
+
+/// Report a child from the durable state a previous coordinator left, without
+/// running it. The exit code follows the same rule the live path uses: only a
+/// successful run is a zero exit.
+fn observed_child_cell(
+    cook: &AgentTaskCookServiceOptions,
+    state: agent_task_lifecycle::AgentTaskRunState,
+) -> AgentTaskCookBatchCellReport {
+    let status = match state {
+        // A terminal, successful durable run is a completed Cook. `Completed`
+        // rather than a synthesized string so `cook_batch_result`'s
+        // `CookStatus::from_status` classification is the same one the live
+        // path produces.
+        agent_task_lifecycle::AgentTaskRunState::Succeeded => CookStatus::Completed,
+        agent_task_lifecycle::AgentTaskRunState::Cancelled => CookStatus::Cancelled,
+        _ => CookStatus::Failed,
+    };
+    AgentTaskCookBatchCellReport {
+        cook_id: cook.cook_id.clone(),
+        initial_run_id: cook.initial_run_id.clone(),
+        status: status.as_str().to_string(),
+        exit_code: i32::from(state != agent_task_lifecycle::AgentTaskRunState::Succeeded),
+        result: None,
+        error: None,
+    }
 }
 
 /// Resume a persisted cook batch after its original synchronous coordinator

@@ -9,6 +9,8 @@ mod cook;
 mod cook_activity;
 mod cook_adoption;
 mod cook_baseline;
+/// Daemon-owned durable lifecycle for a locally-placed detached cook batch.
+mod cook_batch_job;
 mod cook_budget;
 /// Daemon-owned durable lifecycle for a locally-placed detached Cook.
 mod cook_job;
@@ -34,6 +36,7 @@ pub use cook::*;
 pub use cook_activity::{CookActivityProbe, CookProviderActivity};
 pub use cook_adoption::*;
 pub use cook_baseline::*;
+pub use cook_batch_job::*;
 pub use cook_budget::*;
 pub use cook_job::*;
 #[cfg(test)]

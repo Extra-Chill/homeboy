@@ -238,6 +238,10 @@ pub fn register_startup_providers_after_reconcile(
     // owns its record, checkpointing, cancellation and HTTP inspection, while
     // the launcher-spawned child keeps the operator's execution environment.
     crate::agents::agent_task_service::register_cook_job_driver();
+    // A locally-placed detached fanout wave is daemon-owned on the same terms:
+    // the daemon supervises a coordinator it did not spawn, so no branch of its
+    // lifecycle can re-run a child that already completed.
+    crate::agents::agent_task_service::register_cook_batch_job_driver();
     crate::commands::cleanup::register_cleanup_job_driver();
     // The configured acceptance verifier is the one registration that is
     // conditional: `register_acceptance_verifier_from_config` is a no-op when
