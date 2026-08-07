@@ -67,6 +67,18 @@ pub fn route_after_parse_with_provenance(
         return Ok(Some(exit_code));
     }
 
+    // A locally-placed fanout wave asking to detach gets the same verdict, for
+    // the same reason. The flag was advertised on `fanout cook-batch` and
+    // `fanout run-plan` but every gate that acted on it tested for Cook, so a
+    // local wave accepted a flag promising the caller could disconnect and then
+    // blocked that caller for hours. This either serves the request or refuses
+    // it explicitly; it never ignores it.
+    if let Some(exit_code) =
+        local_detach_fanout::intercept_local_detached_fanout(cli, normalized_args, runner_side)?
+    {
+        return Ok(Some(exit_code));
+    }
+
     if runner_side {
         return Ok(None);
     }
@@ -3093,6 +3105,7 @@ fn agent_task_fanout_cook_batch_dispatch_id(
 }
 
 mod local_detach;
+mod local_detach_fanout;
 mod rig_source;
 use rig_source::*;
 fn is_runs_list_runner_option(args: &[String]) -> bool {

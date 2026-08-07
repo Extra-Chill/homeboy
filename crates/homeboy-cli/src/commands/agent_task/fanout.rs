@@ -1140,17 +1140,20 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
     // re-binds this same absolute instant, so the budget covers the batch
     // rather than restarting per child.
     let result = with_current_cook_deadline(plan.cook_deadline(), || {
-        agent_task_service::run_cook_batch(
+        agent_task_service::run_cook_batch_with_control(
             agent_task_service::AgentTaskCookBatchOptions {
                 batch_id: plan.fanout_id.clone(),
                 cooks,
                 max_concurrency: concurrency.limit,
             },
             provider::ExtensionProviderAgentTaskExecutor::discover(),
+            agent_task_service::detached_batch_coordinator_control(&plan.fanout_id),
         )
     })?;
     record_terminal_batch_admission_failures(&plan, &result.value)?;
-    Ok(batch_cook_result(&plan, result, &concurrency))
+    let result = batch_cook_result(&plan, result, &concurrency);
+    notify_batch_wave_complete(&plan.fanout_id, &result.0);
+    Ok(result)
 }
 
 fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
@@ -1175,17 +1178,81 @@ where
     // See the sibling runner: the budget is resolved once and bound for the
     // whole batch so it does not restart per child.
     let result = with_current_cook_deadline(plan.cook_deadline(), || {
-        agent_task_service::run_cook_batch(
+        agent_task_service::run_cook_batch_with_control(
             agent_task_service::AgentTaskCookBatchOptions {
                 batch_id: plan.fanout_id.clone(),
                 cooks,
                 max_concurrency: concurrency.limit,
             },
             executor,
+            agent_task_service::detached_batch_coordinator_control(&plan.fanout_id),
         )
     })?;
     record_terminal_batch_admission_failures(&plan, &result.value)?;
-    Ok(batch_cook_result(&plan, result, &concurrency))
+    let result = batch_cook_result(&plan, result, &concurrency);
+    notify_batch_wave_complete(&plan.fanout_id, &result.0);
+    Ok(result)
+}
+
+/// HOOK — wave-completion notification. Intentionally not implemented here.
+///
+/// # The gap this marks
+///
+/// A batch emits no notification of its own. Each child cook notifies
+/// independently, so a ten-child wave delivers ten unrelated cook messages and
+/// never says "wave done: 7 green, 2 need attention, 1 blocked" — even though
+/// `AgentTaskCookBatchReport` has already computed exactly those totals by the
+/// time this is called. The one message an operator actually wants is the one
+/// that is missing.
+///
+/// # Why it is a hook and not a call
+///
+/// The notification emitter (`agent_task_notify.rs` / `notify.rs`) is owned by
+/// another change in flight. Reaching into it from here would collide. This
+/// marks the exact seam instead.
+///
+/// # What the emitter needs
+///
+/// This is called once per coordinator run, after `record_terminal_batch_admission_failures`
+/// has converged the durable record and after `batch_cook_result` has built the
+/// envelope, so every total is final and durable. It is deliberately
+/// infallible-by-signature: a wave that finished must not be failed by a
+/// notification transport.
+///
+/// The envelope passed here already carries everything an emitter needs, and
+/// carries it in the shape `fanout status` uses:
+///
+/// * `fanout_id: &str` — the durable batch id; `agent-task fanout status <id>`
+///   is the follow-up command the message should name.
+/// * `result["status"]` — the aggregate outcome string
+///   (`succeeded` / `partial_failure` / `failed` / `cancelled` / `timed_out`).
+/// * `result["summary"]` — `{total, queued, running, succeeded, failed,
+///   cancelled, timed_out}`, the "7 green, 2 need attention" numbers.
+/// * `result["concurrency"]` — `{limit, source, reason}`, worth including when
+///   a resource budget lowered the ceiling, since that explains a slow wave.
+/// * `result["cooks"][]` — per child: `cook_id`, `run_id`, `worktree`, `head`,
+///   `exit_code`. A child-level digest should project from these rather than
+///   from `result["cooks"][].result`, which embeds the full cook report and can
+///   quote provider output.
+///
+/// The suggested signature when the emitter lands:
+///
+/// ```ignore
+/// agent_task_notify::notify_fanout_wave_complete(
+///     fanout_id: &str,
+///     summary: &Value,   // result["summary"]
+///     status: &str,      // result["status"]
+/// ) -> Result<()>        // errors logged and dropped here, never propagated
+/// ```
+///
+/// The route is already bound: the coordinator captures the caller's
+/// thread-local `notification_route` and re-binds it onto every worker, and the
+/// detached launcher passes it explicitly through `notification_route::child_env`,
+/// so `notification_route::current()` is correct at this point in both the
+/// attached and the detached coordinator.
+fn notify_batch_wave_complete(_fanout_id: &str, _result: &Value) {
+    // Intentionally empty. See the doc comment above for the required emitter
+    // signature and the payload already available at this call site.
 }
 
 /// Recipes are the durable restart boundary. Persist blocked dependents before

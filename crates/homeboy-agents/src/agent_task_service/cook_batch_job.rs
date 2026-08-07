@@ -60,6 +60,7 @@ use homeboy_core::process::{
 };
 use homeboy_core::Result;
 
+use super::cook::AgentTaskCookBatchControl;
 use crate::agent_task_batch::{self, AgentTaskBatchState};
 use crate::agent_task_lifecycle;
 
@@ -625,6 +626,36 @@ pub fn register_cook_batch_job_driver() {
         ))
         .expect("register cook batch controller job driver");
     });
+}
+
+/// Environment signal the detached launcher sets on the coordinator it spawns.
+///
+/// Its value is the durable batch id the launcher submitted to the daemon. It
+/// is an environment variable rather than a CLI flag for the same reason
+/// `HOMEBOY_RUNNER_HOSTED_EXEC` is: it describes the *execution context* a
+/// coordinator was placed in, not a request an operator made, and it must not
+/// become public command surface that anything else can assert.
+///
+/// It carries the batch id rather than a bare boolean so
+/// [`detached_batch_coordinator_control`] can verify that the coordinator it is
+/// arming is the one the daemon actually owns. An inherited variable from an
+/// unrelated ancestor process therefore arms nothing.
+pub const DETACHED_BATCH_COORDINATOR_ENV: &str = "HOMEBOY_FANOUT_CONTROLLER_JOB_BATCH_ID";
+
+/// The control a batch coordinator should run under in this process.
+///
+/// Returns the daemon-owned control only when this process was spawned by the
+/// detached launcher *for this batch*. Everything else — an attached
+/// `fanout run-plan`, a Lab-placed wave, a coordinator running under a runner —
+/// gets [`AgentTaskCookBatchControl::default`], which is today's behaviour
+/// exactly. There is no durable owner in those cases, so a coordinator that
+/// honoured cancellation or skipped durably-terminal children would be
+/// answering to nobody.
+pub fn detached_batch_coordinator_control(batch_id: &str) -> AgentTaskCookBatchControl {
+    match std::env::var(DETACHED_BATCH_COORDINATOR_ENV) {
+        Ok(owned) if owned == batch_id => AgentTaskCookBatchControl::daemon_owned(),
+        _ => AgentTaskCookBatchControl::default(),
+    }
 }
 
 /// Build the durable submit payload for one detached cook batch.
