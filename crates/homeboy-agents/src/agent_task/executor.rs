@@ -146,6 +146,7 @@ mod tests {
 
         assert_eq!(executor.config["workspace"]["root"], "/candidate");
         assert_eq!(executor.config["workspace_root"], "/candidate");
+        assert!(executor.config.get("workspace_permission_root").is_none());
         assert_eq!(executor.config["unrelated_root"], "/original");
     }
 

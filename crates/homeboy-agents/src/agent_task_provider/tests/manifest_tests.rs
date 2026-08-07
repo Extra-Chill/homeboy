@@ -238,7 +238,7 @@ fn provider_readiness_invocation_receives_effective_config_and_fails_closed() {
 }
 
 #[test]
-fn opencode_provider_boundary_uses_task_workspace_for_cwd_and_config() {
+fn workspace_permission_root_capability_serializes_the_exact_task_workspace() {
     let temp = tempfile::tempdir().expect("tempdir");
     let original = temp.path().join("promotion-target");
     let candidate = temp.path().join("attempt-candidate");
@@ -251,10 +251,11 @@ process.stdin.on('data', (chunk) => input += chunk);
 process.stdin.on('end', () => {
   const request = JSON.parse(input);
   fs.writeFileSync('provider-observation.json', JSON.stringify({
-    cwd: process.cwd(),
-    workspace: request.workspace.root,
-    config_workspace: request.executor.config.workspace.root,
-    config_workspace_root: request.executor.config.workspace_root
+     cwd: process.cwd(),
+     workspace: request.workspace.root,
+     config_workspace: request.executor.config.workspace.root,
+     config_workspace_root: request.executor.config.workspace_root,
+     workspace_permission_root: request.executor.config.workspace_permission_root
   }));
   process.stderr.write('permission denied');
 });"#,
@@ -262,6 +263,9 @@ process.stdin.on('end', () => {
     let (mut request, mut provider) = request("opencode-boundary", format!("node {script}"));
     provider.id = "opencode.agent-task-executor".to_string();
     provider.backend = "opencode".to_string();
+    provider
+        .capabilities
+        .push(AGENT_TASK_PROVIDER_CAPABILITY_WORKSPACE_PERMISSION_ROOT_V1.to_string());
     request.executor.backend = "opencode".to_string();
     request.workspace.root = Some(candidate.display().to_string());
     request.executor.config = json!({
@@ -269,7 +273,18 @@ process.stdin.on('end', () => {
         "workspace_root": candidate.display().to_string(),
     });
 
-    let outcome = run_provider_command_once(&request, &provider);
+    let outcome = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
+        request,
+        AgentTaskExecutionContext {
+            plan_id: "cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874"
+                .to_string(),
+            run_id: Some(
+                "cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874".to_string(),
+            ),
+            attempt: 1,
+            cancellation: Default::default(),
+        },
+    );
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
     assert_eq!(
         outcome.diagnostics[0].class, "agent_task.provider_empty_stdout",
@@ -302,6 +317,11 @@ process.stdin.on('end', () => {
     assert_eq!(
         observation["config_workspace_root"],
         candidate.display().to_string()
+    );
+    assert_eq!(
+        observation["workspace_permission_root"],
+        candidate.display().to_string(),
+        "the versioned provider capability receives the scheduler-selected workspace without run-ID path reconstruction"
     );
     assert!(!original.join("provider-observation.json").exists());
 }
