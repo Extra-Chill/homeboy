@@ -338,6 +338,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
             since_cursor: None,
             full: true,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("cook status resolves through its public alias");
         assert_eq!(status_exit, 0);
@@ -368,6 +369,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
                 since_cursor: None,
                 full: true,
                 no_runner_probe: false,
+                strict_subject_exit: false,
             })
             .expect("resumed Cook status")
             .0["metadata"]["worktree_provision"]["action"],
@@ -413,6 +415,7 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
             since_cursor: None,
             full: true,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("controller status resolves");
         let (logs_value, logs_exit) = logs(LogsArgs {
@@ -662,6 +665,7 @@ fn submit_run_status_reports_terminal_state() {
             since_cursor: None,
             full: true,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("status loaded");
         let (bridge_status_json, bridge_status_exit_code) = status(StatusArgs {
@@ -671,6 +675,7 @@ fn submit_run_status_reports_terminal_state() {
             since_cursor: Some(0),
             full: false,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("bridge status loaded");
         let record: AgentTaskRunRecord = serde_json::from_value(status_json).expect("record");
@@ -703,6 +708,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
             since_cursor: None,
             full: false,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("status loaded");
         let (logs_value, _) = logs(LogsArgs {
@@ -858,6 +864,7 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
             since_cursor: None,
             full: true,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("status loaded");
         assert_eq!(status_exit_code, 0);
@@ -969,6 +976,7 @@ fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit()
             since_cursor: None,
             full: true,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("status loaded");
 
@@ -1063,6 +1071,7 @@ fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
             since_cursor: None,
             full: true,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("status loaded");
         assert_eq!(
@@ -1534,6 +1543,7 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
             since_cursor: None,
             full: true,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("status loaded");
         assert_eq!(status_exit_code, 0);
@@ -2018,6 +2028,7 @@ fn terminal_provider_failure_with_large_promotion_evidence_keeps_inspection_boun
             exact: false,
             full: true,
             no_runner_probe: false,
+            strict_subject_exit: false,
             bridge: false,
             since_cursor: None,
         })
@@ -2430,6 +2441,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             since_cursor: Some(1),
             full: false,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("bridge resume reconciles terminal projection");
 
@@ -2462,6 +2474,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             since_cursor: Some(1),
             full: false,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("bridge reconciliation is idempotent");
         assert_eq!(
@@ -2502,6 +2515,7 @@ fn non_bridge_resume_keeps_aggregate_output_shape() {
             since_cursor: None,
             full: false,
             no_runner_probe: false,
+            strict_subject_exit: false,
         })
         .expect("ordinary resume returns terminal aggregate");
 

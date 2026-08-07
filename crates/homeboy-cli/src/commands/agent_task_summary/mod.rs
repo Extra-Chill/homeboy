@@ -121,8 +121,8 @@ fn render_status_summary(payload: &Value) -> Option<String> {
 
     let mut lines = vec![
         "Agent task status".to_string(),
+        format!("Subject state: {state}"),
         format!("Run: {run_id}"),
-        format!("Status: {state}"),
         format!("Tasks planned: {tasks_planned}"),
         format!("Tasks attempted: {tasks_attempted}"),
     ];
@@ -1319,22 +1319,32 @@ mod tests {
     }
 
     #[test]
-    fn status_summary_points_queued_runs_at_run_command() {
-        let payload = json!({
-            "run_id": "homeboy-4345",
-            "state": "queued",
-            "tasks": [{ "task_id": "homeboy-4345" }],
-            "artifact_refs": []
-        });
+    fn status_summary_labels_the_subject_lifecycle_state() {
+        for state in ["queued", "running", "failed", "succeeded"] {
+            let payload = json!({
+                "run_id": "homeboy-4345",
+                "state": state,
+                "tasks": [{ "task_id": "homeboy-4345" }],
+                "artifact_refs": []
+            });
 
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+            let summary =
+                render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
 
-        assert!(summary.starts_with("Agent task status\nRun: homeboy-4345\nStatus: queued"));
-        assert!(summary.contains("Tasks planned: 1\n"));
-        assert!(summary.contains("Tasks attempted: 0\n"));
-        assert!(summary.contains("Patch candidates: 0 non-empty / 0 empty\n"));
-        assert!(summary.contains("Artifacts: 0\n"));
-        assert!(summary.contains("Next: homeboy agent-task run homeboy-4345\n"));
+            assert!(
+                summary.starts_with(&format!(
+                    "Agent task status\nSubject state: {state}\nRun: homeboy-4345"
+                )),
+                "{summary}"
+            );
+            assert!(summary.contains("Tasks planned: 1\n"));
+            assert!(summary.contains("Tasks attempted: 0\n"));
+            assert!(summary.contains("Patch candidates: 0 non-empty / 0 empty\n"));
+            assert!(summary.contains("Artifacts: 0\n"));
+            if state == "queued" {
+                assert!(summary.contains("Next: homeboy agent-task run homeboy-4345\n"));
+            }
+        }
     }
 
     #[test]

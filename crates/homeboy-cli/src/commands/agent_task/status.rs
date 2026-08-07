@@ -24,8 +24,8 @@ use homeboy::runner::runners::{self as runner, RunnerKind};
 
 use super::super::CmdResult;
 use super::args::{
-    CancelArgs, DiagnoseArgs, EvidenceArgs, LogsArgs, ReplayProviderBoundaryArgs,
-    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
+    CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, LogsArgs,
+    ReplayProviderBoundaryArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
 use super::candidate::{canonical_candidate_projection, classify_candidates, CandidateState};
 use crate::commands::utils::response::{
@@ -197,7 +197,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, run_id);
         preserve_controller_owner_placement(&mut value, run_id);
-        let exit_code = status_exit_code(&value);
+        let exit_code = subject_exit_code(&value, args.strict_subject_exit);
         return Ok((value, exit_code));
     }
     let summary = compact_status_summary(&value, run_id);
@@ -209,7 +209,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     attach_runner_probe(&mut summary, &runner_probe);
     attach_agent_task_status_actionable(&mut summary, run_id);
     preserve_controller_owner_placement(&mut summary, run_id);
-    let exit_code = status_exit_code(&summary);
+    let exit_code = subject_exit_code(&summary, args.strict_subject_exit);
     Ok((summary, exit_code))
 }
 
@@ -478,7 +478,10 @@ fn cook_requires_action(value: &Value) -> bool {
         && value.pointer("/cook/publication").and_then(Value::as_str) != Some("completed")
 }
 
-fn status_exit_code(value: &Value) -> i32 {
+fn subject_exit_code(value: &Value, strict_subject_exit: bool) -> i32 {
+    if !strict_subject_exit {
+        return 0;
+    }
     if cook_requires_action(value) {
         1
     } else {
@@ -1118,7 +1121,7 @@ pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
     Ok((value, 0))
 }
 
-pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
+pub(super) fn artifacts(args: LifecycleReadArgs) -> CmdResult<Value> {
     let artifacts = agent_task_service::artifacts(&args.run_id)?;
     let mut value = serde_json::to_value(artifacts).unwrap_or(Value::Null);
     if !args.full {
@@ -4509,6 +4512,14 @@ mod tests {
     }
 
     #[test]
+    fn successful_status_reads_only_use_subject_exit_in_compatibility_mode() {
+        let actionable = json!({ "cook": { "phase": "terminal", "publication": "blocked" } });
+
+        assert_eq!(subject_exit_code(&actionable, false), 0);
+        assert_eq!(subject_exit_code(&actionable, true), 1);
+    }
+
+    #[test]
     fn discovery_actionable_metadata_is_bounded_and_continues_active_pages() {
         let mut report = json!({
             "limit": 20,
@@ -4964,7 +4975,7 @@ mod tests {
             "homeboy agent-task review agent-task-durable-patch"
         );
         assert_eq!(full["liveness"], compact["liveness"]);
-        assert!(full_rendered.contains("Status: succeeded"));
+        assert!(full_rendered.contains("Subject state: succeeded"));
         assert!(full_rendered.contains("Patch candidates: 1 non-empty / 0 empty"));
         assert!(full_rendered.contains("Changed files: 7"));
         assert!(!full_rendered.contains("no_patch_produced"));
@@ -4999,8 +5010,8 @@ mod tests {
         );
         assert_eq!(status["execution_states"]["gate"]["state"], "failed");
         assert_eq!(status["cook"]["publication"], "blocked");
-        assert_eq!(status_exit_code(&status), 1);
-        assert!(rendered.contains("Status: gate_failed"));
+        assert_eq!(subject_exit_code(&status, true), 1);
+        assert!(rendered.contains("Subject state: gate_failed"));
         assert!(rendered.contains("Candidate state: promoted_gate_failed"));
         assert!(rendered.contains("Cook: gate_failed (publication blocked)"));
         assert!(rendered.contains("Next: homeboy agent-task diagnose cook-attempt-1 --full"));
@@ -5039,7 +5050,7 @@ mod tests {
             status["execution_states"]["finalization"]["state"],
             "finalization_failed"
         );
-        assert_eq!(status_exit_code(&status), 1);
+        assert_eq!(subject_exit_code(&status, true), 1);
         assert!(
             status[ACTIONABLE_METADATA_KEY]["next_actions"]
                 .as_array()
@@ -5069,7 +5080,7 @@ mod tests {
             "succeeded"
         );
         assert_eq!(status["execution_states"]["gate"]["state"], "failed");
-        assert_eq!(status_exit_code(&status), 1);
+        assert_eq!(subject_exit_code(&status, true), 1);
         assert!(
             status[ACTIONABLE_METADATA_KEY]["next_actions"]
                 .as_array()
@@ -5100,7 +5111,7 @@ mod tests {
         assert_eq!(status["state"], "future_success_status");
         assert_eq!(status["child_run_state"], "succeeded");
         assert_eq!(status["cook"]["publication"], "pending");
-        assert_eq!(status_exit_code(&status), 1);
+        assert_eq!(subject_exit_code(&status, true), 1);
     }
 
     #[test]
@@ -5140,7 +5151,7 @@ mod tests {
                 status["cook"]["publication"], "completed",
                 "{terminal_status}"
             );
-            assert_eq!(status_exit_code(&status), 0, "{terminal_status}");
+            assert_eq!(subject_exit_code(&status, true), 0, "{terminal_status}");
             assert!(rendered.contains("Next: homeboy agent-task review cook-attempt-1"));
             assert!(status[ACTIONABLE_METADATA_KEY]["next_actions"]
                 .as_array()
@@ -5283,7 +5294,7 @@ mod tests {
             );
             assert_eq!(status["cook"]["publication"], publication, "{name}");
             assert_eq!(
-                status_exit_code(&status),
+                subject_exit_code(&status, true),
                 if publication == "completed" { 0 } else { 1 },
                 "{name}"
             );

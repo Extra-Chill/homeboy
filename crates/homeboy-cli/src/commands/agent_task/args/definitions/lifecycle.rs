@@ -30,7 +30,7 @@ pub struct SubmitArgs {
     pub run_id: Option<String>,
 }
 #[derive(Args, Debug)]
-pub struct StatusArgs {
+pub struct LifecycleReadArgs {
     pub run_id: String,
     /// Inspect this exact lifecycle record instead of resolving a Cook ID to its
     /// current attempt.
@@ -50,6 +50,41 @@ pub struct StatusArgs {
     /// with `runner_probe.skipped_reason` instead of blocking on the runner.
     #[arg(long = "no-runner-probe", conflicts_with = "bridge")]
     pub no_runner_probe: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct StatusArgs {
+    pub run_id: String,
+    #[arg(long, conflicts_with = "bridge")]
+    pub exact: bool,
+    #[arg(long)]
+    pub bridge: bool,
+    #[arg(long, value_name = "CURSOR", requires = "bridge")]
+    pub since_cursor: Option<u64>,
+    #[arg(long, conflicts_with = "bridge")]
+    pub full: bool,
+    /// Exit nonzero when the inspected Cook needs follow-up action.
+    ///
+    /// Normal status reads report their own success independently from the
+    /// subject lifecycle state. This preserves the former exit-code behavior
+    /// for scripts that deliberately gate on an actionable Cook.
+    #[arg(long, conflicts_with = "bridge")]
+    pub strict_subject_exit: bool,
+    #[arg(long = "no-runner-probe", conflicts_with = "bridge")]
+    pub no_runner_probe: bool,
+}
+
+impl From<StatusArgs> for LifecycleReadArgs {
+    fn from(args: StatusArgs) -> Self {
+        Self {
+            run_id: args.run_id,
+            exact: args.exact,
+            bridge: args.bridge,
+            since_cursor: args.since_cursor,
+            full: args.full,
+            no_runner_probe: args.no_runner_probe,
+        }
+    }
 }
 #[derive(Args, Debug)]
 pub struct LogsArgs {
@@ -193,6 +228,39 @@ mod tests {
             "--bridge",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn strict_subject_exit_is_status_only() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "status",
+            "run-a",
+            "--strict-subject-exit",
+        ])
+        .expect("status compatibility flag parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::Status(args) = agent_task.command else {
+            panic!("expected status command");
+        };
+        assert!(args.strict_subject_exit);
+
+        for command in ["artifacts", "resume"] {
+            assert!(
+                Cli::try_parse_from([
+                    "homeboy",
+                    "agent-task",
+                    command,
+                    "run-a",
+                    "--strict-subject-exit",
+                ])
+                .is_err(),
+                "{command} must reject the status-only compatibility flag"
+            );
+        }
     }
 
     #[test]

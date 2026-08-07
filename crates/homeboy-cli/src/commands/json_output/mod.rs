@@ -370,6 +370,7 @@ mod tests {
                 since_cursor: None,
                 full: false,
                 no_runner_probe: false,
+                strict_subject_exit: false,
             }),
         };
 

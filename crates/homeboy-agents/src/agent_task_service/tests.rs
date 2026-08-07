@@ -433,6 +433,27 @@ fn local_reservation_advances_heartbeat_to_execution_start() {
 }
 
 #[test]
+fn local_provider_execution_observes_its_durable_running_boundary() {
+    with_isolated_home(|_| {
+        let observed = Arc::new(Mutex::new(None));
+        run_loaded_plan(
+            test_plan(),
+            Some("local-provider-boundary"),
+            LocalBoundaryExecutor {
+                run_id: "local-provider-boundary".to_string(),
+                observed: Arc::clone(&observed),
+            },
+        )
+        .expect("local provider run completes");
+
+        assert_eq!(
+            observed.lock().expect("provider boundary").as_ref(),
+            Some(&Value::String("running".to_string()))
+        );
+    });
+}
+
+#[test]
 fn concurrent_schedulers_dispatch_one_reserved_provider_execution() {
     with_isolated_home(|_| {
         let plan = test_plan();
@@ -1642,6 +1663,24 @@ impl AgentTaskExecutorAdapter for SucceedingExecutor {
             follow_up: None,
             metadata: Value::Null,
         }
+    }
+}
+
+struct LocalBoundaryExecutor {
+    run_id: String,
+    observed: Arc<Mutex<Option<Value>>>,
+}
+
+impl AgentTaskExecutorAdapter for LocalBoundaryExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        let record = lifecycle_status(&self.run_id).expect("local provider record");
+        *self.observed.lock().expect("provider boundary") =
+            Some(record.metadata["provider_executions"][0]["state"].clone());
+        SucceedingExecutor.execute(request, context)
     }
 }
 
