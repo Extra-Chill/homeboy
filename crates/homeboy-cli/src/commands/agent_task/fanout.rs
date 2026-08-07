@@ -1206,12 +1206,16 @@ fn compile_batch_cooks(
     configure: impl Fn(&mut AgentTaskCookServiceOptions),
 ) -> Result<Vec<AgentTaskCookServiceOptions>> {
     let harvest_context = batch_harvest_context()?;
+    let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
     plan.cooks
         .iter()
         .map(|cook| {
             let invocation = cook.to_cook_invocation(plan)?;
-            let mut options =
-                agent_task_service::compile_cook_attempt(invocation.options, invocation.dispatch)?;
+            let mut options = agent_task_service::compile_cook_attempt_with_readiness_cache(
+                invocation.options,
+                invocation.dispatch,
+                &mut readiness_cache,
+            )?;
             options.harvest_context = harvest_context.clone();
             configure(&mut options);
             Ok(options)
@@ -1520,13 +1524,17 @@ fn preflight_batch_cook_recipes(
     // Planning and dry-run callers may only have a managed worktree handle.
     // Validate immutable recipe inputs without resolving that handle as a live
     // workspace; execution validates the materialized workspace separately.
+    let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
     for cook in &plan.cooks {
         let invocation = cook.to_cook_invocation(plan)?;
         // Preflight must construct the same initial plan that Cook persists.
         // Comparing the uncompiled invocation made existing recipes appear to
         // drift whenever their workspace-derived plan had already been stored.
-        let mut options =
-            agent_task_service::compile_cook_attempt(invocation.options, invocation.dispatch)?;
+        let mut options = agent_task_service::compile_cook_attempt_with_readiness_cache(
+            invocation.options,
+            invocation.dispatch,
+            &mut readiness_cache,
+        )?;
         options.harvest_context = batch_harvest_context()?;
         if let Some(dispatcher) = attempt_dispatcher {
             options.attempt_dispatcher = Some(dispatcher(&options));
