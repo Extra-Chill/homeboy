@@ -135,6 +135,7 @@ PHPSTAN_DEFAULT_CONFIG="${EXTENSION_PATH}/phpstan.neon.dist"
 PHPSTAN_COMPONENT_CONFIG=""
 PHPSTAN_COMPONENT_CONFIG_SOURCE="extension-default"
 PHPSTAN_COMPONENT_CONFIG_HAS_RULESET=0
+PHPSTAN_COMPONENT_CONFIG_INCLUDES_BASELINE=0
 PHPSTAN_BASE_CONFIG="$PHPSTAN_DEFAULT_CONFIG"
 PHPSTAN_LEVEL_SOURCE="extension-default"
 COMPONENT_BASELINE="${PLUGIN_PATH}/phpstan-baseline.neon"
@@ -256,7 +257,16 @@ if [ -n "$PHPSTAN_COMPONENT_CONFIG" ]; then
     if grep -Eq '^[[:space:]]*(level|customRulesetUsed):' "$PHPSTAN_COMPONENT_CONFIG"; then
         PHPSTAN_COMPONENT_CONFIG_HAS_RULESET=1
     fi
+    if grep -Eq '^[[:space:]]*-[[:space:]]+\.?/?phpstan-baseline\.neon([[:space:]]*(#.*)?)?$' "$PHPSTAN_COMPONENT_CONFIG"; then
+        PHPSTAN_COMPONENT_CONFIG_INCLUDES_BASELINE=1
+    fi
 fi
+
+homeboy_run_phpstan() {
+    # PHPStan resolves project-relative configuration and %currentWorkingDirectory%
+    # from its process CWD, not from the generated config file in TMPDIR.
+    (cd "$PLUGIN_PATH" && "$PHPSTAN_BIN" "$@")
+}
 
 generate_dependency_config() {
     local tmpfile
@@ -286,7 +296,7 @@ generate_dependency_config() {
         # do this here (rather than via --baseline) so every invocation path
         # (summary, full, retry) picks it up automatically through the single
         # config include chain.
-        if [ -f "$COMPONENT_BASELINE" ]; then
+        if [ -f "$COMPONENT_BASELINE" ] && [ "$PHPSTAN_COMPONENT_CONFIG_INCLUDES_BASELINE" -ne 1 ]; then
             printf '    - %s\n' "$COMPONENT_BASELINE"
             has_baseline=1
         fi
@@ -1011,7 +1021,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     set +e
     # Capture stderr separately to show PHPStan errors if it fails
     stderr_file=$(homeboy_mktemp 'phpstan-stderr.XXXXXX')
-    json_output=$("$PHPSTAN_BIN" "${phpstan_args[@]}" --error-format=json 2>"$stderr_file")
+    json_output=$(homeboy_run_phpstan "${phpstan_args[@]}" --error-format=json 2>"$stderr_file")
     json_exit=$?
     stderr_output=$(cat "$stderr_file")
     rm -f "$stderr_file"
@@ -1328,7 +1338,7 @@ if [ "$PHPSTAN_CRITICAL_ONLY" -eq 1 ]; then
     echo "Running PHPStan critical-only check (style checks skipped)..."
     set +e
     stderr_file=$(homeboy_mktemp 'phpstan-stderr.XXXXXX')
-    json_output=$("$PHPSTAN_BIN" "${phpstan_args[@]}" --error-format=json 2>"$stderr_file")
+    json_output=$(homeboy_run_phpstan "${phpstan_args[@]}" --error-format=json 2>"$stderr_file")
     full_exit=$?
     stderr_output=$(cat "$stderr_file")
     rm -f "$stderr_file"
@@ -1401,7 +1411,7 @@ set +e
 # avoids race conditions with `tee` in process substitution.
 stdout_file=$(homeboy_mktemp 'phpstan-stdout.XXXXXX')
 stderr_file=$(homeboy_mktemp 'phpstan-stderr.XXXXXX')
-"$PHPSTAN_BIN" "${phpstan_args[@]}" >"$stdout_file" 2>"$stderr_file"
+homeboy_run_phpstan "${phpstan_args[@]}" >"$stdout_file" 2>"$stderr_file"
 full_exit=$?
 stdout_output=$(cat "$stdout_file")
 stderr_output=$(cat "$stderr_file")

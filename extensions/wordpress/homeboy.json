@@ -75,6 +75,7 @@
       "node tests/helper-manifest-smoke.js",
       "bash tests/phpcs-ignore-fixer-multiline-sql-smoke.sh",
       "bash tests/phpstan-integrity-guard-smoke.sh",
+      "bash tests/phpstan-relative-include-path-smoke.sh",
       "bash tests/phpstan-relative-dependency-path-smoke.sh",
       "bash tests/release-scripts-smoke.sh",
       "bash tests/validation-dependencies-smoke.sh",
