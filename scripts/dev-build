@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+cargo build --bin homeboy
+
+target_dir="${CARGO_TARGET_DIR:-$root/target}"
+if [[ "$target_dir" != /* ]]; then
+    target_dir="$root/$target_dir"
+fi
+binary="$target_dir/debug/homeboy"
+expected_commit="$(git rev-parse --short=12 HEAD)"
+
+if [[ ! -x "$binary" ]]; then
+    printf 'expected development binary was not produced: %s\n' "$binary" >&2
+    exit 1
+fi
+
+actual_commit="$($binary self identity | jq -r '.data.git_commit // empty')"
+if [[ "$actual_commit" != "$expected_commit" ]]; then
+    printf 'development binary identity mismatch: expected %s, got %s\n' \
+        "$expected_commit" "${actual_commit:-missing}" >&2
+    exit 1
+fi
+
+printf 'built %s at %s\n' "$binary" "$expected_commit"

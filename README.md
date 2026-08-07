@@ -61,6 +61,17 @@ git clone https://github.com/Extra-Chill/homeboy.git
 cd homeboy && cargo install --path .
 ```
 
+## Development Build
+
+```bash
+./scripts/dev-build
+```
+
+This builds the root package's runnable `homeboy` binary and verifies that its
+embedded commit matches `HEAD`. It respects `CARGO_TARGET_DIR`, including from
+linked worktrees. `homeboy-cli` is the command-layer library; `cargo build -p
+homeboy-cli` does not produce `target/debug/homeboy`.
+
 ## Documentation
 
 Documentation is checked into this repo and embedded in the binary:
