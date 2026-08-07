@@ -642,6 +642,16 @@ mod tests {
             "v0.2.0",
         );
         assert_eq!(tag, "v0.2.0");
+
+        // Strict release path resolution rejects a missing override, and this
+        // fallback keeps deployment compatible with releases lacking a scoped
+        // component configuration.
+        let tag = super::scoped_release_tag(
+            "definitely-no-such-component-9888",
+            temp.path().join("missing").to_str().unwrap(),
+            "0.2.0",
+        );
+        assert_eq!(tag, "v0.2.0");
     }
 
     /// A monorepo component's release tag is namespaced (`<id>-v<version>`).
