@@ -749,6 +749,8 @@ pub struct AgentTaskCookServiceOptions {
     pub gates: VerifyGateOptions,
     pub max_attempts: u32,
     pub no_finalize: bool,
+    /// Publish a newly created PR as a draft while retaining normal finalization.
+    pub draft_pr: bool,
     pub base: String,
     pub task_base_sha: Option<String>,
     pub head: Option<String>,
@@ -1413,7 +1415,7 @@ fn cook_report_exit_code(report: &AgentTaskCookReport) -> i32 {
                 .as_ref()
                 .and_then(|value| value.get("status"))
                 .and_then(Value::as_str)
-                == Some("review_ready")
+                .is_some_and(|status| matches!(status, "review_ready" | "draft_published"))
             {
                 0
             } else {
@@ -3117,7 +3119,11 @@ where
                 .as_str()
                 .unwrap_or("unknown")
                 .to_string();
-            let exit_code = if status == "review_ready" { 0 } else { 1 };
+            let exit_code = if matches!(status.as_str(), "review_ready" | "draft_published") {
+                0
+            } else {
+                1
+            };
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
@@ -3435,7 +3441,12 @@ where
                     .as_str()
                     .unwrap_or("unknown")
                     .to_string();
-                let exit_code = if final_status == "review_ready" { 0 } else { 1 };
+                let exit_code =
+                    if matches!(final_status.as_str(), "review_ready" | "draft_published") {
+                        0
+                    } else {
+                        1
+                    };
                 let stop_reason = (final_status == "no_changes").then(|| {
                     "cook completed provider execution and gates, but finalization found no changed files; task likely still requires review or retry".to_string()
                 });
@@ -3476,7 +3487,14 @@ where
                             "finalized under explicit accepted inherited baseline-red gate policy"
                                 .to_string(),
                         ),
-                        exit_code: if final_status == "review_ready" { 0 } else { 1 },
+                        exit_code: if matches!(
+                            final_status.as_str(),
+                            "review_ready" | "draft_published"
+                        ) {
+                            0
+                        } else {
+                            1
+                        },
                         invocation_latest_run_id: Some(&run_id),
                     }));
                 }

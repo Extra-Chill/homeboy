@@ -104,7 +104,19 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         });
     }
 
-    let termination = terminate_exact_supervised_daemon(&path, &identity, &state)?;
+    let termination = match terminate_exact_supervised_daemon(&path, &identity, &state)? {
+        SupervisedDaemonTerminationOutcome::Stopped(termination) => termination,
+        SupervisedDaemonTerminationOutcome::AlreadyAbsent => {
+            remove_lease_if_identity_matches(&path, &identity)?;
+            return Ok(DaemonStopResult {
+                stopped: false,
+                already_absent: true,
+                pid: Some(state.pid),
+                state_path: state_path_display,
+                termination_evidence: None,
+            });
+        }
+    };
     let evidence = DaemonTerminationEvidence {
         classification: DaemonTerminationClassification::CleanStop,
         observed_at: chrono::Utc::now().to_rfc3339(),
@@ -142,6 +154,18 @@ struct SupervisedDaemonTermination {
     supervisor_signal: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisedDaemonTerminationOutcome {
+    Stopped(SupervisedDaemonTermination),
+    AlreadyAbsent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExactTerminationTarget {
+    Owned,
+    Absent,
+}
+
 impl SupervisedDaemonTermination {
     fn os_evidence(self, child_pid: u32) -> String {
         let child_signal = signal_name(self.child_signal);
@@ -168,14 +192,26 @@ fn terminate_exact_supervised_daemon(
     path: &std::path::Path,
     identity: &DaemonLeaseIdentity,
     state: &DaemonState,
-) -> Result<SupervisedDaemonTermination> {
+) -> Result<SupervisedDaemonTerminationOutcome> {
     let supervisor = supervised_parent_pid(state.pid, &state.startup_token)?;
-    revalidate_exact_termination_target(path, identity, state)?;
+    if revalidate_exact_termination_target(path, identity, state)? == ExactTerminationTarget::Absent
+    {
+        return Ok(SupervisedDaemonTerminationOutcome::AlreadyAbsent);
+    }
     signal_pid(state.pid, SIGNAL_TERMINATE)?;
     let child_signal = if wait_for_pid_exit(state.pid, TERM_GRACE) {
         Some(SIGNAL_TERMINATE)
     } else {
-        revalidate_exact_termination_target(path, identity, state)?;
+        if revalidate_exact_termination_target(path, identity, state)?
+            == ExactTerminationTarget::Absent
+        {
+            return Ok(SupervisedDaemonTerminationOutcome::Stopped(
+                SupervisedDaemonTermination {
+                    child_signal: Some(SIGNAL_TERMINATE),
+                    supervisor_signal: None,
+                },
+            ));
+        }
         signal_pid(state.pid, SIGNAL_KILL)?;
         if !wait_for_pid_exit(state.pid, KILL_GRACE) {
             return Err(Error::internal_unexpected(format!(
@@ -192,12 +228,30 @@ fn terminate_exact_supervised_daemon(
     let supervisor_signal = match supervisor {
         Some(pid) if wait_for_pid_exit(pid, TERM_GRACE) => None,
         Some(pid) => {
-            revalidate_exact_supervisor_termination_target(path, identity, state, pid)?;
+            if revalidate_exact_supervisor_termination_target(path, identity, state, pid)?
+                == ExactTerminationTarget::Absent
+            {
+                return Ok(SupervisedDaemonTerminationOutcome::Stopped(
+                    SupervisedDaemonTermination {
+                        child_signal,
+                        supervisor_signal: None,
+                    },
+                ));
+            }
             signal_pid(pid, SIGNAL_TERMINATE)?;
             if wait_for_pid_exit(pid, TERM_GRACE) {
                 Some(SIGNAL_TERMINATE)
             } else {
-                revalidate_exact_supervisor_termination_target(path, identity, state, pid)?;
+                if revalidate_exact_supervisor_termination_target(path, identity, state, pid)?
+                    == ExactTerminationTarget::Absent
+                {
+                    return Ok(SupervisedDaemonTerminationOutcome::Stopped(
+                        SupervisedDaemonTermination {
+                            child_signal,
+                            supervisor_signal: Some(SIGNAL_TERMINATE),
+                        },
+                    ));
+                }
                 signal_pid(pid, SIGNAL_KILL)?;
                 if !wait_for_pid_exit(pid, KILL_GRACE) {
                     return Err(Error::internal_unexpected(format!(
@@ -209,17 +263,19 @@ fn terminate_exact_supervised_daemon(
         }
         None => None,
     };
-    Ok(SupervisedDaemonTermination {
-        child_signal,
-        supervisor_signal,
-    })
+    Ok(SupervisedDaemonTerminationOutcome::Stopped(
+        SupervisedDaemonTermination {
+            child_signal,
+            supervisor_signal,
+        },
+    ))
 }
 
-fn revalidate_exact_termination_target(
+pub(super) fn revalidate_exact_termination_target(
     path: &std::path::Path,
     identity: &DaemonLeaseIdentity,
     state: &DaemonState,
-) -> Result<()> {
+) -> Result<ExactTerminationTarget> {
     let current = read_lease_if_identity_matches(path, identity)?;
     if current.pid != state.pid || !active_daemon_job_ids()?.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -229,18 +285,12 @@ fn revalidate_exact_termination_target(
             None,
         ));
     }
-    if !pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
-        return Err(Error::validation_invalid_argument(
-            "daemon_lease",
-            format!(
-                "daemon pid {} no longer owns the persisted startup token",
-                state.pid
-            ),
-            Some(state.pid.to_string()),
-            None,
-        ));
+    if !pid_is_running(state.pid)
+        || !pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)?
+    {
+        return Ok(ExactTerminationTarget::Absent);
     }
-    Ok(())
+    Ok(ExactTerminationTarget::Owned)
 }
 
 /// The child is already absent when this runs, so the supervisor's token is the
@@ -252,7 +302,7 @@ fn revalidate_exact_supervisor_termination_target(
     identity: &DaemonLeaseIdentity,
     state: &DaemonState,
     supervisor_pid: u32,
-) -> Result<()> {
+) -> Result<ExactTerminationTarget> {
     let current = read_lease_if_identity_matches(path, identity)?;
     if current.pid != state.pid || !active_daemon_job_ids()?.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -267,14 +317,9 @@ fn revalidate_exact_supervisor_termination_target(
         DAEMON_STARTUP_TOKEN_ENV,
         &state.startup_token,
     )? {
-        return Err(Error::validation_invalid_argument(
-            "daemon_lease",
-            format!("supervisor pid {supervisor_pid} no longer owns the daemon startup token"),
-            Some(supervisor_pid.to_string()),
-            None,
-        ));
+        return Ok(ExactTerminationTarget::Absent);
     }
-    Ok(())
+    Ok(ExactTerminationTarget::Owned)
 }
 
 /// `ps` is the portable evidence adapter for the supervisor relationship. The
@@ -484,7 +529,19 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
             return Err(active_jobs_block_daemon_stop_error(state, &active_job_ids));
         }
         if !force {
-            let termination = terminate_exact_supervised_daemon(&path, &identity, state)?;
+            let termination = match terminate_exact_supervised_daemon(&path, &identity, state)? {
+                SupervisedDaemonTerminationOutcome::Stopped(termination) => termination,
+                SupervisedDaemonTerminationOutcome::AlreadyAbsent => {
+                    remove_lease_if_identity_matches(&path, &identity)?;
+                    return Ok(DaemonStopResult {
+                        stopped: false,
+                        already_absent: true,
+                        pid: Some(pid),
+                        state_path: state_path_display,
+                        termination_evidence: None,
+                    });
+                }
+            };
             let evidence = DaemonTerminationEvidence {
                 classification: DaemonTerminationClassification::CleanStop,
                 observed_at: chrono::Utc::now().to_rfc3339(),

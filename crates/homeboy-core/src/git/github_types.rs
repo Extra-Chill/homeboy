@@ -3,6 +3,10 @@ use serde::Serialize;
 mod outputs {
     use super::*;
 
+    fn is_false(value: &bool) -> bool {
+        !value
+    }
+
     /// Result of a GitHub issue operation (create, comment, find-one).
     #[derive(Debug, Clone, Serialize)]
     pub struct GithubIssueOutput {
@@ -255,6 +259,8 @@ mod outputs {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         pub body: String,
         pub url: String,
+        #[serde(default, rename = "isDraft", skip_serializing_if = "is_false")]
+        pub is_draft: bool,
         pub state: String,
         /// GitHub `stateReason` (issues only). One of `completed`, `not_planned`,
         /// `reopened`, or `null`. Empty string when absent or for PRs.
