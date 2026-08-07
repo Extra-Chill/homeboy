@@ -1345,11 +1345,12 @@ esac
     });
 }
 
-/// #11901: a definitive remote refusal has no replay-safe continuation. Its
-/// evidence is retained, but its pending authority must not block plain connect.
+/// #11901: a legacy replay journal can contain an already-refused exact
+/// recovery. Its evidence is retained, but its pending authority must not block
+/// a retry of plain connect.
 #[cfg(unix)]
 #[test]
-fn rejected_state_loss_recovery_is_retired_before_plain_connect() {
+fn rejected_legacy_state_loss_replay_is_retired_before_plain_connect_retries() {
     test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let generation_count = home.path().join("daemon-generations");
@@ -1421,16 +1422,24 @@ esac
         )
         .expect("enable local runner");
 
-        let (_rejected, exit_code) = connect_with_orphan_adoption(
+        let operation_id = crate::generation_store::replacement_operation("local-runner")
+            .expect("create legacy operation");
+        crate::generation_store::record_replacement_operation_replay(
             "local-runner",
-            None,
-            &[],
-            false,
-            Some("lease-lost"),
-            Some(41),
-            Some("127.0.0.1:7419"),
+            "state-loss",
+            &remote_state_loss_recovery_command(
+                daemon.to_str().expect("daemon path"),
+                "lease-lost",
+                41,
+                "127.0.0.1:7419",
+                &operation_id,
+            ),
         )
-        .expect("rejected recovery result");
+        .expect("write legacy state-loss replay");
+
+        let (_rejected, exit_code) =
+            connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
+                .expect("rejected legacy replay result");
         assert_eq!(exit_code, 20);
         let journal_dir = homeboy_core::paths::runner_sessions_dir()
             .expect("runner sessions")

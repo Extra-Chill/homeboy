@@ -675,6 +675,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 REMOTE_LEASELESS_RECOVERY_TIMEOUT,
             );
             if !output.success {
+                if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &output,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
@@ -692,6 +697,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 )
             })?;
             if !envelope.success {
+                if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &output,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
