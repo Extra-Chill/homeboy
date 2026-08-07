@@ -983,8 +983,22 @@ pub struct AgentTaskCookBatchReport {
 /// Callers compile workflow policy into the command and cook options; this
 /// routine owns the shared dispatch compilation boundary.
 pub fn compile_cook_attempt(
+    options: AgentTaskCookServiceOptions,
+    dispatch: AgentTaskDispatchCommand,
+) -> Result<AgentTaskCookServiceOptions> {
+    compile_cook_attempt_with_readiness_cache(
+        options,
+        dispatch,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    )
+}
+
+/// Compile a Cook with a caller-owned runtime-readiness cache. Batch callers
+/// share this cache so identical provider/runtime/model verdicts probe once.
+pub fn compile_cook_attempt_with_readiness_cache(
     mut options: AgentTaskCookServiceOptions,
     dispatch: AgentTaskDispatchCommand,
+    readiness_cache: &mut crate::agent_task_provider::ProviderRuntimeReadinessCache,
 ) -> Result<AgentTaskCookServiceOptions> {
     validate_single_cook_prompt_source(
         dispatch.prompt.as_deref(),
@@ -993,8 +1007,13 @@ pub fn compile_cook_attempt(
     )?;
     let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch)?;
     options.initial_plan = build_dispatch_plan(&request)?;
-    crate::agent_task_provider::AgentTaskProviderCatalog::discover()
-        .validate_explicit_models(&options.initial_plan)?;
+    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    catalog.validate_explicit_models(&options.initial_plan)?;
+    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
+        &options.initial_plan,
+        catalog.providers(),
+        readiness_cache,
+    )?;
     // Finalization disclosure is derived from the compiled provider invocation,
     // not a pre-resolution CLI value. The plan is persisted in the recipe and
     // remains authoritative across continuation.

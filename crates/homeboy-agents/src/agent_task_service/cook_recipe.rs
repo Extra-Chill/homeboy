@@ -182,6 +182,17 @@ pub fn validate_initial_recipe_compatibility(options: &AgentTaskCookServiceOptio
     // without weakening persistence-time plan validation.
     recipe.attempts = existing.attempts.clone();
     recipe.retry_budget["execution_budget"] = existing.retry_budget["execution_budget"].clone();
+    // Recipes written before retry-policy provenance was introduced remain
+    // resumable. Their resolved execution budget is already immutable; omit
+    // the new descriptive field from the compatibility comparison until a
+    // pre-provider correction writes the current recipe shape.
+    if existing.retry_budget.get("policy").is_none() {
+        recipe
+            .retry_budget
+            .as_object_mut()
+            .expect("retry budget is an object")
+            .remove("policy");
+    }
     let mismatches = recipe_mismatch_fields(&existing, &recipe);
     ensure_correction_is_safe(&existing, &recipe, &mismatches)?;
     Ok(())
@@ -213,7 +224,11 @@ fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCook
                 Some("serialize cook gate policy".to_string()),
             )
         })?,
-        retry_budget: serde_json::json!({ "max_attempts": options.max_attempts, "execution_budget": options.initial_plan.options.execution_budget }),
+        retry_budget: serde_json::json!({
+            "max_attempts": options.max_attempts,
+            "execution_budget": options.initial_plan.options.execution_budget,
+            "policy": options.initial_plan.metadata["cook_retry_policy"],
+        }),
         finalization: serde_json::json!({
             "no_finalize": options.no_finalize,
             "draft_pr": options.draft_pr,
@@ -2092,6 +2107,68 @@ mod tests {
             let options = observed.expect("terminal continuation reached normal cook boundary");
             assert_eq!(options.max_attempts, 1);
             assert_eq!(options.initial_run_id, "run");
+        });
+    }
+
+    #[test]
+    fn continuation_reconstructs_persisted_retry_intent_and_resolved_budget() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut persisted = recipe();
+            persisted.attempts[0].plan.options.execution_budget =
+                crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 1, 1);
+            persisted.retry_budget["max_attempts"] = serde_json::json!(2);
+            persisted.retry_budget["execution_budget"] = serde_json::json!({
+                "version": 1,
+                "deadline_unix_ms": null,
+                "max_provider_executions": 3,
+                "max_same_provider_retries": 1,
+                "max_provider_rotations": 1,
+            });
+            persisted.retry_budget["policy"] = serde_json::json!({
+                "operator_intent": { "max_attempts": 2, "max_provider_executions": null, "max_same_provider_retries": null, "max_provider_rotations": null },
+                "resolved": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
+            });
+            write_recipe(&persisted).unwrap();
+
+            let options = reconstruct_options(&load_recipe("cook").unwrap())
+                .expect("continuation reconstructs persisted policy");
+            assert_eq!(options.max_attempts, 2);
+            assert_eq!(
+                options
+                    .initial_plan
+                    .options
+                    .execution_budget
+                    .max_provider_executions,
+                3
+            );
+            assert_eq!(
+                load_recipe("cook").unwrap().retry_budget["policy"]["resolved"]
+                    ["max_provider_rotations"],
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn legacy_recipe_without_retry_policy_remains_compatible_after_provider_execution() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let legacy = recipe();
+            write_recipe(&legacy).unwrap();
+            crate::agent_task_lifecycle::submit_plan(&legacy.attempts[0].plan, Some("run"))
+                .expect("materialize legacy provider attempt");
+            crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
+                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+            })
+            .expect("record legacy provider execution");
+
+            let mut options = reconstruct_options(&legacy).expect("legacy recipe reconstructs");
+            options.initial_plan.metadata["cook_retry_policy"] = serde_json::json!({
+                "operator_intent": { "max_attempts": 1 },
+                "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
+            });
+
+            validate_initial_recipe_compatibility(&options)
+                .expect("new retry-policy provenance does not reject a frozen legacy recipe");
         });
     }
 
