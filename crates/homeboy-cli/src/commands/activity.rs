@@ -56,7 +56,7 @@ pub struct ActivityListArgs {
     no_runners: bool,
 }
 
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Debug)]
 pub struct ActivityWatchArgs {
     /// Activity id, observation run id, agent-task run id, or runner job id.
     pub id: String,
@@ -278,6 +278,19 @@ impl WatchPoller for ActivityPoller {
     fn is_terminal(&self, item: &ActivityItem) -> bool {
         !activity::is_active(item.state)
     }
+}
+
+/// `agent-task watch` is an alias for this command, not a second watch loop.
+///
+/// The cook notification already hands operators `homeboy activity watch
+/// {cook_id}` (`agent_task_notify.rs`), and the alias-resolution fallback that
+/// makes a cook id resolve here already exists
+/// (`agent_task_lifecycle::activity_provider::record_for_id`). Building a
+/// separate `agent-task watch` loop would mean two poll loops, two terminality
+/// predicates, and two notification paths over the same records; the cheapest
+/// correct implementation is to route the alias straight into this one (#W3-15).
+pub fn watch_alias(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
+    watch(args)
 }
 
 fn watch(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
@@ -684,6 +697,49 @@ mod tests {
         ] {
             Cli::try_parse_from(command).expect("controller job retrieval command parses");
         }
+    }
+
+    /// `agent-task watch` is an alias, not a second implementation: it must
+    /// parse into the very same `ActivityWatchArgs` this command's own `watch`
+    /// subcommand does, flag for flag (#W3-15).
+    #[test]
+    fn agent_task_watch_is_an_alias_for_activity_watch() {
+        use crate::cli_surface::Commands;
+        use crate::commands::agent_task::{AgentTaskArgs, AgentTaskCommand};
+
+        let argv = |root: &'static str| {
+            vec![
+                "homeboy",
+                root,
+                "watch",
+                "cook-1",
+                "--interval",
+                "5s",
+                "--timeout",
+                "30m",
+            ]
+        };
+
+        let activity = Cli::try_parse_from(argv("activity")).expect("activity watch parses");
+        let Commands::Activity(ActivityArgs {
+            command: Some(ActivityCommand::Watch(direct)),
+        }) = activity.command
+        else {
+            panic!("activity watch resolves to the watch subcommand");
+        };
+
+        let aliased = Cli::try_parse_from(argv("agent-task")).expect("agent-task watch parses");
+        let Commands::AgentTask(AgentTaskArgs {
+            command: AgentTaskCommand::Watch(alias),
+        }) = aliased.command
+        else {
+            panic!("agent-task watch resolves to the alias");
+        };
+
+        assert_eq!(alias.id, direct.id);
+        assert_eq!(alias.interval, direct.interval);
+        assert_eq!(alias.timeout, direct.timeout);
+        assert_eq!(alias.notify, direct.notify);
     }
 
     #[test]
