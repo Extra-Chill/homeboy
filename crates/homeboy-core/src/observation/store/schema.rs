@@ -275,6 +275,22 @@ const MIGRATIONS: &[Migration] = &[
             ON artifacts(run_id, failure_diagnostic, failure_diagnostic_rank);
         "#,
     },
+    Migration {
+        // Artifact inventory pagination commonly narrows by these persisted fields.
+        version: 17,
+        sql: r#"
+        CREATE INDEX IF NOT EXISTS idx_artifacts_run_kind_created
+            ON artifacts(run_id, kind, created_at ASC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_run_mime_created
+            ON artifacts(run_id, mime, created_at ASC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_run_fixture_created
+            ON artifacts(run_id, json_extract(metadata_json, '$.fixture_id'), created_at ASC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_run_surface_created
+            ON artifacts(run_id, json_extract(metadata_json, '$.surface_id'), created_at ASC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_run_scenario_created
+            ON artifacts(run_id, json_extract(metadata_json, '$.scenario_id'), created_at ASC, id ASC);
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.

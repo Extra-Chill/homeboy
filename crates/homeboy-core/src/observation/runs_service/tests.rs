@@ -690,6 +690,11 @@ fn require_run_reads_terminal_lab_review_alias_while_runner_probe_is_stalled() {
         store
             .import_run(&run)
             .expect("persist terminal Lab review run");
+        let artifact_path = _home.path().join("terminal-evidence.json");
+        std::fs::write(&artifact_path, br#"{"ok":true}"#).expect("artifact bytes");
+        store
+            .record_artifact(&run.id, "terminal_evidence", &artifact_path)
+            .expect("persist terminal evidence");
 
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -707,6 +712,10 @@ fn require_run_reads_terminal_lab_review_alias_while_runner_probe_is_stalled() {
         let resolved = require_run(&store, label).expect("durable local terminal record");
         assert_eq!(resolved.id, run.id);
         assert_eq!(resolved.status, RunStatus::Fail.as_str());
+        let artifacts = list_artifacts_for_run(&store, &run.id)
+            .expect("durable artifact reader must not wait for the runner");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].kind, "terminal_evidence");
         assert!(
             !stalled.is_finished(),
             "lookup completed before probe release"

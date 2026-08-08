@@ -1524,7 +1524,7 @@ fn artifacts_command_suppresses_viewer_links_when_public_url_is_unreachable() {
             .find(|artifact| artifact.kind == "bench_artifact")
             .expect("bench artifact");
 
-        assert!(artifact.public_url.is_some());
+        assert_eq!(artifact.public_url, None);
         assert!(artifact.viewer_links.is_empty());
         assert_eq!(artifact.viewer_url, None);
         assert_eq!(

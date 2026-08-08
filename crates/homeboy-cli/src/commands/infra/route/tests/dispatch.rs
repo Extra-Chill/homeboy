@@ -1873,7 +1873,7 @@ fn lab_cook_plan_preserves_actual_cli_provenance_through_handoff_serialization()
 }
 
 #[test]
-fn lab_run_retry_keeps_a_retryable_cook_failure_attached_to_its_recipe() {
+fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path());
@@ -1932,15 +1932,19 @@ fn lab_run_retry_keeps_a_retryable_cook_failure_attached_to_its_recipe() {
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
-        let handoff = materialize_agent_task_retry_handoff(&Cli::parse_from(&args), &args)
-            .expect("materialize Cook retry handoff")
-            .expect("Cook retry handoff");
-
-        assert!(handoff.run_id.starts_with(&format!("{cook_id}-attempt-2-")));
-        let replacement = agent_task_lifecycle::status(&handoff.run_id)
-            .expect("Cook-aware Lab retry is persisted");
-        assert_eq!(replacement.metadata["cook_id"], cook_id);
-        assert_eq!(replacement.metadata["cook_attempt"], 2);
+        assert!(
+            materialize_agent_task_retry_handoff(&Cli::parse_from(&args), &args)
+                .expect("inspect Cook retry route")
+                .is_none()
+        );
+        assert!(
+            agent_task_lifecycle::cook_index(cook_id)
+                .expect("Cook index")
+                .attempts
+                .iter()
+                .all(|attempt| attempt.run_id == run_id),
+            "the router must not reserve a standalone retry before Cook resumes it"
+        );
     });
 }
 
@@ -2726,7 +2730,7 @@ fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
 }
 
 #[test]
-fn agent_task_fanout_dispatch_id_uses_explicit_or_stable_default() {
+fn agent_task_fanout_dispatch_id_matches_the_canonical_plan_identity() {
     let cli = Cli::parse_from([
         "homeboy",
         "--detach-after-handoff",
@@ -2754,13 +2758,19 @@ fn agent_task_fanout_dispatch_id_uses_explicit_or_stable_default() {
         panic!("cook-batch command");
     };
 
-    assert_eq!(agent_task_fanout_cook_batch_dispatch_id(&args), "wave-7167");
+    assert_eq!(
+        crate::commands::agent_task::fanout::cook_batch_fanout_id(&args)
+            .expect("canonical explicit id"),
+        "wave-7167"
+    );
 
     let mut default_args = args;
     default_args.fanout_id = None;
     assert_eq!(
-        agent_task_fanout_cook_batch_dispatch_id(&default_args),
-        "cook-batch-homeboy-issue-7167-1"
+        crate::commands::agent_task::fanout::cook_batch_fanout_id(&default_args)
+            .expect("canonical generated id"),
+        crate::commands::agent_task::fanout::cook_batch_fanout_id(&default_args)
+            .expect("canonical generated id is stable")
     );
 }
 

@@ -963,6 +963,16 @@ fn fresh_cook_review_form_has_bounded_budget_independent_of_code_execution() {
 }
 
 #[test]
+fn gate_feedback_child_budget_preserves_declared_retry_and_rotation_capacity() {
+    let declared = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 1, 1);
+
+    assert_eq!(
+        child_execution_budget(CookFollowUpBudgetScope::Cook, &declared),
+        declared
+    );
+}
+
+#[test]
 fn persisted_review_budget_authority_preserves_lower_bounds_and_caps_larger_values() {
     let scope = CookFollowUpBudgetScope::FreshCookReview;
     let cook_budget = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(9, 9, 9);
@@ -2827,6 +2837,34 @@ fn approved_empty_provider_failure_retry_stays_attached_and_becomes_continuation
                 .expect("successful retry")
                 .state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
+        );
+    });
+}
+
+#[test]
+fn cancelled_provider_child_retry_stays_attached_to_its_cook() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-cancelled-provider-retry";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = format!("{cook_id}-attempt-1");
+        options.max_attempts = 2;
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize first attempt");
+        agent_task_lifecycle::cancel_run(&options.initial_run_id, Some("owner exited"))
+            .expect("cancel detached provider child");
+
+        let retry = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+            .expect("cancelled Cook child retry remains Cook-owned");
+
+        assert_eq!(retry.record.metadata["retry_of"], options.initial_run_id);
+        assert_eq!(retry.record.metadata["cook_id"], cook_id);
+        assert_eq!(retry.record.metadata["cook_attempt"], 2);
+        assert_eq!(
+            agent_task_lifecycle::cook_index(cook_id)
+                .expect("Cook retry index")
+                .latest_run_id,
+            retry.record.run_id
         );
     });
 }
@@ -5484,7 +5522,7 @@ fn pre_provider_adoption_retries_only_the_missing_form_binds_model_and_reaches_r
 }
 
 #[test]
-fn adoption_review_uses_one_bounded_execution_after_the_source_budget_is_consumed() {
+fn adoption_review_child_plan_remains_one_bounded_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let fixture = CandidateAdoptionFixture::new_with_execution_budget(
             "cook-9575-consumed-source-budget",

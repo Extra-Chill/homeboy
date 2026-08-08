@@ -789,6 +789,10 @@ pub(crate) fn record_pending_replacement(runner_id: &str, session: &RunnerSessio
 /// remote lease and proved that these recorded coordinates are no longer a
 /// publishable daemon. A later attempt receives a new operation identity.
 pub(crate) fn retire_pending_replacement(runner_id: &str) -> Result<String> {
+    retire_replacement(runner_id)
+}
+
+fn retire_replacement(runner_id: &str) -> Result<String> {
     with_registry_lock(runner_id, || {
         let operation_id = uuid::Uuid::new_v4().to_string();
         // Publish the successor receipt before releasing the old coordinates.

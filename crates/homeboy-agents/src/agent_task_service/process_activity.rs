@@ -632,6 +632,34 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_provider_roots_do_not_cross_attribute_activity_or_resources() {
+        // Both provider children share a coordinator parent. Sampling from that
+        // parent would blend their commands and resource trees; each child PID
+        // must be used as the root instead.
+        let rows = parse_process_activity_rows(concat!(
+            "1 0 S 1024 10:00 homeboy agent-task fanout cook\n",
+            "101 1 S 2048 05:00 opencode run child-a\n",
+            "102 101 S 4096 04:00 cargo test child-a\n",
+            "201 1 S 8192 05:00 opencode run child-b\n",
+            "202 201 S 16384 04:00 cargo test child-b\n",
+        ));
+
+        let first = select_provider_activity(&rows, 101, &[]);
+        let second = select_provider_activity(&rows, 201, &[]);
+
+        assert_eq!(
+            first.activity.expect("first activity").command,
+            "cargo test child-a"
+        );
+        assert_eq!(
+            second.activity.expect("second activity").command,
+            "cargo test child-b"
+        );
+        assert_eq!(first.tree_rss_kib, Some(4_096));
+        assert_eq!(second.tree_rss_kib, Some(16_384));
+    }
+
+    #[test]
     fn an_unmeasured_tree_reports_no_memory_rather_than_zero() {
         // A budget that fired on a fabricated zero would be worse than no
         // budget at all, so the absence has to survive selection.

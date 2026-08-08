@@ -44,6 +44,24 @@ jobs:
           GITHUB_EVENT_ACTION: ${{ github.event.action }}
         run: bash .github/ci-pr-state.sh
 
+  # This repository owns how much work it asks the reusable workflow to admit.
+  # The action owns deterministic shard planning and aggregation, not this
+  # repository's GitHub-hosted runner budget.
+  ci-capacity-admission:
+    name: homeboy / CI Capacity Admission
+    needs: pr-state
+    if: ${{ needs.pr-state.outputs.active == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      test-shards: ${{ steps.admit.outputs.test-shards }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - id: admit
+        name: Admit configured Test capacity
+        run: bash .github/ci-capacity-admission.sh
+
   # Named for what a green tick here actually proves: the DECLARATION is intact.
   # It used to be called "Required Gates Policy" and run `--local`, which reads
   # as "GitHub requires these checks" while only proving "ci.yml emits these
@@ -202,7 +220,7 @@ jobs:
   # ambiguous source changes fail closed or use Homeboy's full-scope fallback.
   homeboy:
     name: homeboy
-    needs: pr-state
+    needs: [pr-state, ci-capacity-admission]
     if: ${{ needs.pr-state.outputs.active == 'true' }}
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
     with:
@@ -223,9 +241,29 @@ jobs:
       scope: auto
       differential-gating: 'false'
       baseline-commands: none
-      test-shards: '16'
+      test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}
       execution-timeout-seconds: '1800'
       test-timeout-seconds: '1500'
       comment-section-key: test
       comment-section-title: Test
     secrets: inherit
+
+  ci-capacity-evidence:
+    name: homeboy / CI Capacity Evidence
+    needs: [required-gates-declaration, workspace-tests-compile, warning-clean, windows-compile, rustfmt, homeboy-fast, homeboy]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Publish queue, execution, and critical-path timing evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/ci-capacity-evidence.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: homeboy-ci-capacity-evidence-${{ github.run_attempt }}
+          path: ci-capacity-evidence.json
+          if-no-files-found: warn

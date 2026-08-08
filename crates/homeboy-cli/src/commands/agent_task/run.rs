@@ -1731,6 +1731,14 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
         args.force,
     )?;
     if result.run {
+        if result.record.metadata["cook_id"].is_string() {
+            return continue_cook(CookContinueArgs {
+                cook_or_attempt_id: result.record.run_id,
+                preflight: false,
+                rearm: false,
+                full: false,
+            });
+        }
         return run_submitted_with_executor(
             result.record.run_id,
             None,

@@ -728,6 +728,37 @@ fn release_fails_loudly_when_prepared_release_does_not_publish() {
 }
 
 #[test]
+fn release_proves_latest_is_consumable_by_the_linux_homeboy_action() {
+    let workflow = release_workflow();
+    let consumer = job_section(workflow, "verify-linux-consumer");
+    let record_failure = job_section(workflow, "record-failure");
+    let clear_failure = job_section(workflow, "clear-failure");
+
+    assert!(consumer.contains("runs-on: ubuntu-22.04"));
+    assert!(consumer.contains("permissions:\n      contents: read"));
+    assert!(consumer.contains("needs.verify-published.result == 'success'"));
+    assert!(consumer.contains("uses: Extra-Chill/homeboy-action@v2"));
+    assert!(consumer.contains("commands: review lint"));
+    assert!(consumer.contains("expected-commands: review lint"));
+    assert!(consumer.contains("ACTUAL_VERSION=\"$(homeboy --version)\""));
+    assert!(consumer.contains("Linux consumer resolved"));
+    assert!(consumer.contains("must not fall back to an older release"));
+
+    // The consumer action must use its ordinary latest-release resolver. A
+    // source build or injected binary would only test this checkout, not the
+    // Linux archive downstream CI downloads.
+    assert!(!consumer.contains("source:"));
+    assert!(!consumer.contains("binary-path:"));
+    assert!(!consumer.contains("write"));
+
+    // Consumer failure is release failure; it cannot be hidden by the cleanup
+    // bookkeeping jobs that otherwise turn a failed publish chain into green.
+    for section in [record_failure, clear_failure] {
+        assert!(section.contains("- verify-linux-consumer"));
+    }
+}
+
+#[test]
 fn release_artifact_builds_survive_recovery_skips_but_fail_closed_on_required_builds() {
     let workflow = release_workflow();
     let local = job_section(workflow, "build-local-artifacts");

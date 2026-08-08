@@ -9,6 +9,41 @@ use uuid::Uuid;
 
 use super::*;
 
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactListFilter {
+    pub token: Option<String>,
+    pub kind: Option<String>,
+    pub mime: Option<String>,
+    pub original_path: Option<String>,
+    pub path_suffix: Option<String>,
+    pub fixture: Option<String>,
+    pub surface: Option<String>,
+    pub scenario: Option<String>,
+    pub name_glob: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArtifactListPage {
+    pub artifacts: Vec<ArtifactRecord>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+fn add_artifact_filter(
+    where_clauses: &mut Vec<String>,
+    values: &mut Vec<String>,
+    column: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        where_clauses.push(format!("{column} = ?"));
+        values.push(value.to_string());
+    }
+}
+
 const PUBLICATION_LEASE_MS: i64 = 5 * 60 * 1000;
 const PUBLICATION_ARTIFACT_FILENAME_LIMIT: usize = 240;
 
@@ -1161,7 +1196,23 @@ impl ObservationStore {
     }
 
     pub fn list_artifacts(&self, run_id: &str) -> Result<Vec<ArtifactRecord>> {
+        self.list_artifacts_page(run_id, &ArtifactListFilter::default())
+            .map(|page| page.artifacts)
+    }
+
+    /// Query a bounded page from the persisted inventory without materializing
+    /// the rest of a run's artifacts.
+    pub fn list_artifacts_page(
+        &self,
+        run_id: &str,
+        filter: &ArtifactListFilter,
+    ) -> Result<ArtifactListPage> {
         validate_required("run_id", run_id)?;
+        let limit = if filter.limit == 0 {
+            i64::MAX
+        } else {
+            filter.limit.clamp(1, 1_000)
+        };
         let columns = self.artifact_columns_for_read()?;
         let artifact_type = if columns.contains("artifact_type") {
             "artifact_type"
@@ -1193,14 +1244,61 @@ impl ObservationStore {
         } else {
             "'{}'"
         };
+        let mut predicates = vec!["run_id = ?".to_string()];
+        let mut values = vec![run_id.to_string()];
+        add_artifact_filter(&mut predicates, &mut values, "id", filter.token.as_deref());
+        add_artifact_filter(&mut predicates, &mut values, "kind", filter.kind.as_deref());
+        add_artifact_filter(&mut predicates, &mut values, "mime", filter.mime.as_deref());
+        add_artifact_filter(
+            &mut predicates,
+            &mut values,
+            "path",
+            filter.original_path.as_deref(),
+        );
+        add_artifact_filter(
+            &mut predicates,
+            &mut values,
+            "json_extract(metadata_json, '$.fixture_id')",
+            filter.fixture.as_deref(),
+        );
+        add_artifact_filter(
+            &mut predicates,
+            &mut values,
+            "json_extract(metadata_json, '$.surface_id')",
+            filter.surface.as_deref(),
+        );
+        add_artifact_filter(
+            &mut predicates,
+            &mut values,
+            "json_extract(metadata_json, '$.scenario_id')",
+            filter.scenario.as_deref(),
+        );
+        if let Some(suffix) = &filter.path_suffix {
+            predicates.push("path LIKE ?".to_string());
+            values.push(format!("%{suffix}"));
+        }
+        if let Some(glob) = &filter.name_glob {
+            predicates.push("kind GLOB ?".to_string());
+            values.push(glob.clone());
+        }
+        let predicate_sql = predicates.join(" AND ");
+        let total: i64 = self
+            .connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM artifacts WHERE {predicate_sql}"),
+                rusqlite::params_from_iter(values.iter()),
+                |row| row.get(0),
+            )
+            .map_err(|error| self.read_error("count filtered artifact records", error))?;
         let mut statement = self
             .connection
             .prepare(&format!(
                 r#"
                 SELECT id, run_id, kind, {}, path, {}, {}, {}, {}, sha256, size_bytes, mime, {}, created_at
                 FROM artifacts
-                WHERE run_id = ?1
+                WHERE {predicate_sql}
                 ORDER BY created_at ASC, id ASC
+                LIMIT ? OFFSET ?
                 "#,
                 artifact_type,
                 url,
@@ -1210,8 +1308,13 @@ impl ObservationStore {
                 metadata,
             ))
             .map_err(|error| self.read_error("prepare list artifact records", error))?;
+        values.push(limit.to_string());
+        values.push(filter.offset.max(0).to_string());
         let rows = statement
-            .query_map([run_id], row_to_artifact_record)
+            .query_map(
+                rusqlite::params_from_iter(values.iter()),
+                row_to_artifact_record,
+            )
             .map_err(|error| self.read_error("list artifact records", error))?;
 
         let mut artifacts = Vec::new();
@@ -1219,7 +1322,12 @@ impl ObservationStore {
             artifacts
                 .push(row.map_err(|error| self.read_error("collect artifact records", error))?);
         }
-        Ok(artifacts)
+        Ok(ArtifactListPage {
+            artifacts,
+            total: total as usize,
+            limit: limit as usize,
+            offset: filter.offset.max(0) as usize,
+        })
     }
 
     /// Return aggregate artifact counts plus at most `limit` records, with the
