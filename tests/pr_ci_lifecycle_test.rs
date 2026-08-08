@@ -137,6 +137,7 @@ fn ci_admits_only_the_configured_shard_budget_and_publishes_timing_evidence() {
     let admission = job_section(workflow, "ci-capacity-admission");
     assert!(admission.contains("bash .github/ci-capacity-admission.sh"));
     let evidence = job_section(workflow, "ci-capacity-evidence");
+    assert!(evidence.contains("ref: ${{ github.event.pull_request.head.sha || github.sha }}"));
     assert!(evidence.contains("bash .github/ci-capacity-evidence.sh"));
     assert!(evidence.contains("homeboy-ci-capacity-evidence-"));
 }
