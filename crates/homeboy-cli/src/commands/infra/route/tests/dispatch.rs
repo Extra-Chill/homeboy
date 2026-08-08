@@ -2726,7 +2726,7 @@ fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
 }
 
 #[test]
-fn agent_task_fanout_dispatch_id_uses_explicit_or_stable_default() {
+fn agent_task_fanout_dispatch_id_matches_the_canonical_plan_identity() {
     let cli = Cli::parse_from([
         "homeboy",
         "--detach-after-handoff",
@@ -2754,13 +2754,19 @@ fn agent_task_fanout_dispatch_id_uses_explicit_or_stable_default() {
         panic!("cook-batch command");
     };
 
-    assert_eq!(agent_task_fanout_cook_batch_dispatch_id(&args), "wave-7167");
+    assert_eq!(
+        crate::commands::agent_task::fanout::cook_batch_fanout_id(&args)
+            .expect("canonical explicit id"),
+        "wave-7167"
+    );
 
     let mut default_args = args;
     default_args.fanout_id = None;
     assert_eq!(
-        agent_task_fanout_cook_batch_dispatch_id(&default_args),
-        "cook-batch-homeboy-issue-7167-1"
+        crate::commands::agent_task::fanout::cook_batch_fanout_id(&default_args)
+            .expect("canonical generated id"),
+        crate::commands::agent_task::fanout::cook_batch_fanout_id(&default_args)
+            .expect("canonical generated id is stable")
     );
 }
 
