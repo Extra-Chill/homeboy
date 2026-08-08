@@ -24,8 +24,8 @@ use crate::agent_task::{
     AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::agent_task_gate::{
-    AgentTaskGateExecutionPolicy, AgentTaskGateReport, AgentTaskGateRevealPolicy,
-    AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
+    AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy, AgentTaskGateReport,
+    AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_core::command_invocation::CommandInvocation;
@@ -37,6 +37,7 @@ use homeboy_core::lab_contract::AgentTaskDispatchIdentity;
 use homeboy_core::{Error, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -1338,6 +1339,106 @@ fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence()
         .operator_notification
         .message
         .contains("passed=[], failed=[gate-1], skipped=[gate-2]"));
+}
+
+#[test]
+fn promotion_rejects_a_cargo_gate_that_selected_zero_tests() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    git(&workspace, &["init", "-b", "main"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Homeboy Test"]);
+    std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+    std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-m", "base"]);
+    let cargo_bin = temp.path().join("bin");
+    std::fs::create_dir(&cargo_bin).expect("fake cargo directory");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("/bin/sh", cargo_bin.join("sh"))
+        .expect("shell available to the isolated gate environment");
+    std::fs::write(
+        cargo_bin.join("cargo"),
+        "#!/bin/sh\nprintf 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1675 filtered out; finished in 0.00s\\n'\n",
+    )
+    .expect("fake cargo executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(cargo_bin.join("cargo"))
+            .expect("fake cargo metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(cargo_bin.join("cargo"), permissions)
+            .expect("make fake cargo executable");
+    }
+    let (source_path, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(workspace),
+        apply_to_git: true,
+        run_verify_command: true,
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("zero-selected-cargo-gate".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["cargo test --locked selected_test -- --exact".to_string()],
+                gate_environment: AgentTaskGateEnvironmentPolicy {
+                    variables: BTreeMap::from([(
+                        "PATH".to_string(),
+                        cargo_bin.display().to_string(),
+                    )]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("zero-selected gate produces a promotion report");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
+    assert_eq!(
+        report.deterministic_gates[0]
+            .failure_evidence
+            .as_ref()
+            .expect("zero-test failure evidence")
+            .classification,
+        crate::agent_task_gate::AgentTaskGateFailureClassification::ZeroTestsSelected
+    );
+    assert_eq!(
+        report.deterministic_gates[0]
+            .test_result
+            .as_ref()
+            .map(|result| result.total),
+        Some(0)
+    );
+    assert_eq!(
+        report.deterministic_gates[0]
+            .test_result
+            .as_ref()
+            .map(|result| result.filtered),
+        Some(1675)
+    );
+    assert_eq!(
+        report.gate_results[0].status,
+        homeboy_core::gate::HomeboyGateStatus::Failed
+    );
 }
 
 #[test]

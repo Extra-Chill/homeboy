@@ -152,6 +152,60 @@ impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
             crate::agent_task_gate::AgentTaskGateEnvironment::default(),
         ))
     }
+
+    fn verify_with_runtime_tmpdir(
+        &mut self,
+        cwd: &Path,
+        index: usize,
+        command: &str,
+        visibility: AgentTaskGateVisibility,
+        reveal_policy: AgentTaskGateRevealPolicy,
+        runtime_tmpdir: &Path,
+        gate_environment: &crate::agent_task_gate::AgentTaskGateEnvironmentPolicy,
+        package_artifacts: &[crate::agent_task_gate::AgentTaskGatePackageArtifactRequirement],
+    ) -> Result<AgentTaskGateReport> {
+        self.verify_calls.push((
+            cwd.to_path_buf(),
+            command.to_string(),
+            visibility,
+            reveal_policy,
+        ));
+        if self.verify_transport_error {
+            return Err(Error::internal_io(
+                "simulated verification transport interruption",
+                Some("promotion gate transport".to_string()),
+            ));
+        }
+        let status = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(cwd)
+            .output();
+        self.verify_worktrees_clean
+            .push(status.is_ok_and(|status| status.status.success() && status.stdout.is_empty()));
+        if self.run_verify_command {
+            return crate::agent_task_gate::run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                cwd,
+                index,
+                command,
+                visibility,
+                reveal_policy,
+                Some(runtime_tmpdir),
+                gate_environment,
+                package_artifacts,
+            );
+        }
+        Ok(AgentTaskGateReport::new(
+            format!("gate-{index}"),
+            vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+            self.verify_exit_code,
+            String::new(),
+            String::new(),
+            None,
+            visibility,
+            reveal_policy,
+            crate::agent_task_gate::AgentTaskGateEnvironment::default(),
+        ))
+    }
 }
 
 pub(super) fn command_report(parts: Vec<&str>) -> AgentTaskPromotionCommandReport {
