@@ -520,6 +520,12 @@ impl Default for AuditHomeGuard {
 
 impl HomeGuard {
     pub fn new() -> Self {
+        Self::with_controller_runtime(TestBinary::CurrentTest)
+    }
+
+    /// Isolate in-process state while pinning the named executable as the
+    /// controller runtime for lifecycle operations.
+    pub fn with_controller_runtime(controller_binary: TestBinary) -> Self {
         let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
         reset_cached_test_state();
         let prior = std::env::var("HOME").ok();
@@ -585,11 +591,11 @@ impl HomeGuard {
         // the bytes at the few call sites that do.
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-            test_controller_fixture_path(TestBinary::CurrentTest),
+            test_controller_fixture_path(controller_binary),
         );
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV,
-            test_binary_path(TestBinary::CurrentTest),
+            test_binary_path(controller_binary),
         );
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
