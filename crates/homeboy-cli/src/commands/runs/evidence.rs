@@ -38,6 +38,30 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     artifacts.extend(runs_service::related_lab_artifacts_for_runner_job(
         &store, &run,
     )?);
+    let descendant_evidence = run
+        .metadata_json
+        .get("descendant_run_evidence")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<Vec<evidence_report::DescendantRunEvidenceRef>>(value).ok()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|reference| reference.is_valid() && reference.run_id != run.id)
+        .filter_map(|reference| {
+            let child = store.get_run(&reference.run_id).ok().flatten()?;
+            if child.kind != reference.kind {
+                return None;
+            }
+            let child_artifacts = runs_service::list_artifacts_for_run(&store, &child.id).ok()?;
+            Some(evidence_report::DescendantRunEvidence {
+                evidence_command: format!("homeboy runs evidence {}", child.id),
+                primary_diagnostic: evidence_report::failure_diagnostic_artifact(&child_artifacts),
+                status: child.status,
+                reference,
+            })
+        })
+        .collect();
     let artifact_root = homeboy::core::artifacts::root()?;
     let disk_budget = disk_budget(
         &artifact_root,
@@ -48,15 +72,17 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     // MCP, automation) can reuse it; this adapter only supplies the CLI-owned
     // `RunSummary`, disk budget, and command label.
     let run_summary = run_summary(run.clone());
-    let report =
-        evidence_report::build_run_evidence_report(evidence_report::RunEvidenceReportInputs {
+    let report = evidence_report::build_run_evidence_report_with_descendant_evidence(
+        evidence_report::RunEvidenceReportInputs {
             command: "runs.evidence",
             run,
             run_summary,
             artifacts,
             artifact_root,
             disk_budget,
-        });
+        },
+        descendant_evidence,
+    );
 
     Ok((RunsOutput::Evidence(Box::new(report)), 0))
 }
@@ -868,6 +894,81 @@ mod tests {
         let output = RunsOutput::EvidenceSummary(summary);
         assert!(public_envelope_bytes(&output) <= MAX_PUBLIC_ENVELOPE_BYTES);
         assert!(!public_envelope_json(&output).contains("bytes omitted"));
+    }
+
+    #[test]
+    fn evidence_command_resolves_descendant_run_without_copying_its_artifacts() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let child = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("child run");
+            let diagnostic = home.path().join("child-diagnostic.txt");
+            std::fs::write(&diagnostic, "child failed").expect("diagnostic");
+            store
+                .record_artifact_with_metadata(
+                    &child.id,
+                    "failure_diagnostic",
+                    &diagnostic,
+                    serde_json::json!({ "failure_diagnostic": true, "failure_diagnostic_rank": 1 }),
+                )
+                .expect("child artifact");
+            store
+                .finish_run(&child.id, RunStatus::Fail, None)
+                .expect("finish child");
+
+            let parent = store
+                .start_run(
+                    NewRunRecord::builder("runner_execution")
+                        .metadata(serde_json::json!({
+                            "descendant_run_evidence": [{
+                                "schema": "homeboy/descendant-run-evidence-ref/v1",
+                                "run_id": child.id,
+                                "kind": "bench",
+                                "source": "controller.terminal_command_result.refs.runs"
+                            }]
+                        }))
+                        .build(),
+                )
+                .expect("parent run");
+            store
+                .finish_run(&parent.id, RunStatus::Pass, None)
+                .expect("finish parent");
+
+            let (output, _) = evidence(&parent.id).expect("parent evidence");
+            let RunsOutput::Evidence(report) = output else {
+                panic!("expected evidence report");
+            };
+            assert_eq!(report.heartbeat.status, "pass");
+            assert_eq!(report.artifact_index.count, 0);
+            assert_eq!(report.descendant_evidence.len(), 1);
+            assert_eq!(report.descendant_evidence[0].reference.run_id, child.id);
+            assert_eq!(report.descendant_evidence[0].status, "fail");
+            assert_eq!(
+                report.descendant_evidence[0].evidence_command,
+                format!("homeboy runs evidence {}", child.id)
+            );
+            assert!(report.descendant_evidence[0].primary_diagnostic.is_some());
+
+            store
+                .update_run_metadata(
+                    &parent.id,
+                    serde_json::json!({
+                        "descendant_run_evidence": [{
+                            "schema": "homeboy/descendant-run-evidence-ref/v1",
+                            "run_id": child.id,
+                            "kind": "stale-kind",
+                            "source": "controller.terminal_command_result.refs.runs"
+                        }]
+                    }),
+                )
+                .expect("stale descendant kind");
+            let (output, _) = evidence(&parent.id).expect("stale parent evidence");
+            let RunsOutput::Evidence(report) = output else {
+                panic!("expected evidence report");
+            };
+            assert!(report.descendant_evidence.is_empty());
+        });
     }
 
     /// Before this wiring the manifest member was structurally always absent:

@@ -196,6 +196,16 @@ pub struct UnregisteredContextStatusOutput {
     pub git_root: Option<String>,
     pub suggestion: String,
     pub action: &'static str,
+    /// The default unregistered-context path intentionally avoids even local
+    /// control-plane inventory reads. This makes that omission explicit and
+    /// gives callers the bounded, local-only follow-up command.
+    pub control_plane: UnregisteredControlPlaneStatus,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnregisteredControlPlaneStatus {
+    pub status: &'static str,
+    pub command: &'static str,
 }
 
 /// Bounded, local-only control-plane status. This intentionally contains counts

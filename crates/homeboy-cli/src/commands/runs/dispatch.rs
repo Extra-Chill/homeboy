@@ -5,7 +5,10 @@
 
 use homeboy::core::Error;
 
-use super::types::{RunsArgs, RunsArtifactArgs, RunsArtifactCommand, RunsCommand, RunsOutput};
+use super::types::{
+    RunsArgs, RunsArtifactArgs, RunsArtifactCommand, RunsArtifactGetArgs, RunsArtifactsArgs,
+    RunsCommand, RunsOutput,
+};
 use super::CmdResult;
 use super::{
     bench, compare, distribution, dossier, drift, evidence, findings, fuzz_compare, handlers,
@@ -63,6 +66,15 @@ impl RunsArgs {
             {
                 None
             }
+            (RunsCommand::Artifacts(args), Some(runner_id)) if args.runner.is_none() => {
+                args.runner = Some(runner_id);
+                None
+            }
+            (RunsCommand::Artifacts(args), Some(runner_id))
+                if args.runner.as_deref() == Some(runner_id.as_str()) =>
+            {
+                None
+            }
             (
                 RunsCommand::Artifact(RunsArtifactArgs {
                     command: RunsArtifactCommand::Get(args),
@@ -85,6 +97,17 @@ impl RunsArgs {
     pub fn list_runner(&self) -> Option<&str> {
         match &self.command {
             RunsCommand::List(args) => args.runner.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn is_artifacts(&self) -> bool {
+        matches!(self.command, RunsCommand::Artifacts(_))
+    }
+
+    pub fn artifacts_runner(&self) -> Option<&str> {
+        match &self.command {
+            RunsCommand::Artifacts(args) => args.runner.as_deref(),
             _ => None,
         }
     }
@@ -118,7 +141,15 @@ impl RunsArgs {
     pub fn has_command_local_runner_option(&self) -> bool {
         matches!(
             self.command,
-            RunsCommand::Artifact(RunsArtifactArgs {
+            RunsCommand::Artifacts(RunsArtifactsArgs {
+                runner: Some(_),
+                ..
+            }) | RunsCommand::Artifact(RunsArtifactArgs {
+                command: RunsArtifactCommand::Get(RunsArtifactGetArgs {
+                    runner: Some(_),
+                    ..
+                }),
+            }) | RunsCommand::Artifact(RunsArtifactArgs {
                 command: RunsArtifactCommand::Attach(_),
             })
         )
@@ -148,18 +179,6 @@ impl RunsArgs {
                     format!("Run `homeboy runs show {run_id}` to inspect the mirrored local run record."),
                     format!("Run `homeboy runs artifacts {run_id}` to list mirrored artifact records."),
                     "Use `homeboy runs artifact get <run-id> <artifact-id>` for retrievable runner artifacts recorded in the local observation store.".to_string(),
-                ],
-            ),
-            RunsCommand::Artifacts(args) => (
-                format!(
-                    "Lab-offloaded run records are mirrored locally; inspect run `{}` with `homeboy runs show {}` without top-level --runner.",
-                    args.run_id, args.run_id
-                ),
-                vec![
-                    format!("Run `homeboy runs artifacts {}` to list mirrored artifact records.", args.run_id),
-                    format!("Run `homeboy runs artifacts {} --pull` to retrieve runner/remote artifact bytes to the operator-local artifact root.", args.run_id),
-                    format!("Run `homeboy runs artifacts {} --runner {runner_id}` to query the connected runner daemon directly.", args.run_id),
-                    "Use `homeboy runs artifact get <run-id> <artifact-id> --runner <id>` to pull selected runner-side artifact bytes, or `homeboy --runner <id> runs artifact get <run-id> <artifact-id>` from Lab-oriented workflows.".to_string(),
                 ],
             ),
             RunsCommand::Artifact(_) => (

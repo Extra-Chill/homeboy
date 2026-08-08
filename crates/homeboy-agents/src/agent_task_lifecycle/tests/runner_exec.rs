@@ -265,6 +265,167 @@ fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
 }
 
 #[test]
+fn terminal_runner_exec_projects_only_complete_valid_nested_run_references() {
+    with_isolated_home(|_| {
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let child = store
+            .start_run(homeboy_core::observation::NewRunRecord::builder("bench").build())
+            .expect("child run");
+        let diagnostic = tempfile::NamedTempFile::new().expect("diagnostic");
+        std::fs::write(diagnostic.path(), "child failure").expect("write diagnostic");
+        store
+            .record_artifact_with_metadata(
+                &child.id,
+                "failure_diagnostic",
+                diagnostic.path(),
+                serde_json::json!({ "failure_diagnostic": true, "failure_diagnostic_rank": 1 }),
+            )
+            .expect("child diagnostic");
+        store
+            .finish_run(&child.id, homeboy_core::observation::RunStatus::Fail, None)
+            .expect("finish child");
+
+        let run_id = "outer-nested-command-result";
+        record_runner_exec_job_identity(
+            run_id,
+            "homeboy-lab",
+            "00000000-0000-0000-0000-000000000123",
+            "/runner/workspace",
+            &["homeboy".to_string(), "bench".to_string()],
+        )
+        .expect("outer run");
+        record_runner_exec_artifact_refs(run_id, &[]).expect("complete artifact projection");
+        let mut snapshot = runner_snapshot("succeeded");
+        snapshot.events[0].data = Some(serde_json::json!({
+            "stdout": serde_json::json!({
+                "schema": "homeboy/command-result/v3",
+                "command": "bench",
+                "success": true,
+                "exit_code": 0,
+                "status": "succeeded",
+                "refs": { "runs": [{
+                    "id": child.id,
+                    "kind": "bench",
+                    "source": "forged-runner-label"
+                }] }
+            }).to_string()
+        }));
+        project_terminal_runner_exec_result(run_id, &snapshot).expect("project outer run");
+
+        let outer = store
+            .get_run(run_id)
+            .expect("read outer")
+            .expect("outer run");
+        assert_eq!(outer.status, "pass");
+        assert_eq!(
+            outer.metadata_json["descendant_run_evidence"][0]["run_id"],
+            child.id
+        );
+        assert_eq!(
+            outer.metadata_json["descendant_run_evidence"][0]["source"],
+            homeboy_core::observation::evidence_report::DESCENDANT_RUN_EVIDENCE_SOURCE_TERMINAL_COMMAND_RESULT
+        );
+        assert!(store
+            .list_artifacts(run_id)
+            .expect("outer artifacts")
+            .is_empty());
+
+        let malformed =
+            crate::agent_task_lifecycle::runner_exec::terminal_command_result_descendants(
+                &store,
+                run_id,
+                &RunnerJobLogSnapshot {
+                    events: vec![JobEvent {
+                        data: Some(serde_json::json!({
+                            "capture": { "stdout": { "truncated": true } },
+                            "stdout": "{\"schema\":\"homeboy/command-result/v3\"}"
+                        })),
+                        ..snapshot.events[0].clone()
+                    }],
+                    ..snapshot.clone()
+                },
+            );
+        assert!(malformed.is_none());
+
+        let adversarial =
+            crate::agent_task_lifecycle::runner_exec::terminal_command_result_descendants(
+                &store,
+                run_id,
+                &RunnerJobLogSnapshot {
+                    events: vec![JobEvent {
+                        data: Some(serde_json::json!({
+                            "stdout": serde_json::json!({
+                                "schema": "homeboy/command-result/v3",
+                                "command": "bench",
+                                "success": true,
+                                "exit_code": 0,
+                                "status": "succeeded",
+                                "refs": { "runs": [{
+                                    "id": "untrusted-child",
+                                    "kind": "bench",
+                                    "source": "attacker"
+                                }] }
+                            }).to_string()
+                        })),
+                        ..snapshot.events[0].clone()
+                    }],
+                    ..snapshot
+                },
+            );
+        assert!(adversarial.is_none());
+    });
+}
+
+#[test]
+fn terminal_runner_exec_rejects_indirect_descendant_cycles() {
+    with_isolated_home(|_| {
+        let parent_id = "cycle-parent";
+        record_runner_exec_job_identity(
+            parent_id,
+            "homeboy-lab",
+            "00000000-0000-0000-0000-000000000123",
+            "/runner/workspace",
+            &["homeboy".to_string(), "bench".to_string()],
+        )
+        .expect("parent run");
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let child = store
+            .start_run(homeboy_core::observation::NewRunRecord::builder("bench").build())
+            .expect("child run");
+        store
+            .update_run_metadata(
+                &child.id,
+                serde_json::json!({
+                    "descendant_run_evidence": [{
+                        "schema": "homeboy/descendant-run-evidence-ref/v1",
+                        "run_id": parent_id,
+                        "kind": "runner_execution",
+                        "source": "controller.terminal_command_result.refs.runs"
+                    }]
+                }),
+            )
+            .expect("record child edge");
+        let mut snapshot = runner_snapshot("succeeded");
+        snapshot.events[0].data = Some(serde_json::json!({
+            "stdout": serde_json::json!({
+                "schema": "homeboy/command-result/v3",
+                "command": "bench",
+                "success": true,
+                "exit_code": 0,
+                "status": "succeeded",
+                "refs": { "runs": [{
+                    "id": child.id,
+                    "kind": "bench",
+                    "source": "forged"
+                }] }
+            }).to_string()
+        }));
+
+        assert!(terminal_command_result_descendants(&store, parent_id, &snapshot).is_none());
+    });
+}
+
+#[test]
 fn generic_runner_exec_rejects_stale_terminal_snapshot_binding() {
     with_isolated_home(|_| {
         let command = vec!["true".to_string()];
