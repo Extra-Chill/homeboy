@@ -16,6 +16,7 @@ pub struct RunPlanArgs {
 }
 #[derive(Args, Debug)]
 pub struct RunArgs {
+    /// Exact durable run id to execute. Use this to bypass older queued work.
     pub run_id: String,
     #[arg(long = "timeout-ms", value_name = "MS")]
     pub timeout_ms: Option<u64>,
@@ -312,6 +313,18 @@ pub struct CancelArgs {
     pub run_id: String,
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+}
+#[derive(Args, Debug)]
+pub struct QuarantineArgs {
+    /// Exact durable run id. Cook aliases are not accepted for mutations.
+    pub run_id: String,
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+}
+#[derive(Args, Debug)]
+pub struct RearmArgs {
+    /// Exact durable run id. Cook aliases are not accepted for mutations.
+    pub run_id: String,
 }
 #[derive(Args, Debug)]
 pub struct ReviewArgs {

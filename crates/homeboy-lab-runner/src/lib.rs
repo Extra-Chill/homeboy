@@ -289,6 +289,7 @@ pub use homeboy_refresh::{
     RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
 };
 pub use job_preparation::register as register_runner_job_preparation_provider;
+pub use lab::offload::hydrate_runner_workspace_dependencies;
 pub use lab::{
     execute_lab_offload, LabJobOverrides, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
     LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,

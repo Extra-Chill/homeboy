@@ -1931,6 +1931,40 @@ fn full_status_projection_leaves_large_legacy_shared_state_and_observation_db_un
     });
 }
 
+#[test]
+fn disconnected_generation_reconcile_action_passes_reconcile_preflight() {
+    test_support::with_isolated_home(|_| {
+        crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
+        let mut session = direct_ssh_session("lease-stale");
+        // The persisted stale generation has no local tunnel to probe. This
+        // keeps the fixture focused on disconnected recovery preflight.
+        session.local_url = None;
+        session.local_port = None;
+        write_session(&session).expect("write disconnected direct session");
+        let mut generations = crate::RollingGenerations::new("lease-stale", session);
+        generations.admit();
+        crate::generation_store::write("homeboy-lab", &generations)
+            .expect("persist stale generation evidence");
+
+        let status = status("homeboy-lab").expect("read disconnected status");
+        assert!(!status.connected);
+        let inventory =
+            crate::generation_store::status_projection("homeboy-lab", status.session.as_ref())
+                .expect("read persisted generation evidence");
+        assert_eq!(
+            status
+                .admission_summary_with_generations(&inventory, &[], inventory.len())
+                .next_action
+                .as_deref(),
+            Some("homeboy runner reconcile homeboy-lab")
+        );
+
+        let reconciled = reconcile_status("homeboy-lab")
+            .expect("status-recommended reconciliation accepts a disconnected runner");
+        assert!(!reconciled.connected);
+    });
+}
+
 fn snapshot_directory(
     root: &std::path::Path,
 ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
