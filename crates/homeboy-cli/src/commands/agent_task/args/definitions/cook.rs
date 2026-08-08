@@ -330,6 +330,48 @@ mod tests {
     }
 
     #[test]
+    fn cook_help_documents_explicit_execution_cap_precedence_over_configured_rotations() {
+        let help = rendered_cook_help();
+        assert!(
+            help.contains("--max-attempts 1 --max-provider-executions 1"),
+            "{help}"
+        );
+        assert!(
+            help.contains("explicit `--max-provider-rotations`"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn cook_parser_preserves_an_explicit_execution_cap_without_a_rotation_override() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--max-attempts",
+            "1",
+            "--max-provider-executions",
+            "1",
+            "--no-finalize",
+            "--prompt",
+            "test",
+            "--to-worktree",
+            "repo@branch",
+        ])
+        .expect("parse an explicitly bounded Cook");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+
+        assert_eq!(cook.max_attempts, 1);
+        assert_eq!(cook.dispatch.core.attempts, Some(1));
+        assert_eq!(cook.dispatch.core.provider_rotations, None);
+    }
+
+    #[test]
     fn cook_help_exposes_quiet_progress_for_orchestration() {
         let help = rendered_cook_help();
         assert!(help.contains("--no-progress"), "{help}");
