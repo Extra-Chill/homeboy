@@ -46,6 +46,9 @@ pub struct AgentTaskManagedServiceRecord {
     pub requested_cleanup_deadline_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_outcome: Option<String>,
+    /// Set only after this supervisor successfully waits for the service leader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_reaped: Option<bool>,
     pub provenance: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_identity: Option<ProcessStartIdentity>,
@@ -223,6 +226,7 @@ impl AgentTaskServiceSupervisor {
             cleanup: None,
             requested_cleanup_deadline_ms: Some(spec.cleanup_deadline_ms),
             cleanup_outcome: None,
+            cleanup_reaped: None,
             provenance: json!({"schema":"homeboy/agent-task-managed-service/v3", "run_id": run_id, "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "target": spec.target, "lifecycle": spec.lifecycle, "socket_handoff": spec.socket_handoff, "cleanup_deadline_ms": spec.cleanup_deadline_ms, "env_allowlist": spec.env_allowlist, "secret_env": spec.secret_env, "secret_env_plan": spec.secret_env_plan.as_ref().map(|plan| plan.redacted()), "owner": { "runner_id": owner_runner_id, "runner_job_id": owner_runner_job_id }, "endpoint_ownership": { "host": spec.host, "port": spec.port, "lease": port_lease.as_ref().map(|lease| lease.path.display().to_string()) }}),
             process_identity: None,
             process_group_id: None,
@@ -290,9 +294,13 @@ impl AgentTaskServiceSupervisor {
         {
             let cleanup = containment
                 .cleanup_with_grace(Duration::from_millis(spec.cleanup_deadline_ms), false);
+            // A successful containment cleanup waits for its owned leader and
+            // descendants before returning.
+            let reaped = cleanup.is_ok();
             record.state = "failed".to_string();
             record.cleanup = Some("terminated_after_readiness_failure".to_string());
             record.cleanup_outcome = Some(cleanup_outcome(cleanup));
+            record.cleanup_reaped = Some(reaped);
             let _ = persist_record(run_id, &record);
             return Err(format!("managed service '{}': {error}", spec.id));
         }
@@ -350,22 +358,26 @@ impl AgentTaskServiceSupervisor {
                             Duration::from_millis(service.spec.cleanup_deadline_ms),
                             exited,
                         );
-                        let _ = service.child.wait();
-                        cleanup
+                        let child_reaped = service.child.wait().is_ok();
+                        let reaped = cleanup.is_ok() || child_reaped;
+                        (cleanup, reaped)
                     })
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
                 .map(|handle| {
                     handle.join().unwrap_or_else(|_| {
-                        Err(homeboy_core::Error::internal_unexpected(
-                            "managed service cleanup worker panicked",
-                        ))
+                        (
+                            Err(homeboy_core::Error::internal_unexpected(
+                                "managed service cleanup worker panicked",
+                            )),
+                            false,
+                        )
                     })
                 })
                 .collect::<Vec<_>>()
         });
-        for (service, cleanup) in self.services.iter_mut().zip(cleanups) {
+        for (service, (cleanup, reaped)) in self.services.iter_mut().zip(cleanups) {
             service.record.state = "stopped".to_string();
             service.record.cleanup_outcome = Some(match &cleanup {
                 Ok(false) => "graceful".to_string(),
@@ -376,6 +388,7 @@ impl AgentTaskServiceSupervisor {
                 Ok(_) => format!("cleaned_up:{reason}"),
                 Err(error) => format!("cleanup_failed:{reason}:{}", error.message),
             });
+            service.record.cleanup_reaped = Some(reaped);
             if let Some(run_id) = service
                 .record
                 .provenance
@@ -861,22 +874,6 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-fn process_is_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        pid > 0
-            && pid <= i32::MAX as u32
-            && unsafe {
-                libc::kill(pid as libc::pid_t, 0) == 0
-                    || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-            }
-    }
-    #[cfg(not(unix))]
-    {
-        pid == std::process::id()
-    }
 }
 
 fn parent_process_identity(pid: u32) -> Result<Option<ProcessStartIdentity>, String> {
@@ -1752,7 +1749,7 @@ mod tests {
                 record.cleanup_outcome.as_deref(),
                 Some("deadline_escalation_forced")
             );
-            assert!(record.pid.is_some_and(|pid| !super::process_is_alive(pid)));
+            assert_eq!(record.cleanup_reaped, Some(true));
             assert_eq!(record.stdout_uri, record.stderr_uri);
 
             let (refs, evidence) = startup_failure_evidence(run_id);
