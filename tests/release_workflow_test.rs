@@ -1186,6 +1186,29 @@ fn release_fast_path_keeps_every_publication_verification() {
     );
 }
 
+#[test]
+fn release_recovery_runs_publication_gate_from_the_control_revision() {
+    let workflow = release_workflow();
+    let host = job_section(workflow, "host");
+    let gate = release_step_block(host, "name: Gate publication on the declared asset set");
+
+    assert!(
+        gate.contains("CONTROL_SHA: ${{ github.sha }}"),
+        "the publication helper must be pinned to the workflow control revision"
+    );
+    assert!(
+        gate.contains(
+            "git show \"${CONTROL_SHA}:.github/release-asset-completeness.sh\" > \"${CONTROL_HELPER}\""
+        ),
+        "a stranded target tag may predate the helper, so recovery must materialize it from the control revision"
+    );
+    assert!(gate.contains("bash \"${CONTROL_HELPER}\""));
+    assert!(
+        !gate.contains("bash .github/release-asset-completeness.sh"),
+        "the target-tag checkout must not own recovery control helpers"
+    );
+}
+
 /// Recovery is allowed — required — to run a control binary NEWER than the tag
 /// it repairs; that is the bootstrap #10519 asks for, and #10560 built it by
 /// pinning `gate-build` to `github.sha`. The inverse was never bounded: a
