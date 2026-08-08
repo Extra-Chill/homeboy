@@ -1094,6 +1094,7 @@ dependencies = [
  "shlex",
  "tempfile",
  "uuid",
+ "zip",
 ]
 
 [[package]]

@@ -16,6 +16,7 @@
 //! Trace-target git-fetch calculation lives in `trace_fetch_refs`; this module
 //! only decides when those refs participate in workspace sync.
 
+mod dependency_package;
 mod errors;
 mod execute;
 mod fallback_commands;
@@ -34,6 +35,7 @@ mod tests;
 
 // Public API surface.
 pub use execute::execute_lab_offload;
+pub use hydration::hydrate_runner_workspace_dependencies;
 pub use types::{
     LabJobOverrides, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
     LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,

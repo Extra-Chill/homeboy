@@ -492,12 +492,12 @@ mod tests {
     fn workspace_permission_root_is_emitted_only_for_the_versioned_capability() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
             "id": "permission-aware",
-            "backend": "fixture",
+            "backend": "permission-aware",
             "capabilities": [AGENT_TASK_PROVIDER_CAPABILITY_WORKSPACE_PERMISSION_ROOT_V1]
         }))
         .expect("provider declaration");
         let mut executor = AgentTaskExecutor {
-            backend: "fixture".to_string(),
+            backend: "permission-aware".to_string(),
             selector: None,
             runtime_selection: None,
             required_capabilities: Vec::new(),
@@ -513,7 +513,7 @@ mod tests {
         let provider_without_capability: AgentTaskExecutorProvider =
             serde_json::from_value(json!({
                 "id": "unaware",
-                "backend": "fixture"
+                "backend": "permission-aware"
             }))
             .expect("provider declaration");
         let mut unaffected = executor.clone();
