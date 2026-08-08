@@ -1100,6 +1100,13 @@ fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
             .expect("terminal transport awaits aggregate synchronization");
         assert_eq!(record.state, AgentTaskRunState::Running);
         assert!(store::read_aggregate(&record.run_id).is_err());
+        let before_delayed_provider_terminal = status(&record.run_id)
+            .expect("continuation reconciliation observes the pending provider aggregate");
+        assert_eq!(
+            before_delayed_provider_terminal.state,
+            AgentTaskRunState::Running,
+            "continuation must keep observing until the runner publishes the provider aggregate"
+        );
 
         let aggregate = succeeded_aggregate(&test_plan());
         let mut terminal_with_aggregate = terminal_child_snapshot(&aggregate);
@@ -1122,6 +1129,13 @@ fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
         assert_eq!(
             store::read_aggregate(&record.run_id).expect("aggregate persisted"),
             aggregate
+        );
+        let after_delayed_provider_terminal = status(&record.run_id)
+            .expect("continuation reconciliation observes the projected terminal aggregate");
+        assert_eq!(
+            after_delayed_provider_terminal.state,
+            AgentTaskRunState::Succeeded,
+            "the same durable attempt becomes terminal exactly once when delayed provider evidence arrives"
         );
     });
 }

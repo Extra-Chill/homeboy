@@ -26,6 +26,9 @@ pub struct AuditArgs {
     #[command(flatten)]
     pub comp: PositionalComponentArgs,
 
+    #[arg(long, hide = true)]
+    pub release_readiness_source: Option<String>,
+
     #[command(flatten)]
     pub extension_override: ExtensionOverrideArgs,
 
@@ -549,6 +552,7 @@ mod tests {
                 component: Some("homeboy".to_string()),
                 path: None,
             },
+            release_readiness_source: None,
             extension_override: ExtensionOverrideArgs::default(),
             conventions: false,
             only: vec![],
@@ -977,6 +981,7 @@ mod tests {
                     component: Some(root.to_string_lossy().to_string()),
                     path: None,
                 },
+                release_readiness_source: None,
                 extension_override: ExtensionOverrideArgs {
                     extensions: vec!["source-fixture".to_string()],
                 },

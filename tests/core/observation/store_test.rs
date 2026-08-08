@@ -29,12 +29,6 @@ impl XdgGuard {
         std::env::remove_var("XDG_DATA_HOME");
         Self { prior }
     }
-
-    fn set(value: &std::path::Path) -> Self {
-        let prior = std::env::var("XDG_DATA_HOME").ok();
-        std::env::set_var("XDG_DATA_HOME", value);
-        Self { prior }
-    }
 }
 
 impl Drop for XdgGuard {
@@ -50,6 +44,18 @@ impl EnvGuard {
     fn set(key: &'static str, value: String) -> Self {
         let prior = std::env::var(key).ok();
         std::env::set_var(key, value);
+        Self { key, prior }
+    }
+
+    /// Clear a variable for the guard's lifetime.
+    ///
+    /// Needed for the XDG-layout assertions below: `with_isolated_home` sets
+    /// `HOMEBOY_DATA_DIR`, and `homeboy_data()` checks it *before* consulting
+    /// `XDG_DATA_HOME` -- so an `XdgGuard` alone cannot reach the path it is
+    /// setting up. Same drift documented in #11919.
+    fn unset(key: &'static str) -> Self {
+        let prior = std::env::var(key).ok();
+        std::env::remove_var(key);
         Self { key, prior }
     }
 }
@@ -70,6 +76,7 @@ mod store_init_tests {
     fn test_status() {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();
+            let _data_dir = EnvGuard::unset(crate::paths::HOMEBOY_DATA_DIR_ENV);
 
             let status = store::status().expect("status");
 
@@ -90,15 +97,29 @@ mod store_init_tests {
         });
     }
 
+    /// Pins the resolved database path under an isolated home.
+    ///
+    /// This deliberately does **not** set `XDG_DATA_HOME`. `homeboy_data()`
+    /// consults the registered home-root override *before* XDG -- the override
+    /// "outranks `XDG_DATA_HOME` deliberately" per its own comment -- and
+    /// `with_isolated_home` always registers one. So an `XdgGuard::set` here
+    /// could never take effect, and asserting an XDG-derived path was pinning
+    /// a resolution order that does not exist. It failed for that reason.
+    ///
+    /// `HOMEBOY_DATA_DIR` is cleared because the harness sets it and it
+    /// short-circuits ahead of everything; clearing it is what makes this the
+    /// production default rather than a test artifact (#11919).
     #[test]
     fn test_database_path() {
         with_isolated_home(|home| {
-            let data_home = home.path().join("xdg-data");
-            let _xdg = XdgGuard::set(&data_home);
+            let _data_dir = EnvGuard::unset(crate::paths::HOMEBOY_DATA_DIR_ENV);
 
             let path = store::database_path().expect("db path");
 
-            assert_eq!(path, data_home.join("homeboy/homeboy.sqlite"));
+            assert_eq!(
+                path,
+                home.path().join(".local/share/homeboy/homeboy.sqlite")
+            );
         });
     }
 
@@ -1099,8 +1120,14 @@ mod store_artifact_tests {
                 std::fs::read_to_string(persisted.join("nested/detail.txt")).expect("read nested"),
                 "detail"
             );
+            // The immutable tree digest lives in `sha256`, not `url`.
+            // `record_directory_artifact_with_id_and_metadata` computes
+            // `directory_tree_sha256` and stores it there -- it is also what the
+            // idempotent-reuse check compares (`existing.sha256.as_deref()`).
+            // This assertion had the two fields swapped and failed for that
+            // reason.
             assert_eq!(
-                artifact.url,
+                artifact.sha256,
                 Some(
                     crate::observation::directory_tree_sha256(&persisted)
                         .expect("directory digest")
@@ -1108,7 +1135,7 @@ mod store_artifact_tests {
             );
             assert_eq!(artifact.size_bytes, None);
             assert_eq!(artifact.mime, None);
-            assert_eq!(artifact.sha256, None);
+            assert_eq!(artifact.url, None);
         });
     }
 

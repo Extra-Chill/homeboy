@@ -42,6 +42,9 @@ pub struct TestArgs {
     #[command(flatten)]
     pub comp: PositionalComponentArgs,
 
+    #[arg(long, hide = true)]
+    pub release_readiness_source: Option<String>,
+
     #[command(flatten)]
     pub extension_override: ExtensionOverrideArgs,
 

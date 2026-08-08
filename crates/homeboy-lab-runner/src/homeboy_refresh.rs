@@ -21,10 +21,10 @@ use super::connection::{
 use super::execution::exec_with_status_snapshot;
 use super::execution::{reserve_daemon_admission, DaemonAdmissionPolicy};
 use super::{
-    connect_with_orphan_adoption, exec, load, materialize_runner_extension_with_env, merge,
-    normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
-    RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
-    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
+    connect_with_orphan_adoption, copy_snapshot_to_directory, exec, load,
+    materialize_runner_extension_with_env, merge, normalize_runner_command_env_for_homeboy_path,
+    plan_controller_snapshot_extension, RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerExecOutput, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
     RunnerFileTransfer, RunnerKind,
 };
 
@@ -274,6 +274,21 @@ pub struct RunnerDevSyncBinaryProvenance {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
     pub dirty: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_snapshot: Option<RunnerDevSyncSourceSnapshot>,
+}
+
+/// The immutable controller source bytes from which an SSH runner built a
+/// native development binary. The archive and binary digests are independently
+/// checked on the runner before its configured binary is changed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerDevSyncSourceSnapshot {
+    pub schema: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub remote_archive: String,
+    pub build_slot: String,
+    pub binary_sha256: String,
 }
 
 pub type RunnerDevSyncExtensionProvenance =
@@ -674,9 +689,9 @@ pub fn refresh_homeboy_binary(
     phase_summary.push(refresh_phase("identity_verification", true, 0));
     phase_summary.push(refresh_phase("bootstrap_promotion", true, 0));
     phase_summary.push(refresh_phase("configuration_promotion", true, 0));
-    let identity = bootstrap.identity;
-    let updated_fields = bootstrap.updated_fields;
-    let rollback = bootstrap.rollback;
+    let identity = bootstrap.identity.clone();
+    let updated_fields = bootstrap.updated_fields.clone();
+    let rollback = bootstrap.rollback.clone();
 
     // Re-read the session after selection as well. The pre-materialization
     // record is not safe to use for a reconnect after a queued promotion.
@@ -812,9 +827,9 @@ pub fn refresh_homeboy_binary(
                 ));
             }
         };
-        if let Err(error) =
-            disconnect_with_session(&plan.runner_id, refresh_session.as_ref(), options.force)
-        {
+        if let Err(error) = disconnect_before_reconnect(refresh_session.as_ref(), |session| {
+            disconnect_with_session(&plan.runner_id, Some(session), options.force).map(|_| ())
+        }) {
             return rollback_refresh_error_with(error, || {
                 restore_runner_homeboy_path_if_selected(
                     &plan.runner_id,
@@ -835,7 +850,9 @@ pub fn refresh_homeboy_binary(
                 refresh_error_with_phase_summary(error, &phases)
             });
         }
-        phase_summary.push(refresh_phase("disconnect", true, 0));
+        if refresh_session.is_some() {
+            phase_summary.push(refresh_phase("disconnect", true, 0));
+        }
         let (report, connect_exit_code) = match connect_with_orphan_adoption(
             &plan.runner_id,
             refresh_owned_lease.as_deref(),
@@ -847,50 +864,41 @@ pub fn refresh_homeboy_binary(
         ) {
             Ok(result) => result,
             Err(error) => {
-                return rollback_refresh_connect_error_with(
-                    error,
-                    || {
-                        restore_runner_homeboy_path_if_selected(
-                            &plan.runner_id,
-                            &selected_binary_path,
-                            previous_homeboy_path.as_deref(),
-                        )
-                        .map(|_| ())
+                let readiness = blocked_refresh_readiness(&plan);
+                phase_summary.push(refresh_phase("reconnect_transport", true, 1));
+                return Ok((
+                    HomeboyBinaryRefreshOutput {
+                        variant: "refresh_homeboy",
+                        command: "runner.refresh_homeboy",
+                        runner_id: plan.runner_id.clone(),
+                        dry_run: false,
+                        plan: plan.clone(),
+                        identity: Some(identity.clone()),
+                        updated_fields: updated_fields.clone(),
+                        phase_summary,
+                        daemon_refreshed: false,
+                        interrupted_job_ids,
+                        selected_binary_path: selected_binary_path.clone(),
+                        reconnect_required: true,
+                        followup_commands: readiness.continuation.clone().into_iter().collect(),
+                        readiness: Some(readiness),
+                        reconnect_deferred: None,
+                        failure: Some(refresh_verification_failure(
+                            &plan,
+                            exec_output.clone(),
+                            error.message,
+                        )),
+                        bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                            disconnected_ssh,
+                            &plan,
+                            &bootstrap,
+                            &identity,
+                            &updated_fields,
+                        )),
+                        rollback: rollback.clone(),
                     },
-                    || {
-                        let (report, exit_code) = connect_with_orphan_adoption(
-                            &plan.runner_id,
-                            None,
-                            &[],
-                            false,
-                            None,
-                            None,
-                            None,
-                        )?;
-                        if exit_code != 0 || !report.connected {
-                            return Err(Error::validation_invalid_argument(
-                                "reconnect",
-                                report.failure_message.unwrap_or_else(|| {
-                                    "rollback reconnect did not persist an active daemon session".to_string()
-                                }),
-                                Some(plan.runner_id.clone()),
-                                None,
-                            ));
-                        }
-                        Ok(())
-                    },
-                )
-                .map_err(|error| {
-                    let error = durable_refresh_partial_error_if_needed(
-                        error,
-                        &plan.runner_id,
-                        previous_homeboy_path.as_deref(),
-                        options.force,
-                    );
-                    let mut phases = phase_summary.clone();
-                    phases.push(refresh_phase("reconnect_transport", true, 1));
-                    refresh_error_with_phase_summary(error, &phases)
-                });
+                    1,
+                ));
             }
         };
         let daemon_identity_verification = (connect_exit_code == 0)
@@ -904,18 +912,6 @@ pub fn refresh_homeboy_binary(
             } else {
                 connect_exit_code
             };
-            if let Err(rollback_error) = rollback_refreshed_daemon(
-                &plan.runner_id,
-                previous_homeboy_path.as_deref(),
-                options.force,
-            ) {
-                return Err(reconnect_rollback_error(
-                    &report,
-                    rollback_error,
-                    previous_homeboy_path.as_deref(),
-                    options.force,
-                ));
-            }
             phase_summary.push(refresh_phase(
                 "reconnect_transport",
                 true,
@@ -929,15 +925,18 @@ pub fn refresh_homeboy_binary(
                     runner_id: plan.runner_id.clone(),
                     dry_run: false,
                     plan: plan.clone(),
-                    identity: Some(identity),
-                    updated_fields: Vec::new(),
+                    identity: Some(identity.clone()),
+                    updated_fields: updated_fields.clone(),
                     phase_summary,
                     daemon_refreshed: false,
                     interrupted_job_ids,
                     selected_binary_path: selected_binary_path.clone(),
                     reconnect_required: true,
-                    followup_commands: plan.followup_commands.clone(),
-                    readiness: Some(failed_refresh_readiness(&plan)),
+                    followup_commands: blocked_refresh_readiness(&plan)
+                        .continuation
+                        .into_iter()
+                        .collect(),
+                    readiness: Some(blocked_refresh_readiness(&plan)),
                     reconnect_deferred: None,
                     failure: Some(refresh_reconnect_failure(
                         &plan,
@@ -945,7 +944,13 @@ pub fn refresh_homeboy_binary(
                         &report,
                         daemon_identity_verification.err().as_deref(),
                     )),
-                    bootstrap_provenance: None,
+                    bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                        disconnected_ssh,
+                        &plan,
+                        &bootstrap,
+                        &identity,
+                        &updated_fields,
+                    )),
                     rollback: rollback.clone(),
                 },
                 reconnect_exit_code,
@@ -967,18 +972,6 @@ pub fn refresh_homeboy_binary(
                 probe_reconnected_admission_readiness(&plan.runner_id, identity_commit)
             {
                 daemon_refreshed = false;
-                if let Err(rollback_error) = rollback_refreshed_daemon(
-                    &plan.runner_id,
-                    previous_homeboy_path.as_deref(),
-                    options.force,
-                ) {
-                    return Err(reconnect_rollback_error(
-                        &report,
-                        rollback_error,
-                        previous_homeboy_path.as_deref(),
-                        options.force,
-                    ));
-                }
                 phase_summary.push(refresh_phase("reconnect_transport", true, 0));
                 phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
                 phase_summary.push(refresh_phase("admission_readiness", true, 1));
@@ -989,15 +982,18 @@ pub fn refresh_homeboy_binary(
                         runner_id: plan.runner_id.clone(),
                         dry_run: false,
                         plan: plan.clone(),
-                        identity: Some(identity),
-                        updated_fields: Vec::new(),
+                        identity: Some(identity.clone()),
+                        updated_fields: updated_fields.clone(),
                         phase_summary,
                         daemon_refreshed: false,
                         interrupted_job_ids,
                         selected_binary_path: selected_binary_path.clone(),
                         reconnect_required: true,
-                        followup_commands: plan.followup_commands.clone(),
-                        readiness: Some(failed_refresh_readiness(&plan)),
+                        followup_commands: blocked_refresh_readiness(&plan)
+                            .continuation
+                            .into_iter()
+                            .collect(),
+                        readiness: Some(blocked_refresh_readiness(&plan)),
                         reconnect_deferred: None,
                         failure: Some(refresh_reconnect_failure(
                             &plan,
@@ -1005,7 +1001,13 @@ pub fn refresh_homeboy_binary(
                             &report,
                             Some(readiness_error.message.as_str()),
                         )),
-                        bootstrap_provenance: None,
+                        bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                            disconnected_ssh,
+                            &plan,
+                            &bootstrap,
+                            &identity,
+                            &updated_fields,
+                        )),
                         rollback: rollback.clone(),
                     },
                     1,
@@ -1123,10 +1125,62 @@ fn failed_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshRe
     }
 }
 
+fn blocked_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshReadiness {
+    HomeboyRefreshReadiness {
+        state: HomeboyRefreshReadinessState::Blocked,
+        accepting_jobs: false,
+        daemon_fresh: false,
+        owners: Vec::new(),
+        continuation: Some(format!(
+            "homeboy runner connect {}",
+            shell_arg(&plan.runner_id)
+        )),
+    }
+}
+
+fn refresh_bootstrap_provenance(
+    disconnected_ssh: bool,
+    plan: &HomeboyBinaryRefreshPlan,
+    bootstrap: &SshBootstrapPromotion,
+    identity: &Value,
+    updated_fields: &[String],
+) -> HomeboyBootstrapProvenance {
+    HomeboyBootstrapProvenance {
+        transport: if disconnected_ssh {
+            "ssh_bootstrap"
+        } else {
+            "daemon"
+        },
+        requested_ref: plan.git_ref.clone(),
+        resolved_source_sha: bootstrap.source_sha.clone(),
+        binary_commit: identity
+            .get("data")
+            .unwrap_or(identity)
+            .get("git_commit")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        binary_identity: identity.clone(),
+        timeout_ms: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT.as_millis()),
+        config_fields_changed: updated_fields.to_vec(),
+    }
+}
+
 /// `daemon_refreshed` records a completed daemon operation. A later readiness
 /// failure can require reconciliation without requiring another reconnect.
 fn reconnect_required_after_refresh(daemon_refreshed: bool) -> bool {
     !daemon_refreshed
+}
+
+/// A refresh rotates a live daemon but starts a disconnected runner directly.
+/// The subsequent connect always uses the promoted configured binary.
+fn disconnect_before_reconnect(
+    session: Option<&super::RunnerSession>,
+    disconnect: impl FnOnce(&super::RunnerSession) -> Result<()>,
+) -> Result<()> {
+    if let Some(session) = session {
+        disconnect(session)?;
+    }
+    Ok(())
 }
 
 /// Evaluate refresh completion from the admission authority, not from daemon
@@ -1841,47 +1895,94 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
     let mut binary = None;
     if sync_homeboy_binary {
         let source_path = options.homeboy_source.as_deref().map(expand_path);
-        // Resolve the runner and refuse an impossible cross-architecture source
-        // sync BEFORE compiling. A controller-local build always produces a
-        // controller-native binary, so building first and then rejecting the
-        // Mach-O output costs several minutes to reach a verdict that was
-        // knowable up front (#8963).
         let runner = load(&options.runner_id)?;
-        if options.homeboy_binary.is_none() {
-            validate_dev_sync_source_build_for_runner(&runner)?;
-        }
-        let (local_binary, _target_lease) = match options.homeboy_binary.as_deref() {
-            Some(path) => (expand_path(path), None),
-            None => build_local_homeboy_binary(source_path.as_deref())?,
-        };
-        validate_dev_sync_binary_for_runner(&runner, &local_binary)?;
-        let sha256 = sha256_file(&local_binary)?;
+        let (local_binary, remote_binary, sha256, source_snapshot) =
+            match options.homeboy_binary.as_deref() {
+                Some(path) => {
+                    let local_binary = expand_path(path);
+                    validate_dev_sync_binary_for_runner(&runner, &local_binary)?;
+                    let sha256 = sha256_file(&local_binary)?;
+                    let remote_binary = dev_binary_path(&plan.workspace_root, &sha256);
+                    let transfer = RunnerFileTransfer::for_runner(&runner, None)?;
+                    let remote_parent = Path::new(&remote_binary)
+                        .parent()
+                        .and_then(Path::to_str)
+                        .ok_or_else(|| {
+                        Error::internal_json("invalid remote dev binary path".to_string(), None)
+                    })?;
+                    transfer.ensure_directory(remote_parent)?;
+                    transfer.upload_file(&local_binary.display().to_string(), &remote_binary)?;
+                    let (_chmod, exit) = exec(
+                        &options.runner_id,
+                        RunnerExecOptions::diagnostic_raw_shell(format!(
+                            "chmod 0755 {}",
+                            quote_path(&remote_binary)
+                        )),
+                    )?;
+                    if exit != 0 {
+                        return Ok((
+                            dev_sync_failure_output(options, plan, None, Vec::new()),
+                            exit,
+                        ));
+                    }
+                    (local_binary, remote_binary, sha256, None)
+                }
+                None if runner.kind == RunnerKind::Ssh => {
+                    let source = source_path.clone().unwrap_or(
+                        std::env::current_dir()
+                            .map_err(|err| Error::internal_json(err.to_string(), None))?,
+                    );
+                    let snapshot = build_runner_source_snapshot(&source, &plan.workspace_root)?;
+                    let transfer = RunnerFileTransfer::for_runner(&runner, None)?;
+                    let archive = snapshot.archive.path();
+                    let parent = Path::new(&snapshot.remote_archive)
+                        .parent()
+                        .and_then(Path::to_str)
+                        .ok_or_else(|| {
+                            Error::internal_json(
+                                "invalid remote source snapshot path".to_string(),
+                                None,
+                            )
+                        })?;
+                    transfer.ensure_directory(parent)?;
+                    transfer.upload_private_file_atomic(
+                        &archive.display().to_string(),
+                        &snapshot.remote_archive,
+                        &snapshot.sha256,
+                    )?;
+                    let (output, exit) = exec(
+                        &options.runner_id,
+                        RunnerExecOptions::diagnostic_raw_shell(source_snapshot_build_script(
+                            &snapshot,
+                        )),
+                    )?;
+                    if exit != 0 {
+                        return Ok((
+                            dev_sync_failure_output(options, plan, None, Vec::new()),
+                            exit,
+                        ));
+                    }
+                    let (remote_binary, binary_sha256) =
+                        verify_source_snapshot_build(&snapshot, &output.stdout)?;
+                    (
+                        source,
+                        remote_binary,
+                        binary_sha256.clone(),
+                        Some(snapshot.provenance(binary_sha256)),
+                    )
+                }
+                None => {
+                    let (local_binary, _target_lease) =
+                        build_local_homeboy_binary(source_path.as_deref())?;
+                    validate_dev_sync_binary_for_runner(&runner, &local_binary)?;
+                    let sha256 = sha256_file(&local_binary)?;
+                    let remote_binary = dev_binary_path(&plan.workspace_root, &sha256);
+                    (local_binary, remote_binary, sha256, None)
+                }
+            };
         let hash = sha256[..16].to_string();
-        let remote_binary = dev_binary_path(&plan.workspace_root, &sha256);
         plan.local_binary = Some(local_binary.display().to_string());
         plan.remote_binary = Some(remote_binary.clone());
-
-        let transfer = RunnerFileTransfer::for_runner(&runner, None)?;
-        let remote_parent = Path::new(&remote_binary)
-            .parent()
-            .and_then(Path::to_str)
-            .ok_or_else(|| {
-                Error::internal_json("invalid remote dev binary path".to_string(), None)
-            })?;
-        transfer.ensure_directory(remote_parent)?;
-        transfer.upload_file(&local_binary.display().to_string(), &remote_binary)?;
-
-        let chmod_script = format!("chmod 0755 {}", quote_path(&remote_binary));
-        let (_chmod, chmod_exit) = exec(
-            &options.runner_id,
-            RunnerExecOptions::diagnostic_raw_shell(chmod_script),
-        )?;
-        if chmod_exit != 0 {
-            return Ok((
-                dev_sync_failure_output(options, plan, None, Vec::new()),
-                chmod_exit,
-            ));
-        }
 
         let (refreshed, exit_code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
             runner_id: options.runner_id.clone(),
@@ -1913,6 +2014,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
             source_path: source_path.map(|path| path.display().to_string()),
             source_revision,
             dirty,
+            source_snapshot,
         });
         refresh_output = Some(refreshed);
     }
@@ -2546,6 +2648,161 @@ fn build_local_homeboy_binary(
     Ok((target.target_dir().join("release/homeboy"), Some(target)))
 }
 
+const RUNNER_SOURCE_SNAPSHOT_SCHEMA: &str = "homeboy/runner-dev-source-snapshot/v1";
+const RUNNER_SOURCE_SNAPSHOT_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+struct PreparedRunnerSourceSnapshot {
+    archive: tempfile::NamedTempFile,
+    sha256: String,
+    size_bytes: u64,
+    remote_archive: String,
+    build_slot: String,
+}
+
+impl PreparedRunnerSourceSnapshot {
+    fn provenance(&self, binary_sha256: String) -> RunnerDevSyncSourceSnapshot {
+        RunnerDevSyncSourceSnapshot {
+            schema: RUNNER_SOURCE_SNAPSHOT_SCHEMA.to_string(),
+            sha256: self.sha256.clone(),
+            size_bytes: self.size_bytes,
+            remote_archive: self.remote_archive.clone(),
+            build_slot: self.build_slot.clone(),
+            binary_sha256,
+        }
+    }
+}
+
+/// Seal an unpushed working tree into bounded bytes before it crosses the SSH
+/// boundary. The runner only receives this archive, never a controller path or
+/// a git ref it would need to fetch.
+fn build_runner_source_snapshot(
+    source: &Path,
+    workspace_root: &str,
+) -> Result<PreparedRunnerSourceSnapshot> {
+    if !source.join("Cargo.toml").is_file() {
+        return Err(Error::validation_invalid_argument(
+            "homeboy_source",
+            "homeboy source path must contain Cargo.toml",
+            Some(source.display().to_string()),
+            None,
+        ));
+    }
+    let staging = tempfile::tempdir().map_err(|err| Error::internal_io(err.to_string(), None))?;
+    let staged = staging.path().join("source");
+    copy_snapshot_to_directory(
+        source,
+        &staged,
+        &[
+            ".git".to_string(),
+            "target".to_string(),
+            "._*".to_string(),
+            "**/._*".to_string(),
+        ],
+    )?;
+    let archive =
+        tempfile::NamedTempFile::new().map_err(|err| Error::internal_io(err.to_string(), None))?;
+    let status = Command::new("tar")
+        .env("COPYFILE_DISABLE", "1")
+        .args(["--no-xattrs", "-C"])
+        .arg(&staged)
+        .args(["-cf"])
+        .arg(archive.path())
+        .arg(".")
+        .status()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("archive runner source snapshot".to_string()),
+            )
+        })?;
+    if !status.success() {
+        return Err(Error::internal_unexpected(
+            "archive runner source snapshot failed".to_string(),
+        ));
+    }
+    let size_bytes = archive
+        .as_file()
+        .metadata()
+        .map_err(|err| Error::internal_io(err.to_string(), None))?
+        .len();
+    if size_bytes == 0 || size_bytes > RUNNER_SOURCE_SNAPSHOT_MAX_BYTES {
+        return Err(Error::validation_invalid_argument(
+            "homeboy_source",
+            "runner source snapshot exceeds the configured size bound",
+            Some(source.display().to_string()),
+            None,
+        ));
+    }
+    let sha256 = sha256_file(archive.path())?;
+    let prefix = &sha256[..16];
+    let root = workspace_root.trim_end_matches('/');
+    Ok(PreparedRunnerSourceSnapshot {
+        archive,
+        sha256: sha256.clone(),
+        size_bytes,
+        remote_archive: format!("{root}/_homeboy_binaries/dev-source/{prefix}.tar"),
+        build_slot: format!("{root}/_homeboy_binaries/dev/{prefix}"),
+    })
+}
+
+fn source_snapshot_build_script(snapshot: &PreparedRunnerSourceSnapshot) -> String {
+    format!(
+        "set -eu\narchive={archive}\nexpected={expected}\nslot={slot}\ntrap 'rm -f -- \"$archive\"' EXIT\nhash() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\n[ \"$(hash \"$archive\")\" = \"$expected\" ] || {{ echo source_snapshot_hash_mismatch >&2; exit 1; }}\nif [ -f \"$slot/.source-sha256\" ] && [ \"$(cat \"$slot/.source-sha256\")\" = \"$expected\" ] && [ -x \"$slot/homeboy\" ]; then binary_sha=$(hash \"$slot/homeboy\"); else rm -rf -- \"$slot\"; mkdir -p \"$slot/source\"; tar -xf \"$archive\" -C \"$slot/source\"; [ -f \"$slot/source/Cargo.toml\" ] || {{ echo source_snapshot_missing_manifest >&2; exit 1; }}; cargo build --release --bin homeboy --manifest-path \"$slot/source/Cargo.toml\" --target-dir \"$slot/target\"; install -m 0755 \"$slot/target/release/homeboy\" \"$slot/homeboy.tmp\"; mv -f \"$slot/homeboy.tmp\" \"$slot/homeboy\"; printf '%s' \"$expected\" > \"$slot/.source-sha256\"; binary_sha=$(hash \"$slot/homeboy\"); fi\n[ \"$(dd if=\"$slot/homeboy\" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\" = 7f454c46 ] || {{ echo runner_native_build_not_elf >&2; exit 1; }}\nprintf 'HOMEBOY_DEV_SOURCE_SHA256=%s\\nHOMEBOY_DEV_BINARY_SHA256=%s\\nHOMEBOY_DEV_BINARY_PATH=%s\\n' \"$expected\" \"$binary_sha\" \"$slot/homeboy\"\n",
+        archive = quote_path(&snapshot.remote_archive),
+        expected = quote_path(&snapshot.sha256),
+        slot = quote_path(&snapshot.build_slot),
+    )
+}
+
+fn verify_source_snapshot_build(
+    snapshot: &PreparedRunnerSourceSnapshot,
+    stdout: &str,
+) -> Result<(String, String)> {
+    let value = |name: &str| {
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .filter(|value| !value.is_empty())
+    };
+    let source_sha = value("HOMEBOY_DEV_SOURCE_SHA256=").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "identity",
+            "runner native build did not report source identity",
+            None,
+            None,
+        )
+    })?;
+    let binary_sha = value("HOMEBOY_DEV_BINARY_SHA256=").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "identity",
+            "runner native build did not report binary identity",
+            None,
+            None,
+        )
+    })?;
+    let binary = value("HOMEBOY_DEV_BINARY_PATH=").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "identity",
+            "runner native build did not report binary path",
+            None,
+            None,
+        )
+    })?;
+    if source_sha != snapshot.sha256
+        || binary_sha.len() != 64
+        || !binary_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || binary != format!("{}/homeboy", snapshot.build_slot)
+    {
+        return Err(Error::validation_invalid_argument(
+            "identity",
+            "runner native build identity does not match its sealed source snapshot",
+            None,
+            None,
+        ));
+    }
+    Ok((binary.to_string(), binary_sha.to_string()))
+}
+
 fn dev_binary_path(workspace_root: &str, sha256: &str) -> String {
     format!(
         "{}/_homeboy_binaries/dev/{}/homeboy",
@@ -2565,35 +2822,6 @@ fn sha256_file(path: &Path) -> Result<String> {
             None,
         )
     })
-}
-
-/// Refuse a controller-local source build that could never satisfy an SSH runner,
-/// before paying for the compile. A Darwin controller can only emit Mach-O, which
-/// [`validate_dev_sync_binary_for_runner`] rejects for SSH runners — so the
-/// verdict is decidable from the controller platform alone (#8963).
-///
-/// This deliberately does not replace the post-build binary guard: an explicitly
-/// supplied `--homeboy-binary` is still inspected by magic bytes, because its
-/// architecture is not implied by the controller platform.
-fn validate_dev_sync_source_build_for_runner(runner: &super::Runner) -> Result<()> {
-    if runner.kind == RunnerKind::Ssh && cfg!(target_os = "macos") {
-        return Err(Error::validation_invalid_argument(
-            "homeboy_source",
-            "runner dev-sync cannot build a Homeboy binary for an SSH runner on a Darwin controller",
-            None,
-            Some(vec![
-                format!(
-                    "Build/select Homeboy on the runner with `homeboy runner refresh-homeboy {} --ref main --reconnect`.",
-                    shell_arg(&runner.id)
-                ),
-                format!(
-                    "For extension-only sync, run `homeboy runner dev-sync {} --extensions <id>=<path>` without --homeboy-binary or --homeboy-source.",
-                    shell_arg(&runner.id)
-                ),
-            ]),
-        ));
-    }
-    Ok(())
 }
 
 fn validate_dev_sync_binary_for_runner(runner: &super::Runner, binary: &Path) -> Result<()> {
