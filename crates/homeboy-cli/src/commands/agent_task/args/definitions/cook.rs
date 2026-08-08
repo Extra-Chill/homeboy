@@ -152,6 +152,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                     .collect::<BTreeMap<_, _>>(),
                 isolate_home: args.isolate_gate_home,
                 isolate_xdg: args.isolate_gate_xdg,
+                hydrate_rust_cache: true,
                 extension_inputs: args.gate_extension_inputs,
             },
             gate_toolchains: args
