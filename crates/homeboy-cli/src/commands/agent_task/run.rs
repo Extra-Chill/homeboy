@@ -1735,6 +1735,7 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
             return continue_cook(CookContinueArgs {
                 cook_or_attempt_id: result.record.run_id,
                 preflight: false,
+                rearm: false,
                 full: false,
             });
         }
