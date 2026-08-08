@@ -268,6 +268,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             "record": record,
             "logs": log,
             "artifacts": artifacts,
+            "aggregate": aggregate,
             "aggregate_review": aggregate_review,
             "diagnostic_summary": diagnostic_summary,
             "failure_reasons": failure_reasons,
@@ -327,6 +328,7 @@ fn compact_review(value: Value, full: bool) -> Value {
     let promotion = value.pointer("/record/metadata/latest_promotion");
     let selected_candidate = promotion
         .map(compact_selected_candidate)
+        .or_else(|| compact_apply_candidate(&value))
         .unwrap_or(Value::Null);
     let gates = promotion
         .and_then(|promotion| promotion.get("deterministic_gates"))
@@ -380,6 +382,27 @@ fn compact_selected_candidate(promotion: &Value) -> Value {
         "size_bytes": size_bytes,
         "changed_files": promotion.get("changed_files"),
     })
+}
+
+fn compact_apply_candidate(value: &Value) -> Option<Value> {
+    let candidate = value.pointer("/promotion_candidates/0")?;
+    let task_id = candidate.get("task_id").and_then(Value::as_str)?;
+    let artifact_id = candidate.get("artifact_id").and_then(Value::as_str)?;
+    let artifact = value
+        .pointer("/aggregate_review/artifact_inventory")?
+        .as_array()?
+        .iter()
+        .find(|artifact| {
+            artifact.get("task_id").and_then(Value::as_str) == Some(task_id)
+                && artifact.get("artifact_id").and_then(Value::as_str) == Some(artifact_id)
+        })?;
+    Some(serde_json::json!({
+        "status": "available",
+        "task_id": candidate.get("task_id"),
+        "artifact": compact_fields(artifact, &["artifact_id", "kind", "path", "sha256", "metadata"]),
+        "size_bytes": artifact.get("size_bytes"),
+        "changed_files": artifact.pointer("/metadata/changed_files"),
+    }))
 }
 
 fn compact_fields(value: &Value, fields: &[&str]) -> Value {
@@ -1478,7 +1501,7 @@ fn promotion_candidates(
                 .unwrap_or_else(|| candidate.artifact_ids.clone());
             let selection_required = artifact_ids.len() > 1;
             artifact_ids.into_iter().map(move |artifact_id| {
-                let mut command = vec![
+                let command = vec![
                     "homeboy".to_string(),
                     "agent-task".to_string(),
                     "promote".to_string(),
@@ -1495,37 +1518,40 @@ fn promotion_candidates(
                         && promotion.pointer("/patch_artifact/id").and_then(Value::as_str)
                             == Some(artifact_id.as_str())
                 });
-                if let Some(to_worktree) = continuation
+                let destination = continuation
                     .and_then(|promotion| promotion.pointer("/target/worktree"))
                     .and_then(Value::as_str)
-                    .or(context.to_worktree)
-                {
+                    .or(context.to_worktree);
+                let command = destination.map(|destination| {
+                    let mut command = command;
                     command.push("--to-worktree".to_string());
-                    command.push(to_worktree.to_string());
-                }
-                if let Some(contract) = continuation
-                    .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
-                {
-                    append_resume_contract(&mut command, contract);
-                } else if let Some(base) = context.cook_base {
-                    command.extend(["--base".to_string(), base.to_string()]);
-                }
-                if let Some(provider_command) = context.provider_command {
-                    command.push("--provider-command".to_string());
-                    command.push(provider_command.to_string());
-                }
-                command.extend(
-                    context.provider_argv
-                        .iter()
-                        .map(|argument| format!("--provider-argv={argument}")),
-                );
+                    command.push(destination.to_string());
+                    if let Some(contract) = continuation
+                        .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
+                    {
+                        append_resume_contract(&mut command, contract);
+                    } else if let Some(base) = context.cook_base {
+                        command.extend(["--base".to_string(), base.to_string()]);
+                    }
+                    if let Some(provider_command) = context.provider_command {
+                        command.push("--provider-command".to_string());
+                        command.push(provider_command.to_string());
+                    }
+                    command.extend(
+                        context.provider_argv
+                            .iter()
+                            .map(|argument| format!("--provider-argv={argument}")),
+                    );
+                    command
+                });
 
                 serde_json::json!({
                     "task_id": candidate.task_id,
                     "artifact_id": artifact_id,
                     "reason": candidate.reason,
                     "command": command,
-                    "ready": context.to_worktree.is_some(),
+                    "ready": destination.is_some(),
+                    "destination_required": destination.is_none(),
                     "selection_required": selection_required,
                 })
             })
@@ -1635,7 +1661,9 @@ fn review_next_actions(
         if to_worktree.is_some() {
             actions.push("review `promotion_candidates` and run the generated `homeboy agent-task promote` command for the selected patch artifact".to_string());
         } else {
-            actions.push("rerun review with `--to-worktree <handle>` to generate complete promotion commands for apply candidates".to_string());
+            actions.push(format!(
+                "rerun review with `homeboy agent-task review {run_id} --to-worktree <managed-worktree>` to generate executable promotion commands for apply candidates"
+            ));
         }
     }
     if review.summary.retry_candidates > 0 {
@@ -1830,6 +1858,42 @@ mod tests {
         assert!(serde_json::to_vec(&providers).expect("provider JSON").len() < 20_000);
         assert!(diagnostic["message"].as_str().expect("message").len() <= DEFAULT_TEXT_LIMIT + 3);
         assert_eq!(diagnostic["response_body"]["omitted_bytes"], 100_000);
+    }
+
+    #[test]
+    fn compact_apply_candidate_uses_the_selected_task_and_artifact_id() {
+        let value = serde_json::json!({
+            "promotion_candidates": [{
+                "task_id": "selected-task",
+                "artifact_id": "shared-patch"
+            }],
+            "aggregate_review": {
+                "artifact_inventory": [
+                    {
+                        "task_id": "other-task",
+                        "artifact_id": "shared-patch",
+                        "kind": "patch",
+                        "path": "/tmp/other.patch",
+                        "size_bytes": 1,
+                        "metadata": { "changed_files": ["other.rs"] }
+                    },
+                    {
+                        "task_id": "selected-task",
+                        "artifact_id": "shared-patch",
+                        "kind": "patch",
+                        "path": "/tmp/selected.patch",
+                        "size_bytes": 17394,
+                        "metadata": { "changed_files": ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"] }
+                    }
+                ]
+            }
+        });
+
+        let selected = compact_apply_candidate(&value).expect("selected candidate");
+
+        assert_eq!(selected["artifact"]["path"], "/tmp/selected.patch");
+        assert_eq!(selected["size_bytes"], 17394);
+        assert_eq!(selected["changed_files"].as_array().map(Vec::len), Some(6));
     }
 
     #[test]

@@ -180,6 +180,20 @@ fn default_review_is_bounded_and_points_to_full_evidence() {
             value["full_command"],
             "homeboy agent-task review run-review-default-bounded --full"
         );
+        assert_eq!(value["canonical_candidate"]["state"], "patch_available");
+        assert_eq!(value["selected_candidate"]["size_bytes"], 42);
+        assert!(value["promotion_candidates"][0]["command"].is_null());
+        assert_eq!(
+            value["promotion_candidates"][0]["destination_required"],
+            true
+        );
+        let destination_guidance = value["next_actions"][0]
+            .as_str()
+            .expect("destination guidance");
+        assert!(destination_guidance.contains(
+            "homeboy agent-task review run-review-default-bounded --to-worktree <managed-worktree>"
+        ));
+        assert!(!destination_guidance.contains("agent-task promote"));
     });
 }
 
