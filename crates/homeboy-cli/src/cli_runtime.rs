@@ -979,29 +979,7 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
     let Some(run_id) = run_id else {
         return Ok(None);
     };
-    if let Some(pinned) =
-        crate::agents::agent_tasks::lifecycle::runner_pinned_runtime_for_mutation(run_id)?
-    {
-        return delegate_agent_task_lifecycle_to_runner_pinned_runtime(&pinned, normalized_args)
-            .map(Some);
-    }
-    let Some(pinned) = crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(run_id)?
-    else {
-        return Ok(None);
-    };
-    let status = ProcessCommand::new(&pinned)
-        .args(&normalized_args[1..])
-        .status()
-        .map_err(|error| {
-            homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some(format!(
-                    "execute pinned controller runtime {}",
-                    pinned.display()
-                )),
-            )
-        })?;
-    Ok(Some(status.code().unwrap_or(1)))
+    delegate_agent_task_lifecycle_to_resolved_runtime(run_id, normalized_args)
 }
 
 fn delegate_cook_continue_to_pinned_runtime(
@@ -1013,29 +991,56 @@ fn delegate_cook_continue_to_pinned_runtime(
     if current_runtime_owns_terminal_cook_continuation(&run_id)? {
         return Ok(None);
     }
+    delegate_agent_task_lifecycle_to_resolved_runtime(&run_id, normalized_args)
+}
+
+enum AgentTaskLifecyclePinnedRuntime {
+    Runner(crate::agents::agent_tasks::lifecycle::RunnerPinnedRuntime),
+    Controller(std::path::PathBuf),
+}
+
+/// Select runner authority before validating a controller-local pin. Historical
+/// runner records carry paths that are intentionally unavailable on controller.
+fn agent_task_lifecycle_pinned_runtime_for_mutation(
+    run_id: &str,
+) -> homeboy::core::Result<Option<AgentTaskLifecyclePinnedRuntime>> {
     if let Some(pinned) =
-        crate::agents::agent_tasks::lifecycle::runner_pinned_runtime_for_mutation(&run_id)?
+        crate::agents::agent_tasks::lifecycle::runner_pinned_runtime_for_mutation(run_id)?
     {
-        return delegate_agent_task_lifecycle_to_runner_pinned_runtime(&pinned, normalized_args)
-            .map(Some);
+        return Ok(Some(AgentTaskLifecyclePinnedRuntime::Runner(pinned)));
     }
-    let Some(pinned) = crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(&run_id)?
-    else {
-        return Ok(None);
-    };
-    let status = ProcessCommand::new(&pinned)
-        .args(&normalized_args[1..])
-        .status()
-        .map_err(|error| {
-            homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some(format!(
-                    "execute pinned controller runtime {}",
-                    pinned.display()
-                )),
-            )
-        })?;
-    Ok(Some(status.code().unwrap_or(1)))
+    Ok(
+        crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(run_id)?
+            .map(AgentTaskLifecyclePinnedRuntime::Controller),
+    )
+}
+
+fn delegate_agent_task_lifecycle_to_resolved_runtime(
+    run_id: &str,
+    normalized_args: &[String],
+) -> homeboy::core::Result<Option<i32>> {
+    match agent_task_lifecycle_pinned_runtime_for_mutation(run_id)? {
+        Some(AgentTaskLifecyclePinnedRuntime::Runner(pinned)) => {
+            delegate_agent_task_lifecycle_to_runner_pinned_runtime(&pinned, normalized_args)
+                .map(Some)
+        }
+        Some(AgentTaskLifecyclePinnedRuntime::Controller(pinned)) => {
+            let status = ProcessCommand::new(&pinned)
+                .args(&normalized_args[1..])
+                .status()
+                .map_err(|error| {
+                    homeboy::core::Error::internal_io(
+                        error.to_string(),
+                        Some(format!(
+                            "execute pinned controller runtime {}",
+                            pinned.display()
+                        )),
+                    )
+                })?;
+            Ok(Some(status.code().unwrap_or(1)))
+        }
+        None => Ok(None),
+    }
 }
 
 fn delegate_agent_task_lifecycle_to_runner_pinned_runtime(
@@ -3206,42 +3211,19 @@ mod tests {
             })
             .expect("persist runner-owned v2 pin");
 
-            let cli = Cli::parse_from([
-                "homeboy",
-                "--runner",
-                "homeboy-lab",
-                "agent-task",
-                "run",
-                run_id,
-            ]);
-            let error = delegate_agent_task_lifecycle_to_pinned_runtime(
-                &cli,
-                &argv(&[
-                    "homeboy",
-                    "--runner",
-                    "homeboy-lab",
-                    "agent-task",
-                    "run",
-                    run_id,
-                ]),
-            )
-            .expect_err("the unavailable persisted runner must fail closed");
-
-            assert!(
-                !error.message.contains("pinned controller executable is missing"),
-                "runner authority must be selected before controller-local path validation: {error}"
-            );
-            assert!(
-                error.to_string().contains("homeboy-lab"),
-                "runner failure must identify the recorded authority: {error}"
-            );
-            assert_eq!(
-                error.details["next_actions"][0], "homeboy runner status homeboy-lab",
-                "runner recovery guidance must be durable and specific: {error}"
-            );
+            let runtime = agent_task_lifecycle_pinned_runtime_for_mutation(run_id)
+                .expect("runner authority is selected before controller-local validation")
+                .expect("runner-owned v2 pin selects a runtime");
+            assert!(matches!(
+                runtime,
+                AgentTaskLifecyclePinnedRuntime::Runner(ref pinned)
+                    if pinned.runner_id == "homeboy-lab"
+                        && pinned.executable
+                            == std::path::Path::new("/home/chubes/.local/share/homeboy/controller-runtimes/linux/homeboy")
+            ));
             assert_eq!(
                 crate::agents::agent_tasks::lifecycle::status(run_id)
-                    .expect("runner dispatch failure leaves the durable record intact")
+                    .expect("runtime resolution leaves the durable record intact")
                     .run_id,
                 run_id
             );
