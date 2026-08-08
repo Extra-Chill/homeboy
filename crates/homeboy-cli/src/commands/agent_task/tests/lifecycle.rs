@@ -2515,6 +2515,44 @@ fn cancel_command_marks_queued_run_cancelled() {
 }
 
 #[test]
+fn exact_full_status_displays_retained_safe_quarantine_diagnostic() {
+    with_temp_home(|| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("run-cli-quarantine-diagnostic"))
+            .expect("submitted");
+        homeboy::agents::agent_task_lifecycle::quarantine_queued_run_exact(
+            "run-cli-quarantine-diagnostic",
+            "maintenance\nwindow\u{0000}",
+        )
+        .expect("quarantined");
+
+        let (value, exit_code) = status(StatusArgs {
+            run_id: "run-cli-quarantine-diagnostic".to_string(),
+            exact: true,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+        })
+        .expect("exact full status");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["metadata"]["queue_quarantine"]["category"],
+            "operator_quarantine"
+        );
+        assert_eq!(
+            value["metadata"]["queue_quarantine"]["summary"],
+            "operator quarantined this queued run"
+        );
+        assert_eq!(
+            value["metadata"]["queue_quarantine"]["operator_reason"],
+            "maintenancewindow"
+        );
+    });
+}
+
+#[test]
 fn retry_command_submits_new_queued_run() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-retry-source"))

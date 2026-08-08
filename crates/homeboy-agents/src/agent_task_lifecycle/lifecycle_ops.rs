@@ -2,7 +2,9 @@ use super::acceptance_verifier::{
     validate_acceptance_requirement, validate_attestation, with_acceptance_verifier,
 };
 use super::*;
+use chrono::DateTime;
 use homeboy_engine_primitives::content_hash;
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 
 const LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS: i64 = 120;
@@ -1533,55 +1535,62 @@ pub fn recover_controller_runtime(
 }
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let run_id = sanitize_run_id(run_id);
+    let mut record = store::read_record(&run_id)?;
     migrate_record_controller_runtime(&mut record)?;
     homeboy_core::controller_runtime::validate_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
     )?;
-    if record.state == AgentTaskRunState::Running && record.owner_process_is_running() {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            format!(
-                "agent-task run '{}' is already running under pid {}",
-                record.run_id,
-                record.owner_pid().unwrap_or_default()
-            ),
-            Some(record.run_id),
-            None,
-        ));
-    }
-    if matches!(
-        record.state,
-        AgentTaskRunState::Succeeded
-            | AgentTaskRunState::PartialRecoverable
-            | AgentTaskRunState::PartialFailure
-            | AgentTaskRunState::Failed
-            | AgentTaskRunState::Cancelled
-    ) {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            format!(
-                "agent-task run '{}' is already terminal with state {:?}",
-                record.run_id, record.state
-            ),
-            Some(record.run_id),
-            None,
-        ));
-    }
-
-    let reclaimed_stale = record.state == AgentTaskRunState::Running;
-    record.updated_at = Some(now_timestamp());
-    set_run_state(&mut record, AgentTaskRunState::Running);
-    update_lifecycle_heartbeat(&mut record);
-    for task in &mut record.tasks {
-        if task.state == AgentTaskState::Queued {
-            task.state = AgentTaskState::Running;
+    let mut error = None;
+    store::mutate_record(&run_id, |record| {
+        if record.metadata.get("queue_quarantine").is_some() {
+            error = Some(Error::validation_invalid_argument(
+                "run_id",
+                "agent-task run is quarantined; re-arm its exact run id after repairing durable provenance",
+                Some(record.run_id.clone()),
+                None,
+            ));
+            return false;
         }
-    }
-    record.record_runner_metadata(reclaimed_stale);
-    store::write_record(&record)?;
-    Ok(record)
+        if record.state == AgentTaskRunState::Running && record.owner_process_is_running() {
+            error = Some(Error::validation_invalid_argument(
+                "run_id",
+                format!(
+                    "agent-task run '{}' is already running under pid {}",
+                    record.run_id,
+                    record.owner_pid().unwrap_or_default()
+                ),
+                Some(record.run_id.clone()),
+                None,
+            ));
+            return false;
+        }
+        if record.state.is_terminal() {
+            error = Some(Error::validation_invalid_argument(
+                "run_id",
+                format!(
+                    "agent-task run '{}' is already terminal with state {:?}",
+                    record.run_id, record.state
+                ),
+                Some(record.run_id.clone()),
+                None,
+            ));
+            return false;
+        }
+        let reclaimed_stale = record.state == AgentTaskRunState::Running;
+        record.updated_at = Some(now_timestamp());
+        set_run_state(record, AgentTaskRunState::Running);
+        update_lifecycle_heartbeat(record);
+        for task in &mut record.tasks {
+            if task.state == AgentTaskState::Queued {
+                task.state = AgentTaskState::Running;
+            }
+        }
+        record.record_runner_metadata(reclaimed_stale);
+        true
+    })?
+    .ok_or_else(|| error.unwrap_or_else(|| Error::internal_unexpected("agent-task run transition was not applied")))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2090,10 +2099,45 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
     true
 }
 
-pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskQueuedRunSkip {
+    pub run_id: String,
+    pub submitted_at: Option<String>,
+    pub age_seconds: Option<i64>,
+    pub dispatcher_kind: Option<String>,
+    pub category: String,
+    pub error_code: String,
+    pub summary: String,
+    pub provider_id: Option<String>,
+    pub required_environment_variables: Vec<String>,
+    pub reason: String,
+    pub remediation: String,
+}
+
+#[derive(Debug, Default)]
+pub struct AgentTaskQueuedRunClaim {
+    pub record: Option<AgentTaskRunRecord>,
+    pub skipped: Vec<AgentTaskQueuedRunSkip>,
+}
+
+/// Claim the oldest executable queued record. Invalid provenance is retained on
+/// a nonterminal quarantine record before any running transition can occur.
+pub fn claim_next_eligible_queued_run() -> Result<AgentTaskQueuedRunClaim> {
+    claim_next_eligible_queued_run_with_preflight(|_, _| Ok(()))
+}
+
+/// Claim the oldest executable queued record after caller-supplied admission
+/// checks have validated its durable plan, but before the atomic Running claim.
+pub fn claim_next_eligible_queued_run_with_preflight(
+    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+) -> Result<AgentTaskQueuedRunClaim> {
     let mut queued: Vec<AgentTaskRunRecord> = store::read_records()?
         .into_iter()
-        .filter(|record| record.state == AgentTaskRunState::Queued && !is_transport_proxy(record))
+        .filter(|record| {
+            record.state == AgentTaskRunState::Queued
+                && !is_transport_proxy(record)
+                && record.metadata.get("queue_quarantine").is_none()
+        })
         .collect();
     queued.sort_by(|left, right| {
         left.submitted_at
@@ -2101,15 +2145,284 @@ pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
             .then_with(|| left.run_id.cmp(&right.run_id))
     });
 
+    let mut skipped = Vec::new();
     for record in queued {
+        let plan = match validate_controller_runtime(&record.run_id)
+            .and_then(|_| load_controller_plan(&record.run_id))
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                quarantine_queued_run(&record, None, &error)?;
+                skipped.push(queue_skip(&record, None, &error));
+                continue;
+            }
+        };
+        if let Err(error) = preflight(&record, &plan) {
+            quarantine_queued_run(&record, Some(&plan), &error)?;
+            skipped.push(queue_skip(&record, Some(&plan), &error));
+            continue;
+        }
         match mark_running(&record.run_id) {
-            Ok(claimed) => return Ok(Some(claimed)),
-            Err(error) if error.code == ErrorCode::ValidationInvalidArgument => continue,
+            Ok(claimed) => {
+                return Ok(AgentTaskQueuedRunClaim {
+                    record: Some(claimed),
+                    skipped,
+                })
+            }
+            Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
+                quarantine_queued_run(&record, Some(&plan), &error)?;
+                skipped.push(queue_skip(&record, Some(&plan), &error));
+            }
             Err(error) => return Err(error),
         }
     }
 
-    Ok(None)
+    Ok(AgentTaskQueuedRunClaim {
+        record: None,
+        skipped,
+    })
+}
+
+pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
+    Ok(claim_next_eligible_queued_run()?.record)
+}
+
+fn queue_skip(
+    record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
+    error: &Error,
+) -> AgentTaskQueuedRunSkip {
+    let diagnostic = redacted_queue_diagnostic(plan, error);
+    AgentTaskQueuedRunSkip {
+        run_id: record.run_id.clone(),
+        submitted_at: Some(record.submitted_at.clone()),
+        age_seconds: DateTime::parse_from_rfc3339(&record.submitted_at)
+            .ok()
+            .map(|submitted| {
+                (Utc::now() - submitted.with_timezone(&Utc))
+                    .num_seconds()
+                    .max(0)
+            }),
+        dispatcher_kind: plan
+            .and_then(|plan| plan.metadata.pointer("/attempt_dispatch/kind"))
+            .and_then(Value::as_str)
+            .and_then(trusted_dispatcher_kind),
+        category: diagnostic.category.to_string(),
+        error_code: diagnostic.error_code,
+        summary: diagnostic.summary.clone(),
+        provider_id: diagnostic.provider_id.clone(),
+        required_environment_variables: diagnostic.required_environment_variables.clone(),
+        reason: diagnostic.summary,
+        remediation: queue_quarantine_remediation().to_string(),
+    }
+}
+
+pub(crate) fn trusted_dispatcher_kind(kind: &str) -> Option<String> {
+    matches!(kind, "local" | "lab" | "test-detached").then(|| kind.to_string())
+}
+
+fn queue_quarantine_remediation() -> &'static str {
+    "inspect retained diagnostics with: homeboy agent-task status <run-id> --exact --full"
+}
+
+fn quarantine_queued_run(
+    record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
+    error: &Error,
+) -> Result<()> {
+    let diagnostic = redacted_queue_diagnostic(plan, error);
+    let _ = store::mutate_record(&record.run_id, |quarantined| {
+        if quarantined.state != AgentTaskRunState::Queued
+            || quarantined.metadata.get("queue_quarantine").is_some()
+        {
+            return false;
+        }
+        let now = now_timestamp();
+        let remediation = queue_quarantine_remediation();
+        quarantined.ensure_metadata_object().insert(
+            "queue_quarantine".to_string(),
+            json!({
+                "category": diagnostic.category,
+                "error_code": diagnostic.error_code,
+                "summary": diagnostic.summary,
+                "provider_id": diagnostic.provider_id,
+                "required_environment_variables": diagnostic.required_environment_variables,
+                "quarantined_at": now,
+                "remediation": remediation,
+            }),
+        );
+        true
+    })?;
+    Ok(())
+}
+
+struct RedactedQueueDiagnostic {
+    category: &'static str,
+    error_code: String,
+    summary: String,
+    provider_id: Option<String>,
+    required_environment_variables: Vec<String>,
+}
+
+fn redacted_queue_diagnostic(
+    plan: Option<&AgentTaskPlan>,
+    error: &Error,
+) -> RedactedQueueDiagnostic {
+    let provider_id = plan.and_then(trusted_plan_provider_id);
+    let required_environment_variables = plan
+        .map(trusted_plan_environment_variables)
+        .unwrap_or_default();
+    let (category, summary) = if required_environment_variables.is_empty() {
+        (
+            "queue_admission_preflight_failed",
+            "queued run failed admission preflight",
+        )
+    } else {
+        (
+            "required_environment_preflight_failed",
+            "required environment is unavailable for queued execution",
+        )
+    };
+    RedactedQueueDiagnostic {
+        category,
+        error_code: error.code.as_str().to_string(),
+        summary: summary.to_string(),
+        provider_id,
+        required_environment_variables,
+    }
+}
+
+fn trusted_plan_provider_id(plan: &AgentTaskPlan) -> Option<String> {
+    plan.tasks
+        .first()
+        .and_then(|task| {
+            task.executor
+                .selector
+                .as_deref()
+                .or(Some(&task.executor.backend))
+        })
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+        .map(str::to_string)
+}
+
+fn trusted_plan_environment_variables(plan: &AgentTaskPlan) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    for name in plan
+        .tasks
+        .iter()
+        .flat_map(|task| task.executor.secret_env.iter())
+        .chain(
+            plan.services
+                .iter()
+                .flat_map(|service| service.secret_env.iter()),
+        )
+    {
+        if name.len() <= 128
+            && !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            names.insert(name.clone());
+        }
+    }
+    names.into_iter().take(16).collect()
+}
+
+/// Re-arm a quarantined record by exact durable run ID after its provenance is repaired.
+pub fn rearm_quarantined_run(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let run_id = require_literal_run_id(run_id)?;
+    store::mutate_record(&run_id, |record| {
+        if record.state != AgentTaskRunState::Queued
+            || record.metadata.get("queue_quarantine").is_none()
+        {
+            return false;
+        }
+        record.ensure_metadata_object().remove("queue_quarantine");
+        record.updated_at = Some(now_timestamp());
+        true
+    })?
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            "only an exact queued quarantined run can be re-armed",
+            Some(run_id),
+            None,
+        )
+    })
+}
+
+/// Quarantine one exact queued run without changing its lifecycle state or
+/// removing any evidence. It can only return through `rearm_quarantined_run`.
+pub fn quarantine_queued_run_exact(run_id: &str, reason: &str) -> Result<AgentTaskRunRecord> {
+    let run_id = require_literal_run_id(run_id)?;
+    let operator_reason = normalized_operator_quarantine_reason(reason);
+    store::mutate_record(&run_id, |record| {
+        if record.state != AgentTaskRunState::Queued
+            || record.metadata.get("queue_quarantine").is_some()
+        {
+            return false;
+        }
+        let quarantined_at = now_timestamp();
+        let remediation = "repair provenance, then re-arm with: homeboy agent-task rearm <run-id>";
+        record.updated_at = Some(quarantined_at.clone());
+        record.ensure_metadata_object().insert(
+            "queue_quarantine".to_string(),
+            json!({
+                "category": "operator_quarantine",
+                "error_code": "operator_quarantine",
+                "summary": "operator quarantined this queued run",
+                "operator_reason": operator_reason,
+                "quarantined_at": quarantined_at,
+                "remediation": remediation,
+            }),
+        );
+        true
+    })?
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            "only an exact queued non-quarantined run can be quarantined",
+            Some(run_id),
+            None,
+        )
+    })
+}
+
+fn normalized_operator_quarantine_reason(reason: &str) -> String {
+    const MAX_BYTES: usize = 240;
+    let mut normalized = String::new();
+    for character in reason.chars().filter(|character| !character.is_control()) {
+        if normalized.len() + character.len_utf8() > MAX_BYTES {
+            break;
+        }
+        normalized.push(character);
+    }
+    let normalized = normalized.trim();
+    if normalized.is_empty() {
+        "operator requested quarantine".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+fn require_literal_run_id(run_id: &str) -> Result<String> {
+    let sanitized = sanitize_run_id(run_id);
+    if sanitized != run_id {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "quarantine and re-arm require a literal exact durable run id",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(sanitized)
 }
 
 pub fn record_run_aggregate(

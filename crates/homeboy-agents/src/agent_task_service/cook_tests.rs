@@ -206,6 +206,162 @@ fn terminal_review_form_continuation_rejects_generic_failed_and_cancelled_runs()
 }
 
 #[test]
+fn run_next_skips_persisted_test_detached_recipe_and_executes_eligible_work() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "run-next-ineligible-test-detached",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        persist_initial_recipe(&options).expect("persisted test-detached recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .expect("declared Cook attempt submitted");
+        agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+        })
+        .expect("deterministic durable submission timestamp");
+        agent_task_lifecycle::cancel_run(&options.initial_run_id, Some("fixture terminal"))
+            .expect("declared Cook attempt terminal");
+        super::super::enqueue_terminal_continuation(&options.cook_id, &options.initial_run_id)
+            .expect("durable Cook continuation queued");
+
+        agent_task_lifecycle::submit_plan(
+            &batch_cook_options(
+                "run-next-eligible-work",
+                Arc::new(AcceptedDetachedAttemptDispatcher),
+            )
+            .initial_plan,
+            Some("run-next-eligible-work"),
+        )
+        .expect("eligible work queued");
+
+        let result =
+            super::super::run_next_with_cook_dispatcher(ImmediateSuccessExecutor, |_| Ok(None))
+                .expect("ineligible continuation does not block eligible work");
+
+        assert_eq!(
+            result.value.expect("eligible aggregate").plan_id,
+            "run-next-eligible-work"
+        );
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].run_id, options.initial_run_id);
+        assert_eq!(
+            result.skipped[0].submitted_at.as_deref(),
+            Some("2000-01-01T00:00:00+00:00")
+        );
+        assert!(result.skipped[0]
+            .age_seconds
+            .is_some_and(|age_seconds| age_seconds > 800_000_000));
+        assert_eq!(
+            result.skipped[0].dispatcher_kind.as_deref(),
+            Some("test-detached")
+        );
+        assert_eq!(
+            result.skipped[0].category,
+            "cook_continuation_preflight_failed"
+        );
+        assert_eq!(result.skipped[0].error_code, "validation.invalid_argument");
+        assert!(result.skipped[0].remediation.contains("agent-task status"));
+    });
+}
+
+#[test]
+fn run_next_redacts_poisoned_recipe_dispatcher_kind() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        const POISONED_KIND: &str = "LEAK_RECIPE_DISPATCHER_SECRET";
+        let options = batch_cook_options(
+            "run-next-poisoned-recipe",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        persist_initial_recipe(&options).expect("persisted recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .expect("declared Cook attempt submitted");
+        agent_task_lifecycle::cancel_run(&options.initial_run_id, Some("fixture terminal"))
+            .expect("declared Cook attempt terminal");
+        super::super::enqueue_terminal_continuation(&options.cook_id, &options.initial_run_id)
+            .expect("durable Cook continuation queued");
+
+        let recipe_path = homeboy_core::paths::homeboy_data()
+            .expect("data path")
+            .join("agent-task-cooks")
+            .join(&options.cook_id)
+            .join("recipe.json");
+        let mut recipe: Value =
+            serde_json::from_slice(&std::fs::read(&recipe_path).expect("persisted recipe bytes"))
+                .expect("persisted recipe JSON");
+        recipe["promotion_transport"]["attempt_dispatch"]["kind"] =
+            serde_json::json!(POISONED_KIND);
+        std::fs::write(
+            &recipe_path,
+            serde_json::to_vec(&recipe).expect("poisoned recipe JSON"),
+        )
+        .expect("poisoned recipe persisted");
+
+        agent_task_lifecycle::submit_plan(
+            &batch_cook_options(
+                "run-next-after-poisoned-recipe",
+                Arc::new(AcceptedDetachedAttemptDispatcher),
+            )
+            .initial_plan,
+            Some("run-next-after-poisoned-recipe"),
+        )
+        .expect("eligible work queued");
+
+        let result =
+            super::super::run_next_with_cook_dispatcher(ImmediateSuccessExecutor, |_| Ok(None))
+                .expect("poisoned continuation does not block eligible work");
+        let status = agent_task_lifecycle::status(&options.initial_run_id)
+            .expect("continuation record status");
+        let logs =
+            agent_task_lifecycle::logs(&options.initial_run_id).expect("continuation record logs");
+        let rendered = serde_json::to_string(&serde_json::json!({
+            "queue_skips": result.skipped,
+            "status": status,
+            "logs": logs,
+        }))
+        .expect("queue projections serialize");
+
+        assert_eq!(
+            result.value.expect("eligible aggregate").plan_id,
+            "run-next-after-poisoned-recipe"
+        );
+        assert!(!rendered.contains(POISONED_KIND));
+        assert!(rendered.contains("cook_continuation_unsupported_dispatcher"));
+        assert!(rendered.contains("agent-task status <run-id> --exact --full"));
+    });
+}
+
+#[test]
+fn malformed_continuation_does_not_head_of_line_block_run_next() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let queue = homeboy_core::paths::homeboy_data()
+            .expect("data path")
+            .join("agent-task-cook-continuations");
+        std::fs::create_dir_all(&queue).expect("continuation queue");
+        std::fs::write(queue.join("000-malformed.pending"), "not JSON")
+            .expect("malformed continuation persisted");
+        agent_task_lifecycle::submit_plan(
+            &batch_cook_options(
+                "run-next-after-malformed-continuation",
+                Arc::new(AcceptedDetachedAttemptDispatcher),
+            )
+            .initial_plan,
+            Some("run-next-after-malformed-continuation"),
+        )
+        .expect("eligible work queued");
+
+        let result =
+            super::super::run_next_with_cook_dispatcher(ImmediateSuccessExecutor, |_| Ok(None))
+                .expect("malformed continuation is skipped");
+
+        assert_eq!(
+            result.value.expect("eligible aggregate").plan_id,
+            "run-next-after-malformed-continuation"
+        );
+        assert!(queue.join("000-malformed.failed").is_file());
+    });
+}
+
+#[test]
 fn durable_cook_inspection_reports_an_unsupported_run_schema() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = batch_cook_options(

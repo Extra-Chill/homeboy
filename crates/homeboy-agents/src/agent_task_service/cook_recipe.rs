@@ -962,14 +962,13 @@ pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
     fs::create_dir_all(&root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
     reclaim_dead_claims(&root)?;
-    for entry in fs::read_dir(&root)
+    let mut pending: Vec<_> = fs::read_dir(&root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
-    {
-        let path = entry
-            .map_err(|error| {
-                Error::internal_io(error.to_string(), Some(root.display().to_string()))
-            })?
-            .path();
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
+    pending.sort_by_key(|entry| entry.file_name());
+    for entry in pending {
+        let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("pending") {
             continue;
         }
@@ -990,12 +989,12 @@ pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
                     None,
                 );
                 fail_claimed_path(&claimed, &error.message)?;
-                return Err(error);
+                continue;
             }
         };
         if let Err(error) = validate_continuation(&continuation) {
             fail_claimed_path(&claimed, &error.message)?;
-            return Err(error);
+            continue;
         }
         return Ok(Some(ClaimedCookContinuation {
             continuation,

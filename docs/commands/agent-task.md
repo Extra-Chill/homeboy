@@ -23,8 +23,8 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | Subcommand | Purpose |
 |---|---|
 | `run-plan` | Run an `AgentTaskPlan` through extension-declared executor providers. |
-| `run <run-id>` | Execute a previously submitted durable run. |
-| `run-next` | Claim and execute the oldest queued durable run. |
+| `run <run-id>` | Execute one exact durable run id, bypassing older queued work. |
+| `run-next` | Claim and execute the oldest eligible queued durable run, reporting skipped quarantined work. |
 | `submit` | Persist an agent-task plan and return a durable run id without executing it. |
 | `status <run-id> [--exact]` | Read durable run status; `--exact` bypasses Cook alias resolution to inspect that concrete lifecycle record. |
 | `list [--limit <n>]` | List durable runs, newest first. |
@@ -35,6 +35,8 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
+| `quarantine <run-id> --reason <text>` | Exclude one exact queued run while retaining its nonterminal lifecycle evidence. |
+| `rearm <run-id>` | Return one exact quarantined queued run to eligibility after repair. |
 | `resume <run-id>` | Resume a queued or stale-running durable run. |
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
