@@ -881,13 +881,18 @@ impl RunnerStatusReport {
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone());
 
-        // A retained active count has to receive a bounded authoritative
-        // observation before a reconnect can be considered. Otherwise status
-        // advertises connect while connect correctly returns to reconcile.
-        let next_action = unresolved_generation
-            .as_ref()
-            .map(|_| reconcile_action(&self.runner_id))
-            .or_else(|| self.admission_action())
+        // Retained generations still need a bounded authoritative observation,
+        // but only after the disconnected runner restores its daemon transport.
+        // Reconciliation settles terminal jobs through the connected daemon.
+        // A disconnected report must first select its reconnect, refresh, or
+        // ownership-recovery action rather than advertising that unavailable path.
+        let next_action = self
+            .admission_action()
+            .or_else(|| {
+                unresolved_generation
+                    .as_ref()
+                    .map(|_| reconcile_action(&self.runner_id))
+            })
             .map(|action| action.render_command());
 
         RunnerAdmissionSummary {
@@ -1514,7 +1519,7 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn retained_admission_count_projects_each_durable_owner_before_reconnect() {
+    fn disconnected_retained_admission_count_points_to_connect_before_reconcile() {
         let mut report = base_report();
         report.connected = false;
         report.state = RunnerSessionState::Disconnected;
@@ -1550,7 +1555,64 @@ mod status_serialization_tests {
         );
         assert_eq!(
             summary.next_action.as_deref(),
-            Some("homeboy runner reconcile homeboy-lab")
+            Some("homeboy runner connect homeboy-lab")
+        );
+    }
+
+    #[test]
+    fn disconnected_stale_daemon_with_retained_projections_points_to_refresh() {
+        let mut report = base_report();
+        report.connected = false;
+        report.state = RunnerSessionState::Disconnected;
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.stale_daemon = Some(RunnerStaleDaemonWarning {
+            severity: "error",
+            verification: RunnerDaemonVerification::Compared,
+            probe_error: None,
+            mismatch_predicate: "active_daemon_control_plane_version != job_command_binary_version",
+            session_homeboy_version: "0.299.0".to_string(),
+            current_homeboy_version: "0.299.2".to_string(),
+            session_homeboy_build_identity: None,
+            current_homeboy_build_identity: None,
+            controller_homeboy_version: None,
+            controller_homeboy_build_identity: None,
+            compatibility_reason: None,
+            active_daemon_control_plane_version: "0.299.0".to_string(),
+            job_command_binary_version: "0.299.0".to_string(),
+            active_daemon_control_plane_build_identity: None,
+            job_command_binary_build_identity: None,
+            refresh_command:
+                "homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"
+                    .to_string(),
+            stale_runtime_paths: Vec::new(),
+            changed_runtime_paths: Vec::new(),
+            message: "stale".to_string(),
+            recovery_commands: Vec::new(),
+            recovery_actions: Vec::new(),
+        });
+        let generations = vec![RunnerDaemonGenerationStatus {
+            generation: "lease-old".to_string(),
+            admission_owner: false,
+            drain_state: crate::RollingDrainState::Draining,
+            active_job_count: 2,
+            observed_active_job_count: None,
+            active_job_count_authoritative: false,
+            job_owner_count: 2,
+            run_owner_count: 0,
+            artifact_owner_count: 0,
+            homeboy_build_identity: None,
+            remote_daemon_lease_id: Some("lease-old".to_string()),
+            remote_daemon_address: None,
+            local_url: None,
+        }];
+
+        let summary = report.admission_summary_with_generations(&generations, &[], 1);
+
+        assert_eq!(summary.active_job_count, 0);
+        assert_eq!(summary.unresolved_retained_projection_count, 2);
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect")
         );
     }
 }

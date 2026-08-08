@@ -3129,6 +3129,7 @@ fn is_runs_list_runner_option(args: &[String]) -> bool {
 
 fn is_command_local_runner_option(command: &Commands) -> bool {
     match command {
+        Commands::Runs(args) if args.has_command_local_runner_option() => true,
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
             command: crate::commands::agent_task::AgentTaskCommand::Doctor(_),
         }) => true,

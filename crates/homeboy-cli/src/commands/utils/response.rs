@@ -1433,6 +1433,33 @@ mod tests {
         assert!(value.get("subject_state").is_none());
     }
 
+    #[test]
+    fn doctor_readiness_verdict_serializes_consistently_with_the_envelope() {
+        for (scenario, doctor_status, exit_code, success, envelope_status) in [
+            ("healthy", "ok", 0, true, "succeeded"),
+            ("degraded", "warn", 0, true, "succeeded"),
+            ("disconnected_recoverable", "error", 1, false, "failed"),
+            ("terminal_error", "error", 1, false, "failed"),
+        ] {
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(json!({
+                    "command": "runner.doctor",
+                    "status": doctor_status,
+                    "checks": [{ "id": "daemon.recovery", "status": doctor_status }],
+                })),
+                exit_code,
+                &CommandIdentity::with_operation("runner", "doctor"),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+
+            assert_eq!(value["success"], success, "{scenario}");
+            assert_eq!(value["exit_code"], exit_code, "{scenario}");
+            assert_eq!(value["status"], envelope_status, "{scenario}");
+            assert_eq!(value["data"]["status"], doctor_status, "{scenario}");
+        }
+    }
+
     fn release_failure_payload(step_id: &str, step_type: &str) -> Value {
         json!({
             "command": "release",
