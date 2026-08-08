@@ -2,6 +2,7 @@
 //! resume, and retry.
 
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -716,6 +717,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
 pub(crate) fn resolve_cook_destination(
     mut args: AgentTaskCookArgs,
 ) -> homeboy::core::Result<AgentTaskCookArgs> {
+    normalize_cook_repository_identity(&mut args)?;
     if args.to_worktree.is_some() {
         return Ok(args);
     }
@@ -747,6 +749,285 @@ pub(crate) fn resolve_cook_destination(
         args.head = Some(derived_cook_branch(task_url)?);
     }
     Ok(args)
+}
+
+#[derive(Debug, Clone)]
+struct CookRepositoryIdentity {
+    slug: String,
+    remote_identity: String,
+    workspace_path: PathBuf,
+    provenance: String,
+}
+
+fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    let mut identities = Vec::new();
+    let mut source_identities = Vec::new();
+    for (flag, value) in [
+        ("--workspace", args.dispatch.workspace.as_deref()),
+        ("--cwd", args.dispatch.cwd.as_deref()),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        let resolved = cook_repository_identities_for_workspace(flag, value)?;
+        source_identities.push((flag, resolved.clone()));
+        identities.extend(resolved);
+    }
+    if identities.is_empty() {
+        if args.dispatch.workspace.is_some() || args.dispatch.cwd.is_some() {
+            return require_explicit_cook_repo(
+                args,
+                "the supplied workspace is not a Git checkout with a configured repository remote",
+            );
+        }
+        return Ok(());
+    }
+
+    let source_remotes = source_identities
+        .iter()
+        .flat_map(|(_, identities)| {
+            identities
+                .iter()
+                .map(|identity| identity.remote_identity.clone())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if source_remotes.len() != 1
+        || source_identities
+            .iter()
+            .any(|(_, identities)| identities.is_empty())
+    {
+        return Err(repository_identity_conflict_error(&source_identities));
+    }
+
+    let candidates: BTreeMap<_, _> =
+        identities
+            .into_iter()
+            .fold(BTreeMap::new(), |mut candidates, identity| {
+                candidates.entry(identity.slug.clone()).or_insert(identity);
+                candidates
+            });
+    let selected = match args.dispatch.repo.as_deref() {
+        Some(repo) => candidates.get(repo).cloned().ok_or_else(|| {
+            repository_identity_error(
+                format!("--repo `{repo}` does not match the supplied workspace repository"),
+                &candidates,
+            )
+        })?,
+        None if candidates.len() == 1 => {
+            candidates.values().next().cloned().expect("one candidate")
+        }
+        None => {
+            return Err(repository_identity_error(
+                "the supplied workspace maps to multiple configured repositories".to_string(),
+                &candidates,
+            ));
+        }
+    };
+    args.dispatch.repo = Some(selected.slug.clone());
+    args.repository_identity = Some(serde_json::json!({
+        "slug": selected.slug,
+        "remote_identity": selected.remote_identity,
+        "workspace_path": selected.workspace_path,
+        "provenance": selected.provenance,
+    }));
+    Ok(())
+}
+
+fn require_explicit_cook_repo(args: &AgentTaskCookArgs, reason: &str) -> homeboy::core::Result<()> {
+    if args.dispatch.repo.is_some() {
+        return Ok(());
+    }
+    Err(homeboy::core::Error::validation_missing_argument(vec![
+        format!(
+            "--repo <repo> is required because {reason}; provide --repo <configured-component>"
+        ),
+    ]))
+}
+
+fn cook_repository_identities_for_workspace(
+    flag: &str,
+    value: &str,
+) -> homeboy::core::Result<Vec<CookRepositoryIdentity>> {
+    let path = Path::new(value);
+    let workspace_path = if path.is_dir() {
+        std::fs::canonicalize(path).map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?
+    } else if let Some(record) = homeboy::core::worktree::resolve_workspace_ref_if_present(value)? {
+        PathBuf::from(record.path())
+    } else {
+        return Ok(Vec::new());
+    };
+    let Some(git_root) = homeboy::core::git::repo_root(&workspace_path) else {
+        return Ok(Vec::new());
+    };
+    let remotes = homeboy::core::git::output_optional(&git_root, &["remote"])
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty())
+        .filter_map(|remote| {
+            homeboy::core::git::remote_url(&git_root, remote).map(|url| (remote.to_string(), url))
+        })
+        .collect::<Vec<_>>();
+    let configured = homeboy::core::component::registered()?;
+    let mut identities = Vec::new();
+    for (remote_name, remote_url) in remotes {
+        let Some(remote_identity) = canonical_remote_identity(&remote_url) else {
+            continue;
+        };
+        for component in &configured {
+            let Some(component_identity) = component
+                .remote_url
+                .as_deref()
+                .and_then(canonical_remote_identity)
+            else {
+                continue;
+            };
+            if component_identity == remote_identity {
+                identities.push(CookRepositoryIdentity {
+                    slug: component.id.clone(),
+                    remote_identity: remote_identity.clone(),
+                    workspace_path: git_root.clone(),
+                    provenance: format!("{flag}:git-remote:{remote_name}"),
+                });
+            }
+        }
+    }
+    Ok(identities)
+}
+
+pub(crate) fn canonical_remote_identity(remote_url: &str) -> Option<String> {
+    let remote_url = remote_url.trim();
+    let (host, path) = if let Some((_, rest)) = remote_url.split_once("://") {
+        let (authority, path) = rest.split_once('/')?;
+        (authority.rsplit('@').next()?, path)
+    } else {
+        let (authority, path) = remote_url.split_once(':')?;
+        (authority.rsplit('@').next()?, path)
+    };
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    (!host.is_empty()
+        && path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .count()
+            >= 2)
+        .then(|| {
+            format!(
+                "git://{}/{}",
+                host.to_ascii_lowercase(),
+                path.to_ascii_lowercase()
+            )
+        })
+}
+
+fn repository_identity_conflict_error(
+    sources: &[(&str, Vec<CookRepositoryIdentity>)],
+) -> homeboy::core::Error {
+    let candidates = sources
+        .iter()
+        .map(|(flag, identities)| {
+            let identities = identities
+                .iter()
+                .map(|identity| identity.remote_identity.as_str())
+                .collect::<Vec<_>>();
+            format!(
+                "{flag}: {}",
+                if identities.is_empty() {
+                    "unresolved".to_string()
+                } else {
+                    identities.join(", ")
+                }
+            )
+        })
+        .collect::<Vec<_>>();
+    homeboy::core::Error::validation_invalid_argument(
+        "workspace",
+        format!(
+            "--workspace and --cwd must resolve to the same configured repository identity; --repo cannot select one conflicting checkout: {}",
+            candidates.join("; ")
+        ),
+        None,
+        None,
+    )
+}
+
+fn validate_cook_destination_identity(
+    args: &AgentTaskCookArgs,
+    destination: &Path,
+) -> homeboy::core::Result<()> {
+    let Some(expected) = args
+        .repository_identity
+        .as_ref()
+        .and_then(|identity| identity.get("remote_identity"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    let Some(git_root) = homeboy::core::git::repo_root(destination) else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook destination is not a Git checkout bound to the resolved repository identity",
+            Some(destination.display().to_string()),
+            None,
+        ));
+    };
+    let identities = homeboy::core::git::output_optional(&git_root, &["remote"])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|remote| homeboy::core::git::remote_url(&git_root, remote))
+        .filter_map(|remote| canonical_remote_identity(&remote))
+        .collect::<std::collections::BTreeSet<_>>();
+    if identities.len() == 1 && identities.contains(expected) {
+        return Ok(());
+    }
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "to_worktree",
+        format!(
+            "Cook destination repository identity does not match resolved `{expected}`; destination identities: {}",
+            if identities.is_empty() {
+                "unresolved".to_string()
+            } else {
+                identities.into_iter().collect::<Vec<_>>().join(", ")
+            }
+        ),
+        Some(destination.display().to_string()),
+        None,
+    ))
+}
+
+fn repository_identity_error(
+    message: String,
+    candidates: &BTreeMap<String, CookRepositoryIdentity>,
+) -> homeboy::core::Error {
+    let candidates = candidates
+        .values()
+        .map(|candidate| {
+            format!(
+                "{} ({}, {})",
+                candidate.slug,
+                candidate.remote_identity,
+                candidate.workspace_path.display()
+            )
+        })
+        .collect::<Vec<_>>();
+    let recovery = candidates
+        .iter()
+        .map(|candidate| {
+            let slug = candidate
+                .split_whitespace()
+                .next()
+                .expect("candidate has slug");
+            format!("homeboy agent-task cook --repo {slug} ...")
+        })
+        .collect::<Vec<_>>();
+    homeboy::core::Error::validation_invalid_argument(
+        "repo",
+        format!("{message}; candidates: {}", candidates.join(", ")),
+        None,
+        Some(recovery),
+    )
 }
 
 fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
@@ -1432,6 +1713,15 @@ pub(crate) fn compile_cook_plan(
     // dispatch input, never authority to replace the writable Cook workspace.
     dispatch.cwd = None;
     dispatch.workspace = Some(workspace);
+    validate_cook_destination_identity(
+        args,
+        Path::new(
+            dispatch
+                .workspace
+                .as_deref()
+                .expect("Cook workspace is set"),
+        ),
+    )?;
     let mut request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
@@ -1451,6 +1741,9 @@ pub(crate) fn compile_cook_plan(
     };
     plan.options.candidate_completion = args.candidate_completion;
     record_cook_provision(&mut plan, provision);
+    if let Some(identity) = &args.repository_identity {
+        plan.metadata["cook_repository_identity"] = identity.clone();
+    }
     for task in &mut plan.tasks {
         let root = task.workspace.root.as_deref().ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(

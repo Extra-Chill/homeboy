@@ -147,15 +147,22 @@ pub struct DispatchArgs {
     #[arg(long = "task", value_name = "PROMPT", hide = true)]
     pub tasks: Vec<String>,
 
-    /// Existing local repo checkout or worktree path to cook in.
+    /// Existing local repo checkout or worktree path to cook in. For Cook,
+    /// omitting --repo infers its configured component when the Git remote maps
+    /// unambiguously to one registered component.
     #[arg(long, value_name = "PATH")]
     pub cwd: Option<String>,
 
-    /// Homeboy workspace ID or existing local workspace path to cook in.
+    /// Homeboy workspace ID or existing local workspace path to cook in. For
+    /// Cook, omitting --repo infers its configured component when the workspace
+    /// Git remote maps unambiguously to one registered component.
     #[arg(long, value_name = "ID_OR_PATH")]
     pub workspace: Option<String>,
 
     /// Repo/component slug for metadata and task grouping, e.g. sample-plugin.
+    /// Cook infers this from an explicit --workspace or --cwd Git checkout when
+    /// its configured remote mapping is unambiguous; an explicit value must
+    /// match the checkout.
     #[arg(long, value_name = "REPO")]
     pub repo: Option<String>,
 
