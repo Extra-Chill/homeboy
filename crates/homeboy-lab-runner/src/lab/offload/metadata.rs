@@ -5,10 +5,130 @@ use super::*;
 use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
 #[cfg(test)]
 use homeboy_core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
+use homeboy_lab_runner_contract::{
+    negotiate_lab_capability_handshake, required_lab_handoff_capabilities, LabCapabilityAdmission,
+    LabCapabilityHandshake, LabRuntimeAncestry, LabRuntimeIdentity,
+};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const ENV_RESOLUTION_SCHEMA: &str = "homeboy/env-resolution/v1";
 const REDACTED_ENV_VALUE: &str = "<redacted>";
+
+/// Capture one deterministic direct-runner admission. The runner command and
+/// daemon each advertise capabilities; missing evidence deliberately refuses
+/// the handoff rather than inferring compatibility from a release version.
+pub(crate) fn direct_runner_capability_admission(
+    runner: &Runner,
+    status: &RunnerStatusReport,
+    homeboy: &str,
+) -> Result<LabCapabilityAdmission> {
+    let controller = homeboy_product_identity::build_identity();
+    let controller_identity = LabRuntimeIdentity {
+        build_identity: controller.display,
+        source_revision: controller.git_commit.unwrap_or_default(),
+        clean: controller.git_dirty == Some(false),
+    };
+    let Some((runner_command, runner_command_capabilities)) =
+        crate::configured_runner_homeboy_handshake_evidence(runner, homeboy)?
+    else {
+        return Ok(negotiate_lab_capability_handshake(
+            &LabCapabilityHandshake {
+                controller: controller_identity.clone(),
+                required_capabilities: required_lab_handoff_capabilities(),
+                runner_command: controller_identity.clone(),
+                runner_command_capabilities: Vec::new(),
+                daemon: controller_identity,
+                daemon_capabilities: Vec::new(),
+                ancestry: LabRuntimeAncestry::Unknown,
+            },
+        ));
+    };
+    let Some(session) = status.session.as_ref() else {
+        return Ok(negotiate_lab_capability_handshake(
+            &LabCapabilityHandshake {
+                controller: controller_identity.clone(),
+                required_capabilities: required_lab_handoff_capabilities(),
+                runner_command,
+                runner_command_capabilities,
+                daemon: controller_identity,
+                daemon_capabilities: Vec::new(),
+                ancestry: LabRuntimeAncestry::Unknown,
+            },
+        ));
+    };
+    let daemon_source = session
+        .homeboy_build_identity
+        .as_deref()
+        .and_then(build_commit)
+        .unwrap_or_default()
+        .to_string();
+    let daemon = LabRuntimeIdentity {
+        build_identity: session.homeboy_build_identity.clone().unwrap_or_default(),
+        source_revision: daemon_source,
+        clean: !session
+            .homeboy_build_identity
+            .as_deref()
+            .is_some_and(|value| value.ends_with("-dirty")),
+    };
+    let daemon_capabilities = session
+        .local_url
+        .as_deref()
+        .and_then(|url| crate::daemon_lab_handoff_capabilities(url).ok())
+        .unwrap_or_default();
+    let ancestry = runtime_ancestry(
+        &controller_identity.source_revision,
+        &runner_command.source_revision,
+    );
+    Ok(negotiate_lab_capability_handshake(
+        &LabCapabilityHandshake {
+            controller: controller_identity,
+            required_capabilities: required_lab_handoff_capabilities(),
+            runner_command,
+            runner_command_capabilities,
+            daemon,
+            daemon_capabilities,
+            ancestry,
+        },
+    ))
+}
+
+fn build_commit(identity: &str) -> Option<&str> {
+    identity
+        .split_once('+')
+        .map(|(_, commit)| commit.trim_end_matches("-dirty"))
+        .filter(|commit| !commit.is_empty())
+}
+
+fn runtime_ancestry(controller: &str, runner: &str) -> LabRuntimeAncestry {
+    if controller.is_empty() || runner.is_empty() {
+        return LabRuntimeAncestry::Unknown;
+    }
+    if controller == runner {
+        return LabRuntimeAncestry::ExactSource;
+    }
+    let Some(source) = std::env::current_exe()
+        .ok()
+        .and_then(|path| source_checkout_for_binary(&path))
+    else {
+        return LabRuntimeAncestry::Unknown;
+    };
+    match Command::new("git")
+        .args([
+            "-C",
+            &source.display().to_string(),
+            "merge-base",
+            "--is-ancestor",
+            controller,
+            runner,
+        ])
+        .status()
+    {
+        Ok(status) if status.success() => LabRuntimeAncestry::VerifiedNewerDescendant,
+        Ok(_) => LabRuntimeAncestry::Diverged,
+        Err(_) => LabRuntimeAncestry::Unknown,
+    }
+}
 
 /// Insert generic `${components.<id>.path}` override env vars so a remote rig
 /// check resolves component paths to the runner-side materialized checkout

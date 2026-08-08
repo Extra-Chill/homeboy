@@ -1444,17 +1444,40 @@ pub(crate) fn run_lab_offload_inner(
             );
         }
     }
-    let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
+    let direct_capability_admission = if runner_status
+        .session
+        .as_ref()
+        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+    {
+        Some(direct_runner_capability_admission(
+            &runner,
+            &runner_status,
+            homeboy_path,
+        )?)
+    } else {
+        None
+    };
+    let mut runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
+    if let Some(admission) = &direct_capability_admission {
+        runner_homeboy["capability_admission"] =
+            serde_json::to_value(admission).expect("Lab capability admission serializes");
+    }
+    let blocking_runner_homeboy_drift = direct_capability_admission
+        .as_ref()
+        .map(|admission| require_exact_runner_version || !admission.compatible)
+        .unwrap_or_else(|| {
+            lab_runner_homeboy_has_blocking_drift_against_configured_identity(
+                &runner_status,
+                configured_build_identity.as_deref(),
+                require_exact_runner_version,
+            )
+        });
     plan = with_step(
         plan,
         PlanStep::builder(
             "lab.runner_homeboy",
             "lab.runner_homeboy",
-            if lab_runner_homeboy_has_blocking_drift_against_configured_identity(
-                &runner_status,
-                configured_build_identity.as_deref(),
-                require_exact_runner_version,
-            ) {
+            if blocking_runner_homeboy_drift {
                 PlanStepStatus::Failed
             } else {
                 PlanStepStatus::Ready
@@ -1485,11 +1508,7 @@ pub(crate) fn run_lab_offload_inner(
                 shell::quote_arg(runner_id)
             ))
     );
-    if lab_runner_homeboy_has_blocking_drift_against_configured_identity(
-        &runner_status,
-        configured_build_identity.as_deref(),
-        require_exact_runner_version,
-    ) {
+    if blocking_runner_homeboy_drift {
         return Err(stale_runner_homeboy_error(
             runner_id,
             homeboy_path,

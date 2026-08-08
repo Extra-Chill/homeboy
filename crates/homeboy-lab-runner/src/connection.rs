@@ -2254,6 +2254,60 @@ pub(crate) fn configured_runner_homeboy_build_identity(
     )
 }
 
+pub(crate) fn configured_runner_homeboy_handshake_evidence(
+    runner: &Runner,
+    homeboy: &str,
+) -> Result<
+    Option<(
+        homeboy_lab_runner_contract::LabRuntimeIdentity,
+        Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
+    )>,
+> {
+    let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
+        return Ok(None);
+    };
+    let output = client.execute_with_timeout(
+        &format!("{} self identity", shell::quote_arg(homeboy)),
+        Duration::from_secs(15),
+    );
+    if !output.success {
+        return Ok(None);
+    }
+    let body: Value = parse_json_from_mixed_stdout(&output.stdout).map_err(|error| {
+        Error::validation_invalid_argument(
+            "runner",
+            format!("parse runner Homeboy identity: {error}"),
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    let data = body.get("data").unwrap_or(&body);
+    let commit = data
+        .get("git_commit")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let display = data
+        .get("display")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let capabilities =
+        serde_json::from_value(data["lab_handoff_capabilities"].clone()).unwrap_or_default();
+    Ok(Some((
+        homeboy_lab_runner_contract::LabRuntimeIdentity {
+            build_identity: display.to_string(),
+            source_revision: commit.to_string(),
+            clean: data.get("git_dirty").and_then(Value::as_bool) == Some(false),
+        },
+        capabilities,
+    )))
+}
+
+pub(crate) fn daemon_lab_handoff_capabilities(
+    local_url: &str,
+) -> std::result::Result<Vec<homeboy_lab_runner_contract::LabCapabilityVersion>, String> {
+    connection_daemon::daemon_http_lab_handoff_capabilities(local_url)
+}
+
 fn status_for_admission_with<Status, Reconnect>(
     runner_id: &str,
     mut status_fn: Status,
