@@ -626,11 +626,19 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Reserve action checkout path
+        run: |
+          if git ls-files --error-unmatch -- .homeboy-action >/dev/null 2>&1 || [ -e .homeboy-action ] || [ -L .homeboy-action ]; then
+            echo '::error::Refusing to overwrite consumer path reserved for the Homeboy Action checkout: .homeboy-action'
+            exit 1
+          fi
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
+      - name: Reserve action-owned candidate Test shard paths
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
       - id: candidate-binary
         env:
           GH_TOKEN: ${{ github.token }}
@@ -727,11 +735,19 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Reserve action checkout path
+        run: |
+          if git ls-files --error-unmatch -- .homeboy-action >/dev/null 2>&1 || [ -e .homeboy-action ] || [ -L .homeboy-action ]; then
+            echo '::error::Refusing to overwrite consumer path reserved for the Homeboy Action checkout: .homeboy-action'
+            exit 1
+          fi
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
+      - name: Reserve action-owned candidate Test shard paths
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
       - id: candidate-binary
         env:
           GH_TOKEN: ${{ github.token }}
@@ -911,11 +927,19 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
+      - name: Reserve action checkout path
+        run: |
+          if git ls-files --error-unmatch -- .homeboy-action >/dev/null 2>&1 || [ -e .homeboy-action ] || [ -L .homeboy-action ]; then
+            echo '::error::Refusing to overwrite consumer path reserved for the Homeboy Action checkout: .homeboy-action'
+            exit 1
+          fi
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
+      - name: Reserve action-owned baseline Test shard paths
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
       - id: candidate-binary
         env:
           GH_TOKEN: ${{ github.token }}
@@ -989,11 +1013,19 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
+      - name: Reserve action checkout path
+        run: |
+          if git ls-files --error-unmatch -- .homeboy-action >/dev/null 2>&1 || [ -e .homeboy-action ] || [ -L .homeboy-action ]; then
+            echo '::error::Refusing to overwrite consumer path reserved for the Homeboy Action checkout: .homeboy-action'
+            exit 1
+          fi
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
+      - name: Reserve action-owned baseline Test shard paths
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
       - id: candidate-binary
         env:
           GH_TOKEN: ${{ github.token }}
