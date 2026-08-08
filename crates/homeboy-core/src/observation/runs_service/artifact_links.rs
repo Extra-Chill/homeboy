@@ -11,12 +11,7 @@ pub(crate) fn enrich_artifact_link(mut artifact: ArtifactRecord) -> ArtifactReco
         public_artifact_url(&artifact).or_else(|| public_url_for_url_artifact(&artifact));
     if let Some(url) = public_url.clone() {
         if artifact.artifact_type != "url"
-            && artifact
-                .metadata_json
-                .get("public_url_validation")
-                .and_then(|validation| validation.get("reachable"))
-                .and_then(Value::as_bool)
-                != Some(true)
+            && !crate::artifact_links::public_artifact_url_is_reachable_or_legacy(&artifact)
         {
             return artifact;
         }
