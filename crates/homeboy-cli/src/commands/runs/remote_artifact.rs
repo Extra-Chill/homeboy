@@ -136,6 +136,12 @@ fn metadata_with_resource_lifecycle(
 pub fn preview(args: RunsArtifactPreviewArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
+    preview_artifact(artifact, args.port)
+}
+
+/// Preview uses a resolved record so both run-id and opaque-handle lookup share
+/// the same directory and loopback-server safety checks.
+pub fn preview_artifact(artifact: ArtifactRecord, port: Option<u16>) -> CmdResult<RunsOutput> {
     if artifact.artifact_type != "directory" {
         return Err(Error::validation_invalid_argument(
             "artifact_id",
@@ -164,8 +170,7 @@ pub fn preview(args: RunsArtifactPreviewArgs) -> CmdResult<RunsOutput> {
         ));
     }
 
-    let port = args
-        .port
+    let port = port
         .map(Ok)
         .unwrap_or_else(artifact_preview::available_port)?;
     let base_url = format!("http://127.0.0.1:{port}/");
@@ -187,7 +192,7 @@ pub fn preview(args: RunsArtifactPreviewArgs) -> CmdResult<RunsOutput> {
     Ok((
         RunsOutput::ArtifactPreview(RunsArtifactPreviewOutput {
             command: "runs.artifact.preview",
-            run_id: args.run_id,
+            run_id: artifact.run_id.clone(),
             artifact_id: artifact.id,
             artifact_path: artifact_path.display().to_string(),
             base_url,
