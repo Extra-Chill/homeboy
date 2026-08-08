@@ -1831,11 +1831,15 @@ fn run_promotion_gate(
         }
     };
     let supervision = GATE_SUPERVISION.with(|slot| slot.borrow().clone());
+    let mut gate_environment = options.gates.gate_environment.clone();
+    // A dependency-hydration opt-out also opts out of controller Rust cache
+    // hydration; verification then runs solely with its isolated gate state.
+    gate_environment.hydrate_rust_cache &= options.gates.hydrate_dependencies;
     // Pre-dispatch validation protects provider budget. Recheck in this exact
     // runtime because every gate receives its own isolated HOME/XDG directory.
     let result = if let Err(error) = crate::agent_task_gate::preflight_gate_toolchains(
         worktree_path,
-        &options.gates.gate_environment,
+        &gate_environment,
         &options.gates.required_toolchains(),
         &options.gates.gate_package_artifacts,
         Some(&runtime_tmpdir.context().tmp_dir),
@@ -1857,7 +1861,7 @@ fn run_promotion_gate(
             reveal_policy,
             Some(&runtime_tmpdir.context().tmp_dir),
             Some(supervision),
-            &options.gates.gate_environment,
+            &gate_environment,
             &options.gates.gate_package_artifacts,
         )
     } else {
@@ -1868,7 +1872,7 @@ fn run_promotion_gate(
             visibility,
             reveal_policy,
             &runtime_tmpdir.context().tmp_dir,
-            &options.gates.gate_environment,
+            &gate_environment,
             &options.gates.gate_package_artifacts,
         )
     };
