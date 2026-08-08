@@ -139,6 +139,26 @@ pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
 /// Resume a Cook from its immutable recipe rather than asking the operator to
 /// replay prompt, provider, gate, workspace, or disclosure arguments.
 pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
+    continue_cook_with(
+        args,
+        ExtensionProviderAgentTaskExecutor::discover(),
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+    )
+}
+
+pub(crate) fn continue_cook_with<E, F>(
+    args: CookContinueArgs,
+    executor: E,
+    reconstruct_dispatcher: F,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: Fn(
+            &Value,
+        ) -> homeboy::core::Result<
+            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+        > + Copy,
+{
     let recipe =
         agent_task_service::load_recipe(&args.cook_or_attempt_id).or_else(|cook_error| {
             agent_task_service::load_recipe_for_attempt(&args.cook_or_attempt_id)?.ok_or(cook_error)
@@ -146,10 +166,7 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
     let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
     let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
     if !record.state.is_terminal() {
-        return Ok((
-            cook_continuation_status(&recipe.cook_id, &run_id, &format!("{:?}", record.state)),
-            0,
-        ));
+        return Ok((cook_continuation_status(&recipe.cook_id, &record), 0));
     }
 
     if matches!(
@@ -158,29 +175,36 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
     ) {
-        // Explicit recovery claims the exact Cook without exposing it to the
-        // generic daemon queue between rearm and execution.
-        let Some(claim) =
+        // Ordinary continuation consumes only the pending entry scheduled by
+        // authoritative reconciliation. Failed and completed claims require an
+        // explicit rearm and can never be silently replayed.
+        let claim = if args.rearm {
             agent_task_service::claim_continuation_for_recovery(&recipe.cook_id, &run_id)?
-        else {
+        } else {
+            agent_task_service::claim_continuation_for(&recipe.cook_id, &run_id)?
+        };
+        let Some(claim) = claim else {
             return Ok((
-                cook_continuation_pending(&recipe.cook_id, &run_id, &format!("{:?}", record.state)),
+                cook_terminal_continuation_status(
+                    &recipe.cook_id,
+                    &run_id,
+                    &format!("{:?}", record.state),
+                    agent_task_service::continuation_state(&recipe.cook_id, &run_id)?,
+                ),
                 0,
             ));
         };
         let mut result = None;
         let historical_terminal =
             recipe.runtime_generation != homeboy::core::build_identity::current().display;
-        let dispatcher = |dispatch_recipe: &Value| {
-            crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(dispatch_recipe)
-        };
+        let dispatcher = reconstruct_dispatcher;
+        let executor = executor.clone();
         let execute = |options| {
             agent_task_service::authorize_cook_continue_route(&options)?;
-            let executor = ExtensionProviderAgentTaskExecutor::discover();
             let cook = if historical_terminal {
-                agent_task_service::run_terminal_cook_continuation(options, executor)?
+                agent_task_service::run_terminal_cook_continuation(options, executor.clone())?
             } else {
-                agent_task_service::run_cook(options, executor)?
+                agent_task_service::run_cook(options, executor.clone())?
             };
             let exit_code = cook.exit_code;
             result = Some(cook.value);
@@ -207,9 +231,7 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
         ));
     }
 
-    let dispatcher = crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
-        &recipe.promotion_transport["attempt_dispatch"],
-    )?;
+    let dispatcher = reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
     let attempt = recipe
         .attempts
         .iter()
@@ -232,7 +254,6 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
     options.initial_run_id = attempt.run_id.clone();
     options.initial_plan = attempt.plan.clone();
     agent_task_service::authorize_cook_continue_route(&options)?;
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
     let result = if terminal_review_form_continuation {
         agent_task_service::run_terminal_cook_continuation(options, executor)?
     } else {
@@ -431,27 +452,126 @@ fn cook_continuation_preflight_report(
     })
 }
 
-fn cook_continuation_pending(cook_id: &str, run_id: &str, provider_state: &str) -> Value {
+fn cook_terminal_continuation_status(
+    cook_id: &str,
+    run_id: &str,
+    provider_state: &str,
+    state: agent_task_service::CookContinuationState,
+) -> Value {
+    let (status, guidance) = match state {
+        agent_task_service::CookContinuationState::Pending => (
+            "continuation_pending",
+            serde_json::json!({
+                "action": "await_continuation_claim",
+                "command": format!("homeboy agent-task cook-continue {run_id}"),
+            }),
+        ),
+        agent_task_service::CookContinuationState::Claimed => (
+            "continuation_in_progress",
+            serde_json::json!({
+                "action": "await_claimed_continuation",
+                "command": format!("homeboy agent-task status {run_id} --full"),
+            }),
+        ),
+        agent_task_service::CookContinuationState::Failed => (
+            "continuation_recovery_required",
+            serde_json::json!({
+                "action": "rearm_failed_continuation",
+                "command": format!("homeboy agent-task cook-continue {run_id} --rearm"),
+            }),
+        ),
+        agent_task_service::CookContinuationState::Completed => (
+            "continuation_completed",
+            serde_json::json!({
+                "action": "inspect_completed_cook",
+                "command": format!("homeboy agent-task status {run_id} --full"),
+            }),
+        ),
+        agent_task_service::CookContinuationState::Absent => (
+            "continuation_not_scheduled",
+            serde_json::json!({
+                "action": "reconcile_terminal_attempt",
+                "command": format!("homeboy agent-task reconcile {run_id} --dry-run"),
+            }),
+        ),
+    };
     serde_json::json!({
         "schema": "homeboy/agent-task-cook/v1",
         "cook_id": cook_id,
         "latest_run_id": run_id,
-        "status": "continuation_pending",
+        "status": status,
         "provider": { "state": provider_state, "run_id": run_id },
         "remaining_phases": ["harvest", "review", "gates", "promotion", "finalization"],
-        "continuation_command": format!("homeboy agent-task cook-continue {run_id}"),
+        "guidance": guidance,
     })
 }
 
-fn cook_continuation_status(cook_id: &str, run_id: &str, provider_state: &str) -> Value {
+fn cook_continuation_status(
+    cook_id: &str,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Value {
+    let run_id = &record.run_id;
+    let runner_id = record.runner_id();
+    let waiting_for_capacity = record
+        .metadata
+        .pointer("/runner_queue/state")
+        .and_then(Value::as_str)
+        == Some("waiting_for_capacity");
+    let runner_disconnected = record
+        .metadata
+        .get("runner_liveness")
+        .and_then(Value::as_str)
+        == Some("disconnected");
+    let (status, guidance) = if runner_disconnected {
+        (
+            "recovery_required",
+            serde_json::json!({
+                "action": "reconcile_runner_authority",
+                "command": format!("homeboy agent-task reconcile {run_id} --dry-run"),
+                "message": "The runner could not be reached during bounded reconciliation; inspect the scoped recovery before retrying provider work."
+            }),
+        )
+    } else if waiting_for_capacity
+        || record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+    {
+        let command = runner_id
+            .map(|runner_id| format!("homeboy runner status {runner_id}"))
+            .unwrap_or_else(|| format!("homeboy agent-task run {run_id}"));
+        (
+            "accepted_unscheduled",
+            serde_json::json!({
+                "action": if runner_id.is_some() { "await_runner_capacity" } else { "schedule_queued_run" },
+                "command": command,
+                "message": if runner_id.is_some() {
+                    "The runner accepted this Cook and owns its FIFO queue entry; it will schedule provider execution when a capacity lease is available."
+                } else {
+                    "This Cook is durably queued but has no runner or provider boundary; schedule its queued run before expecting provider work."
+                }
+            }),
+        )
+    } else {
+        (
+            "observation_in_progress",
+            serde_json::json!({
+                "action": "watch_provider",
+                "command": format!("homeboy agent-task logs {run_id}"),
+                "message": "The runner reports active provider work; follow the durable observation until its terminal result is projected."
+            }),
+        )
+    };
     serde_json::json!({
         "schema": "homeboy/agent-task-cook/v1",
         "cook_id": cook_id,
         "latest_run_id": run_id,
-        "status": "in_flight",
-        "provider": { "state": provider_state, "run_id": run_id },
+        "status": status,
+        "provider": {
+            "state": format!("{:?}", record.state),
+            "run_id": run_id,
+            "runner_id": runner_id,
+            "runner_job_status": record.metadata.get("runner_job_status"),
+        },
         "remaining_phases": ["harvest", "review", "gates", "promotion", "finalization"],
-        "continuation_command": format!("homeboy agent-task cook-continue {run_id}"),
+        "guidance": guidance,
     })
 }
 
@@ -1436,10 +1556,15 @@ pub(super) fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
     if let Some(timeout_ms) = args.timeout_ms {
         plan.options.timeout_ms = Some(timeout_ms);
     }
-    emit_runner_lifecycle_progress(&plan, args.record_run_id.as_deref());
+    // Managed services own durable process logs, so a direct plan invocation
+    // needs a run identity even when the caller did not provide one.
+    let record_run_id = args.record_run_id.or_else(|| {
+        (!plan.services.is_empty()).then(|| format!("run-plan-{}", uuid::Uuid::new_v4()))
+    });
+    emit_runner_lifecycle_progress(&plan, record_run_id.as_deref());
     run_loaded_plan(
         plan,
-        args.record_run_id.as_deref(),
+        record_run_id.as_deref(),
         ExtensionProviderAgentTaskExecutor::discover(),
     )
 }
@@ -1521,12 +1646,19 @@ where
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
     let Some(aggregate) = result.value else {
-        return Ok((serde_json::json!({ "claimed": false }), 0));
+        return Ok((
+            serde_json::json!({ "claimed": false, "queue_skips": result.skipped }),
+            0,
+        ));
     };
-    Ok((
-        aggregate_value_with_failure_reasons(&aggregate),
-        result.exit_code,
-    ))
+    let mut value = aggregate_value_with_failure_reasons(&aggregate);
+    if let Value::Object(object) = &mut value {
+        object.insert(
+            "queue_skips".to_string(),
+            serde_json::to_value(result.skipped).unwrap_or(Value::Null),
+        );
+    }
+    Ok((value, result.exit_code))
 }
 
 pub(super) fn submit(args: SubmitArgs) -> CmdResult<Value> {
@@ -1599,6 +1731,14 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
         args.force,
     )?;
     if result.run {
+        if result.record.metadata["cook_id"].is_string() {
+            return continue_cook(CookContinueArgs {
+                cook_or_attempt_id: result.record.run_id,
+                preflight: false,
+                rearm: false,
+                full: false,
+            });
+        }
         return run_submitted_with_executor(
             result.record.run_id,
             None,
@@ -1614,7 +1754,7 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cook_report_with_continuation, cook_resolved_policy_disclosure,
+        cook_continuation_status, cook_report_with_continuation, cook_resolved_policy_disclosure,
         durable_cook_identity_lines, preflight_continue_cook,
     };
     use crate::commands::agent_task::args::CookContinueArgs;
@@ -1676,6 +1816,104 @@ mod tests {
     }
 
     #[test]
+    fn cook_continue_reports_runner_capacity_without_offering_a_duplicate_dispatch() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", vec![]);
+            homeboy::agents::agent_tasks::lifecycle::submit_plan(
+                &plan,
+                Some("cook-queue-attempt-1"),
+            )
+            .expect("persist queued attempt");
+            homeboy::agents::agent_tasks::lifecycle::rewrite_record_for_test(
+                "cook-queue-attempt-1",
+                |record| {
+                    record.metadata = serde_json::json!({
+                        "runner_id": "fixture-lab",
+                        "runner_job_status": "queued",
+                        "runner_queue": { "state": "waiting_for_capacity" },
+                    });
+                },
+            )
+            .expect("record accepted queue ownership");
+            let record = homeboy::agents::agent_tasks::lifecycle::status("cook-queue-attempt-1")
+                .expect("read queued attempt");
+
+            let report = cook_continuation_status("cook-queue", &record);
+
+            assert_eq!(report["status"], "accepted_unscheduled");
+            assert_eq!(report["guidance"]["action"], "await_runner_capacity");
+            assert_eq!(
+                report["guidance"]["command"],
+                "homeboy runner status fixture-lab"
+            );
+            assert!(report.get("continuation_command").is_none());
+        });
+    }
+
+    #[test]
+    fn cook_continue_reports_a_queued_record_without_runner_as_unscheduled() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", vec![]);
+            homeboy::agents::agent_tasks::lifecycle::submit_plan(
+                &plan,
+                Some("cook-unassigned-attempt-1"),
+            )
+            .expect("persist queued attempt");
+            let record =
+                homeboy::agents::agent_tasks::lifecycle::status("cook-unassigned-attempt-1")
+                    .expect("read queued attempt without a runner boundary");
+
+            let report = cook_continuation_status("cook-unassigned", &record);
+
+            assert_eq!(report["status"], "accepted_unscheduled");
+            assert_eq!(report["guidance"]["action"], "schedule_queued_run");
+            assert_eq!(
+                report["guidance"]["command"],
+                "homeboy agent-task run cook-unassigned-attempt-1"
+            );
+            assert!(report.get("continuation_command").is_none());
+        });
+    }
+
+    #[test]
+    fn cook_continue_reports_active_runner_work_with_a_watch_command() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", vec![]);
+            homeboy::agents::agent_tasks::lifecycle::submit_plan(
+                &plan,
+                Some("cook-active-attempt-1"),
+            )
+            .expect("persist active attempt");
+            homeboy::agents::agent_tasks::lifecycle::mark_running("cook-active-attempt-1")
+                .expect("runner starts the provider attempt");
+            homeboy::agents::agent_tasks::lifecycle::rewrite_record_for_test(
+                "cook-active-attempt-1",
+                |record| {
+                    record.metadata = serde_json::json!({
+                        "runner_id": "fixture-lab",
+                        "runner_job_status": "running",
+                        "provider_run_ids": ["fixture-provider-run-1"],
+                        "phase": "provider_execution",
+                    });
+                },
+            )
+            .expect("record active runner and provider evidence");
+            let record = homeboy::agents::agent_tasks::lifecycle::status("cook-active-attempt-1")
+                .expect("read active runner-backed provider attempt");
+
+            let report = cook_continuation_status("cook-active", &record);
+
+            assert_eq!(report["status"], "observation_in_progress");
+            assert_eq!(report["guidance"]["action"], "watch_provider");
+            assert_eq!(
+                report["guidance"]["command"],
+                "homeboy agent-task logs cook-active-attempt-1"
+            );
+            assert!(report.get("continuation_command").is_none());
+        });
+    }
+
+    #[test]
     fn cook_continue_preflight_reports_a_read_only_rejection_without_creating_a_run() {
         crate::test_support::with_isolated_home(|_| {
             let before = homeboy::agents::agent_tasks::lifecycle::list_records()
@@ -1683,6 +1921,7 @@ mod tests {
             let (report, exit_code) = preflight_continue_cook(CookContinueArgs {
                 cook_or_attempt_id: "missing-cook".to_string(),
                 preflight: true,
+                rearm: false,
                 full: false,
             })
             .expect("preflight returns a machine-readable rejection");

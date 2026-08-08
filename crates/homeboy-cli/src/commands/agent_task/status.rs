@@ -24,7 +24,7 @@ use homeboy::runner::runners::{self as runner, RunnerKind};
 
 use super::super::CmdResult;
 use super::args::{
-    CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, LogsArgs,
+    CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, LogsArgs, QuarantineArgs, RearmArgs,
     ReplayProviderBoundaryArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
 use super::candidate::{canonical_candidate_projection, classify_candidates, CandidateState};
@@ -2264,6 +2264,16 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     surface_cancellation_recovery(&mut value);
     Ok((value, 0))
+}
+
+pub(super) fn quarantine(args: QuarantineArgs) -> CmdResult<Value> {
+    let record = agent_task_lifecycle::quarantine_queued_run_exact(&args.run_id, &args.reason)?;
+    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+}
+
+pub(super) fn rearm(args: RearmArgs) -> CmdResult<Value> {
+    let record = agent_task_lifecycle::rearm_quarantined_run(&args.run_id)?;
+    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
 }
 
 fn hydrated_executor_input_value(

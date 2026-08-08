@@ -330,6 +330,9 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
     assert!(runner_status_operator_commands(&report)
         .iter()
         .all(|command| command.scope != "daemon_reconcile_split_view"));
+    assert!(runner_status_operator_commands(&report)
+        .iter()
+        .all(|command| command.scope != "generation_reconcile"));
 }
 
 #[test]

@@ -1,7 +1,30 @@
 use homeboy::core::observation::evidence_report::{self, RunEvidenceReport};
-use homeboy::core::observation::{disk_budget::disk_budget, runs_service, ObservationStore};
+use homeboy::core::observation::{
+    disk_budget::disk_budget, evidence_report::evidence_failure_summary, runs_service,
+    ArtifactRecord, BoundedArtifactProjection, ObservationStore, RunRecord,
+};
+use serde_json::{json, Value};
 
+use crate::commands::utils::response::{self as response, CommandIdentity};
+
+use super::types::{
+    RunsEvidenceArtifactIndexSummary, RunsEvidenceLinksSummary, RunsEvidenceSummaryOutput,
+};
 use super::{require_run, run_summary, CmdResult, RunSummary, RunsOutput};
+
+const DEFAULT_ARTIFACT_LIMIT: usize = 8;
+/// Maximum bytes in the pretty-serialized public command-result envelope.
+///
+/// This is deliberately measured after the standard response wrapper has
+/// lifted command metadata, rather than against the inner `RunsOutput` value.
+/// The measurement includes the newline emitted by both stdout and `--output`.
+const MAX_PUBLIC_ENVELOPE_BYTES: usize = 16 * 1024;
+// Eight compact artifacts plus a failure summary fit below the public envelope
+// contract even when every retained byte serializes as a six-byte JSON escape.
+// Keep ordinary opaque identifiers (including 36-byte UUID run IDs) intact.
+// Stable locators are either emitted verbatim or omitted by the envelope pass;
+// they must never be shortened into invalid commands.
+const MAX_STRING_BYTES: usize = 64;
 
 /// `runs evidence` output. The report shaping lives in
 /// [`homeboy::core::observation::evidence_report`]; this adapter only embeds
@@ -15,6 +38,30 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     artifacts.extend(runs_service::related_lab_artifacts_for_runner_job(
         &store, &run,
     )?);
+    let descendant_evidence = run
+        .metadata_json
+        .get("descendant_run_evidence")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<Vec<evidence_report::DescendantRunEvidenceRef>>(value).ok()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|reference| reference.is_valid() && reference.run_id != run.id)
+        .filter_map(|reference| {
+            let child = store.get_run(&reference.run_id).ok().flatten()?;
+            if child.kind != reference.kind {
+                return None;
+            }
+            let child_artifacts = runs_service::list_artifacts_for_run(&store, &child.id).ok()?;
+            Some(evidence_report::DescendantRunEvidence {
+                evidence_command: format!("homeboy runs evidence {}", child.id),
+                primary_diagnostic: evidence_report::failure_diagnostic_artifact(&child_artifacts),
+                status: child.status,
+                reference,
+            })
+        })
+        .collect();
     let artifact_root = homeboy::core::artifacts::root()?;
     let disk_budget = disk_budget(
         &artifact_root,
@@ -25,17 +72,195 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     // MCP, automation) can reuse it; this adapter only supplies the CLI-owned
     // `RunSummary`, disk budget, and command label.
     let run_summary = run_summary(run.clone());
-    let report =
-        evidence_report::build_run_evidence_report(evidence_report::RunEvidenceReportInputs {
+    let report = evidence_report::build_run_evidence_report_with_descendant_evidence(
+        evidence_report::RunEvidenceReportInputs {
             command: "runs.evidence",
             run,
             run_summary,
             artifacts,
             artifact_root,
             disk_budget,
-        });
+        },
+        descendant_evidence,
+    );
 
     Ok((RunsOutput::Evidence(Box::new(report)), 0))
+}
+
+/// Render the full core report or a bounded CLI projection without changing the
+/// reusable report schema used by non-CLI consumers.
+pub fn evidence_projection(run_id: &str, full: bool) -> CmdResult<RunsOutput> {
+    if full {
+        return evidence(run_id);
+    }
+    let store = ObservationStore::open_initialized()?;
+    let run = require_run(&store, run_id)?;
+    let mut run_ids = vec![run.id.clone()];
+    run_ids.extend(runs_service::related_lab_run_ids(&store, &run)?);
+    let projection =
+        store.bounded_artifact_projection_for_runs(&run_ids, DEFAULT_ARTIFACT_LIMIT)?;
+    let summary = compact_projection(&run, projection);
+    let summary = compact_to_output_limit(summary);
+    Ok((RunsOutput::EvidenceSummary(summary), 0))
+}
+
+fn compact_projection(
+    run: &RunRecord,
+    projection: BoundedArtifactProjection,
+) -> RunsEvidenceSummaryOutput {
+    let failure = evidence_failure_summary(run);
+    let diagnostic = projection
+        .diagnostic
+        .as_ref()
+        .map(|artifact| compact_artifact(artifact, true));
+    let diagnostic_retrieval_command = projection.diagnostic.as_ref().map(artifact_continuation);
+    let artifacts = projection
+        .artifacts
+        .iter()
+        .map(|artifact| compact_artifact(artifact, true))
+        .collect::<Vec<_>>();
+    let mut failure_summary = json!({
+        "failed": failure.failed,
+        "status": bounded_string(&failure.status),
+        "exit_code": failure.exit_code,
+        "error": failure.error.as_deref().map(bounded_string),
+        "gate_failures": failure.gate_failures.iter().take(4).map(|value| bounded_string(value)).collect::<Vec<_>>(),
+        "hints": failure.hints.iter().take(4).map(|value| bounded_string(value)).collect::<Vec<_>>(),
+    });
+    if let Some(diagnostic) = &diagnostic {
+        failure_summary["diagnostic"] = json!({ "artifact": diagnostic });
+    }
+    RunsEvidenceSummaryOutput {
+        schema: "homeboy/runs-evidence-summary/v1",
+        byte_limit: MAX_PUBLIC_ENVELOPE_BYTES,
+        command: "runs.evidence",
+        run_id: Some(run.id.clone()),
+        run: json!({ "id": run.id, "kind": bounded_string(&run.kind), "status": bounded_string(&run.status) }),
+        failure: failure_summary,
+        diagnostic: None,
+        diagnostic_retrieval_command,
+        artifact_index: RunsEvidenceArtifactIndexSummary {
+            count: projection.count,
+            file_count: projection.file_count,
+            directory_count: projection.directory_count,
+            url_count: projection.url_count,
+            missing_count: 0,
+            missing_count_known: false,
+            total_size_bytes: projection.total_size_bytes,
+            returned_count: artifacts.len(),
+            omitted_count: projection.count.saturating_sub(artifacts.len()),
+            artifacts,
+            complete_command: Some(format!("homeboy runs artifacts {}", run.id)),
+        },
+        evidence_links: RunsEvidenceLinksSummary {
+            count: 0,
+            returned_count: 0,
+            omitted_count: 0,
+            links: Vec::new(),
+        },
+        full_report_command: Some(format!("homeboy runs evidence {} --full", run.id)),
+    }
+}
+
+fn compact_artifact(artifact: &ArtifactRecord, include_continuation: bool) -> Value {
+    // The bounded projection is safe to send beyond the controller: opaque
+    // handles are its only artifact locators. `runs evidence --full` retains
+    // the complete artifact records, including their paths.
+    json!({ "handle": artifact.id, "kind": bounded_string(&artifact.kind), "type": bounded_string(&artifact.artifact_type), "continuation": include_continuation.then(|| artifact_continuation(artifact)) })
+}
+
+fn artifact_continuation(artifact: &ArtifactRecord) -> String {
+    if artifact.artifact_type == "directory" {
+        format!("homeboy runs artifact preview-handle {}", artifact.id)
+    } else {
+        format!("homeboy runs artifact get-handle {} -o <path>", artifact.id)
+    }
+}
+
+/// Release builds must never turn a large but valid evidence inventory into an
+/// internal error. Remove optional samples deterministically until the final
+/// pretty-serialized public envelope is within the command's byte contract.
+fn compact_to_output_limit(mut summary: RunsEvidenceSummaryOutput) -> RunsEvidenceSummaryOutput {
+    loop {
+        let output = RunsOutput::EvidenceSummary(summary);
+        if public_envelope_bytes(&output) <= MAX_PUBLIC_ENVELOPE_BYTES {
+            let RunsOutput::EvidenceSummary(summary) = output else {
+                unreachable!()
+            };
+            return summary;
+        }
+        let RunsOutput::EvidenceSummary(mut next) = output else {
+            unreachable!()
+        };
+        if next.artifact_index.artifacts.pop().is_some() {
+            next.artifact_index.returned_count = next.artifact_index.artifacts.len();
+            next.artifact_index.omitted_count = next
+                .artifact_index
+                .count
+                .saturating_sub(next.artifact_index.returned_count);
+            summary = next;
+            continue;
+        }
+        if next.diagnostic_retrieval_command.take().is_some() {
+            summary = next;
+            continue;
+        }
+        if next.full_report_command.take().is_some() {
+            summary = next;
+            continue;
+        }
+        if next.artifact_index.complete_command.take().is_some() {
+            summary = next;
+            continue;
+        }
+        if next
+            .run
+            .as_object_mut()
+            .and_then(|run| run.remove("id"))
+            .is_some()
+        {
+            summary = next;
+            continue;
+        }
+        if next.run_id.take().is_some() {
+            summary = next;
+            continue;
+        }
+        // The remaining schema, counts, status, and selected opaque diagnostic
+        // handle are fixed-size. Artifact handles are validated 67-byte digests.
+        return next;
+    }
+}
+
+/// This is the exact public serializer used by `homeboy runs evidence`: the
+/// runtime turns `RunsOutput` into a JSON value, wraps it as a v3 command
+/// result, then pretty-serializes it for both stdout and `--output`.
+fn public_envelope_bytes(output: &RunsOutput) -> usize {
+    // `print_response` uses `writeln!` and `OutputWriteOptions::json_output`
+    // appends the same newline to `--output` files.
+    public_envelope_json(output).len() + 1
+}
+
+fn public_envelope_json(output: &RunsOutput) -> String {
+    let data = serde_json::to_value(output).expect("runs evidence output serializes");
+    let response = response::cli_response_for_json_result_for_identity(
+        &Ok(data),
+        0,
+        &CommandIdentity::with_operation("runs", "evidence"),
+        None,
+    );
+    serde_json::to_string_pretty(&response).expect("runs evidence public envelope serializes")
+}
+
+fn bounded_string(value: &str) -> String {
+    if value.len() <= MAX_STRING_BYTES {
+        return value.to_string();
+    }
+    let mut end = MAX_STRING_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[{} bytes omitted]", &value[..end], value.len() - end)
 }
 
 #[cfg(test)]
@@ -47,6 +272,10 @@ mod tests {
     use serde_json::Value;
     use std::path::Path;
 
+    use super::super::handlers::artifact_command;
+    use super::super::types::{
+        RunsArtifactArgs, RunsArtifactCommand, RunsArtifactPreviewHandleArgs,
+    };
     use super::*;
 
     struct XdgGuard(Option<String>);
@@ -385,6 +614,363 @@ mod tests {
         });
     }
 
+    #[test]
+    fn evidence_projection_bounds_large_inventories_and_keeps_the_top_diagnostic() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "bounded-evidence",
+                    serde_json::json!({ "exit_code": 1, "error": "\u{0001}".repeat(100_000) }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish run");
+            let artifact_path = home.path().join("artifact.json");
+            std::fs::write(&artifact_path, b"{}").expect("artifact");
+            let mut diagnostic_id = None;
+            for index in 0..1022 {
+                let metadata = if index == 1021 {
+                    serde_json::json!({
+                        "failure_diagnostic": true,
+                        "failure_diagnostic_rank": 99
+                    })
+                } else if index == 1020 {
+                    serde_json::json!({
+                        "failure_diagnostic": true,
+                        "failure_diagnostic_rank": 1
+                    })
+                } else {
+                    serde_json::json!({ "failure_diagnostic_rank": index })
+                };
+                let kind = if index == 1021 {
+                    format!("diagnostic-{}", "\u{0002}".repeat(100_000))
+                } else {
+                    format!("artifact-{index}")
+                };
+                let artifact = store
+                    .record_artifact_with_id(
+                        &run.id,
+                        &kind,
+                        &artifact_path,
+                        &format!("artifact-id-{index:04}"),
+                        metadata,
+                    )
+                    .expect("record artifact");
+                if index == 1021 {
+                    diagnostic_id = Some(artifact.id);
+                }
+            }
+            let diagnostic_id = diagnostic_id.expect("diagnostic id");
+            let omitted = store
+                .get_artifact("artifact-id-0500")
+                .expect("read omitted artifact")
+                .expect("omitted artifact");
+            std::fs::remove_file(&omitted.path).expect("remove omitted artifact bytes");
+
+            let (output, _) = evidence_projection(&run.id, false).expect("bounded evidence");
+            let RunsOutput::EvidenceSummary(summary) = output else {
+                panic!("expected bounded evidence summary");
+            };
+            assert_eq!(summary.artifact_index.count, 1022);
+            assert_eq!(
+                summary.artifact_index.returned_count,
+                DEFAULT_ARTIFACT_LIMIT
+            );
+            assert_eq!(summary.artifact_index.omitted_count, 1014);
+            assert!(!summary.artifact_index.missing_count_known);
+            assert_eq!(summary.run_id.as_deref(), Some(run.id.as_str()));
+            assert_eq!(summary.run["id"], run.id);
+            assert_eq!(
+                summary.artifact_index.complete_command.as_deref(),
+                Some(format!("homeboy runs artifacts {}", run.id).as_str())
+            );
+            assert_eq!(
+                summary.full_report_command.as_deref(),
+                Some(format!("homeboy runs evidence {} --full", run.id).as_str())
+            );
+            let summary_output = RunsOutput::EvidenceSummary(summary);
+            assert!(
+                public_envelope_bytes(&summary_output) <= MAX_PUBLIC_ENVELOPE_BYTES,
+                "the pretty command-result envelope must satisfy the public byte contract"
+            );
+            let expected_envelope = public_envelope_json(&summary_output);
+            let summary_json = serde_json::to_string(&summary_output).expect("serialize summary");
+            assert!(
+                !summary_json.contains(home.path().to_str().expect("UTF-8 controller path")),
+                "the bounded output must not leak a controller-local path"
+            );
+            assert!(
+                !expected_envelope.contains(artifact_path.to_str().expect("UTF-8 artifact path")),
+                "the public command envelope must not leak a local artifact path"
+            );
+            let output_path = home.path().join("evidence-envelope.json");
+            let data = serde_json::to_value(&summary_output).expect("serialize evidence output");
+            response::write_json_to_file_for_identity(
+                &Ok(data),
+                output_path.to_str().expect("UTF-8 output path"),
+                0,
+                &CommandIdentity::with_operation("runs", "evidence"),
+                None,
+            );
+            let output_file = std::fs::read_to_string(output_path).expect("read --output file");
+            assert_eq!(output_file, format!("{expected_envelope}\n"));
+            assert!(output_file.len() <= MAX_PUBLIC_ENVELOPE_BYTES);
+            let envelope: Value = serde_json::from_str(&expected_envelope).expect("parse envelope");
+            assert_eq!(envelope["schema"], "homeboy/command-result/v3");
+            assert_eq!(envelope["command"], "runs");
+            assert_eq!(envelope["operation"], "evidence");
+            assert_eq!(envelope["data"]["variant"], "evidence_summary");
+            let RunsOutput::EvidenceSummary(summary) = summary_output else {
+                unreachable!()
+            };
+            let handle = summary.artifact_index.artifacts[0]["handle"]
+                .as_str()
+                .expect("bounded diagnostic handle")
+                .to_string();
+            assert!(handle.starts_with("ah_"));
+            assert_eq!(
+                summary.diagnostic_retrieval_command.as_deref(),
+                Some(format!("homeboy runs artifact get-handle {handle} -o <path>").as_str())
+            );
+            let returned_ids = summary
+                .artifact_index
+                .artifacts
+                .iter()
+                .filter_map(|artifact| artifact["handle"].as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(returned_ids.len(), DEFAULT_ARTIFACT_LIMIT);
+            assert!(returned_ids.iter().all(|id| !id.is_empty()));
+            let omitted_id = (0..1022)
+                .map(|index| format!("artifact-id-{index:04}"))
+                .find(|id| !returned_ids.contains(&id.as_str()))
+                .expect("an omitted artifact id");
+            let summary_json = serde_json::to_string(&summary).expect("serialize summary");
+            assert!(
+                !summary_json.contains(&format!("\"{omitted_id}\"")),
+                "the bounded output must not leak omitted artifact IDs"
+            );
+
+            let (full, _) = evidence_projection(&run.id, true).expect("full evidence");
+            let RunsOutput::Evidence(full) = full else {
+                panic!("expected full evidence report");
+            };
+            assert_eq!(full.artifact_index.count, 1022);
+            assert_eq!(full.artifact_index.artifacts.len(), 1022);
+            assert_eq!(
+                full.failure
+                    .diagnostic
+                    .as_ref()
+                    .and_then(|diagnostic| diagnostic.artifact.as_ref())
+                    .map(|artifact| artifact.id.as_str()),
+                Some(diagnostic_id.as_str())
+            );
+
+            let (selection, _) = super::super::handlers::apply_field_selection(
+                RunsOutput::EvidenceSummary(summary),
+                &["$.failure.diagnostic.artifact.handle".to_string()],
+            )
+            .expect("field projection");
+            let RunsOutput::FieldSelection(selection) = selection else {
+                panic!("expected field selection");
+            };
+            assert_eq!(selection.fields[0].value, Value::String(handle));
+        });
+    }
+
+    #[test]
+    fn evidence_projection_continues_selected_directory_diagnostics_by_handle() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "directory-diagnostic",
+                    Value::Null,
+                ))
+                .expect("run");
+            let directory = home.path().join("diagnostic-site");
+            std::fs::create_dir_all(&directory).expect("directory");
+            std::fs::write(directory.join("index.html"), "<html>diagnostic</html>").expect("index");
+            let artifact = store
+                .record_directory_artifact_with_metadata(
+                    &run.id,
+                    "diagnostic-site",
+                    &directory,
+                    json!({ "failure_diagnostic": true, "failure_diagnostic_rank": 1 }),
+                )
+                .expect("directory artifact");
+
+            let (output, _) = evidence_projection(&run.id, false).expect("bounded evidence");
+            let RunsOutput::EvidenceSummary(summary) = output else {
+                panic!("expected bounded evidence summary");
+            };
+            let handle = summary.artifact_index.artifacts[0]["handle"]
+                .as_str()
+                .expect("directory handle");
+            let continuation = format!("homeboy runs artifact preview-handle {handle}");
+            assert_eq!(
+                summary.artifact_index.artifacts[0]["continuation"],
+                continuation
+            );
+            assert_eq!(summary.failure["diagnostic"]["artifact"]["handle"], handle);
+            assert_eq!(
+                summary.diagnostic_retrieval_command.as_deref(),
+                Some(continuation.as_str())
+            );
+
+            assert_eq!(artifact.artifact_type, "directory");
+
+            let (preview, _) = artifact_command(RunsArtifactArgs {
+                command: RunsArtifactCommand::PreviewHandle(RunsArtifactPreviewHandleArgs {
+                    handle: handle.to_string(),
+                    port: None,
+                }),
+            })
+            .expect("preview selected directory diagnostic by handle");
+            let RunsOutput::ArtifactPreview(preview) = preview else {
+                panic!("expected directory preview output");
+            };
+            unsafe {
+                libc::kill(preview.process_id as i32, libc::SIGTERM);
+            }
+            assert_eq!(preview.run_id, run.id);
+            assert_eq!(preview.artifact_id, artifact.id);
+            assert!(preview.base_url.starts_with("http://127.0.0.1:"));
+        });
+    }
+
+    #[test]
+    fn bounded_strings_keep_ordinary_uuid_run_ids_exact() {
+        let run_id = "123e4567-e89b-12d3-a456-426614174000";
+        assert_eq!(bounded_string(run_id), run_id);
+    }
+
+    #[test]
+    fn pathological_run_ids_omit_optional_locators_instead_of_truncating_them() {
+        let run_id = "run-".to_string() + &"x".repeat(MAX_PUBLIC_ENVELOPE_BYTES);
+        let summary = RunsEvidenceSummaryOutput {
+            schema: "homeboy/runs-evidence-summary/v1",
+            byte_limit: MAX_PUBLIC_ENVELOPE_BYTES,
+            command: "runs.evidence",
+            run_id: Some(run_id.clone()),
+            run: json!({ "id": run_id, "kind": "bench", "status": "fail" }),
+            failure: json!({ "failed": true, "status": "fail", "exit_code": 1 }),
+            diagnostic: None,
+            diagnostic_retrieval_command: None,
+            artifact_index: RunsEvidenceArtifactIndexSummary {
+                count: 0,
+                file_count: 0,
+                directory_count: 0,
+                url_count: 0,
+                missing_count: 0,
+                missing_count_known: false,
+                total_size_bytes: 0,
+                artifacts: Vec::new(),
+                returned_count: 0,
+                omitted_count: 0,
+                complete_command: Some(format!("homeboy runs artifacts {run_id}")),
+            },
+            evidence_links: RunsEvidenceLinksSummary {
+                count: 0,
+                links: Vec::new(),
+                returned_count: 0,
+                omitted_count: 0,
+            },
+            full_report_command: Some(format!("homeboy runs evidence {run_id} --full")),
+        };
+
+        let summary = compact_to_output_limit(summary);
+        assert!(summary.run_id.is_none());
+        assert!(summary.run.get("id").is_none());
+        assert!(summary.artifact_index.complete_command.is_none());
+        assert!(summary.full_report_command.is_none());
+        let output = RunsOutput::EvidenceSummary(summary);
+        assert!(public_envelope_bytes(&output) <= MAX_PUBLIC_ENVELOPE_BYTES);
+        assert!(!public_envelope_json(&output).contains("bytes omitted"));
+    }
+
+    #[test]
+    fn evidence_command_resolves_descendant_run_without_copying_its_artifacts() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let child = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("child run");
+            let diagnostic = home.path().join("child-diagnostic.txt");
+            std::fs::write(&diagnostic, "child failed").expect("diagnostic");
+            store
+                .record_artifact_with_metadata(
+                    &child.id,
+                    "failure_diagnostic",
+                    &diagnostic,
+                    serde_json::json!({ "failure_diagnostic": true, "failure_diagnostic_rank": 1 }),
+                )
+                .expect("child artifact");
+            store
+                .finish_run(&child.id, RunStatus::Fail, None)
+                .expect("finish child");
+
+            let parent = store
+                .start_run(
+                    NewRunRecord::builder("runner_execution")
+                        .metadata(serde_json::json!({
+                            "descendant_run_evidence": [{
+                                "schema": "homeboy/descendant-run-evidence-ref/v1",
+                                "run_id": child.id,
+                                "kind": "bench",
+                                "source": "controller.terminal_command_result.refs.runs"
+                            }]
+                        }))
+                        .build(),
+                )
+                .expect("parent run");
+            store
+                .finish_run(&parent.id, RunStatus::Pass, None)
+                .expect("finish parent");
+
+            let (output, _) = evidence(&parent.id).expect("parent evidence");
+            let RunsOutput::Evidence(report) = output else {
+                panic!("expected evidence report");
+            };
+            assert_eq!(report.heartbeat.status, "pass");
+            assert_eq!(report.artifact_index.count, 0);
+            assert_eq!(report.descendant_evidence.len(), 1);
+            assert_eq!(report.descendant_evidence[0].reference.run_id, child.id);
+            assert_eq!(report.descendant_evidence[0].status, "fail");
+            assert_eq!(
+                report.descendant_evidence[0].evidence_command,
+                format!("homeboy runs evidence {}", child.id)
+            );
+            assert!(report.descendant_evidence[0].primary_diagnostic.is_some());
+
+            store
+                .update_run_metadata(
+                    &parent.id,
+                    serde_json::json!({
+                        "descendant_run_evidence": [{
+                            "schema": "homeboy/descendant-run-evidence-ref/v1",
+                            "run_id": child.id,
+                            "kind": "stale-kind",
+                            "source": "controller.terminal_command_result.refs.runs"
+                        }]
+                    }),
+                )
+                .expect("stale descendant kind");
+            let (output, _) = evidence(&parent.id).expect("stale parent evidence");
+            let RunsOutput::Evidence(report) = output else {
+                panic!("expected evidence report");
+            };
+            assert!(report.descendant_evidence.is_empty());
+        });
+    }
+
     /// Before this wiring the manifest member was structurally always absent:
     /// nothing in the repository produced one, so `runs evidence` advertised an
     /// interpretation layer it never populated. A run nobody attached a manifest
@@ -666,7 +1252,49 @@ mod tests {
             assert_eq!(output.run.status, "running");
             assert_eq!(output.failure.status, "running");
             assert!(!output.failure.failed);
+
+            let (bounded, _) = evidence_projection(&run.id, false).expect("bounded evidence");
+            let RunsOutput::EvidenceSummary(bounded) = bounded else {
+                panic!("expected bounded evidence");
+            };
+            assert_eq!(bounded.artifact_index.count, 0);
+            assert_eq!(bounded.artifact_index.total_size_bytes, 0);
         });
+    }
+
+    #[test]
+    fn diagnostic_continuations_keep_long_ids_and_urls_exact() {
+        let long_id = "id".repeat(2_000);
+        let long_url = format!("https://example.test/{}", "path/".repeat(1_000));
+        let file = ArtifactRecord {
+            id: long_id.clone(),
+            run_id: "run".to_string(),
+            kind: "diagnostic".to_string(),
+            artifact_type: "file".to_string(),
+            path: "ignored".to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: Value::Null,
+            created_at: "now".to_string(),
+        };
+        assert_eq!(
+            artifact_continuation(&file),
+            format!("homeboy runs artifact get-handle {long_id} -o <path>")
+        );
+        let url = ArtifactRecord {
+            artifact_type: "url".to_string(),
+            url: Some(long_url.clone()),
+            ..file
+        };
+        assert_eq!(
+            artifact_continuation(&url),
+            format!("homeboy runs artifact get-handle {long_id} -o <path>")
+        );
     }
 
     #[test]

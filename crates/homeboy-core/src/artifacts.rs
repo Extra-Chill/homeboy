@@ -12,7 +12,7 @@ pub use super::artifact_dom_boxes::{
 };
 pub use super::artifact_links::{
     cached_validated_viewer_links, public_artifact_path_url, public_artifact_url,
-    PUBLIC_ARTIFACT_BASE_URL_ENV,
+    public_artifact_url_is_reachable_or_legacy, PUBLIC_ARTIFACT_BASE_URL_ENV,
 };
 pub use super::artifact_manifest::{
     ArtifactManifest, ARTIFACT_MANIFEST_SCHEMA, RUNTIME_AGENT_ARTIFACT_PATHS_SCHEMA,

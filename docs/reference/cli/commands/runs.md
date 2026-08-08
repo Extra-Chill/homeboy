@@ -36,7 +36,7 @@ Inspect persisted observation runs and artifacts
 | `homeboy runs proof` | Show only the compact proof signals for one run: verdict, gate failures, and declared proof/scorecard signal fields. Full evidence stays behind `runs show --json` / `runs evidence` |
 | `homeboy runs dossier` | Aggregate the actionable read-only dossier for one persisted run |
 | `homeboy runs resume-plan` | Show a generic resume plan for a validation-progress run |
-| `homeboy runs evidence` | Show stable evidence registry data for one run; start here for reviewer-facing evidence |
+| `homeboy runs evidence` | Show bounded, actionable evidence for one run; use --full for the complete registry report |
 | `homeboy runs env` | Explain redacted Lab environment provenance for one run |
 | `homeboy runs artifacts` | List artifacts recorded for one run |
 | `homeboy runs artifact` | Retrieve or sync recorded run artifacts |
@@ -291,14 +291,19 @@ Show a generic resume plan for a validation-progress run
 ## `homeboy runs evidence`
 
 ```sh
-homeboy runs evidence <RUN_ID>
+homeboy runs evidence [OPTIONS] <RUN_ID>
 ```
 
-Show stable evidence registry data for one run; start here for reviewer-facing evidence
+Show bounded, actionable evidence for one run; use --full for the complete registry report
 
 | Argument | Required | Description |
 | --- | --- | --- |
 | `<RUN_ID>` | yes | _no help text_ |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--full` | flag | Emit the complete lossless evidence report, including every artifact and evidence link |
+| `-q`, `--field` | `<FIELD>` | JSONPath selector(s) projected over the evidence result so callers extract only specific fields instead of the whole structure. Repeat or comma-separate. Rooted at the evidence payload, e.g. `-q '$.failure.diagnostic'`, `-q '$.artifact_index.omitted_count'` |
 
 ## `homeboy runs env`
 
@@ -329,6 +334,18 @@ List artifacts recorded for one run
 | `--runner` | `<RUNNER>` | Query artifacts from a connected execution runner daemon |
 | `--pull` | flag | Pull runner/remote artifact bytes to the operator-local artifact root so the completed run is self-contained. Best-effort and per-artifact: the listing still prints, and each artifact reports a pull status |
 | `--pull-dir` | `<PULL_DIR>` | Optional directory to write pulled artifact bytes into. Defaults to a run-scoped path under the operator-local artifact root |
+| `--token` | `<TOKEN>` | Exact persisted artifact id token |
+| `--kind` | `<KIND>` | Exact artifact kind |
+| `--mime` | `<MIME>` | Exact MIME type |
+| `--original-path` | `<ORIGINAL_PATH>` | Exact original persisted path |
+| `--path-suffix` | `<PATH_SUFFIX>` | Match a persisted path suffix |
+| `--fixture` | `<FIXTURE>` | Exact `fixture_id` artifact metadata value |
+| `--surface` | `<SURFACE>` | Exact `surface_id` artifact metadata value |
+| `--scenario` | `<SCENARIO>` | Exact `scenario_id` artifact metadata value |
+| `--name-glob` | `<NAME_GLOB>` | Glob match against the artifact kind/name |
+| `--limit` | `<LIMIT>` | Maximum records in this page (1-1000) |
+| `--offset` | `<OFFSET>` | Number of matching records to skip before this page |
+| `--full` | flag | Retain the exhaustive legacy listing and derived summaries |
 
 ## `homeboy runs artifact`
 
@@ -342,7 +359,9 @@ Retrieve or sync recorded run artifacts
 | --- | --- |
 | `homeboy runs artifact attach` | Attach an existing runner-side output file to a persisted run |
 | `homeboy runs artifact get` | Copy a recorded file artifact to a local path |
+| `homeboy runs artifact get-handle` | Retrieve one artifact using the bounded opaque handle emitted by `runs evidence` |
 | `homeboy runs artifact preview` | Serve a recorded directory artifact with a local static preview URL |
+| `homeboy runs artifact preview-handle` | Serve a directory artifact using the opaque handle emitted by `runs evidence` |
 | `homeboy runs artifact capture` | Capture generated HTML entrypoint screenshots from a recorded directory artifact |
 | `homeboy runs artifact cleanup-downloads` | Plan or delete locally cached runner artifact downloads |
 | `homeboy runs artifact cleanup-persisted` | Plan or delete persisted local run artifacts and their database records |
@@ -385,6 +404,23 @@ Copy a recorded file artifact to a local path
 | `-o`, `--output` | `<OUTPUT>` | Destination file path. Defaults to the recorded artifact filename |
 | `-q`, `--field` | `<FIELD>` | JSONPath selector(s) projected over the artifact-get result so callers extract only specific fields (e.g. `sha256`, `output_path`) instead of the whole structure. Repeat or comma-separate. Field selection still writes the artifact bytes when `--output` is set. Example: `-q '$.sha256'`, `-q '$.output_path'` |
 
+## `homeboy runs artifact get-handle`
+
+```sh
+homeboy runs artifact get-handle [OPTIONS] <HANDLE>
+```
+
+Retrieve one artifact using the bounded opaque handle emitted by `runs evidence`
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<HANDLE>` | yes | Stable bounded opaque artifact handle emitted by `runs evidence` |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `-o`, `--output` | `<OUTPUT>` | Destination file path. Defaults to the recorded artifact filename |
+| `-q`, `--field` | `<FIELD>` | JSONPath selector(s) projected over the retrieval result |
+
 ## `homeboy runs artifact preview`
 
 ```sh
@@ -397,6 +433,22 @@ Serve a recorded directory artifact with a local static preview URL
 | --- | --- | --- |
 | `<RUN_ID>` | yes | Observation run id that owns the artifact |
 | `<ARTIFACT_ID>` | yes | Directory artifact id/path token from `homeboy runs artifacts <run-id>` |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--port` | `<PORT>` | Local loopback port. Defaults to an available ephemeral port |
+
+## `homeboy runs artifact preview-handle`
+
+```sh
+homeboy runs artifact preview-handle [OPTIONS] <HANDLE>
+```
+
+Serve a directory artifact using the opaque handle emitted by `runs evidence`
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<HANDLE>` | yes | Stable bounded opaque directory-artifact handle emitted by `runs evidence` |
 
 | Option | Value | Description |
 | --- | --- | --- |

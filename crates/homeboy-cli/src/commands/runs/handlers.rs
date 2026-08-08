@@ -14,7 +14,8 @@ use homeboy::core::artifact_address::ArtifactAddress;
 use homeboy::core::observation::evidence_report::directory_publication_guidance;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{
-    merge_metadata, FindingListFilter, ObservationStore, RunListFilter, RunRecord, RunStatus,
+    merge_metadata, ArtifactListFilter, FindingListFilter, ObservationStore, RunListFilter,
+    RunRecord, RunStatus,
 };
 use homeboy::core::resource_lifecycle_index::resource_lifecycle_index_from_artifacts;
 use homeboy::core::validation_progress::ValidationProgressLedger;
@@ -26,12 +27,13 @@ use super::bench::run_contains_scenario;
 use super::common::{run_summaries_with_artifact_indexes, RunSummary};
 use super::types::{
     actionable_for_run_detail, actionable_for_run_list, RunDetail, RunsArtifactArgs,
-    RunsArtifactCommand, RunsArtifactCommandHint, RunsArtifactGetArgs, RunsArtifactGetOutput,
-    RunsArtifactPathGuide, RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs,
-    RunsArtifactsOutput, RunsCancelOutput, RunsDirectoryArtifactPublicationGuidance,
-    RunsEnvKeyOutput, RunsEnvOutput, RunsEnvSourceLayerOutput, RunsEnvSummary,
-    RunsFieldSelectionOutput, RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput,
-    RunsSelectedField, RunsShowOutput, RunsStaleRunSummary,
+    RunsArtifactCommand, RunsArtifactCommandHint, RunsArtifactGetArgs, RunsArtifactGetHandleArgs,
+    RunsArtifactGetOutput, RunsArtifactPage, RunsArtifactPathGuide, RunsArtifactPreviewHandleArgs,
+    RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs, RunsArtifactsOutput,
+    RunsCancelOutput, RunsDirectoryArtifactPublicationGuidance, RunsEnvKeyOutput, RunsEnvOutput,
+    RunsEnvSourceLayerOutput, RunsEnvSummary, RunsFieldSelectionOutput, RunsListArgs,
+    RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsSelectedField, RunsShowOutput,
+    RunsStaleRunSummary,
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
@@ -567,6 +569,20 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
         runner: None,
         pull: false,
         pull_dir: None,
+        token: None,
+        kind: None,
+        mime: None,
+        original_path: None,
+        path_suffix: None,
+        fixture: None,
+        surface: None,
+        scenario: None,
+        name_glob: None,
+        limit: 50,
+        offset: 0,
+        // Preserve the direct test helper's historical exhaustive projection;
+        // the public CLI defaults to the bounded discovery page.
+        full: true,
     })
 }
 
@@ -582,13 +598,61 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
                 ]),
             ));
         }
-        return remote::runner_artifacts(runner_id, &args.run_id);
+        return remote::runner_artifacts(runner_id, &args);
     }
 
     let store = ObservationStore::open_initialized()?;
     let run = runs_service::require_run(&store, &args.run_id)?;
     let run_id = run.id;
-    let artifacts = runs_service::list_artifacts_for_run(&store, &run_id)?;
+    let filter = ArtifactListFilter {
+        token: args.token.clone(),
+        kind: args.kind.clone(),
+        mime: args.mime.clone(),
+        original_path: args.original_path.clone(),
+        path_suffix: args.path_suffix.clone(),
+        fixture: args.fixture.clone(),
+        surface: args.surface.clone(),
+        scenario: args.scenario.clone(),
+        name_glob: args.name_glob.clone(),
+        limit: args.limit,
+        offset: args.offset,
+    };
+    let page = if args.full {
+        None
+    } else {
+        Some(store.list_artifacts_page(&run_id, &filter)?)
+    };
+    let artifacts = match page.as_ref() {
+        Some(page) => page.artifacts.clone(),
+        None => runs_service::list_artifacts_for_run(&store, &run_id)?,
+    };
+    if !args.full {
+        let page = page.expect("bounded artifact page is present");
+        return Ok((
+            RunsOutput::Artifacts(RunsArtifactsOutput {
+                command: "runs.artifacts",
+                run_id: run_id.clone(),
+                runner_id: None,
+                path_guide: RunsArtifactPathGuide::for_listing(&run_id, None),
+                next_commands: artifact_get_command_hints(&run_id, &artifacts),
+                artifacts,
+                page: Some(RunsArtifactPage {
+                    total: page.total,
+                    limit: page.limit,
+                    offset: page.offset,
+                    next_offset: (page.offset + page.artifacts.len() < page.total)
+                        .then_some(page.offset + page.artifacts.len()),
+                }),
+                resource_lifecycle_index: None,
+                directory_publication: Vec::new(),
+                preview_entrypoints: Vec::new(),
+                matrix_summary: None,
+                fuzz_result_envelopes: Vec::new(),
+                pull: None,
+            }),
+            0,
+        ));
+    }
     let preview_entrypoints = artifacts
         .iter()
         .flat_map(homeboy::core::artifacts::html_preview_entrypoints)
@@ -624,6 +688,7 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
             path_guide: RunsArtifactPathGuide::for_listing(&run_id, None),
             next_commands: artifact_get_command_hints(&run_id, &artifacts),
             artifacts,
+            page: None,
             resource_lifecycle_index,
             directory_publication,
             preview_entrypoints,
@@ -1042,7 +1107,9 @@ pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
     match args.command {
         RunsArtifactCommand::Attach(args) => remote_artifact::attach(args),
         RunsArtifactCommand::Get(args) => artifact_get(args),
+        RunsArtifactCommand::GetHandle(args) => artifact_get_handle(args),
         RunsArtifactCommand::Preview(args) => remote_artifact::preview(args),
+        RunsArtifactCommand::PreviewHandle(args) => artifact_preview_handle(args),
         RunsArtifactCommand::Capture(args) => remote_artifact::capture(args),
         RunsArtifactCommand::CleanupDownloads(args) => remote_artifact::cleanup_downloads(args),
         RunsArtifactCommand::CleanupPersisted(args) => remote_artifact::cleanup_persisted(args),
@@ -1051,6 +1118,23 @@ pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
             Ok((RunsOutput::ArtifactPostprocess(output), exit_code))
         }
     }
+}
+
+pub(crate) fn artifact_preview_handle(
+    args: RunsArtifactPreviewHandleArgs,
+) -> CmdResult<RunsOutput> {
+    let store = ObservationStore::open_initialized()?;
+    let artifact = store
+        .get_artifact_for_handle(&args.handle)?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "handle",
+                "artifact handle was not found",
+                Some(args.handle),
+                None,
+            )
+        })?;
+    remote_artifact::preview_artifact(artifact, args.port)
 }
 
 pub(crate) fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
@@ -1069,10 +1153,40 @@ fn artifact_get_inner(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
 
     let store = ObservationStore::open_initialized()?;
     let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
+    artifact_get_resolved(artifact, args.output)
+}
 
+/// Handle lookup is deliberately exact: it has no run-id, name, ordinal, or
+/// fuzzy token fallback. The unique handle index scopes the resolved artifact
+/// to its durable owner before any byte access happens.
+fn artifact_get_handle(args: RunsArtifactGetHandleArgs) -> CmdResult<RunsOutput> {
+    let fields = args.field.clone();
+    let store = ObservationStore::open_initialized()?;
+    let artifact = store
+        .get_artifact_for_handle(&args.handle)?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "handle",
+                "artifact handle was not found",
+                Some(args.handle),
+                None,
+            )
+        })?;
+    let (output, exit_code) = artifact_get_resolved(artifact, args.output)?;
+    if fields.is_empty() {
+        Ok((output, exit_code))
+    } else {
+        apply_field_selection(output, &fields)
+    }
+}
+
+fn artifact_get_resolved(
+    artifact: homeboy::core::observation::ArtifactRecord,
+    output: Option<PathBuf>,
+) -> CmdResult<RunsOutput> {
     match runs_service::classify_artifact_storage(&artifact) {
         runs_service::ArtifactStorage::LocalFile => {
-            let outcome = runs_service::copy_local_file_artifact(artifact, args.output)?;
+            let outcome = runs_service::copy_local_file_artifact(artifact, output)?;
             Ok((
                 RunsOutput::ArtifactGet(RunsArtifactGetOutput {
                     command: "runs.artifact.get",
@@ -1089,13 +1203,13 @@ fn artifact_get_inner(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
                 0,
             ))
         }
-        runs_service::ArtifactStorage::Remote => remote_artifact::get(artifact, args.output),
+        runs_service::ArtifactStorage::Remote => remote_artifact::get(artifact, output),
         runs_service::ArtifactStorage::PublicUrl => {
             let source_content_url = artifact
                 .url
                 .clone()
                 .or_else(|| artifact.public_url.clone());
-            let outcome = runs_service::download_public_artifact(artifact, args.output)?;
+            let outcome = runs_service::download_public_artifact(artifact, output)?;
             Ok((
                 RunsOutput::ArtifactGet(RunsArtifactGetOutput {
                     command: "runs.artifact.get",
@@ -1133,7 +1247,7 @@ fn artifact_get_inner(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
     }
 }
 
-/// Project `--field`/`-q` selectors over a `show` or `artifact get` result,
+/// Project `--field`/`-q` selectors over a `show`, `evidence`, or `artifact get` result,
 /// returning a compact [`RunsOutput::FieldSelection`] carrying only the
 /// requested fields. Show selectors are rooted at the run detail; artifact-get
 /// selectors at the artifact-get result. Unsupported variants are returned
@@ -1174,6 +1288,14 @@ pub(super) fn apply_field_selection(
                 .and_then(Value::as_str)
                 .map(str::to_string);
             (payload.clone(), run_id, artifact_id)
+        }
+        "evidence" | "evidence_summary" => {
+            let run_id = payload
+                .get("run_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            (payload, run_id, None)
         }
         _ => return Ok((output, 0)),
     };
@@ -1389,6 +1511,18 @@ mod pull_tests {
             runner: Some("lab".to_string()),
             pull: true,
             pull_dir: None,
+            token: None,
+            kind: None,
+            mime: None,
+            original_path: None,
+            path_suffix: None,
+            fixture: None,
+            surface: None,
+            scenario: None,
+            name_glob: None,
+            limit: 50,
+            offset: 0,
+            full: false,
         });
         let Err(err) = result else {
             panic!("--pull with --runner should fail");

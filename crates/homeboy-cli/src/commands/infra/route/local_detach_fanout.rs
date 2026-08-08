@@ -249,12 +249,13 @@ pub(super) fn intercept_local_detached_fanout(
         }
     };
 
-    // Hand durable ownership of the wave's lifecycle to the daemon. This is
-    // additive, never a precondition: the coordinator is already running, so a
-    // daemon that cannot be reached must not fail the wave. The outcome is
-    // reported in the envelope either way — the same degradation `cook_job`
-    // reports as `controller_job.state: "unavailable"`.
-    let controller_job = submit_batch_controller_job(&fanout_id, pid, &start_identity);
+    // A detached handoff promises daemon ownership, not merely a session-
+    // detached PID. If admission fails, stop the coordinator before returning
+    // so the caller cannot mistake an orphaned wave for durable work.
+    let controller_job = hand_off_to_controller(
+        &mut child,
+        submit_batch_controller_job(&fanout_id, pid, &start_identity),
+    )?;
     let handoff = await_durable_handoff(&fanout_id, &mut child, handoff_timeout());
 
     let envelope = handoff_envelope(&fanout_id, pid, &log_path, &handoff, &controller_job);
@@ -268,28 +269,16 @@ pub(super) fn intercept_local_detached_fanout(
     Ok(Some(0))
 }
 
-/// What the daemon returned when offered ownership of this wave.
-///
-/// Submission is best-effort by design. By the time it runs the coordinator is
-/// already spawned, so a daemon that is unreachable or refuses admission must
-/// degrade to exactly the previous behaviour — a PID-owned detached coordinator
-/// — rather than fail an operator's wave. The failure is reported, not
-/// swallowed.
+/// Durable daemon ownership of a detached wave.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ControllerJobHandoff {
     Owned { job_id: String },
-    Unavailable { reason: String },
 }
 
 impl ControllerJobHandoff {
     fn projection(&self) -> Value {
         match self {
             Self::Owned { job_id } => json!({ "state": "owned", "job_id": job_id }),
-            Self::Unavailable { reason } => json!({
-                "state": "unavailable",
-                "job_id": Value::Null,
-                "reason": reason,
-            }),
         }
     }
 }
@@ -304,12 +293,23 @@ fn submit_batch_controller_job(
     batch_id: &str,
     pid: u32,
     start_identity: &homeboy::core::process::ProcessStartIdentity,
-) -> ControllerJobHandoff {
-    match submit_batch_controller_job_inner(batch_id, pid, start_identity) {
-        Ok(job_id) => ControllerJobHandoff::Owned { job_id },
-        Err(error) => ControllerJobHandoff::Unavailable {
-            reason: error.message,
-        },
+) -> homeboy::core::Result<String> {
+    submit_batch_controller_job_inner(batch_id, pid, start_identity)
+}
+
+/// Convert a spawned coordinator into a durable handoff, or leave no work
+/// behind. The child exists before daemon admission because its PID and kernel
+/// start identity are the daemon's liveness proof.
+fn hand_off_to_controller(
+    child: &mut std::process::Child,
+    submission: homeboy::core::Result<String>,
+) -> homeboy::core::Result<ControllerJobHandoff> {
+    match submission {
+        Ok(job_id) => Ok(ControllerJobHandoff::Owned { job_id }),
+        Err(error) => {
+            terminate_and_reap_detached_child(child);
+            Err(error)
+        }
     }
 }
 
@@ -937,19 +937,35 @@ mod tests {
         assert_eq!(args, before);
     }
 
-    /// A daemon that cannot be reached must degrade to a PID-owned detached
-    /// wave and say so, never fail the wave that is already running.
+    /// Daemon admission is required for a detached wave. A failed admission
+    /// must stop the just-spawned coordinator rather than claiming success for
+    /// PID-owned work that dies with no durable owner.
     #[test]
-    fn an_unavailable_daemon_is_reported_rather_than_swallowed() {
-        let unavailable = ControllerJobHandoff::Unavailable {
-            reason: "daemon unreachable".to_string(),
-        };
+    fn a_failed_daemon_admission_terminates_the_detached_coordinator() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("spawn detached coordinator fixture");
 
-        let projection = unavailable.projection();
+        let error = hand_off_to_controller(
+            &mut child,
+            Err(Error::validation_invalid_argument(
+                "controller_job",
+                "daemon admission failed",
+                None,
+                None,
+            )),
+        )
+        .expect_err("a wave without daemon ownership must fail handoff");
 
-        assert_eq!(projection["state"], "unavailable");
-        assert_eq!(projection["job_id"], Value::Null);
-        assert_eq!(projection["reason"], "daemon unreachable");
+        assert!(error.message.contains("daemon admission failed"));
+        assert!(
+            matches!(
+                homeboy::core::process::process_identity_state(child.id(), None),
+                homeboy::core::process::ProcessIdentityState::Dead
+            ),
+            "failed admission must leave no coordinator running"
+        );
     }
 
     /// The envelope is the operator's only output, so every handle it names has

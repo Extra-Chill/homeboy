@@ -104,6 +104,8 @@ where
         ) {
             Ok(services) => Some(services),
             Err(error) => {
+                let (evidence_refs, evidence) =
+                    super::managed_services::startup_failure_evidence(&scratch_run_id);
                 let outcomes = plan
                     .tasks
                     .iter()
@@ -114,10 +116,11 @@ where
                         failure_classification: Some(
                             AgentTaskFailureClassification::ExecutionFailed,
                         ),
+                        evidence_refs: evidence_refs.clone(),
                         diagnostics: vec![AgentTaskDiagnostic {
                             class: "managed_service_startup".to_string(),
                             message: error.clone(),
-                            data: serde_json::Value::Null,
+                            data: evidence.clone(),
                         }],
                         ..Default::default()
                     })

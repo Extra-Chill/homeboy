@@ -106,7 +106,8 @@ pub fn classify(args: &[String]) -> CommandCapability {
     match args {
         [flag] if flag == "--version" || flag == "-V" => CommandCapability::ReadOnly,
         [command, subcommand]
-            if command == "self" && matches!(subcommand.as_str(), "identity" | "status") =>
+            if command == "self"
+                && matches!(subcommand.as_str(), "identity" | "inspect" | "status") =>
         {
             CommandCapability::ReadOnly
         }

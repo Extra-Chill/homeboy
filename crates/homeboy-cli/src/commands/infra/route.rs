@@ -2402,6 +2402,11 @@ fn materialize_agent_task_retry_handoff(
     if !agent_task_lifecycle::run_record_exists_resolved(&retry.run_id)? {
         return Ok(None);
     }
+    if agent_task_lifecycle::status(&retry.run_id)?.metadata["cook_id"].is_string() {
+        // Cook retries must return through the controller so its promotion,
+        // gates, and finalization lifecycle consumes the successful patch.
+        return Ok(None);
+    }
 
     let retry_result = crate::agents::agent_task_service::retry(
         &retry.run_id,
@@ -3045,7 +3050,9 @@ fn start_agent_task_fanout_lab_dispatch_observation(
 ) -> Option<AgentTaskFanoutLabDispatchObservation> {
     let store = ObservationStore::open_initialized().ok()?;
     let cwd = std::env::current_dir().ok();
-    let fanout_id = agent_task_fanout_cook_batch_dispatch_id(args);
+    // Planning owns generated batch identities. Reusing its exact result keeps
+    // the observer's status command pointed at the record admission creates.
+    let fanout_id = crate::commands::agent_task::fanout::cook_batch_fanout_id(args).ok()?;
     let run = store
         .start_run(
             NewRunRecord::builder("agent-task")
@@ -3084,26 +3091,6 @@ fn start_agent_task_fanout_lab_dispatch_observation(
     })
 }
 
-fn agent_task_fanout_cook_batch_dispatch_id(
-    args: &crate::commands::agent_task::AgentTaskFanoutCookBatchArgs,
-) -> String {
-    args.fanout_id.clone().unwrap_or_else(|| {
-        let first = args
-            .issues
-            .first()
-            .and_then(|issue| issue.split_once("/issues/").map(|(_, number)| number))
-            .and_then(|number| number.split(['/', '?', '#']).next())
-            .filter(|value| !value.is_empty())
-            .unwrap_or("batch");
-        format!(
-            "cook-batch-{}-issue-{}-{}",
-            args.repo,
-            first,
-            args.issues.len()
-        )
-    })
-}
-
 mod local_detach;
 mod local_detach_fanout;
 mod rig_source;
@@ -3124,6 +3111,7 @@ fn is_runs_list_runner_option(args: &[String]) -> bool {
 
 fn is_command_local_runner_option(command: &Commands) -> bool {
     match command {
+        Commands::Runs(args) if args.has_command_local_runner_option() => true,
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
             command: crate::commands::agent_task::AgentTaskCommand::Doctor(_),
         }) => true,
