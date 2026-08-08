@@ -639,6 +639,7 @@ jobs:
         if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
         uses: taiki-e/install-action@nextest
       - name: Configure candidate Test shards
+        id: inventory
         continue-on-error: true
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
@@ -663,7 +664,10 @@ jobs:
           cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
           auto-issue: 'false'
-      - id: plan
+      - name: Plan candidate Test shards
+        id: plan
+        if: always() && steps.inventory.outcome == 'success'
+        continue-on-error: true
         env:
           TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
           TEST_SHARD_PLAN_FILE: ${{ github.workspace }}/homeboy-test-shard-plan.json
@@ -672,18 +676,49 @@ jobs:
         run: |
           bash .homeboy-action/scripts/core/shard-tests.sh plan
           echo "matrix=$(jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}')" >> "${GITHUB_OUTPUT}"
-      - uses: actions/upload-artifact@v7
+      - name: Write candidate Test inventory failure provenance
+        if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
+        env:
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMAND: ${{ needs.plan.outputs.test-command }}
+          INVENTORY_OUTCOME: ${{ steps.inventory.outcome }}
+          PLANNER_OUTCOME: ${{ steps.plan.outcome }}
+          RESULTS: ${{ steps.inventory.outputs.results }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          mkdir -p homeboy-test-inventory-failure
+          inventory_payload="${RESULTS-}"
+          [ -n "${inventory_payload}" ] || inventory_payload='{}'
+          jq -cn --arg schema 'homeboy/test-inventory-provenance/v1' --arg phase candidate --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg command "${COMMAND}" --arg inventory_outcome "${INVENTORY_OUTCOME}" --arg planner_outcome "${PLANNER_OUTCOME}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${inventory_payload}" \
+            '{schema:$schema,phase:$phase,repository:$repository,candidate_sha:$candidate_sha,command:$command,inventory_outcome:$inventory_outcome,planner_outcome:$planner_outcome,run_attempt:$run_attempt,results:$results}' > homeboy-test-inventory-failure/provenance.json
+          cp -R homeboy-ci-results homeboy-test-inventory-failure/homeboy-ci-results 2>/dev/null || true
+      - name: Upload candidate Test inventory failure provenance
+        if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-inventory-failure-${{ github.run_attempt }}
+          path: homeboy-test-inventory-failure
+          if-no-files-found: error
+      - name: Upload candidate Test shard plan
+        if: always() && steps.plan.outcome == 'success'
+        uses: actions/upload-artifact@v7
         with:
           name: homeboy-test-shard-plan-${{ github.run_attempt }}
           path: |
             homeboy-test-inventory.json
             homeboy-test-shard-plan.json
           if-no-files-found: error
+      - name: Fail candidate Test inventory generation
+        if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
+        run: |
+          echo '::error::Candidate Test inventory generation failed; shard execution was not started. Inspect the inventory provenance artifact and this job for the underlying command failure.'
+          exit 1
 
   candidate-test-shards:
     name: Candidate Test shard ${{ matrix.shard_id }}
     needs: [binary, plan, candidate-test-plan]
-    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
+    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && needs.candidate-test-plan.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -775,7 +810,7 @@ jobs:
 
   reconcile-test-shards:
     name: Test
-    needs: [candidate-test-shards, baseline-test-shards, baseline-test-plan, plan]
+    needs: [candidate-test-shards, candidate-test-plan, baseline-test-shards, baseline-test-plan, plan]
     if: ${{ always() && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
     steps:
@@ -784,19 +819,42 @@ jobs:
           repository: Extra-Chill/homeboy-action
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
+      - name: Download candidate Test inventory failure provenance
+        if: needs.candidate-test-plan.result != 'success'
+        uses: actions/download-artifact@v7
+        with:
+          name: homeboy-test-inventory-failure-${{ github.run_attempt }}
+          path: test-inventory-failure
+      - name: Report candidate Test inventory generation failure
+        if: needs.candidate-test-plan.result != 'success'
+        run: |
+          provenance=test-inventory-failure/provenance.json
+          command="$(jq -r .command "${provenance}")"
+          results="$(jq -c .results "${provenance}")"
+          echo "::error::Test inventory generation failed for '${command}' (inventory=${{ needs.candidate-test-plan.result }}; results=${results}). Inspect Plan candidate Test shards for the underlying command failure."
+          find test-inventory-failure/homeboy-ci-results -type f -maxdepth 1 -print -exec cat {} \; 2>/dev/null || true
+          exit 1
+      - name: Report baseline Test inventory generation failure
+        if: needs.candidate-test-plan.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result != 'success'
+        run: |
+          echo '::error::Baseline Test inventory generation failed; baseline shard artifacts were not downloaded. Inspect Plan baseline Test shards for the underlying command failure.'
+          exit 1
       - uses: actions/download-artifact@v7
+        if: needs.candidate-test-plan.result == 'success'
         with:
           pattern: homeboy-test-shard-*
           path: test-shard-artifacts
       - uses: actions/download-artifact@v7
+        if: needs.candidate-test-plan.result == 'success'
         with:
           name: homeboy-test-shard-plan-${{ github.run_attempt }}
       - uses: actions/download-artifact@v7
-        if: github.event_name == 'pull_request' && inputs.differential-gating == 'true'
+        if: needs.candidate-test-plan.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result == 'success'
         with:
           name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
           path: baseline-test-plan
       - name: Aggregate complete candidate Test shard evidence
+        if: needs.candidate-test-plan.result == 'success'
         env:
           TEST_SHARD_ARTIFACT_ROOT: test-shard-artifacts
           TEST_SHARD_PLAN_FILE: homeboy-test-shard-plan.json
@@ -807,7 +865,7 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: bash .homeboy-action/scripts/core/shard-tests.sh aggregate
       - name: Aggregate complete baseline Test shard evidence
-        if: github.event_name == 'pull_request' && inputs.differential-gating == 'true'
+        if: needs.candidate-test-plan.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result == 'success'
         env:
           TEST_SHARD_ARTIFACT_ROOT: test-shard-artifacts
           TEST_SHARD_PLAN_FILE: baseline-test-plan/homeboy-test-shard-plan.json
@@ -818,7 +876,7 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: bash .homeboy-action/scripts/core/shard-tests.sh aggregate
       - name: Apply differential Test result
-        if: github.event_name == 'pull_request' && inputs.differential-gating == 'true'
+        if: needs.candidate-test-plan.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result == 'success'
         env:
           COMMAND: ${{ needs.plan.outputs.test-command }}
         run: |
@@ -837,7 +895,7 @@ jobs:
           python3 .homeboy-action/scripts/core/apply-differential-gate.py "$(cat homeboy-ci-results/results.json)" homeboy-ci-results homeboy-baseline-results > reconciled-results.json
           RESULTS="$(cat reconciled-results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
       - name: Enforce sharded Test result
-        if: github.event_name != 'pull_request' || inputs.differential-gating != 'true'
+        if: needs.candidate-test-plan.result == 'success' && (github.event_name != 'pull_request' || inputs.differential-gating != 'true')
         env:
           COMMAND: ${{ needs.plan.outputs.test-command }}
         run: RESULTS="$(cat homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
@@ -866,6 +924,7 @@ jobs:
         if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
         uses: taiki-e/install-action@nextest
       - name: Configure baseline Test shards
+        id: inventory
         continue-on-error: true
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
@@ -890,7 +949,10 @@ jobs:
           cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
           auto-issue: 'false'
-      - id: plan
+      - name: Plan baseline Test shards
+        id: plan
+        if: always() && steps.inventory.outcome == 'success'
+        continue-on-error: true
         env:
           TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
           TEST_SHARD_PLAN_FILE: ${{ github.workspace }}/homeboy-test-shard-plan.json
@@ -900,7 +962,14 @@ jobs:
           bash .homeboy-action/scripts/core/shard-tests.sh plan
           jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}' >> /dev/null
           echo "matrix=$(jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}')" >> "${GITHUB_OUTPUT}"
-      - uses: actions/upload-artifact@v7
+      - name: Fail baseline Test inventory generation
+        if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
+        run: |
+          echo '::error::Baseline Test inventory generation failed; baseline shard execution was not started.'
+          exit 1
+      - name: Upload baseline Test shard plan
+        if: always() && steps.plan.outcome == 'success'
+        uses: actions/upload-artifact@v7
         with:
           name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
           path: |
@@ -911,7 +980,7 @@ jobs:
   baseline-test-shards:
     name: Baseline Test shard ${{ matrix.shard_id }}
     needs: [binary, plan, baseline-test-plan]
-    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
+    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

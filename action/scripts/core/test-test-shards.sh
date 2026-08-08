@@ -212,7 +212,7 @@ grep -F "inputs.test-shards == '1' || needs.reconcile-test-shards.result == 'suc
 if [ "$(grep -c 'uses: taiki-e/install-action@nextest' "${WORKFLOW}")" -ne 4 ]; then
   printf 'FAIL: Rust candidate and baseline plan/replay jobs do not all install cargo-nextest\n'; exit 1
 fi
-if [ "$(grep -c "continue-on-error: true" "${WORKFLOW}")" -lt 4 ]; then
+if [ "$(grep -c "continue-on-error: true" "${WORKFLOW}")" -lt 6 ]; then
   printf 'FAIL: inventory planning transport is not isolated from normal Test verdict enforcement\n'; exit 1
 fi
 if [ "$(grep -c "HOMEBOY_RUST_NEXTEST_FALLBACK: '0'" "${WORKFLOW}")" -ne 4 ] || [ "$(grep -c 'NEXTEST_PROFILE: ci' "${WORKFLOW}")" -ne 4 ]; then
@@ -225,4 +225,15 @@ fi
 # shellcheck disable=SC2016
 grep -F 'baseline_result="$(jq -r --arg command "${COMMAND}"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline metadata is not derived from its aggregate result\n'; exit 1; }
 grep -F 'result_filename="$(command_result_filename "${COMMAND}")"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline lookup does not use the canonical result filename\n'; exit 1; }
+grep -F 'name: Write candidate Test inventory failure provenance' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate inventory failures do not preserve provenance\n'; exit 1; }
+# shellcheck disable=SC2016
+grep -F 'name: homeboy-test-inventory-failure-${{ github.run_attempt }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate inventory failure provenance is not artifact-scoped\n'; exit 1; }
+grep -F "needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate shard work can start without a successful inventory plan\n'; exit 1; }
+grep -F 'name: Report candidate Test inventory generation failure' "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not report candidate inventory generation failures\n'; exit 1; }
+grep -F "if: needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test artifact downloads are not gated on a successful candidate plan\n'; exit 1; }
+grep -F "Candidate Test inventory generation failed; shard execution was not started" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate inventory producer is not terminal\n'; exit 1; }
+grep -F "::error::Test inventory generation failed for" "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not emit the inventory generation diagnostic\n'; exit 1; }
+if grep -A4 'name: Report candidate Test inventory generation failure' "${WORKFLOW}" | grep -F 'homeboy-test-shard-plan-' >/dev/null; then
+  printf 'FAIL: inventory failure reporting attempts to read a missing shard plan artifact\n'; exit 1
+fi
 printf 'PASS: policy waits for sharded Test reconciliation while preserving unsharded behavior\n'
