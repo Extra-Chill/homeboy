@@ -475,6 +475,7 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
             agent_task_service::AgentTaskCandidateAdoptionOptions {
                 ai_model: args.ai_model.clone(),
                 replace_interrupted: args.replace_interrupted,
+                accept_inherited_failures: args.accept_inherited_failures,
             },
             crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
             ExtensionProviderAgentTaskExecutor::discover(),
@@ -491,6 +492,7 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
         "candidate_ref": args.candidate_ref,
         "ai_model": args.ai_model,
         "replace_interrupted": args.replace_interrupted,
+        "accept_inherited_failures": args.accept_inherited_failures,
         "controller_owned": true,
     });
     Ok((value, exit_code))

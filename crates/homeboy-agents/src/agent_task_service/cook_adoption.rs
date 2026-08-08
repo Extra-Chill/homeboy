@@ -240,6 +240,10 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     let (record, recipe) = resolve_adoption_target_with_attempt(cook_or_run_id, attempt)?;
     let cook_id = &recipe.cook_id;
     let mut options = super::reconstruct_adoption_options(&recipe)?;
+    // Adoption is a separate explicit authorization. The durable recipe keeps
+    // its historical policy, while this invocation may accept only normalized
+    // immutable-baseline matches produced below.
+    options.gates.accept_inherited_failures = adoption.accept_inherited_failures;
     let run_id = record.run_id.clone();
     let plan = agent_task_lifecycle::load_plan(&run_id)?;
     let recipe_attempt = recipe
@@ -311,6 +315,14 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         // failed attempt is archived when the new adoption starts.
         && !legacy_adoption_budget_failure(&recipe, &run_id, persisted_adoption_result)
     {
+        let persisted_promotion = persisted_promotion_for_attempt(&record.run_id)?;
+        let inherited_failure_requires_authorization =
+            persisted_promotion.as_ref().is_some_and(|promotion| {
+                promotion.deterministic_gates.iter().any(|gate| {
+                    gate.status
+                        == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+                })
+            });
         if let Some(result) = record
             .candidate_adoption
             .as_ref()
@@ -318,6 +330,28 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         {
             let result: CandidateAdoptionTerminalResult = serde_json::from_value(result)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
+            if inherited_failure_requires_authorization && !adoption.accept_inherited_failures {
+                return Ok(cook_report(CookReportInput {
+                    cook_id: cook_id.to_string(),
+                    status: "baseline_red",
+                    disposition: CookDisposition::Terminal,
+                    attempts: vec![AgentTaskCookAttemptReport {
+                        attempt: 1,
+                        run_id: record.run_id.clone(),
+                        run_state: format!("{:?}", record.state),
+                        aggregate_path: record.aggregate_path.clone(),
+                        promotion: persisted_promotion,
+                        feedback: None,
+                    }],
+                    finalization: None,
+                    stop_reason: Some(
+                        "completed adoption contains accepted inherited baseline-red gate evidence; rerun adopt with --accept-inherited-failures to reauthorize it"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(record.run_id.as_str()),
+                }));
+            }
             let exit_code = if matches!(
                 result.status.as_str(),
                 "review_ready" | "draft_published" | "green_no_finalize"
@@ -340,9 +374,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                     run_id: record.run_id.clone(),
                     run_state: format!("{:?}", record.state),
                     aggregate_path: record.aggregate_path.clone(),
-                    promotion: persisted_promotion_for_attempt(&record.run_id)
-                        .ok()
-                        .flatten(),
+                    promotion: persisted_promotion,
                     feedback: None,
                 }],
                 finalization: None,
@@ -359,6 +391,28 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 None,
             )
         })?;
+        if inherited_failure_requires_authorization && !adoption.accept_inherited_failures {
+            return Ok(cook_report(CookReportInput {
+                cook_id: cook_id.to_string(),
+                status: "baseline_red",
+                disposition: CookDisposition::Terminal,
+                attempts: vec![AgentTaskCookAttemptReport {
+                    attempt: 1,
+                    run_id: record.run_id.clone(),
+                    run_state: format!("{:?}", record.state),
+                    aggregate_path: record.aggregate_path.clone(),
+                    promotion: Some(promotion),
+                    feedback: None,
+                }],
+                finalization: None,
+                stop_reason: Some(
+                    "completed adoption contains accepted inherited baseline-red gate evidence; rerun adopt with --accept-inherited-failures to reauthorize it"
+                        .to_string(),
+                ),
+                exit_code: 1,
+                invocation_latest_run_id: Some(record.run_id.as_str()),
+            }));
+        }
         let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request,
             promotion_report: promotion.clone(),

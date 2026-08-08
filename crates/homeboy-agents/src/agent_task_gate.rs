@@ -672,6 +672,40 @@ pub struct AgentTaskGateArtifactPathProvenance {
     pub sha256: Option<String>,
 }
 
+impl AgentTaskGateEnvironment {
+    /// Reconstruct the candidate's package inputs for immutable-base replay.
+    /// A replay never broadens to new ambient input: source mappings remain
+    /// explicit, while fixed mappings retain their recorded resolved value.
+    pub(crate) fn package_artifact_replay_requirements(
+        &self,
+    ) -> Option<Vec<AgentTaskGatePackageArtifactRequirement>> {
+        self.package_artifacts
+            .iter()
+            .map(|artifact| {
+                (!artifact.artifacts.is_empty()
+                    && artifact.artifacts.iter().all(|path| path.sha256.is_some()))
+                .then(|| AgentTaskGatePackageArtifactRequirement {
+                    id: artifact.id.clone(),
+                    environment: AgentTaskGateArtifactEnvironmentMapping {
+                        name: artifact.environment.clone(),
+                        source: artifact.source.clone(),
+                        default: artifact.source.is_none().then(|| artifact.value.clone()),
+                    },
+                    required_paths: artifact
+                        .artifacts
+                        .iter()
+                        .map(|path| AgentTaskGateArtifactPathRequirement {
+                            path: path.path.clone(),
+                            sha256: path.sha256.clone(),
+                        })
+                        .collect(),
+                    remediation: artifact.remediation.clone(),
+                })
+            })
+            .collect()
+    }
+}
+
 /// Identity and source provenance for an extension directory made available to
 /// a gate. The destination is stable beneath the gate's isolated HOME.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2043,19 +2077,30 @@ fn validate_package_artifacts(
                 missing.push(artifact.path.clone());
                 continue;
             }
-            if let Some(expected) = &artifact.sha256 {
+            let observed = if path.is_file() {
                 let bytes = fs::read(&path).map_err(|error| {
                     Error::internal_io(error.to_string(), Some(path.display().to_string()))
                 })?;
-                let actual = format!("sha256:{:x}", Sha256::digest(bytes));
-                if expected != &actual {
+                Some(format!("sha256:{:x}", Sha256::digest(bytes)))
+            } else {
+                None
+            };
+            if let Some(expected) = &artifact.sha256 {
+                let actual = observed.as_ref().ok_or_else(|| {
+                    package_artifact_error(
+                        requirement,
+                        "required artifact digest cannot be verified for a non-file path",
+                        vec![artifact.path.clone()],
+                    )
+                })?;
+                if expected != actual {
                     missing.push(artifact.path.clone());
                     continue;
                 }
             }
             artifacts.push(AgentTaskGateArtifactPathProvenance {
                 path: artifact.path.clone(),
-                sha256: artifact.sha256.clone(),
+                sha256: observed.or_else(|| artifact.sha256.clone()),
             });
         }
         if !missing.is_empty() {

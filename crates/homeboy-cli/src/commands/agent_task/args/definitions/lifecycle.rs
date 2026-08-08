@@ -395,6 +395,11 @@ pub struct AdoptArgs {
     /// Replace a stale interrupted adoption while retaining its lifecycle evidence.
     #[arg(long)]
     pub replace_interrupted: bool,
+    /// Permit finalization only when a failed recorded gate reproduces with the
+    /// same bounded fingerprint on the immutable candidate base. New or changed
+    /// failures remain blocking and inherited-red evidence remains in the report.
+    #[arg(long)]
+    pub accept_inherited_failures: bool,
     /// Return the complete cook adoption report, including nested gate evidence.
     #[arg(long)]
     pub full: bool,

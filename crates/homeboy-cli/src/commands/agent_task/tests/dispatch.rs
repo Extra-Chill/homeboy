@@ -944,6 +944,38 @@ fn adopt_attempt_selector_parses_as_an_explicit_cook_attempt() {
 }
 
 #[test]
+fn adopt_inherited_failure_acceptance_is_explicit_and_documented() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "adopt",
+        "cook-11978",
+        "--candidate-ref",
+        "deadbeef",
+        "--accept-inherited-failures",
+    ])
+    .expect("explicit inherited-failure acceptance parses");
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Adopt(args) = agent_task.command else {
+        panic!("expected adopt command");
+    };
+    assert!(args.accept_inherited_failures);
+
+    let Err(error) = Cli::try_parse_from(["homeboy", "agent-task", "adopt", "--help"]) else {
+        panic!("help exits after rendering");
+    };
+    let help = error.to_string();
+    assert!(help.contains("--accept-inherited-failures"), "{help}");
+    assert!(help.contains("immutable candidate base"), "{help}");
+    assert!(
+        help.contains("New or changed failures remain blocking"),
+        "{help}"
+    );
+}
+
+#[test]
 fn cook_execution_budget_flags_parse_and_reject_legacy_attempts_mix() {
     let cli = Cli::try_parse_from([
         "homeboy",

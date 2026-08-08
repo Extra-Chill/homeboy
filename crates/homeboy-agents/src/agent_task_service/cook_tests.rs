@@ -2313,7 +2313,8 @@ fn no_finalize_initial_request_preserves_its_existing_contract() {
 /// be promoted and adopted.
 struct CandidateAdoptionFixture {
     _temp: tempfile::TempDir,
-    _source: std::path::PathBuf,
+    source: std::path::PathBuf,
+    provider: std::path::PathBuf,
     target: std::path::PathBuf,
     candidate: String,
     cook_id: String,
@@ -2450,7 +2451,8 @@ impl CandidateAdoptionFixture {
 
         let mut fixture = Self {
             _temp: temp,
-            _source: source,
+            source,
+            provider,
             target,
             candidate,
             cook_id: cook_id.to_string(),
@@ -2516,12 +2518,31 @@ impl CandidateAdoptionFixture {
         executor: E,
         backend: &mut CaptureBackend,
     ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-        self.adopt_run(&self.run_id, dispatcher, executor, backend)
+        self.adopt_run_with_inherited_failure_acceptance(
+            &self.run_id,
+            false,
+            dispatcher,
+            executor,
+            backend,
+        )
     }
 
     fn adopt_run<E: AgentTaskExecutorAdapter + Clone>(
         &self,
         run_id: &str,
+        dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+        executor: E,
+        backend: &mut CaptureBackend,
+    ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+        self.adopt_run_with_inherited_failure_acceptance(
+            run_id, false, dispatcher, executor, backend,
+        )
+    }
+
+    fn adopt_run_with_inherited_failure_acceptance<E: AgentTaskExecutorAdapter + Clone>(
+        &self,
+        run_id: &str,
+        accept_inherited_failures: bool,
         dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
         executor: E,
         backend: &mut CaptureBackend,
@@ -2532,12 +2553,189 @@ impl CandidateAdoptionFixture {
             AgentTaskCandidateAdoptionOptions {
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
                 replace_interrupted: false,
+                accept_inherited_failures,
             },
             dispatcher,
             executor,
             backend,
         )
     }
+}
+
+#[test]
+fn adoption_accepts_an_identical_immutable_baseline_failure_when_explicitly_authorized() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture = CandidateAdoptionFixture::new("cook-11978-inherited", 1, 0, true, None);
+        fixture.options.gates.verify = vec![
+            "printf inherited >&2; exit 1".to_string(),
+            "test \"$(cat lib.rs)\" = candidate".to_string(),
+        ];
+        fixture.options.gates.execution_policy =
+            crate::agent_task_gate::AgentTaskGateExecutionPolicy::ContinueAll;
+        persist_initial_recipe(&fixture.options).expect("persist inherited-failure recipe");
+        let mut backend = CaptureBackend::default();
+
+        let result = fixture
+            .adopt_run_with_inherited_failure_acceptance(
+                &fixture.run_id,
+                true,
+                |_| Ok(None),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("identical inherited failure is accepted");
+
+        assert_eq!(result.exit_code, 0, "{:#?}", result.value);
+        assert_eq!(result.value.status, "green_no_finalize");
+        let promotion = result.value.attempts[0].promotion.as_ref().unwrap();
+        assert_eq!(
+            promotion.deterministic_gates[0].status,
+            crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+        assert_eq!(
+            promotion.deterministic_gates[0]
+                .baseline_comparison
+                .as_ref()
+                .unwrap()
+                .result,
+            crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
+        );
+        assert_eq!(
+            promotion.deterministic_gates[1].status,
+            crate::agent_task_gate::AgentTaskGateStatus::Succeeded
+        );
+        assert_eq!(
+            promotion.provenance["candidate"]["fingerprint"]["head"],
+            fixture.candidate
+        );
+        assert!(
+            promotion.deterministic_gates[0]
+                .candidate_checkout
+                .is_some(),
+            "normalized inherited-red evidence remains bound to its immutable candidate checkout"
+        );
+
+        let reused = fixture
+            .adopt(|_| Ok(None), UnusedExecutor, &mut backend)
+            .expect("completed adoption returns its durable report");
+        assert_eq!(reused.exit_code, 1, "{:#?}", reused.value);
+        assert_eq!(reused.value.status, "baseline_red");
+        assert!(reused
+            .value
+            .stop_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("--accept-inherited-failures")));
+    });
+}
+
+#[test]
+fn adoption_blocks_a_changed_failure_despite_inherited_failure_authorization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture = CandidateAdoptionFixture::new("cook-11978-regression", 1, 0, true, None);
+        fixture.options.gates.verify = vec!["cat lib.rs >&2; exit 1".to_string()];
+        persist_initial_recipe(&fixture.options).expect("persist regression recipe");
+        let mut backend = CaptureBackend::default();
+
+        let result = fixture
+            .adopt_run_with_inherited_failure_acceptance(
+                &fixture.run_id,
+                true,
+                |_| Ok(None),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("regression produces a blocking report");
+
+        assert_eq!(result.exit_code, 1, "{:#?}", result.value);
+        assert_eq!(result.value.status, "gate_failed");
+        let promotion = result.value.attempts[0].promotion.as_ref().unwrap();
+        assert_eq!(
+            promotion.deterministic_gates[0].status,
+            crate::agent_task_gate::AgentTaskGateStatus::Failed
+        );
+        assert_eq!(
+            promotion.deterministic_gates[0]
+                .baseline_comparison
+                .as_ref()
+                .unwrap()
+                .result,
+            crate::agent_task_gate::AgentTaskGateDifferentialResult::CandidateRegression
+        );
+    });
+}
+
+#[test]
+fn adoption_blocks_inherited_failure_when_candidate_package_artifact_differs_from_base() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture = CandidateAdoptionFixture::new("cook-11978-artifact", 1, 0, true, None);
+        let artifact = fixture.source.join("fixtures/input.bin");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, b"candidate package input").unwrap();
+        git_output(&fixture.source, &["add", "fixtures/input.bin"]).unwrap();
+        git_output(
+            &fixture.source,
+            &["commit", "-m", "candidate package input"],
+        )
+        .unwrap();
+        fixture.candidate = git_output(&fixture.source, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(
+            &fixture.provider,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} reset --hard --quiet FETCH_HEAD\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+                target = fixture.target.display(),
+                candidate = fixture.candidate,
+            ),
+        )
+        .unwrap();
+        fixture.options.gates.verify = vec!["printf inherited >&2; exit 1".to_string()];
+        fixture.options.gates.gate_package_artifacts = vec![
+            crate::agent_task_gate::AgentTaskGatePackageArtifactRequirement {
+                id: "candidate-input".to_string(),
+                environment: crate::agent_task_gate::AgentTaskGateArtifactEnvironmentMapping {
+                    name: "CANDIDATE_INPUT".to_string(),
+                    source: None,
+                    default: Some("fixtures".to_string()),
+                },
+                required_paths: vec![
+                    crate::agent_task_gate::AgentTaskGateArtifactPathRequirement {
+                        path: "fixtures/input.bin".to_string(),
+                        sha256: None,
+                    },
+                ],
+                remediation: serde_json::json!({"action": "restore_candidate_input"}),
+            },
+        ];
+        persist_initial_recipe(&fixture.options).expect("persist package-artifact recipe");
+        let mut backend = CaptureBackend::default();
+
+        let result = fixture
+            .adopt_run_with_inherited_failure_acceptance(
+                &fixture.run_id,
+                true,
+                |_| Ok(None),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("package drift produces a blocking report");
+
+        assert_eq!(result.exit_code, 1, "{:#?}", result.value);
+        assert_eq!(result.value.status, "gate_failed");
+        let promotion = result.value.attempts[0].promotion.as_ref().unwrap();
+        assert_eq!(
+            promotion.deterministic_gates[0]
+                .baseline_comparison
+                .as_ref()
+                .unwrap()
+                .result,
+            crate::agent_task_gate::AgentTaskGateDifferentialResult::Inconclusive
+        );
+        assert!(promotion.deterministic_gates[0]
+            .environment
+            .package_artifacts[0]
+            .artifacts[0]
+            .sha256
+            .is_some());
+    });
 }
 
 #[test]
@@ -5162,6 +5360,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
                 AgentTaskCandidateAdoptionOptions {
                     ai_model: Some("openai/gpt-5.6-sol".to_string()),
                     replace_interrupted: false,
+                    accept_inherited_failures: false,
                 },
                 |_| Ok(None),
                 ReviewFormOnlyExecutor,
@@ -5380,6 +5579,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             AgentTaskCandidateAdoptionOptions {
                 ai_model: Some("fixture-model-review".to_string()),
                 replace_interrupted: false,
+                accept_inherited_failures: false,
             },
             |_| Ok(None),
             ReviewFormOnlyExecutor,
