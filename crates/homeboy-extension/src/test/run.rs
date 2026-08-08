@@ -27,7 +27,7 @@ pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use regex::Regex;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -57,6 +57,9 @@ const NO_TESTS_APPLICABLE_FILE_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_FILE";
 const NO_TESTS_APPLICABLE_NONCE_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_NONCE";
 const NO_TESTS_APPLICABLE_EXTENSION_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_EXTENSION_ID";
 const NO_TESTS_APPLICABLE_STEP: &str = "test";
+const TEST_INVENTORY_ONLY_ENV: &str = "HOMEBOY_TEST_INVENTORY_ONLY";
+const TEST_INVENTORY_FILE_ENV: &str = "HOMEBOY_TEST_INVENTORY_FILE";
+const TEST_INVENTORY_SCHEMA: &str = "homeboy/test-inventory/v1";
 const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 25 * 60;
 
 pub(crate) fn test_timeout() -> Duration {
@@ -75,6 +78,38 @@ struct NoTestsApplicableEvidence {
     step: String,
     nonce: String,
     reason: String,
+}
+
+#[derive(Deserialize)]
+struct TestInventoryEvidence {
+    schema: String,
+    tests: Vec<serde_json::Value>,
+    inventory_fingerprint: String,
+}
+
+fn requested_test_inventory_file(ci_env: &[(String, String)]) -> Option<PathBuf> {
+    let inventory_only = ci_env
+        .iter()
+        .any(|(key, value)| key == TEST_INVENTORY_ONLY_ENV && value == "1");
+    if !inventory_only {
+        return None;
+    }
+
+    ci_env
+        .iter()
+        .find(|(key, value)| key == TEST_INVENTORY_FILE_ENV && !value.is_empty())
+        .map(|(_, value)| PathBuf::from(value))
+}
+
+fn valid_test_inventory(path: &Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<TestInventoryEvidence>(&bytes).ok())
+        .is_some_and(|inventory| {
+            inventory.schema == TEST_INVENTORY_SCHEMA
+                && !inventory.tests.is_empty()
+                && !inventory.inventory_fingerprint.is_empty()
+        })
 }
 /// Classify what the test runner actually measured.
 ///
@@ -140,6 +175,19 @@ fn test_run_status(
         // population, so `Contradicted` cannot be produced. Fail closed.
         Err(_) => "failed",
     }
+}
+
+fn test_run_status_with_inventory(
+    runner_success: bool,
+    test_counts: Option<&TestCounts>,
+    no_tests_applicable: bool,
+    inventory_measured: bool,
+) -> &'static str {
+    if inventory_measured {
+        return if runner_success { "passed" } else { "failed" };
+    }
+
+    test_run_status(runner_success, test_counts, no_tests_applicable)
 }
 
 /// Re-finalize a test result when persisted artifacts add missing test counts.
@@ -490,7 +538,14 @@ fn run_main_test_workflow_inner(
     // Autofix is owned by `refactor --from test --write`; the test command is read-only.
     let test_autofix: Option<AppliedRefactor> = None;
 
-    let status = test_run_status(output.success, test_counts.as_ref(), no_tests_applicable);
+    let inventory_measured =
+        requested_test_inventory_file(&args.ci_env).is_some_and(|path| valid_test_inventory(&path));
+    let status = test_run_status_with_inventory(
+        output.success,
+        test_counts.as_ref(),
+        no_tests_applicable,
+        inventory_measured,
+    );
 
     let coverage = coverage_file
         .as_deref()
@@ -2063,6 +2118,50 @@ mod tests {
     #[test]
     fn status_fails_successful_runner_without_result_evidence() {
         assert_eq!(test_run_status(true, None, false), "failed");
+    }
+
+    #[test]
+    fn inventory_mode_requires_explicit_valid_inventory_evidence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let inventory = temp.path().join("inventory.json");
+        let ci_env = vec![
+            (TEST_INVENTORY_ONLY_ENV.to_string(), "1".to_string()),
+            (
+                TEST_INVENTORY_FILE_ENV.to_string(),
+                inventory.to_string_lossy().into_owned(),
+            ),
+        ];
+
+        assert_eq!(
+            test_run_status_with_inventory(true, None, false, false),
+            "failed",
+            "requesting inventory mode without evidence must remain unmeasured"
+        );
+
+        std::fs::write(
+            &inventory,
+            r#"{"schema":"homeboy/test-inventory/v1","tests":[{"id":"suite::test"}],"inventory_fingerprint":"abc123"}"#,
+        )
+        .expect("write inventory");
+        let measured =
+            requested_test_inventory_file(&ci_env).is_some_and(|path| valid_test_inventory(&path));
+        assert!(measured);
+        assert_eq!(
+            test_run_status_with_inventory(true, None, false, measured),
+            "passed"
+        );
+        assert_eq!(
+            test_run_status_with_inventory(false, None, false, measured),
+            "failed",
+            "inventory evidence cannot override a failed runner"
+        );
+
+        std::fs::write(
+            &inventory,
+            r#"{"schema":"homeboy/test-inventory/v1","tests":[],"inventory_fingerprint":"abc123"}"#,
+        )
+        .expect("write empty inventory");
+        assert!(!valid_test_inventory(&inventory));
     }
 
     #[test]
