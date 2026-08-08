@@ -1318,7 +1318,8 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         .map(causal_chain_from_aggregate)
         .unwrap_or_default();
     let retry = retry_replay_action(&record);
-    let next_commands = diagnose_next_commands(&record, retry.action.as_ref());
+    let next_commands =
+        diagnose_next_commands(&record, retry.action.as_ref(), retry.continuation.as_ref());
 
     let mut value = json!({
         "schema": "homeboy/agent-task-diagnose/v1",
@@ -1359,6 +1360,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         &missing_artifacts,
         record.runner_id(),
         retry.action.as_ref(),
+        retry.continuation.as_ref(),
     );
     bound_full_reader_payload(&mut value);
     preserve_controller_owner_placement(&mut value, run_id);
@@ -1422,6 +1424,7 @@ fn attach_diagnose_actionable(
     missing_artifacts: &[Value],
     runner_id: Option<&str>,
     retry_action: Option<&CommandNextAction>,
+    continuation_action: Option<&CommandNextAction>,
 ) {
     let run_id = record.run_id.as_str();
     let candidate_payload = candidate_result_payload(
@@ -1432,7 +1435,9 @@ fn attach_diagnose_actionable(
         .state()
         .is_available();
     let failures = aggregate.map(diagnosed_failures).unwrap_or_default();
-    let (next_actions, basis) = if candidate_recoverable {
+    let (next_actions, basis) = if let Some(continuation) = continuation_action {
+        (vec![continuation.clone()], DIAGNOSE_ACTION_BASIS_CANDIDATE)
+    } else if candidate_recoverable {
         (
             vec![CommandNextAction::new(
                 "review the canonical candidate",
@@ -4202,6 +4207,7 @@ struct RetryReplayAction {
     readiness: &'static str,
     reason: Option<String>,
     action: Option<CommandNextAction>,
+    continuation: Option<CommandNextAction>,
 }
 
 impl RetryReplayAction {
@@ -4211,6 +4217,7 @@ impl RetryReplayAction {
             readiness: "unavailable",
             reason: Some(reason.into()),
             action: None,
+            continuation: None,
         }
     }
 
@@ -4242,6 +4249,30 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
             );
         }
     };
+    match cook_continuation_action(record) {
+        Ok(true) => {
+            return RetryReplayAction {
+                owner,
+                readiness: "unavailable",
+                reason: Some(
+                    "the authenticated review-form continuation must resume through Cook"
+                        .to_string(),
+                ),
+                action: None,
+                continuation: Some(cook_continuation_command(&record.run_id)),
+            };
+        }
+        Ok(false) => {}
+        Err(error) => {
+            return RetryReplayAction::unavailable(
+                owner,
+                format!(
+                    "cannot validate whether this run requires Cook continuation: {}",
+                    error.message
+                ),
+            );
+        }
+    }
     if !plan_has_retry_materialization_identity(&plan) {
         return RetryReplayAction::unavailable(
             owner,
@@ -4288,7 +4319,34 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
         readiness: "ready",
         reason: None,
         action: Some(owner_bound_retry_action(&record.run_id, runner_id, owner)),
+        continuation: None,
     }
+}
+
+/// A promoted review-form follow-up retains the candidate through Cook's
+/// authenticated continuation route. Generic retry replays its obsolete clean
+/// workspace attestation and is therefore not a legal recovery action.
+fn cook_continuation_action(record: &AgentTaskRunRecord) -> homeboy::core::Result<bool> {
+    let Some(recipe) = agent_task_service_direct::load_recipe_for_attempt(&record.run_id)? else {
+        return Ok(false);
+    };
+    agent_task_service_direct::validate_recipe_attempt_record(&recipe, &record.run_id, record)?;
+    let Some(attempt) = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == record.run_id)
+    else {
+        return Ok(false);
+    };
+    agent_task_service_direct::terminal_review_form_continuation_is_eligible(&attempt.plan, record)
+}
+
+fn cook_continuation_command(run_id: &str) -> CommandNextAction {
+    CommandNextAction::new(
+        "resume the authenticated Cook continuation",
+        format!("homeboy agent-task cook-continue {}", quote_arg(run_id)),
+    )
+    .with_kind(CommandNextActionKind::Repair)
 }
 
 fn owner_bound_retry_action(
@@ -4366,6 +4424,7 @@ fn plan_has_retry_materialization_identity(plan: &AgentTaskPlan) -> bool {
 fn diagnose_next_commands(
     record: &AgentTaskRunRecord,
     retry_action: Option<&CommandNextAction>,
+    continuation_action: Option<&CommandNextAction>,
 ) -> Vec<String> {
     let owner = record
         .runner_id()
@@ -4377,7 +4436,11 @@ fn diagnose_next_commands(
         format!("homeboy {owner} agent-task artifacts {run_id}"),
         format!("homeboy {owner} agent-task review {run_id}"),
     ];
-    commands.extend(retry_action.map(|action| action.command.clone()));
+    commands.extend(
+        continuation_action
+            .or(retry_action)
+            .map(|action| action.command.clone()),
+    );
     commands
 }
 
@@ -4625,7 +4688,7 @@ mod tests {
         }))
         .expect("minimal durable record");
 
-        let commands = diagnose_next_commands(&record, None);
+        let commands = diagnose_next_commands(&record, None, None);
 
         assert!(commands
             .iter()
@@ -4663,6 +4726,47 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("no longer matches"));
+    }
+
+    #[test]
+    fn cook_continuation_replaces_generic_retry_in_diagnose_commands() {
+        let record: AgentTaskRunRecord = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": "review-form-timeout",
+            "plan_id": "plan",
+            "state": "partial_failure",
+            "submitted_at": "2026-08-08T00:00:00Z",
+            "plan_path": "plan.json",
+            "metadata": {}
+        }))
+        .expect("minimal durable record");
+        let retry = RetryReplayAction {
+            owner: json!({ "placement": "local" }),
+            readiness: "unavailable",
+            reason: Some(
+                "the authenticated review-form continuation must resume through Cook".to_string(),
+            ),
+            action: None,
+            continuation: Some(
+                CommandNextAction::new(
+                    "resume the authenticated Cook continuation",
+                    "homeboy agent-task cook-continue review-form-timeout",
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            ),
+        };
+
+        let commands =
+            diagnose_next_commands(&record, retry.action.as_ref(), retry.continuation.as_ref());
+
+        assert_eq!(retry.projection()["readiness"], "unavailable");
+        assert!(retry.projection()["action"].is_null());
+        assert!(
+            commands.contains(&"homeboy agent-task cook-continue review-form-timeout".to_string())
+        );
+        assert!(commands
+            .iter()
+            .all(|command| !command.contains("agent-task retry")));
     }
 
     #[test]
