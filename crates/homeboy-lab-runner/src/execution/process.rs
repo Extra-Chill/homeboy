@@ -449,9 +449,7 @@ pub(crate) fn controller_proxy_projection_names(
             names.push(name.clone());
             continue;
         }
-        if matches!(name.as_str(), "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY")
-            && controller_loopback_proxy(value)
-        {
+        if is_standard_proxy_env_name(name) && controller_loopback_proxy(value) {
             return Err(Error::validation_invalid_argument(
                 name,
                 "controller-loopback proxy URLs must use the explicit homeboy://controller-proxy projection request",
@@ -462,6 +460,12 @@ pub(crate) fn controller_proxy_projection_names(
     }
     names.sort();
     Ok(names)
+}
+
+fn is_standard_proxy_env_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("HTTP_PROXY")
+        || name.eq_ignore_ascii_case("HTTPS_PROXY")
+        || name.eq_ignore_ascii_case("ALL_PROXY")
 }
 
 pub(crate) fn apply_controller_proxy_projection(
@@ -576,6 +580,12 @@ mod tests {
             homeboy_core::error::ErrorCode::ValidationInvalidArgument
         );
         assert!(error.message.contains("homeboy://controller-proxy"));
+    }
+
+    #[test]
+    fn lowercase_controller_loopback_proxy_is_rejected_without_an_explicit_projection() {
+        let env = HashMap::from([("all_proxy".to_string(), "http://localhost:8080".to_string())]);
+        assert!(controller_proxy_projection_names(&env).is_err());
     }
 
     #[test]

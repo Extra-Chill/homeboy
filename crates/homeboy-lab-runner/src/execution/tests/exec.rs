@@ -1502,3 +1502,12 @@ fn diagnostic_ssh_is_available_for_stale_sessions_but_not_fresh_admission() {
     });
     assert!(!diagnostic_ssh_allowed(&fresh));
 }
+
+#[test]
+fn diagnostic_ssh_refuses_controller_proxy_projection_before_remote_execution() {
+    let error =
+        reject_controller_proxy_projection_for_diagnostic_ssh("lab", &["ALL_PROXY".to_string()])
+            .expect_err("diagnostic SSH cannot safely project a controller proxy");
+    assert!(error.message.contains("daemon-backed direct SSH"));
+    assert!(error.details.to_string().contains("Drop --ssh"));
+}

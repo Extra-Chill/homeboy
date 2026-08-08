@@ -58,14 +58,17 @@ environment variable the workload uses:
 export HOMEBOY_CONTROLLER_PROXY=socks5://127.0.0.1:8080
 homeboy runner exec <runner-id> \
   --env ALL_PROXY=homeboy://controller-proxy \
-  -- curl --proxy "$ALL_PROXY" https://private.example.invalid
+  -- sh -lc 'curl --proxy "$ALL_PROXY" https://private.example.invalid'
 ```
 
 Homeboy opens or reuses a controller-owned SSH reverse forward and replaces only
 that explicit marker with a runner-loopback URL. A raw `127.0.0.1` controller
-proxy supplied through `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is rejected;
+proxy supplied through `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` (in either
+case) is rejected;
 this prevents a remote runner from receiving an unusable controller loopback
 address. The session owns forward teardown and reconnect/rotation cleanup.
+`HOMEBOY_CONTROLLER_PROXY` must be credential-free; configure authentication at
+the controller-local proxy instead of embedding userinfo in the URL.
 
 ## Example profile: Extra Chill
 

@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -45,7 +44,6 @@ const REMOTE_RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 // controller-local tunnel that disappeared during a link flap.
 const DIRECT_TUNNEL_RECOVERY_WAIT: Duration = Duration::from_secs(30);
 const CONTROLLER_PROXY_ENV: &str = "HOMEBOY_CONTROLLER_PROXY";
-static CONTROLLER_PROXY_FORWARD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
 pub(crate) use connection_daemon::versions_match;
@@ -93,6 +91,10 @@ fn controller_proxy_from_env() -> Result<Option<ControllerProxy>> {
     else {
         return Ok(None);
     };
+    controller_proxy_from_url(&value)
+}
+
+fn controller_proxy_from_url(value: &str) -> Result<Option<ControllerProxy>> {
     let (scheme, authority_and_path) = value.split_once("://").ok_or_else(|| {
         Error::validation_invalid_argument(
             CONTROLLER_PROXY_ENV,
@@ -110,9 +112,17 @@ fn controller_proxy_from_env() -> Result<Option<ControllerProxy>> {
         ));
     }
     let authority = authority_and_path.split('/').next().unwrap_or_default();
-    let endpoint = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, endpoint)| endpoint);
+    if authority.contains('@') {
+        return Err(Error::validation_invalid_argument(
+            CONTROLLER_PROXY_ENV,
+            "must not include proxy credentials",
+            None,
+            Some(vec![format!(
+                "Configure a credential-free controller-local proxy endpoint in {CONTROLLER_PROXY_ENV}; Homeboy never projects proxy userinfo to a runner."
+            )]),
+        ));
+    }
+    let endpoint = authority;
     let (host, port) = endpoint.rsplit_once(':').ok_or_else(|| {
         Error::validation_invalid_argument(CONTROLLER_PROXY_ENV, "must include a port", None, None)
     })?;
@@ -168,63 +178,82 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
 /// Return the runner-loopback proxy URL for an explicitly requesting direct SSH
 /// job. The controller endpoint is read only here and never enters job data.
 pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String> {
-    let _guard = CONTROLLER_PROXY_FORWARD_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("controller proxy forward lock poisoned");
-    let mut session = recorded_session(runner_id)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "controller_proxy",
-            "controller proxy access requires a connected direct SSH runner session",
-            Some(runner_id.to_string()),
-            Some(vec![format!(
-                "Run `homeboy runner connect {runner_id}` and retry."
-            )]),
-        )
-    })?;
-    if session.mode != RunnerTunnelMode::DirectSsh {
-        return Err(Error::validation_invalid_argument(
-            "controller_proxy",
-            "controller proxy access is available only to direct SSH runner jobs",
-            Some(runner_id.to_string()),
-            None,
-        ));
-    }
-    if let Some(forward) = session.proxy_forward.as_ref() {
-        if homeboy_core::process::pid_is_running(forward.tunnel_pid) {
-            return Ok(forward.runner_url.clone());
+    super::generation_store::with_runner_registry_lock(runner_id, || {
+        let session = recorded_session(runner_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_proxy",
+                "controller proxy access requires a connected direct SSH runner session",
+                Some(runner_id.to_string()),
+                Some(vec![format!(
+                    "Run `homeboy runner connect {runner_id}` and retry."
+                )]),
+            )
+        })?;
+        if session.mode != RunnerTunnelMode::DirectSsh {
+            return Err(Error::validation_invalid_argument(
+                "controller_proxy",
+                "controller proxy access is available only to direct SSH runner jobs",
+                Some(runner_id.to_string()),
+                None,
+            ));
         }
-    }
-    let server_id = session.server_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "controller_proxy",
-            "direct SSH runner session has no server identity",
-            Some(runner_id.to_string()),
-            None,
-        )
-    })?;
-    let server = server::load(server_id)?;
-    let forward = open_controller_proxy_forward(&server)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            CONTROLLER_PROXY_ENV,
-            "is required when a runner job requests controller proxy access",
-            None,
-            Some(vec![format!(
-                "Set {CONTROLLER_PROXY_ENV} on the controller and retry."
-            )]),
-        )
-    })?;
-    session.proxy_forward = Some(forward.clone());
-    if let Err(error) = write_session(&session) {
-        terminate_tunnel_with_identity(
-            forward.tunnel_pid,
-            forward.tunnel_process_start_identity.as_ref(),
-            homeboy_core::process::process_start_identity,
-            terminate_pid,
-        );
-        return Err(error);
-    }
-    Ok(forward.runner_url)
+        if let Some(forward) = session.proxy_forward.as_ref() {
+            if homeboy_core::process::pid_is_running(forward.tunnel_pid) {
+                return Ok(forward.runner_url.clone());
+            }
+        }
+        let server_id = session.server_id.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_proxy",
+                "direct SSH runner session has no server identity",
+                Some(runner_id.to_string()),
+                None,
+            )
+        })?;
+        let server = server::load(server_id)?;
+        let forward = open_controller_proxy_forward(&server)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                CONTROLLER_PROXY_ENV,
+                "is required when a runner job requests controller proxy access",
+                None,
+                Some(vec![format!(
+                    "Set {CONTROLLER_PROXY_ENV} on the controller and retry."
+                )]),
+            )
+        })?;
+        let mut replacement = session.clone();
+        replacement.proxy_forward = Some(forward.clone());
+        match replace_session_if_matches(&session, &replacement) {
+            Ok(true) => {}
+            Ok(false) => {
+                terminate_tunnel_with_identity(
+                    forward.tunnel_pid,
+                    forward.tunnel_process_start_identity.as_ref(),
+                    homeboy_core::process::process_start_identity,
+                    terminate_pid,
+                );
+                return Err(Error::validation_invalid_argument(
+                    "controller_proxy",
+                    "runner session changed while proxy projection was being established",
+                    Some(runner_id.to_string()),
+                    Some(vec![
+                        "Retry the runner job; Homeboy discarded the stale proxy forward."
+                            .to_string(),
+                    ]),
+                ));
+            }
+            Err(error) => {
+                terminate_tunnel_with_identity(
+                    forward.tunnel_pid,
+                    forward.tunnel_process_start_identity.as_ref(),
+                    homeboy_core::process::process_start_identity,
+                    terminate_pid,
+                );
+                return Err(error);
+            }
+        }
+        Ok(forward.runner_url)
+    })
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {

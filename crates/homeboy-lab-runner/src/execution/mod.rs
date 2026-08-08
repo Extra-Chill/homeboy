@@ -965,6 +965,10 @@ pub(crate) fn exec_with_status_snapshot(
     };
 
     if should_force_diagnostic_ssh(&runner, &options) {
+        reject_controller_proxy_projection_for_diagnostic_ssh(
+            runner_id,
+            &controller_proxy_projection,
+        )?;
         if !diagnostic_ssh_allowed(&connected) {
             return Err(Error::validation_invalid_argument(
                 "ssh",
@@ -1121,6 +1125,24 @@ pub(crate) fn exec_with_status_snapshot(
         append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
         (output, exit_code)
     })
+}
+
+fn reject_controller_proxy_projection_for_diagnostic_ssh(
+    runner_id: &str,
+    projection_names: &[String],
+) -> Result<()> {
+    if projection_names.is_empty() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "controller_proxy",
+        "controller proxy projection requires daemon-backed direct SSH execution",
+        Some(runner_id.to_string()),
+        Some(vec![
+            "Drop --ssh and reconnect the runner so Homeboy can own the reverse forward."
+                .to_string(),
+        ]),
+    ))
 }
 
 fn unavailable_daemon_admission_error(runner_id: &str) -> Error {
