@@ -265,6 +265,74 @@ fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
 }
 
 #[test]
+fn generic_runner_exec_preserves_submission_provenance_on_failure() {
+    with_isolated_home(|_| {
+        let run_id = "runner-provenance-before-spawn";
+        record_runner_exec_job_identity(
+            run_id,
+            "homeboy-lab",
+            "00000000-0000-0000-0000-000000000123",
+            "/runner/workspace",
+            &["homeboy".to_string(), "bench".to_string()],
+        )
+        .expect("bound run");
+        let record = homeboy_core::runner_execution_envelope::RunnerExecutionRecord::planned(
+            run_id,
+            "homeboy-lab",
+            "dispatch",
+        )
+        .with_orchestration_provenance(Some(
+            homeboy_core::runner_execution_envelope::OrchestrationTargetProvenance::new(
+                "homeboy-lab",
+                homeboy_core::runner_execution_envelope::BinaryProvenance {
+                    owner: "controller".to_string(),
+                    path: Some("/usr/local/bin/homeboy".to_string()),
+                    version: Some("0.334.0".to_string()),
+                    build_identity: Some("homeboy 0.334.0+controller".to_string()),
+                },
+                homeboy_core::runner_execution_envelope::BinaryProvenance {
+                    owner: "daemon".to_string(),
+                    path: Some("http://127.0.0.1:3000".to_string()),
+                    version: Some("0.334.0".to_string()),
+                    build_identity: Some("homeboy 0.334.0+daemon".to_string()),
+                },
+                homeboy_core::runner_execution_envelope::BinaryProvenance {
+                    owner: "runner configuration".to_string(),
+                    path: Some("/opt/homeboy".to_string()),
+                    version: None,
+                    build_identity: None,
+                },
+            ),
+        ));
+        record_runner_exec_execution_record(run_id, &record)
+            .expect("submission provenance persists");
+        record_runner_exec_artifact_refs(run_id, &[]).expect("complete artifact projection");
+        project_terminal_runner_exec_result(run_id, &runner_snapshot("failed"))
+            .expect("failed terminal result projects");
+
+        let run = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .get_run(run_id)
+            .expect("read")
+            .expect("run");
+        assert_eq!(
+            run.metadata_json["runner_execution_record"]["status"],
+            "failed"
+        );
+        assert_eq!(
+            run.metadata_json["runner_execution_record"]["orchestration_provenance"]
+                ["runner_daemon_binary"]["build_identity"],
+            "homeboy 0.334.0+daemon"
+        );
+        assert!(
+            run.metadata_json["runner_execution_record"]["orchestration_provenance"]
+                ["runner_command_binary"]["version"]
+                .is_null()
+        );
+    });
+}
+
+#[test]
 fn terminal_runner_exec_projects_only_complete_valid_nested_run_references() {
     with_isolated_home(|_| {
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
