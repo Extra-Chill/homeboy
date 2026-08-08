@@ -335,12 +335,13 @@ function opencodeExternalDirectoryPatterns(request = {}, config = {}) {
 		return [];
 	}
 
-	const concreteWorkspace = concretePath(opencodeWorkspacePermissionRoot(request, config));
 	const patterns = [...workspacePatterns];
 	const attemptRoot = config.runtime_env?.TMPDIR;
 	if (isAbsolutePath(attemptRoot)) {
 		const concreteAttemptRoot = concretePath(attemptRoot);
-		if (isStrictDescendant(concreteWorkspace, concreteAttemptRoot)) {
+		if (opencodeWorkspacePermissionRoots(request, config).some((workspaceRoot) => (
+			isStrictDescendant(concretePath(workspaceRoot), concreteAttemptRoot)
+		))) {
 			// OpenCode discovers project metadata from this Homeboy-provided attempt root.
 			patterns.unshift(path.join(concreteAttemptRoot, '*'));
 		}
@@ -350,12 +351,20 @@ function opencodeExternalDirectoryPatterns(request = {}, config = {}) {
 }
 
 function opencodeWorkspaceReadPatterns(request = {}, config = {}) {
-	const workspaceRoot = opencodeWorkspacePermissionRoot(request, config);
-	return isAbsolutePath(workspaceRoot) ? [path.join(concretePath(workspaceRoot), '**')] : [];
+	return opencodeWorkspacePermissionRoots(request, config)
+		.filter(isAbsolutePath)
+		.map((workspaceRoot) => path.join(concretePath(workspaceRoot), '**'));
 }
 
 function opencodeWorkspacePermissionRoot(request = {}, config = {}) {
 	return config.workspace_permission_root || resolveOpenCodeCwd(request, config);
+}
+
+function opencodeWorkspacePermissionRoots(request = {}, config = {}) {
+	return [...new Set([
+		opencodeWorkspacePermissionRoot(request, config),
+		resolveOpenCodeCwd(request, config),
+	].filter(isAbsolutePath))];
 }
 
 function concretePath(candidate) {

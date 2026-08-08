@@ -386,7 +386,10 @@ assert.equal(config.agent.title.disable, true);
 		});
 		const concreteWorkspace = concretePath(permissionWorkspace.workspace);
 		const concretePermissionRoot = concretePath(permissionWorkspace.workspacePermissionRoot || permissionWorkspace.workspace);
-		const workspacePattern = path.join(concretePermissionRoot, '**');
+		const workspacePatterns = [...new Set([
+			path.join(concretePermissionRoot, '**'),
+			path.join(concreteWorkspace, '**'),
+		])];
 		const concreteAttemptRoot = permissionWorkspace.attemptRoot && concretePath(permissionWorkspace.attemptRoot);
 		const attemptRootPattern = concreteAttemptRoot && path.join(concreteAttemptRoot, '*');
 		const expectedAttemptRootPattern = permissionWorkspace.allowAttemptRoot ? attemptRootPattern : undefined;
@@ -397,7 +400,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 assert.equal(process.cwd(), ${JSON.stringify(concreteWorkspace)});
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
-assert.equal(config.permission.external_directory[${JSON.stringify(workspacePattern)}], 'allow');
+for (const pattern of ${JSON.stringify(workspacePatterns)}) {
+  assert.equal(config.permission.external_directory[pattern], 'allow');
+  assert.equal(config.agent.build.permission.external_directory[pattern], 'allow');
+}
 assert.equal(config.permission.external_directory[${JSON.stringify(attemptRootPattern)}], ${JSON.stringify(expectedAttemptRootPattern ? 'allow' : undefined)});
 assert.equal(config.permission.external_directory[${JSON.stringify(path.join(ambientTmpdir, '*'))}], undefined);
 assert.equal(config.permission.external_directory['/unrelated/**'], 'deny');
@@ -413,24 +419,12 @@ assert.deepEqual(config.permission.glob, { '*': 'allow' });
 		});
 		assert.deepEqual(config.permission.edit, { '*': 'allow' });
 		assert.deepEqual(config.permission.bash, { '*': 'allow', 'git push *': 'deny' });
-		assert.deepEqual(config.agent.build.permission, ${JSON.stringify(expectedAttemptRootPattern ? {
-			read: { '*': 'allow', '..': 'deny', '../*': 'deny', '..\\*': 'deny', '*.env': 'deny' },
-			glob: { '*': 'allow' },
-			grep: { '*': 'allow', secret: 'deny' },
-			edit: { '*': 'allow' },
-			bash: { '*': 'allow', 'git push *': 'deny' },
-			external_directory: {
-			[attemptRootPattern]: 'allow',
-			[workspacePattern]: 'allow',
-			},
-		} : {
-			read: { '*': 'allow', '..': 'deny', '../*': 'deny', '..\\*': 'deny', '*.env': 'deny' },
-			glob: { '*': 'allow' },
-			grep: { '*': 'allow', secret: 'deny' },
-			edit: { '*': 'allow' },
-			bash: { '*': 'allow', 'git push *': 'deny' },
-			external_directory: { [workspacePattern]: 'allow' },
-		})});
+		assert.deepEqual(config.agent.build.permission.read, config.permission.read);
+		assert.deepEqual(config.agent.build.permission.glob, config.permission.glob);
+		assert.deepEqual(config.agent.build.permission.grep, config.permission.grep);
+		assert.deepEqual(config.agent.build.permission.edit, config.permission.edit);
+		assert.deepEqual(config.agent.build.permission.bash, config.permission.bash);
+assert.equal(config.agent.build.permission.external_directory[${JSON.stringify(attemptRootPattern)}], ${JSON.stringify(expectedAttemptRootPattern ? 'allow' : undefined)});
 fs.writeFileSync(${JSON.stringify(configCapturePath)}, JSON.stringify(config));
 process.exit(0);
 `);
@@ -475,6 +469,8 @@ process.exit(0);
 				path.join(concreteAttemptRoot, '*'),
 				path.join(concreteAttemptRoot, 'workspace', 'packages', 'runtime-playground', 'src', '*'),
 				path.join(concreteAttemptRoot, 'workspace', 'tests', '*'),
+				path.join(concreteWorkspace, 'packages', 'runtime-playground', 'src', '*'),
+				path.join(concreteWorkspace, 'tests', '*'),
 			]
 			: [path.join(concreteWorkspace, 'tests', '*')];
 		for (const requestedPattern of requestedPatterns) {
@@ -511,7 +507,7 @@ process.exit(0);
 		if (permissionWorkspace.workspacePermissionRoot) {
 			assert.equal(
 				externalDirectoryAction(generatedConfig, 'build', path.join(concreteWorkspace, '**')),
-				'deny'
+				'allow'
 			);
 		}
 		if (permissionWorkspace.label === 'controller-scratch') {
@@ -522,6 +518,9 @@ process.exit(0);
 				// OpenCode asks for this parent-directory glob, not the calling tool's glob.
 				const exactAttemptRequest = path.join(concreteAttemptRoot, '*');
 				assert.equal(externalDirectoryRules.findLast((rule) => rule.pattern === exactAttemptRequest)?.action, 'allow');
+				for (const workspacePattern of workspacePatterns) {
+					assert.equal(externalDirectoryRules.findLast((rule) => rule.pattern === workspacePattern)?.action, 'allow');
+				}
 				assert.equal(externalDirectoryRules.findLast((rule) => rule.pattern === path.join(root, 'controller-scratch', 'unrelated-attempt', '*'))?.action || 'deny', 'deny');
 			}
 		}
