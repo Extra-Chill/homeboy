@@ -2002,6 +2002,60 @@ pub fn record_provider_execution_terminal(
     })
 }
 
+/// Whether this run still has a provider execution that can produce work.
+///
+/// Controller-owned artifact harvesting may continue after a provider result is
+/// terminal. Foreground liveness sampling is only meaningful while a provider
+/// boundary remains active, so callers use this durable predicate to stop
+/// sampling during that bounded cleanup phase.
+pub fn has_active_provider_execution(run_id: &str) -> Result<bool> {
+    let record = store::read_record(&sanitize_run_id(run_id))?;
+    Ok(record.metadata["provider_executions"]
+        .as_array()
+        .is_some_and(|executions| {
+            executions
+                .iter()
+                .any(|execution| execution["state"] == json!("running"))
+        }))
+}
+
+/// Record the controller time spent after a provider returned and before its
+/// terminal outcome was fully harvested and finalized.
+pub fn record_provider_execution_cleanup_elapsed(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    elapsed_ms: u64,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let execution_key = format!("{task_id}:{attempt}");
+    let mut found = false;
+    let record = store::mutate_record(&run_id, |record| {
+        let Some(execution) = record
+            .ensure_metadata_object()
+            .get_mut("provider_executions")
+            .and_then(Value::as_array_mut)
+            .and_then(|executions| {
+                executions
+                    .iter_mut()
+                    .find(|execution| execution["key"] == execution_key)
+            })
+        else {
+            return false;
+        };
+        found = true;
+        execution["post_provider_cleanup_elapsed_ms"] = json!(elapsed_ms);
+        execution["post_provider_cleanup_finished_at"] = json!(now_timestamp());
+        true
+    })?;
+    if !found {
+        return Err(Error::internal_unexpected(
+            "provider cleanup completed without its durable attempt record",
+        ));
+    }
+    record.ok_or_else(|| Error::internal_unexpected("provider cleanup timing was unchanged"))
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn rewrite_record_for_test<F>(run_id: &str, mut rewrite: F) -> Result<AgentTaskRunRecord>
 where
