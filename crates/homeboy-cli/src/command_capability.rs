@@ -149,29 +149,15 @@ pub fn classify(args: &[String]) -> CommandCapability {
     }
 }
 
-/// Whether startup may reconcile runner-exec state before this invocation.
+/// Whether this command owns runner-exec recovery.
 ///
-/// This is intentionally narrower than command mutation: a review may
-/// materialize a controller-local artifact, but runner recovery would make its
-/// already-durable aggregate unavailable during a Lab outage.
+/// Recovery may contact a previously selected runner, so only `runner exec`
+/// may start it. Other mutations must not turn routine commands into an
+/// unrelated background-recovery admission path.
 pub fn requires_startup_reconciliation(args: &[String]) -> bool {
-    classify(args) == CommandCapability::Mutation
-        // The lifecycle command that launches these internal processes already
-        // performs startup recovery. Repeating it here delays lease publication
-        // and can make the supervisor kill an otherwise healthy cold start.
-        && !args
-            .get(1..)
-            .unwrap_or_default()
-            .windows(2)
-            .any(|args| {
-                matches!(args, [command, subcommand]
-                    if command == "daemon" && matches!(subcommand.as_str(), "supervise" | "serve"))
-            })
-        && !args
-            .get(1..)
-            .unwrap_or_default()
-            .windows(2)
-            .any(|args| args == ["agent-task", "review"])
+    homeboy_owned_args(args.get(1..).unwrap_or_default())
+        .windows(2)
+        .any(|args| args == ["runner", "exec"])
 }
 
 #[cfg(test)]
@@ -255,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn review_keeps_its_local_materialization_capability_but_skips_runner_recovery() {
+    fn only_runner_exec_owns_startup_recovery() {
         let review = args(&[
             "homeboy",
             "agent-task",
@@ -266,17 +252,20 @@ mod tests {
         ]);
         assert_eq!(classify(&review), CommandCapability::Mutation);
         assert!(!requires_startup_reconciliation(&review));
-        assert!(requires_startup_reconciliation(&args(&[
+        assert!(!requires_startup_reconciliation(&args(&[
             "homeboy",
             "agent-task",
             "retry",
             "run-1",
             "--run",
         ])));
+        assert!(requires_startup_reconciliation(&args(&[
+            "homeboy", "runner", "exec", "lab", "--", "true",
+        ])));
     }
 
     #[test]
-    fn internal_daemon_processes_publish_their_lease_without_repeating_recovery() {
+    fn other_mutations_do_not_own_runner_recovery() {
         for command in [
             args(&[
                 "homeboy",
@@ -305,7 +294,7 @@ mod tests {
             args(&["homeboy", "daemon", "start"]),
             args(&["homeboy", "daemon", "ensure-running"]),
         ] {
-            assert!(requires_startup_reconciliation(&command));
+            assert!(!requires_startup_reconciliation(&command));
         }
     }
 

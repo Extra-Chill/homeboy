@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::Output;
 use std::time::{Duration, Instant};
 
-use homeboy_core::observation::{NewRunRecord, ObservationStore, RunListFilter, RunStatus};
+use homeboy_core::observation::{NewRunRecord, ObservationStore, RunListFilter};
 use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary};
 
 /// Run the fixture binary through the shared hermetic harness.
@@ -292,11 +292,11 @@ fn non_tty_local_wait_stays_foreground() {
     );
 }
 
-/// Historical runner recovery is a distinct owner, never an admission gate for
-/// an accepted Cook. This invokes the actual detached Cook command path rather
-/// than a scheduler helper so its output and durable handoff remain observable.
+/// Historical runner recovery belongs to `runner exec`, never an unrelated
+/// Cook admission. This invokes the actual detached Cook command path so the
+/// ownership boundary remains observable.
 #[test]
-fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_records() {
+fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
     let context = HermeticTestContext::new();
     let database = context.data_dir().join("homeboy.sqlite");
     let store = ObservationStore::open_initialized_at(&database).expect("open fixture store");
@@ -354,43 +354,21 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
     assert_eq!(handoff["detached"], true, "{stdout}");
     assert!(handoff["cook_id"].as_str().is_some_and(|id| !id.is_empty()));
 
-    let observation_deadline = Instant::now() + Duration::from_secs(5);
-    let (owners, children) = loop {
-        let store = ObservationStore::open_initialized_at(&database).expect("reopen fixture store");
-        let owners = store
-            .list_runs(RunListFilter {
-                kind: Some("runner_exec_recovery".to_string()),
-                ..RunListFilter::default()
-            })
-            .expect("list recovery owners");
-        let children = store
-            .list_runs(RunListFilter {
-                kind: Some("runner_exec_recovery_child".to_string()),
-                ..RunListFilter::default()
-            })
-            .expect("list recovery children");
-        if owners.len() == 1
-            && owners[0].status != RunStatus::Running.as_str()
-            && children.len() == 100
-            && children
-                .iter()
-                .all(|child| child.status != RunStatus::Running.as_str())
-        {
-            break (owners, children);
-        }
-        assert!(
-            Instant::now() < observation_deadline,
-            "recovery state did not settle"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    };
-    assert_eq!(owners.len(), 1, "recovery has its own durable owner");
-    assert_eq!(owners[0].status, RunStatus::Pass.as_str());
-    assert_eq!(owners[0].metadata_json["scheduled_count"], 100);
-    assert_eq!(children.len(), 100, "each source has a durable child");
-    assert!(children
-        .iter()
-        .all(|child| child.status == RunStatus::Pass.as_str()));
+    let store = ObservationStore::open_initialized_at(&database).expect("reopen fixture store");
+    assert!(store
+        .list_runs(RunListFilter {
+            kind: Some("runner_exec_recovery".to_string()),
+            ..RunListFilter::default()
+        })
+        .expect("list recovery owners")
+        .is_empty());
+    assert!(store
+        .list_runs(RunListFilter {
+            kind: Some("runner_exec_recovery_child".to_string()),
+            ..RunListFilter::default()
+        })
+        .expect("list recovery children")
+        .is_empty());
 
     #[cfg(unix)]
     if let Some(pid) = handoff["pid"].as_u64() {

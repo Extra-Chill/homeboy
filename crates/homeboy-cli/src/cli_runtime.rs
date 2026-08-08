@@ -775,13 +775,13 @@ fn schedule_runner_exec_recovery() {
     let Ok(Some(schedule)) = crate::runner::schedule_terminal_runner_exec_recovery() else {
         return;
     };
-    eprintln!(
-        "runner-exec recovery accepted: owner_id={} deferred_count={} budget_ms={} inspect=`{}`",
-        schedule.owner_id, schedule.deferred_count, schedule.budget_ms, schedule.inspection_action
-    );
     if !schedule.is_new_owner {
         return;
     }
+    eprintln!(
+        "runner-exec recovery scheduled: owner_id={} deferred_count={} inspect=`{}`",
+        schedule.owner_id, schedule.deferred_count, schedule.inspection_action
+    );
     let executable = match std::env::current_exe() {
         Ok(executable) => executable,
         Err(error) => {
