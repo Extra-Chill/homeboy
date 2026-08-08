@@ -443,6 +443,10 @@ pub struct RunsArtifactsOutput {
     pub runner_id: Option<String>,
     pub path_guide: RunsArtifactPathGuide,
     pub artifacts: Vec<ArtifactRecord>,
+    /// Persisted inventory page details. `--full` omits the limit so legacy
+    /// callers retain the exhaustive listing contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<RunsArtifactPage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_lifecycle_index: Option<ResourceLifecycleIndex>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -459,6 +463,14 @@ pub struct RunsArtifactsOutput {
     /// retrieval of each artifact's bytes to the operator-local artifact root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pull: Option<RunsArtifactPullSummary>,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactPage {
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -564,6 +576,42 @@ pub struct RunsArtifactsArgs {
     /// run-scoped path under the operator-local artifact root.
     #[arg(long, requires = "pull")]
     pub pull_dir: Option<PathBuf>,
+    /// Exact persisted artifact id token.
+    #[arg(long)]
+    pub token: Option<String>,
+    /// Exact artifact kind.
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// Exact MIME type.
+    #[arg(long)]
+    pub mime: Option<String>,
+    /// Exact original persisted path.
+    #[arg(long)]
+    pub original_path: Option<String>,
+    /// Match a persisted path suffix.
+    #[arg(long)]
+    pub path_suffix: Option<String>,
+    /// Exact `fixture_id` artifact metadata value.
+    #[arg(long)]
+    pub fixture: Option<String>,
+    /// Exact `surface_id` artifact metadata value.
+    #[arg(long)]
+    pub surface: Option<String>,
+    /// Exact `scenario_id` artifact metadata value.
+    #[arg(long)]
+    pub scenario: Option<String>,
+    /// Glob match against the artifact kind/name.
+    #[arg(long)]
+    pub name_glob: Option<String>,
+    /// Maximum records in this page (1-1000).
+    #[arg(long, default_value_t = 50)]
+    pub limit: i64,
+    /// Number of matching records to skip before this page.
+    #[arg(long, default_value_t = 0)]
+    pub offset: i64,
+    /// Retain the exhaustive legacy listing and derived summaries.
+    #[arg(long)]
+    pub full: bool,
 }
 
 #[derive(Serialize)]
