@@ -1337,6 +1337,24 @@ pub(crate) fn cook_finalization_options(
         .iter()
         .map(|step| step.command.clone())
         .collect();
+    let inherited_failure_count = promotion
+        .deterministic_gates
+        .iter()
+        .filter(|gate| {
+            gate.status == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+        })
+        .count();
+    let attempt_summary = if inherited_failure_count == 0 {
+        format!(
+            "{} deterministic cook gate attempt(s) completed green",
+            promotion.deterministic_gates.len()
+        )
+    } else {
+        format!(
+            "{} deterministic cook gate attempt(s) completed; {inherited_failure_count} inherited baseline-red failure(s) were reproduced on the immutable base and explicitly accepted",
+            promotion.deterministic_gates.len()
+        )
+    };
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
         run_id: successful_run_id.to_string(),
@@ -1352,10 +1370,7 @@ pub(crate) fn cook_finalization_options(
         evidence: AgentTaskPrEvidence {
             source_refs,
             artifact_refs,
-            attempt_summary: format!(
-                "{} deterministic cook gate attempt(s) completed green",
-                promotion.deterministic_gates.len()
-            ),
+            attempt_summary,
             ai_tool: options.ai_tool.clone(),
             ai_model: options.ai_model.clone(),
             source_relationship: AgentTaskPrSourceRelationship::default(),
@@ -1501,14 +1516,17 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     let recipe = if super::cook_recipe::recipe_exists(run_or_cook_id)? {
         super::cook_recipe::load_recipe(run_or_cook_id)?
     } else {
-        super::cook_recipe::load_recipe_for_attempt(run_or_cook_id)?.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "run_or_cook_id",
-                "no durable Cook recipe contains this run or cook id",
-                Some(run_or_cook_id.to_string()),
-                None,
-            )
-        })?
+        match super::cook_recipe::load_recipe_for_attempt(run_or_cook_id)? {
+            Some(recipe) => recipe,
+            None => {
+                return recover_manual_finalization_pr(
+                    run_or_cook_id,
+                    overrides,
+                    preflight,
+                    backend,
+                )
+            }
+        }
     };
     if let Some(receipt) = completed_finalization_receipt_for_recovery(&recipe, run_or_cook_id)? {
         return Ok(receipt);
@@ -1616,6 +1634,48 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     Ok(value)
 }
 
+/// Recover a standalone manual-finalization record. Unlike Cook attempts, a
+/// manual identity can be reserved without a recipe, so it is its own durable
+/// recovery root.
+fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
+    run_id: &str,
+    overrides: Vec<AgentTaskReviewOverride>,
+    preflight: bool,
+    backend: &mut B,
+) -> Result<Value> {
+    let record = agent_task_lifecycle::status(run_id).map_err(|_| {
+        Error::validation_invalid_argument(
+            "run_or_cook_id",
+            "no durable Cook recipe or manual finalization record contains this run or cook id",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    if let Some(receipt) = manual_finalization_receipt_for_run(&record, run_id)? {
+        return Ok(receipt);
+    }
+    if !overrides.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "review_overrides",
+            "recovered manual finalization must execute the preflight-validated dossier unchanged",
+            None,
+            None,
+        ));
+    }
+    let report = manual_finalization_intent_for_run(&record, run_id)?;
+    let finalization = manual_finalization_options(report)?;
+    let report = if preflight {
+        preflight_pr_with_backend(finalization, backend)?
+    } else {
+        finalize_pr_with_backend(finalization, backend)?
+    };
+    let value = serde_json::to_value(&report).unwrap_or(Value::Null);
+    if !preflight {
+        persist_manual_finalization_receipt(run_id, &report)?;
+    }
+    Ok(value)
+}
+
 fn manual_finalization_run_ids(recipe: &super::cook_recipe::AgentTaskCookRecipe) -> Vec<&str> {
     recipe
         .attempts
@@ -1653,28 +1713,46 @@ fn completed_finalization_receipt_for_recovery(
         // generic shape. Only the explicit manual receipt schema requires the
         // additional recovery integrity contract.
         if value["manual_finalization"] == true {
-            let report: AgentTaskPrFinalizationReport = serde_json::from_value(value.clone())
-                .map_err(|_| {
-                    Error::validation_invalid_argument(
-                        "cook_finalization",
-                        "persisted manual finalization receipt is invalid",
-                        Some(run_id.to_string()),
-                        None,
-                    )
-                })?;
-            let intent = manual_finalization_intent_for_run(&record, run_id)?;
-            if !valid_manual_finalization_receipt(&report, &intent, &record, run_id, true) {
-                return Err(Error::validation_invalid_argument(
-                    "cook_finalization",
-                    "persisted manual finalization receipt failed integrity validation",
-                    Some(run_id.to_string()),
-                    None,
-                ));
-            }
+            return manual_finalization_receipt_for_run(&record, run_id);
         }
         return Ok(Some(value.clone()));
     }
     Ok(None)
+}
+
+fn manual_finalization_receipt_for_run(
+    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
+    run_id: &str,
+) -> Result<Option<Value>> {
+    let Some(value) = record.metadata.get("cook_finalization") else {
+        return Ok(None);
+    };
+    if !matches!(
+        value["status"].as_str(),
+        Some("review_ready" | "draft_published")
+    ) || value["manual_finalization"] != true
+    {
+        return Ok(None);
+    }
+    let report: AgentTaskPrFinalizationReport =
+        serde_json::from_value(value.clone()).map_err(|_| {
+            Error::validation_invalid_argument(
+                "cook_finalization",
+                "persisted manual finalization receipt is invalid",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let intent = manual_finalization_intent_for_run(record, run_id)?;
+    if !valid_manual_finalization_receipt(&report, &intent, record, run_id, true) {
+        return Err(Error::validation_invalid_argument(
+            "cook_finalization",
+            "persisted manual finalization receipt failed integrity validation",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(Some(value.clone()))
 }
 
 fn manual_finalization_intent_for_recovery(

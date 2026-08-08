@@ -381,9 +381,10 @@ pub struct PromoteArgs {
 }
 #[derive(Args, Debug)]
 pub struct AdoptArgs {
-    /// Existing durable run id or cook id whose recipe owns the candidate lifecycle.
+    /// Existing durable Cook id or one of its declared attempt run ids whose recipe owns the candidate lifecycle.
+    #[arg(value_name = "RUN_OR_COOK_ID")]
     pub run_or_cook_id: String,
-    /// Select an exact durable attempt from the Cook recipe. Required when attempts use different policies.
+    /// Select an exact durable attempt from the resolved Cook recipe. Required when attempts use different policies.
     #[arg(long, value_name = "N")]
     pub attempt: Option<u32>,
     /// Immutable commit revision in the recorded source worktree.
@@ -395,13 +396,18 @@ pub struct AdoptArgs {
     /// Replace a stale interrupted adoption while retaining its lifecycle evidence.
     #[arg(long)]
     pub replace_interrupted: bool,
+    /// Permit finalization only when a failed recorded gate reproduces with the
+    /// same bounded fingerprint on the immutable candidate base. New or changed
+    /// failures remain blocking and inherited-red evidence remains in the report.
+    #[arg(long)]
+    pub accept_inherited_failures: bool,
     /// Return the complete cook adoption report, including nested gate evidence.
     #[arg(long)]
     pub full: bool,
 }
 #[derive(Args, Debug)]
 pub struct FinalizePrArgs {
-    /// Hydrate finalization from a durable Cook recipe and its applied promotion.
+    /// Hydrate finalization from a durable Cook recipe or a validated manual-finalization record.
     #[arg(
         long,
         value_name = "RUN_OR_COOK_ID",
