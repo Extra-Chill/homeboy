@@ -152,6 +152,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                     .collect::<BTreeMap<_, _>>(),
                 isolate_home: args.isolate_gate_home,
                 isolate_xdg: args.isolate_gate_xdg,
+                hydrate_rust_cache: true,
                 extension_inputs: args.gate_extension_inputs,
             },
             gate_toolchains: args
@@ -330,6 +331,48 @@ mod tests {
     }
 
     #[test]
+    fn cook_help_documents_explicit_execution_cap_precedence_over_configured_rotations() {
+        let help = rendered_cook_help();
+        assert!(
+            help.contains("--max-attempts 1 --max-provider-executions 1"),
+            "{help}"
+        );
+        assert!(
+            help.contains("explicit `--max-provider-rotations`"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn cook_parser_preserves_an_explicit_execution_cap_without_a_rotation_override() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--max-attempts",
+            "1",
+            "--max-provider-executions",
+            "1",
+            "--no-finalize",
+            "--prompt",
+            "test",
+            "--to-worktree",
+            "repo@branch",
+        ])
+        .expect("parse an explicitly bounded Cook");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+
+        assert_eq!(cook.max_attempts, 1);
+        assert_eq!(cook.dispatch.core.attempts, Some(1));
+        assert_eq!(cook.dispatch.core.provider_rotations, None);
+    }
+
+    #[test]
     fn cook_help_exposes_quiet_progress_for_orchestration() {
         let help = rendered_cook_help();
         assert!(help.contains("--no-progress"), "{help}");
@@ -492,7 +535,9 @@ pub struct AgentTaskCookArgs {
     /// provider with a `commands.ensure` argv template, and without one you must
     /// create the destination first with `homeboy worktree create`. When
     /// omitted, --repo plus --task-url derives an issue-owned destination
-    /// through that same configured provider.
+    /// through that same configured provider. An explicit --workspace or --cwd
+    /// Git checkout can infer --repo when its remote maps to exactly one
+    /// configured component; an explicit --repo must match that checkout.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
     #[arg(
@@ -578,6 +623,10 @@ pub struct AgentTaskCookArgs {
     /// Policy the acceptance authority applies.
     #[arg(long, requires = "require_acceptance")]
     pub acceptance_policy: Option<String>,
+    /// Controller-resolved repository identity for a supplied checkout. This is
+    /// not caller input: Cook persists it with the compiled plan.
+    #[arg(skip)]
+    pub repository_identity: Option<serde_json::Value>,
 }
 
 #[derive(Args, Clone, Debug)]
