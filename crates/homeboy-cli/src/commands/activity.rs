@@ -42,7 +42,7 @@ pub struct ActivityListArgs {
     /// Maximum activity items to return.
     #[arg(long, default_value_t = 20)]
     limit: usize,
-    /// Include older completed records instead of active + recent.
+    /// Include all collected records and next actions without default compaction.
     #[arg(long)]
     all: bool,
     /// Skip connected Lab runners and report only controller-local records.
@@ -148,6 +148,25 @@ pub fn render_activity_summary(payload: &serde_json::Value) -> Option<String> {
     // no answer: the operator reads "nothing is running" when the truth is
     // "a runner did not answer". Name the runners that were unreachable.
     lines.extend(unreachable_runner_lines(report));
+    if let Some(truncation) = report.get("truncation") {
+        let omitted = truncation
+            .get("items_omitted")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let stale = truncation
+            .get("stale_items_omitted")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let actions = truncation
+            .get("next_actions_omitted")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if omitted > 0 || actions > 0 {
+            lines.push(format!(
+                "truncated: omitted {omitted} records ({stale} stale) and {actions} next actions; use `homeboy activity list --all --limit <count>` to inspect them."
+            ));
+        }
+    }
     if items.is_empty() {
         lines.push("No active or recent Homeboy activity.".to_string());
         return Some(format!("{}\n", lines.join("\n")));
@@ -435,10 +454,24 @@ fn actionable_for_activity_report(report: &ActivityReport) -> CommandActionableM
             .refs
             .agent_tasks
             .extend(item_metadata.refs.agent_tasks);
-        metadata.next_actions.extend(item_metadata.next_actions);
         metadata.artifacts.extend(item_metadata.artifacts);
         metadata.evidence.extend(item_metadata.evidence);
     }
+    metadata.next_actions = report
+        .next_actions
+        .iter()
+        .filter_map(|command| {
+            report
+                .items
+                .iter()
+                .flat_map(|item| item.next_actions.iter())
+                .find(|action| action.command == *command)
+        })
+        .map(|action| {
+            CommandNextAction::new(action.label.clone(), action.command.clone())
+                .with_kind(action_kind_from_label(&action.label))
+        })
+        .collect();
     metadata
 }
 

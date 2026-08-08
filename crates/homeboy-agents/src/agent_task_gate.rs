@@ -254,6 +254,75 @@ impl VerifyGateOptions {
     pub(crate) fn required_toolchains(&self) -> Vec<AgentTaskGateToolchainRequirement> {
         self.gate_toolchains.clone()
     }
+
+    /// Reject repository-owned npm gate declarations that no candidate patch can
+    /// repair before a provider is admitted.
+    pub(crate) fn preflight_declarations(&self, workspace: &Path) -> Result<()> {
+        for command in self.verify.iter().chain(&self.private_verify) {
+            let Some(script) = npm_run_script(command) else {
+                continue;
+            };
+            let manifest_path = workspace.join("package.json");
+            let manifest = fs::read_to_string(&manifest_path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(manifest_path.display().to_string()))
+            })?;
+            let manifest: serde_json::Value = serde_json::from_str(&manifest).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "gate declaration",
+                    format!("invalid package manifest: {error}"),
+                    Some(manifest_path.display().to_string()),
+                    None,
+                )
+            })?;
+            if manifest.pointer(&format!("/scripts/{script}")).is_some() {
+                continue;
+            }
+            let package = manifest
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unnamed package");
+            let remediation = format!(
+                "Add \"{script}\": \"<command>\" to {}/scripts for package `{package}`, or change/remove the declared Cook gate `{command}`.",
+                manifest_path.display(),
+            );
+            let mut error = Error::validation_invalid_argument(
+                "gate declaration",
+                format!(
+                    "declared npm gate `{command}` is invalid for package `{package}`: {} has no `scripts.{script}`. {remediation}",
+                    manifest_path.display(),
+                ),
+                Some(manifest_path.display().to_string()),
+                None,
+            );
+            error.details = json!({
+                "failure_classification": "gate_declaration",
+                "command": command,
+                "package": package,
+                "manifest": manifest_path,
+                "missing_script": script,
+                "remediation": remediation,
+            });
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn has_npm_run_declaration(&self) -> bool {
+        self.verify
+            .iter()
+            .chain(&self.private_verify)
+            .any(|command| npm_run_script(command).is_some())
+    }
+}
+
+fn npm_run_script(command: &str) -> Option<&str> {
+    let tokens: Vec<_> = command.split_whitespace().collect();
+    if tokens.len() == 3 && tokens[0] == "npm" && tokens[1] == "run" && !tokens[2].starts_with('-')
+    {
+        Some(tokens[2])
+    } else {
+        None
+    }
 }
 
 impl Default for VerifyGateOptions {
@@ -726,6 +795,8 @@ impl From<AgentTaskGateStatus> for HomeboyGateStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateFailureEvidence {
+    #[serde(default)]
+    pub classification: AgentTaskGateFailureClassification,
     pub summary: String,
     pub command: String,
     pub exit_code: i32,
@@ -738,6 +809,14 @@ pub struct AgentTaskGateFailureEvidence {
     /// Homeboy treats their locations and suggested actions as opaque data.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<AgentTaskGateDiagnosticRecord>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskGateFailureClassification {
+    #[default]
+    CandidateCode,
+    GateDeclaration,
 }
 
 pub const AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA: &str = "homeboy/gate-diagnostic-record/v1";
@@ -2098,12 +2177,29 @@ fn gate_failure_evidence(
 ) -> AgentTaskGateFailureEvidence {
     let stdout_tail = text_tail(stdout, 20);
     let stderr_tail = text_tail(stderr, 20);
-    let summary = format!("deterministic gate failed with exit code {exit_code}: {command}");
-    let agent_feedback = format!(
-        "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes, using the captured stdout/stderr tails as the primary failure evidence."
-    );
+    let missing_script = npm_run_script(command).filter(|script| {
+        stderr.contains(&format!("Missing script: \"{script}\""))
+            || stderr.contains(&format!("Missing script: {script}"))
+    });
+    let classification = missing_script
+        .is_some()
+        .then_some(AgentTaskGateFailureClassification::GateDeclaration)
+        .unwrap_or(AgentTaskGateFailureClassification::CandidateCode);
+    let summary = match missing_script {
+        Some(script) => format!("declared npm gate is missing script `{script}`: {command}"),
+        None => format!("deterministic gate failed with exit code {exit_code}: {command}"),
+    };
+    let agent_feedback = match missing_script {
+        Some(script) => format!(
+            "The declared gate is invalid, not candidate-code feedback. Add `scripts.{script}` to the relevant package.json or change/remove `{command}` before rerunning Cook."
+        ),
+        None => format!(
+            "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes, using the captured stdout/stderr tails as the primary failure evidence."
+        ),
+    };
 
     AgentTaskGateFailureEvidence {
+        classification,
         summary,
         command: command.to_string(),
         exit_code,
@@ -3753,6 +3849,32 @@ mod tests {
                 "{name} must resolve to the invocation temp dir"
             );
         }
+    }
+
+    #[test]
+    fn npm_missing_script_is_a_non_retryable_gate_declaration_failure() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        fs::write(
+            workspace.path().join("package.json"),
+            r#"{"name":"fixture-package","scripts":{"test":"true"}}"#,
+        )
+        .expect("manifest");
+        let gates = VerifyGateOptions {
+            verify: vec!["npm run typecheck".to_string()],
+            ..Default::default()
+        };
+
+        let error = gates
+            .preflight_declarations(workspace.path())
+            .expect_err("missing script is a declaration failure");
+
+        assert_eq!(error.details["failure_classification"], "gate_declaration");
+        assert_eq!(error.details["package"], "fixture-package");
+        assert_eq!(error.details["missing_script"], "typecheck");
+        assert!(error.details["remediation"]
+            .as_str()
+            .expect("remediation")
+            .contains("scripts"));
     }
 
     /// A symlinked invocation temp alias must yield sandbox paths that are

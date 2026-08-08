@@ -43,6 +43,60 @@ pub(super) mod concurrency_tests {
             .any(|diagnostic| diagnostic.class == "agent_task.provider_worker_panicked"));
     }
 
+    #[derive(Clone)]
+    struct PolicyDeniedExecutor;
+
+    impl AgentTaskExecutorAdapter for PolicyDeniedExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Failed,
+                summary: Some("provider policy denied the request".to_string()),
+                failure_classification: Some(AgentTaskFailureClassification::PolicyDenied),
+                diagnostics: vec![AgentTaskDiagnostic {
+                    class: "provider.policy_denied".to_string(),
+                    message: "fixture provider denied a live execution".to_string(),
+                    data: json!({ "fixture": "policy-denied-terminalization" }),
+                }],
+                ..Default::default()
+            }
+        }
+    }
+
+    #[test]
+    fn policy_denied_terminalization_records_post_provider_cleanup_without_retrying() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let run_id = "policy-denied-terminalization";
+        let plan = plan_with_tasks(1);
+        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run");
+
+        let aggregate = AgentTaskScheduler::new(PolicyDeniedExecutor)
+            .with_run_id(run_id)
+            .run(plan);
+
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(aggregate.outcomes.len(), 1);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::PolicyDenied)
+        );
+        let record = crate::agent_task_lifecycle::status(run_id).expect("durable terminal record");
+        let execution = &record.metadata["provider_executions"][0];
+        assert_eq!(execution["state"], "failed");
+        assert!(execution["finished_at"].is_string());
+        assert!(execution["post_provider_cleanup_elapsed_ms"].is_u64());
+        assert!(execution["post_provider_cleanup_finished_at"].is_string());
+        assert!(
+            !crate::agent_task_lifecycle::has_active_provider_execution(run_id)
+                .expect("terminal provider is inactive")
+        );
+    }
+
     pub(crate) fn init_git_workspace(path: &std::path::Path) {
         fs::create_dir(path).expect("workspace directory");
         for args in [

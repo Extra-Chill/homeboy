@@ -1,6 +1,6 @@
 use serde::ser::Error as SerializeError;
 use serde::{Deserialize, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use homeboy_core::is_zero_u32;
 use homeboy_core::phase_timing::PhaseTimingReport;
@@ -450,6 +450,135 @@ pub struct ReleaseOptions {
     /// Bump policy controls that affect release plan validation.
     #[serde(default, skip_serializing_if = "ReleaseBumpPolicyOptions::is_default")]
     pub bump_policy: ReleaseBumpPolicyOptions,
+    /// Placement selected for portable release-readiness gates. Release mutation
+    /// always remains controller-owned; a runner is evidence provenance only.
+    #[serde(default, skip_serializing_if = "ReleasePreflightPlacement::is_default")]
+    pub preflight_placement: ReleasePreflightPlacement,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ReleaseReadinessEnvelope>,
+}
+
+/// Typed placement policy for the portable portion of release preflight.
+///
+/// This deliberately does not describe versioning, tagging, pushing, or
+/// publication. Those operations mutate controller-owned state and are never
+/// authorized by readiness evidence from a runner.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleasePreflightPlacement {
+    #[serde(default)]
+    pub policy: ReleasePreflightPlacementPolicy,
+    /// Runner selected for portable gate execution, when policy pinning is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleasePreflightPlacementPolicy {
+    #[default]
+    Auto,
+    Local,
+    Lab,
+    LabOrLocal,
+}
+
+impl ReleasePreflightPlacement {
+    fn is_default(value: &Self) -> bool {
+        value == &Self::default()
+    }
+}
+
+/// Immutable source identity bound to release-readiness evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleasePreflightSourceIdentity {
+    pub commit: String,
+}
+
+/// Portable gate evidence that the controller may consume before mutation.
+///
+/// The envelope is intentionally data-only: Lab dispatch owns runner execution
+/// and artifact persistence, while release owns the decision to mutate only
+/// after this identity is revalidated locally.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseReadinessEnvelope {
+    pub source: ReleasePreflightSourceIdentity,
+    pub placement: ReleasePreflightPlacement,
+    pub runner_id: Option<String>,
+    pub evidence_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "ReleaseReadinessProvenance::is_empty")]
+    pub provenance: ReleaseReadinessProvenance,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_results: Vec<ReleaseReadinessGateResult>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseReadinessProvenance {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dependencies: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, String>,
+}
+
+impl ReleaseReadinessProvenance {
+    pub fn is_empty(value: &Self) -> bool {
+        value.dependencies.is_empty() && value.extensions.is_empty()
+    }
+}
+
+/// A readiness envelope authorizes release planning only when it has an
+/// explicit selected-gate outcome. Bare `--skip-checks` remains authorized
+/// because it records every selected portable gate as `skipped`.
+pub fn readiness_is_valid(readiness: &ReleaseReadinessEnvelope) -> bool {
+    !readiness.gate_results.is_empty()
+        && readiness
+            .gate_results
+            .iter()
+            .all(|gate| match gate.status.as_str() {
+                "passed" => {
+                    gate.source_sha.as_deref() == Some(readiness.source.commit.as_str())
+                        && gate
+                            .runner_id
+                            .as_deref()
+                            .is_some_and(|runner| !runner.is_empty())
+                        && !gate.evidence_refs.is_empty()
+                        && gate.provenance.as_ref().is_some_and(|provenance| {
+                            !ReleaseReadinessProvenance::is_empty(provenance)
+                        })
+                }
+                "skipped" => gate.source_sha.as_deref() == Some(readiness.source.commit.as_str()),
+                "local_only" => {
+                    gate.gate == "package_preflight"
+                        && gate.local_only.as_ref().is_some_and(|local_only| {
+                            !local_only.reason.is_empty() && !local_only.continuation.is_empty()
+                        })
+                }
+                _ => false,
+            })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseReadinessGateResult {
+    pub gate: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<String>,
+    /// Immutable identities emitted by the child that executed this gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ReleaseReadinessProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_only: Option<ReleaseReadinessLocalOnly>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseReadinessLocalOnly {
+    pub reason: String,
+    pub continuation: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -518,6 +647,8 @@ pub struct ReleaseCommandInput {
     /// Internal execution contract resolved before the workflow runs.
     #[serde(skip_serializing)]
     pub execution: Option<ReleaseExecutionPlan>,
+    #[serde(skip_serializing)]
+    pub readiness: Option<ReleaseReadinessEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -617,6 +748,8 @@ pub struct ReleaseCommandResult {
     pub continuation_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub release_summary: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ReleaseReadinessEnvelope>,
 }
 
 /// Result of a batch release across multiple components.
@@ -758,6 +891,38 @@ mod tests {
         let input = ReleaseCommandInput::default();
 
         assert!(!input.force_lower_bump);
+    }
+
+    #[test]
+    fn readiness_envelope_keeps_runner_provenance_separate_from_mutation_policy() {
+        let envelope = ReleaseReadinessEnvelope {
+            source: ReleasePreflightSourceIdentity {
+                commit: "abc123".to_string(),
+            },
+            placement: ReleasePreflightPlacement {
+                policy: ReleasePreflightPlacementPolicy::Lab,
+                runner_id: Some("homeboy-lab".to_string()),
+            },
+            runner_id: Some("homeboy-lab".to_string()),
+            evidence_refs: vec!["runner-artifact://homeboy-lab/release/lint.json".to_string()],
+            provenance: ReleaseReadinessProvenance::default(),
+            gate_results: vec![ReleaseReadinessGateResult {
+                gate: "lint".to_string(),
+                status: "passed".to_string(),
+                reason: None,
+                source_sha: None,
+                runner_id: Some("homeboy-lab".to_string()),
+                evidence_refs: Vec::new(),
+                provenance: None,
+                local_only: None,
+            }],
+        };
+
+        let value = serde_json::to_value(envelope).expect("serialize readiness envelope");
+
+        assert_eq!(value["source"]["commit"], "abc123");
+        assert_eq!(value["runner_id"], "homeboy-lab");
+        assert!(value.get("mutation_runner_id").is_none());
     }
 
     #[test]

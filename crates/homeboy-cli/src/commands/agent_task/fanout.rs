@@ -2219,6 +2219,15 @@ fn cook_command(plan: &BatchCookFanoutPlan, _cook: &BatchCookSpec) -> Vec<String
     ]
 }
 
+/// Return the canonical durable identity for a cook-batch invocation.
+///
+/// Routing observers must use this rather than deriving an approximation from
+/// issue arguments: `build_cook_batch_plan` includes all effective cook inputs
+/// in generated identities.
+pub(crate) fn cook_batch_fanout_id(args: &AgentTaskFanoutCookBatchArgs) -> Result<String> {
+    Ok(build_cook_batch_plan(args)?.fanout_id)
+}
+
 fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCookFanoutPlan> {
     let profiles = load_verification_profiles(args.verification_profiles.as_deref())?;
     let mut seen = HashSet::new();
@@ -4224,6 +4233,21 @@ fi
         let changed = build_cook_batch_plan(&args).expect("changed plan");
         assert_ne!(first.fanout_id, changed.fanout_id);
         assert_ne!(first.cooks[0].cook_id, changed.cooks[0].cook_id);
+    }
+
+    #[test]
+    fn canonical_cook_batch_identity_matches_the_plan_and_its_child_lineage() {
+        let mut args = cook_batch_args();
+        args.fanout_id = None;
+
+        let fanout_id = cook_batch_fanout_id(&args).expect("canonical fanout identity");
+        let plan = build_cook_batch_plan(&args).expect("canonical fanout plan");
+
+        assert_eq!(fanout_id, plan.fanout_id);
+        for cook in plan.cooks {
+            assert!(cook.cook_id.starts_with(&format!("{fanout_id}-")));
+            assert!(cook.run_id().starts_with(&format!("cook-{fanout_id}-")));
+        }
     }
 
     #[test]

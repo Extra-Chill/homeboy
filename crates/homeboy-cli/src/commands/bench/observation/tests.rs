@@ -108,11 +108,51 @@ fn recorded_bench_artifact_reports_unreachable_public_viewer_url() {
         artifact.observation_artifact_id.as_deref(),
         Some("artifact-1")
     );
-    assert!(artifact.public_url.is_some());
+    assert_eq!(artifact.public_url, None);
     assert!(artifact.viewer_refs.viewer_links.is_empty());
     assert_eq!(artifact.viewer_refs.viewer_url, None);
     assert_eq!(diagnostic.class, "bench_public_artifact_url_unreachable");
     assert_eq!(diagnostic.metadata["status_code"], 404);
+}
+
+#[test]
+fn recorded_bench_artifact_preserves_legacy_public_viewer_url() {
+    let public_artifact_base = "https://artifacts.example.test/homeboy";
+    let _public_artifact_base = EnvGuard::set(
+        homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
+        public_artifact_base,
+    );
+    let mut artifact = BenchArtifact::default();
+    let record = ArtifactRecord {
+        id: "legacy-artifact".to_string(),
+        run_id: "run-1".to_string(),
+        kind: "bench_artifact".to_string(),
+        artifact_type: "file".to_string(),
+        path: "/tmp/blueprint.after.json".to_string(),
+        url: None,
+        public_url: None,
+        viewer_url: None,
+        viewer_links: Vec::new(),
+        sha256: None,
+        size_bytes: None,
+        mime: Some("application/json".to_string()),
+        metadata_json: serde_json::json!({
+            "viewer": crate::commands::runs::HOSTED_BLUEPRINT_VIEWER.to_metadata(None)
+        }),
+        created_at: "2026-06-12T00:00:00Z".to_string(),
+    };
+
+    let diagnostic = apply_recorded_bench_artifact_links(
+        "cold",
+        Some(0),
+        "blueprint.after",
+        &mut artifact,
+        &record,
+    );
+
+    assert_eq!(diagnostic, None);
+    assert!(artifact.public_url.is_some());
+    assert_eq!(artifact.viewer_refs.viewer_links.len(), 1);
 }
 
 pub(super) fn bench_results(component_id: &str, scenario_id: &str, p95: f64) -> BenchResults {

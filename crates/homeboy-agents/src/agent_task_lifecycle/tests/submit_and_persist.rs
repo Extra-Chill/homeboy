@@ -434,6 +434,37 @@ fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
     });
 }
 
+#[test]
+fn terminal_provider_execution_is_inactive_while_cleanup_timing_remains_durable() {
+    with_isolated_home(|_| {
+        let run_id = "policy-denied-terminalization";
+        let plan = test_plan();
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+        reserve_provider_execution(run_id, &plan.tasks[0], 1).expect("reserved");
+
+        assert!(
+            has_active_provider_execution(run_id).expect("active provider execution"),
+            "the heartbeat may sample only while the provider boundary is active"
+        );
+
+        record_provider_execution_terminal(run_id, &plan.tasks[0].task_id, 1, "failed")
+            .expect("policy-denied provider terminalized");
+        record_provider_execution_cleanup_elapsed(run_id, &plan.tasks[0].task_id, 1, 17)
+            .expect("cleanup timing recorded");
+
+        assert!(
+            !has_active_provider_execution(run_id).expect("terminal provider execution"),
+            "controller artifact cleanup must not keep provider liveness active"
+        );
+        let record = status(run_id).expect("durable record");
+        let execution = &record.metadata["provider_executions"][0];
+        assert_eq!(execution["state"], "failed");
+        assert!(execution["finished_at"].is_string());
+        assert_eq!(execution["post_provider_cleanup_elapsed_ms"], 17);
+        assert!(execution["post_provider_cleanup_finished_at"].is_string());
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn submit_plan_persists_owner_only_plan_file_before_observation() {
@@ -1100,6 +1131,13 @@ fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
             .expect("terminal transport awaits aggregate synchronization");
         assert_eq!(record.state, AgentTaskRunState::Running);
         assert!(store::read_aggregate(&record.run_id).is_err());
+        let before_delayed_provider_terminal = status(&record.run_id)
+            .expect("continuation reconciliation observes the pending provider aggregate");
+        assert_eq!(
+            before_delayed_provider_terminal.state,
+            AgentTaskRunState::Running,
+            "continuation must keep observing until the runner publishes the provider aggregate"
+        );
 
         let aggregate = succeeded_aggregate(&test_plan());
         let mut terminal_with_aggregate = terminal_child_snapshot(&aggregate);
@@ -1122,6 +1160,13 @@ fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
         assert_eq!(
             store::read_aggregate(&record.run_id).expect("aggregate persisted"),
             aggregate
+        );
+        let after_delayed_provider_terminal = status(&record.run_id)
+            .expect("continuation reconciliation observes the projected terminal aggregate");
+        assert_eq!(
+            after_delayed_provider_terminal.state,
+            AgentTaskRunState::Succeeded,
+            "the same durable attempt becomes terminal exactly once when delayed provider evidence arrives"
         );
     });
 }

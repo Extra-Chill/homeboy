@@ -32,6 +32,12 @@ JSON output uses the standard command-result envelope with `data.schema = homebo
 
 Human output is a compact table followed by next-action command lines per item.
 
+The default view prioritizes active work, scans a bounded extra window for stale
+projections, and omits stale rows that would crowd out current records. Its
+`truncation` object states omitted record and next-action counts explicitly.
+Use `homeboy activity list --all --limit <count>` to retain every collected
+record and action, or `homeboy activity show <id>` for a direct record lookup.
+
 ## Runner federation
 
 Records for a run offloaded to a Lab runner live on that runner until it reports back, so a controller-local read cannot see them. `activity` federates connected Lab runners by default:

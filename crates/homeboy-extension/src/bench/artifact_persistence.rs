@@ -353,25 +353,26 @@ pub fn apply_recorded_bench_artifact_links(
 ) -> Option<BenchDiagnostic> {
     artifact.observation_artifact_id = Some(record.id.clone());
     let public_url = artifact_links::public_artifact_url(record)?;
-    artifact.public_url = Some(public_url.clone());
-    artifact.viewer_refs.viewer_links =
-        artifact_links::cached_validated_viewer_links(record, &public_url);
-    artifact.viewer_refs.viewer_url = artifact
-        .viewer_refs
-        .viewer_links
-        .first()
-        .map(|link| link.url.clone());
-    let validation = record.metadata_json.get("public_url_validation")?;
-    let reachable = validation
-        .get("reachable")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    (!reachable).then(|| {
+    if artifact_links::public_artifact_url_is_reachable_or_legacy(record) {
+        artifact.public_url = Some(public_url.clone());
+        artifact.viewer_refs.viewer_links =
+            artifact_links::cached_validated_viewer_links(record, &public_url);
+        artifact.viewer_refs.viewer_url = artifact
+            .viewer_refs
+            .viewer_links
+            .first()
+            .map(|link| link.url.clone());
+        None
+    } else {
+        let validation = record
+            .metadata_json
+            .get("public_url_validation")
+            .expect("unreachable new artifact has validation metadata");
         let error = validation
             .get("error")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("public artifact URL was not reachable");
-            bench_artifact_diagnostic(
+        Some(bench_artifact_diagnostic(
                 scenario_id,
                 run_index,
                 name,
@@ -384,8 +385,8 @@ pub fn apply_recorded_bench_artifact_links(
                     "status_code": validation.get("status_code").cloned().unwrap_or(serde_json::Value::Null),
                     "error": validation.get("error").cloned().unwrap_or(serde_json::Value::Null),
                 }),
-            )
-    })
+            ))
+    }
 }
 
 fn bench_artifact_metadata(

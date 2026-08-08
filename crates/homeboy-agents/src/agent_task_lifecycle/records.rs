@@ -623,6 +623,22 @@ impl AgentTaskRunRecord {
     }
 
     pub(crate) fn owner_pid(&self) -> Option<u32> {
+        let provider_pids = self
+            .metadata
+            .get("provider_executions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|execution| execution["state"] == "running")
+            .filter_map(|execution| {
+                execution["owner_pid"]
+                    .as_u64()
+                    .and_then(|pid| u32::try_from(pid).ok())
+            })
+            .collect::<Vec<_>>();
+        if provider_pids.len() == 1 {
+            return provider_pids.into_iter().next();
+        }
         self.metadata
             .get("runner_pid")
             .and_then(Value::as_u64)
