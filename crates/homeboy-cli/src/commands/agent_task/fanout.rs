@@ -1,6 +1,7 @@
 //! Public batch-cook fanout command handlers.
 
 use homeboy_engine_primitives::content_hash;
+use homeboy_engine_primitives::shell::quote_args;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -37,7 +38,7 @@ use homeboy::agents::agent_tasks::{
     AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
     AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
 };
-use homeboy::core::{config, worktree, Error, Result};
+use homeboy::core::{config, worktree, Error, ErrorCode, Result};
 
 use crate::commands::utils::response::{CommandNextAction, CommandNextActionKind};
 
@@ -1430,6 +1431,7 @@ fn cook_batch_inner(
     mut args: AgentTaskFanoutCookBatchArgs,
     attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
 ) -> CmdResult<Value> {
+    normalize_cook_batch_repo(&mut args)?;
     apply_provider_profile(&mut args);
     // Resolve the effective backend (explicit --backend or the configured
     // default) and validate it up front (#7717). Otherwise an omitted
@@ -1539,6 +1541,182 @@ fn cook_batch_inner(
         }),
         exit_code,
     ))
+}
+
+fn normalize_cook_batch_repo(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
+    let path_like = std::path::Path::new(&args.repo).is_absolute()
+        || args.repo.contains(std::path::MAIN_SEPARATOR)
+        || std::path::Path::new(&args.repo).exists();
+    let handle_like = args.repo.contains('@');
+    if !path_like && !handle_like {
+        return Ok(());
+    }
+
+    if handle_like && !path_like {
+        let candidates = args
+            .repo
+            .split_once('@')
+            .and_then(|(id, _)| {
+                homeboy::core::component::registered()
+                    .ok()
+                    .and_then(|components| {
+                        components
+                            .into_iter()
+                            .find(|component| component.id == id)
+                            .map(|component| vec![component.id])
+                    })
+            })
+            .unwrap_or_default();
+        return Err(invalid_cook_batch_repo(args, candidates));
+    }
+
+    match homeboy::core::component::resolve_registered_primary_path(&args.repo)? {
+        homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
+            args.repo = id;
+            Ok(())
+        }
+        homeboy::core::component::RegisteredPrimaryPathResolution::Related(candidates) => {
+            Err(invalid_cook_batch_repo(args, candidates))
+        }
+        homeboy::core::component::RegisteredPrimaryPathResolution::Unknown => {
+            Err(invalid_cook_batch_repo(args, Vec::new()))
+        }
+    }
+}
+
+fn invalid_cook_batch_repo(args: &AgentTaskFanoutCookBatchArgs, candidates: Vec<String>) -> Error {
+    let correction_command = (candidates.len() == 1).then(|| {
+        let mut corrected = args.clone();
+        corrected.repo = candidates[0].clone();
+        quote_args(&cook_batch_argv(&corrected))
+    });
+    let message = if candidates.is_empty() {
+        "--repo must be a registered repo slug or an exact registered primary path"
+    } else if candidates.len() == 1 {
+        "--repo identifies a related checkout, not a registered primary path"
+    } else {
+        "--repo matches multiple registered component identities"
+    };
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        message,
+        serde_json::json!({
+            "provided": args.repo,
+            "expected_kind": "registered_repo_slug_or_primary_path",
+            "resolved_candidates": candidates,
+            "correction_command": correction_command,
+        }),
+    )
+}
+
+/// Project the complete typed cook-batch invocation to executable argv.
+///
+/// Typed command handlers cannot recover which default-valued flags the caller
+/// spelled, so this intentionally renders every effective setting. Keeping the
+/// projection here makes correction and next-action commands preserve the same
+/// recipe rather than each maintaining a partial option list.
+fn cook_batch_argv(args: &AgentTaskFanoutCookBatchArgs) -> Vec<String> {
+    let mut command = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "fanout".to_string(),
+        "cook-batch".to_string(),
+        "--repo".to_string(),
+        args.repo.clone(),
+        "--from".to_string(),
+        args.from.clone(),
+        "--base".to_string(),
+        args.base.clone(),
+        "--branch-prefix".to_string(),
+        args.branch_prefix.clone(),
+        "--private-gate-reveal".to_string(),
+        clap::ValueEnum::to_possible_value(&args.gates.private_gate_reveal)
+            .expect("gate reveal policy has a clap value")
+            .get_name()
+            .to_string(),
+        "--gate-execution-policy".to_string(),
+        args.gates.gate_execution_policy.clone(),
+        "--gate-timeout-seconds".to_string(),
+        args.gates.gate_timeout_seconds.to_string(),
+        "--gate-heartbeat-interval-seconds".to_string(),
+        args.gates.gate_heartbeat_interval_seconds.to_string(),
+        "--gate-no-progress-timeout-seconds".to_string(),
+        args.gates.gate_no_progress_timeout_seconds.to_string(),
+        "--gate-environment-mode".to_string(),
+        args.gates.gate_environment_mode.clone(),
+        "--isolate-gate-home".to_string(),
+        args.gates.isolate_gate_home.to_string(),
+        "--isolate-gate-xdg".to_string(),
+        args.gates.isolate_gate_xdg.to_string(),
+    ];
+    for (flag, values) in [
+        ("--verify", &args.gates.verify),
+        ("--private-verify", &args.gates.private_verify),
+        ("--gate-toolchain", &args.gates.gate_toolchains),
+        ("--secret-env", &args.secret_env),
+    ] {
+        for value in values {
+            command.extend([flag.to_string(), value.clone()]);
+        }
+    }
+    for (flag, values) in [
+        ("--gate-env", &args.gates.gate_environment),
+        ("--gate-env-from", &args.gates.gate_environment_preserve),
+    ] {
+        for (name, value) in values {
+            command.extend([flag.to_string(), format!("{name}={value}")]);
+        }
+    }
+    for value in &args.gates.gate_package_artifacts {
+        command.extend([
+            "--gate-package-artifact".to_string(),
+            serde_json::to_string(value).expect("gate package artifact serializes"),
+        ]);
+    }
+    for value in &args.gates.gate_extension_inputs {
+        command.extend([
+            "--gate-extension-input".to_string(),
+            serde_json::to_string(value).expect("gate extension input serializes"),
+        ]);
+    }
+    for (flag, value) in [
+        ("--fanout-id", args.fanout_id.as_ref()),
+        ("--prompt-template", args.prompt_template.as_ref()),
+        ("--backend", args.backend.as_ref()),
+        ("--selector", args.selector.as_ref()),
+        ("--model", args.model.as_ref()),
+        ("--provider-profile", args.provider_profile.as_ref()),
+        ("--provider-config", args.provider_config.as_ref()),
+        ("--ai-tool", args.ai_tool.as_ref()),
+        (
+            "--verification-profiles",
+            args.verification_profiles.as_ref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            command.extend([flag.to_string(), value.clone()]);
+        }
+    }
+    if args.gates.rerun_completed_gates {
+        command.push("--rerun-completed-gates".to_string());
+    }
+    if args.gates.accept_inherited_failures {
+        command.push("--accept-inherited-failures".to_string());
+    }
+    if let Some(value) = args.max_concurrency {
+        command.extend(["--max-concurrency".to_string(), value.to_string()]);
+    }
+    if let Some(value) = args.max_duration {
+        command.extend(["--max-duration".to_string(), value.to_string()]);
+    }
+    if args.dry_run {
+        command.push("--dry-run".to_string());
+    }
+    if args.run_plan {
+        command.push("--run-plan".to_string());
+    }
+    command.extend(args.issues.clone());
+    command
 }
 
 fn bind_materialized_worktrees(
@@ -2728,19 +2906,17 @@ fn worktree_create_command(args: &AgentTaskFanoutCookBatchArgs, branch: &str) ->
 }
 
 fn cook_batch_plan_command(args: &AgentTaskFanoutCookBatchArgs) -> String {
-    format!(
-        "homeboy agent-task fanout cook-batch --repo {} --dry-run {}",
-        args.repo,
-        args.issues.join(" ")
-    )
+    let mut planned = args.clone();
+    planned.dry_run = true;
+    planned.run_plan = false;
+    quote_args(&cook_batch_argv(&planned))
 }
 
 fn cook_batch_run_command(args: &AgentTaskFanoutCookBatchArgs) -> String {
-    format!(
-        "homeboy agent-task fanout cook-batch --repo {} --run-plan {}",
-        args.repo,
-        args.issues.join(" ")
-    )
+    let mut runnable = args.clone();
+    runnable.dry_run = false;
+    runnable.run_plan = true;
+    quote_args(&cook_batch_argv(&runnable))
 }
 
 /// The command map for a cook-batch envelope.
@@ -3748,6 +3924,135 @@ fi
             dry_run: true,
             run_plan: false,
         }
+    }
+
+    fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
+        let components = home.join(".config/homeboy/components");
+        std::fs::create_dir_all(&components).expect("components directory");
+        std::fs::write(
+            components.join(format!("{id}.json")),
+            serde_json::json!({ "local_path": local_path }).to_string(),
+        )
+        .expect("component registration");
+    }
+
+    #[test]
+    fn cook_batch_repo_normalization_accepts_slugs_and_registered_primary_paths() {
+        with_isolated_home(|home| {
+            let primary = home.path().join("primary");
+            std::fs::create_dir(&primary).expect("primary directory");
+            write_component_registration(home.path(), "fixture", &primary);
+
+            let mut slug = cook_batch_args();
+            slug.repo = "fixture".to_string();
+            normalize_cook_batch_repo(&mut slug).expect("slug remains accepted");
+            assert_eq!(slug.repo, "fixture");
+
+            let mut path = cook_batch_args();
+            path.repo = primary.to_string_lossy().to_string();
+            normalize_cook_batch_repo(&mut path).expect("primary path resolves");
+            assert_eq!(path.repo, "fixture");
+        });
+    }
+
+    #[test]
+    fn cook_batch_repo_normalization_rejects_handles_and_unknown_paths_with_corrections() {
+        with_isolated_home(|home| {
+            let primary = home.path().join("primary");
+            std::fs::create_dir(&primary).expect("primary directory");
+            write_component_registration(home.path(), "fixture", &primary);
+
+            let mut handle = cook_batch_args();
+            handle.repo = "fixture@fix-11984".to_string();
+            handle.from = "origin/release".to_string();
+            handle.base = "release".to_string();
+            handle.branch_prefix = "repair".to_string();
+            handle.fanout_id = Some("faithful-correction".to_string());
+            handle.backend = Some("fixture-backend".to_string());
+            handle.selector = Some("fixture-selector".to_string());
+            handle.model = Some("fixture-model".to_string());
+            handle.provider_profile = Some("fixture-profile".to_string());
+            handle.secret_env = vec!["FIXTURE_TOKEN".to_string()];
+            handle.gates.verify = vec!["cargo check --all".to_string()];
+            handle.gates.private_verify = vec!["private check".to_string()];
+            handle.gates.gate_execution_policy = "continue-all".to_string();
+            handle.gates.gate_timeout_seconds = 41;
+            handle.gates.gate_heartbeat_interval_seconds = 9;
+            handle.gates.gate_no_progress_timeout_seconds = 17;
+            handle.gates.rerun_completed_gates = true;
+            handle.gates.gate_environment_mode = "replace".to_string();
+            handle.gates.gate_environment = vec![("FEATURE".to_string(), "enabled".to_string())];
+            handle.gates.gate_toolchains = vec!["fixture-tool".to_string()];
+            handle.max_concurrency = Some(3);
+            handle.max_duration = Some(120);
+            let mut corrected = handle.clone();
+            corrected.repo = "fixture".to_string();
+            let expected_command = quote_args(&cook_batch_argv(&corrected));
+            let error = normalize_cook_batch_repo(&mut handle).expect_err("handle is not a repo");
+            assert_eq!(error.details["provided"], "fixture@fix-11984");
+            assert_eq!(
+                error.details["expected_kind"],
+                "registered_repo_slug_or_primary_path"
+            );
+            assert_eq!(error.details["resolved_candidates"], json!(["fixture"]));
+            assert_eq!(
+                error.details["correction_command"], expected_command,
+                "the correction changes only --repo"
+            );
+
+            let cli = Cli::try_parse_from(cook_batch_argv(&corrected))
+                .expect("correction command remains a valid invocation");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let AgentTaskCommand::Fanout(fanout) = agent_task.command else {
+                panic!("fanout command");
+            };
+            let AgentTaskFanoutCommand::CookBatch(replayed) = fanout.command else {
+                panic!("cook-batch command");
+            };
+            assert_eq!(replayed.repo, "fixture");
+            assert_eq!(replayed.from, corrected.from);
+            assert_eq!(replayed.base, corrected.base);
+            assert_eq!(replayed.branch_prefix, corrected.branch_prefix);
+            assert_eq!(replayed.fanout_id, corrected.fanout_id);
+            assert_eq!(replayed.backend, corrected.backend);
+            assert_eq!(replayed.selector, corrected.selector);
+            assert_eq!(replayed.model, corrected.model);
+            assert_eq!(replayed.provider_profile, corrected.provider_profile);
+            assert_eq!(replayed.secret_env, corrected.secret_env);
+            assert_eq!(replayed.gates.verify, corrected.gates.verify);
+            assert_eq!(
+                replayed.gates.private_verify,
+                corrected.gates.private_verify
+            );
+            assert_eq!(
+                replayed.gates.gate_execution_policy,
+                corrected.gates.gate_execution_policy
+            );
+            assert_eq!(
+                replayed.gates.gate_timeout_seconds,
+                corrected.gates.gate_timeout_seconds
+            );
+            assert_eq!(
+                replayed.gates.gate_environment,
+                corrected.gates.gate_environment
+            );
+            assert_eq!(
+                replayed.gates.gate_toolchains,
+                corrected.gates.gate_toolchains
+            );
+            assert_eq!(replayed.max_concurrency, corrected.max_concurrency);
+            assert_eq!(replayed.max_duration, corrected.max_duration);
+
+            let mut unknown = cook_batch_args();
+            unknown.repo = home.path().join("unknown").to_string_lossy().to_string();
+            let error =
+                normalize_cook_batch_repo(&mut unknown).expect_err("unknown path is rejected");
+            assert_eq!(error.details["provided"], unknown.repo);
+            assert_eq!(error.details["resolved_candidates"], json!([]));
+            assert!(error.details["correction_command"].is_null());
+        });
     }
 
     fn with_materialized_cook_batch_worktrees(test: impl FnOnce()) {
