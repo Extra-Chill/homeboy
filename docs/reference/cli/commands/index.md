@@ -49,7 +49,7 @@ Hand-written narrative lives in the [commands index](../../../commands/commands-
 | `homeboy worktree` | [worktree.md](worktree.md) | Manage component-backed task worktrees |
 | `homeboy tunnel` | [tunnel.md](tunnel.md) | Manage private service tunnel declarations |
 | `homeboy runs` | [runs.md](runs.md) | Inspect persisted observation runs and artifacts |
-| `homeboy self` | [self.md](self.md) | Inspect the active Homeboy binary and install signals |
+| `homeboy self` | [self.md](self.md) | Inspect the active Homeboy binary; `self identity` reports its local build identity |
 | `homeboy stack` | [stack.md](stack.md) | Manage stacks (combined-fixes branches built from base + cherry-picked PRs) |
 | `homeboy api` | [api.md](api.md) | Make API requests to a project |
 | `homeboy upgrade` | [upgrade.md](upgrade.md) | Upgrade Homeboy to the latest version |
