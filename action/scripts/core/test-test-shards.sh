@@ -221,9 +221,16 @@ fi
 if [ "$(grep -c 'HOMEBOY_RUST_TEST_RUNNER: nextest' "${WORKFLOW}")" -ne 4 ]; then
   printf 'FAIL: Rust shard jobs do not explicitly select nextest\n'; exit 1
 fi
+if [ "$(grep -c 'prepare-test-shard-workspace.sh' "${WORKFLOW}")" -ne 8 ]; then
+  printf 'FAIL: candidate and baseline Test shard jobs do not reserve and restore action-owned transport paths symmetrically\n'; exit 1
+fi
+if [ "$(grep -c 'Refusing to overwrite consumer path reserved for the Homeboy Action checkout' "${WORKFLOW}")" -ne 4 ]; then
+  printf 'FAIL: candidate and baseline Test shard jobs do not reject action checkout collisions symmetrically\n'; exit 1
+fi
 # The literal workflow expression is the contract.
 # shellcheck disable=SC2016
 grep -F 'baseline_result="$(jq -r --arg command "${COMMAND}"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline metadata is not derived from its aggregate result\n'; exit 1; }
+# shellcheck disable=SC2016
 grep -F 'result_filename="$(command_result_filename "${COMMAND}")"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline lookup does not use the canonical result filename\n'; exit 1; }
 grep -F 'name: Write candidate Test inventory failure provenance' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate inventory failures do not preserve provenance\n'; exit 1; }
 # shellcheck disable=SC2016
