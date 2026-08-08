@@ -46,6 +46,8 @@ Run generic agent task plans
 | `homeboy agent-task runtime-validate` | Validate controller runtime eligibility without executing provider work |
 | `homeboy agent-task replay-provider-boundary` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider |
 | `homeboy agent-task cancel` | Mark a queued or stale-running durable run as cancelled |
+| `homeboy agent-task quarantine` | Exclude one exact queued record while preserving its lifecycle and evidence |
+| `homeboy agent-task rearm` | Return one exact quarantined queued record to normal queue eligibility |
 | `homeboy agent-task resume` | Resume a queued or stale-running durable run |
 | `homeboy agent-task retry` | Submit a fresh durable run from an existing run's plan |
 | `homeboy agent-task fanout` | Cook, submit, and inspect batches of independent tasks |
@@ -288,7 +290,7 @@ Execute a previously submitted durable run
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Exact durable run id to execute. Use this to bypass older queued work |
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -620,6 +622,34 @@ Mark a queued or stale-running durable run as cancelled
 | Option | Value | Description |
 | --- | --- | --- |
 | `--reason` | `<TEXT>` | _no help text_ |
+
+## `homeboy agent-task quarantine`
+
+```sh
+homeboy agent-task quarantine [OPTIONS] <RUN_ID>
+```
+
+Exclude one exact queued record while preserving its lifecycle and evidence
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<RUN_ID>` | yes | Exact durable run id. Cook aliases are not accepted for mutations |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--reason` | `<TEXT>` | _no help text_ |
+
+## `homeboy agent-task rearm`
+
+```sh
+homeboy agent-task rearm <RUN_ID>
+```
+
+Return one exact quarantined queued record to normal queue eligibility
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<RUN_ID>` | yes | Exact durable run id. Cook aliases are not accepted for mutations |
 
 ## `homeboy agent-task resume`
 

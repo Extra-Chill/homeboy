@@ -72,6 +72,15 @@ pub struct ClaimedCookContinuation {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CookContinuationState {
+    Absent,
+    Pending,
+    Claimed,
+    Failed,
+    Completed,
+}
+
 impl ClaimedCookContinuation {
     pub fn continuation(&self) -> &AgentTaskCookContinuation {
         &self.continuation
@@ -953,14 +962,13 @@ pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
     fs::create_dir_all(&root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
     reclaim_dead_claims(&root)?;
-    for entry in fs::read_dir(&root)
+    let mut pending: Vec<_> = fs::read_dir(&root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
-    {
-        let path = entry
-            .map_err(|error| {
-                Error::internal_io(error.to_string(), Some(root.display().to_string()))
-            })?
-            .path();
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
+    pending.sort_by_key(|entry| entry.file_name());
+    for entry in pending {
+        let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("pending") {
             continue;
         }
@@ -981,12 +989,12 @@ pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
                     None,
                 );
                 fail_claimed_path(&claimed, &error.message)?;
-                return Err(error);
+                continue;
             }
         };
         if let Err(error) = validate_continuation(&continuation) {
             fail_claimed_path(&claimed, &error.message)?;
-            return Err(error);
+            continue;
         }
         return Ok(Some(ClaimedCookContinuation {
             continuation,
@@ -1057,9 +1065,39 @@ pub fn claim_continuation_for(
     }))
 }
 
-/// Atomically claim one exact continuation for explicit operator recovery.
-/// Unlike the generic queue path, this never exposes the selected work as
-/// pending for a background consumer to steal between rearm and claim.
+/// Read the durable state of one exact continuation after reclaiming abandoned
+/// claims. Callers use this to distinguish work owned by another consumer from
+/// completed work and an explicitly recoverable failure.
+pub fn continuation_state(cook_id: &str, run_id: &str) -> Result<CookContinuationState> {
+    let hash = content_hash::sha256_hex(format!("{cook_id}:{run_id}").as_bytes());
+    let root = queue_root()?;
+    fs::create_dir_all(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
+    reclaim_dead_claims(&root)?;
+    let claimed_prefix = format!("{hash}.claimed.");
+    if fs::read_dir(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .any(|name| name.starts_with(&claimed_prefix))
+    {
+        return Ok(CookContinuationState::Claimed);
+    }
+    for (suffix, state) in [
+        ("pending", CookContinuationState::Pending),
+        ("failed", CookContinuationState::Failed),
+        ("completed", CookContinuationState::Completed),
+    ] {
+        if root.join(format!("{hash}.{suffix}")).exists() {
+            return Ok(state);
+        }
+    }
+    Ok(CookContinuationState::Absent)
+}
+
+/// Atomically claim an existing failed continuation for explicit operator
+/// recovery. Unlike the generic queue path, this never exposes the selected
+/// work as pending for a background consumer to steal between rearm and claim.
 pub fn claim_continuation_for_recovery(
     cook_id: &str,
     run_id: &str,
@@ -1077,14 +1115,8 @@ pub fn claim_continuation_for_recovery(
             None,
         ));
     }
-    let continuation = AgentTaskCookContinuation {
-        schema: CONTINUATION_SCHEMA.to_string(),
-        key: format!("{cook_id}:{run_id}"),
-        cook_id: cook_id.to_string(),
-        run_id: run_id.to_string(),
-        retries: 0,
-    };
-    let hash = content_hash::sha256_hex(continuation.key.as_bytes());
+    let key = format!("{cook_id}:{run_id}");
+    let hash = content_hash::sha256_hex(key.as_bytes());
     let root = queue_root()?;
     fs::create_dir_all(&root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
@@ -1095,91 +1127,101 @@ pub fn claim_continuation_for_recovery(
         .filter_map(|entry| entry.file_name().into_string().ok())
         .any(|name| name.starts_with(&format!("{hash}.claimed.")))
     {
-        return Ok(None);
+        return Err(rearm_state_error(
+            cook_id,
+            run_id,
+            CookContinuationState::Claimed,
+        ));
     }
 
     let claimed = root.join(format!("{hash}.claimed.{}", std::process::id()));
-    for state in ["pending", "failed"] {
-        let source = root.join(format!("{hash}.{state}"));
-        match fs::rename(&source, &claimed) {
-            Ok(()) => {
-                fs::write(
-                    &claimed,
-                    serde_json::to_vec(&continuation)
-                        .map_err(|error| Error::internal_json(error.to_string(), None))?,
-                )
-                .map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(claimed.display().to_string()))
-                })?;
-                return Ok(Some(ClaimedCookContinuation {
-                    continuation,
-                    path: claimed,
-                }));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some(source.display().to_string()),
-                ))
-            }
+    let failed = root.join(format!("{hash}.failed"));
+    match fs::rename(&failed, &claimed) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(rearm_state_error(
+                cook_id,
+                run_id,
+                continuation_state(cook_id, run_id)?,
+            ))
         }
-    }
-
-    let completed = root.join(format!("{hash}.completed"));
-    if completed.exists() {
-        let record = agent_task_lifecycle::status(run_id)?;
-        if record
-            .metadata
-            .pointer("/latest_promotion/status")
-            .and_then(Value::as_str)
-            != Some("verification_pending")
-        {
-            return Ok(None);
-        }
-        fs::rename(&completed, &claimed).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(completed.display().to_string()))
-        })?;
-        fs::write(
-            &claimed,
-            serde_json::to_vec(&continuation)
-                .map_err(|error| Error::internal_json(error.to_string(), None))?,
-        )
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some(claimed.display().to_string()))
-        })?;
-        return Ok(Some(ClaimedCookContinuation {
-            continuation,
-            path: claimed,
-        }));
-    }
-
-    let mut file = match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&claimed)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
         Err(error) => {
             return Err(Error::internal_io(
                 error.to_string(),
-                Some(claimed.display().to_string()),
+                Some(failed.display().to_string()),
             ))
         }
-    };
-    file.write_all(
-        &serde_json::to_vec(&continuation)
+    }
+    let mut continuation: AgentTaskCookContinuation =
+        match read_claimed_continuation(&claimed, "failed durable continuation") {
+            Ok(continuation) => continuation,
+            Err(error) => {
+                fail_claimed_path(&claimed, &error.message)?;
+                return Err(error);
+            }
+        };
+    if let Err(error) = validate_continuation(&continuation) {
+        fail_claimed_path(&claimed, &error.message)?;
+        return Err(error);
+    }
+    if continuation.key != key {
+        let error = Error::validation_invalid_argument(
+            "cook_continuation",
+            "failed durable continuation key does not match its Cook attempt",
+            Some(continuation.key.clone()),
+            None,
+        );
+        fail_claimed_path(&claimed, &error.message)?;
+        return Err(error);
+    }
+    continuation.retries = 0;
+    fs::write(
+        &claimed,
+        serde_json::to_vec(&continuation)
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
     )
     .map_err(|error| Error::internal_io(error.to_string(), Some(claimed.display().to_string())))?;
-    file.sync_all().map_err(|error| {
-        Error::internal_io(error.to_string(), Some(claimed.display().to_string()))
-    })?;
     Ok(Some(ClaimedCookContinuation {
         continuation,
         path: claimed,
     }))
+}
+
+fn rearm_state_error(cook_id: &str, run_id: &str, state: CookContinuationState) -> Error {
+    Error::validation_invalid_argument(
+        "cook_continuation.rearm",
+        format!(
+            "Cook `{cook_id}` attempt `{run_id}` cannot be rearmed because its continuation is {state:?}; only an existing failed continuation can be rearmed"
+        ),
+        Some(run_id.to_string()),
+        None,
+    )
+}
+
+fn read_claimed_continuation(
+    path: &std::path::Path,
+    description: &str,
+) -> Result<AgentTaskCookContinuation> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    if !metadata.is_file() {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation",
+            format!("unreadable {description}: expected a regular file"),
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    let raw = fs::read(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    serde_json::from_slice(&raw).map_err(|error| {
+        Error::validation_invalid_argument(
+            "cook_continuation",
+            format!("malformed {description}: {error}"),
+            Some(path.display().to_string()),
+            None,
+        )
+    })
 }
 
 pub fn reconstruct_options(recipe: &AgentTaskCookRecipe) -> Result<AgentTaskCookServiceOptions> {
@@ -1806,6 +1848,18 @@ fn reclaim_dead_claims(root: &std::path::Path) -> Result<()> {
             continue;
         };
         if !homeboy_core::process::pid_is_running(pid) {
+            let continuation: AgentTaskCookContinuation =
+                match read_claimed_continuation(&path, "durable continuation") {
+                    Ok(continuation) => continuation,
+                    Err(error) => {
+                        fail_claimed_path(&path, &error.message)?;
+                        continue;
+                    }
+                };
+            if let Err(error) = validate_continuation(&continuation) {
+                fail_claimed_path(&path, &error.message)?;
+                continue;
+            }
             fs::rename(&path, continuation_state_path(&path, "pending")).map_err(|error| {
                 Error::internal_io(error.to_string(), Some(path.display().to_string()))
             })?;
@@ -2338,55 +2392,79 @@ mod tests {
                 .fail("wrong controller runtime")
                 .unwrap();
 
+            assert_eq!(
+                continuation_state("cook", "run").unwrap(),
+                CookContinuationState::Failed
+            );
             assert!(!enqueue_terminal_continuation("cook", "run").unwrap());
             assert!(rearm_failed_terminal_continuation("cook", "run").unwrap());
+            assert_eq!(
+                continuation_state("cook", "run").unwrap(),
+                CookContinuationState::Pending
+            );
             let claim = claim_continuation_for("cook", "run")
                 .unwrap()
                 .expect("explicit recovery rearmed the failed continuation");
+            assert_eq!(
+                continuation_state("cook", "run").unwrap(),
+                CookContinuationState::Claimed
+            );
             assert_eq!(claim.continuation().retries, 0);
             claim.complete().unwrap();
 
+            assert_eq!(
+                continuation_state("cook", "run").unwrap(),
+                CookContinuationState::Completed
+            );
             assert!(!rearm_failed_terminal_continuation("cook", "run").unwrap());
         });
     }
 
     #[test]
-    fn targeted_recovery_claim_never_exposes_fresh_work_to_generic_consumers() {
+    fn targeted_recovery_claim_keeps_failed_work_owned_during_a_daemon_race() {
         homeboy_core::test_support::with_isolated_home(|_| {
             write_recipe(&recipe()).unwrap();
+            enqueue_terminal_continuation("cook", "run").unwrap();
+            claim_continuation_for("cook", "run")
+                .unwrap()
+                .unwrap()
+                .fail("promotion failed")
+                .unwrap();
 
             let claim = claim_continuation_for_recovery("cook", "run")
                 .unwrap()
-                .expect("operator owns exact continuation");
+                .expect("operator atomically owns the failed continuation");
 
             assert_eq!(claim.continuation().key, "cook:run");
-            assert!(claim_continuation().unwrap().is_none());
+            assert!(
+                claim_continuation().unwrap().is_none(),
+                "the daemon cannot steal a failed continuation while explicit recovery owns it"
+            );
             claim.complete().unwrap();
         });
     }
 
     #[test]
-    fn targeted_recovery_reclaims_completed_but_still_unverified_work() {
+    fn targeted_recovery_rejects_absent_pending_and_completed_continuations() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            persist_recipe_run();
+            write_recipe(&recipe()).unwrap();
+            let absent = claim_continuation_for_recovery("cook", "run")
+                .expect_err("absent work cannot be rearmed");
+            assert!(absent.message.contains("Absent"));
+
             enqueue_terminal_continuation("cook", "run").unwrap();
+            let pending = claim_continuation_for_recovery("cook", "run")
+                .expect_err("pending work cannot be rearmed");
+            assert!(pending.message.contains("Pending"));
+
             claim_continuation_for("cook", "run")
                 .unwrap()
                 .unwrap()
                 .complete()
                 .unwrap();
-            crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
-                record.metadata["latest_promotion"] =
-                    serde_json::json!({ "status": "verification_pending" });
-            })
-            .unwrap();
-
-            let claim = claim_continuation_for_recovery("cook", "run")
-                .unwrap()
-                .expect("unverified completed claim is recoverable");
-
-            assert_eq!(claim.continuation().key, "cook:run");
-            claim.complete().unwrap();
+            let completed = claim_continuation_for_recovery("cook", "run")
+                .expect_err("completed work cannot be rearmed");
+            assert!(completed.message.contains("Completed"));
         });
     }
 
@@ -2470,6 +2548,66 @@ mod tests {
                 .unwrap()
                 .contains("malformed durable continuation"));
             assert!(!root.join("malformed.pending").exists());
+        });
+    }
+
+    #[test]
+    fn malformed_failed_recovery_is_terminalized_while_its_claim_is_live() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            write_recipe(&recipe()).unwrap();
+            let root = queue_root().unwrap();
+            fs::create_dir_all(&root).unwrap();
+            let hash = content_hash::sha256_hex(b"cook:run");
+            fs::write(root.join(format!("{hash}.failed")), b"not json").unwrap();
+
+            let error = claim_continuation_for_recovery("cook", "run")
+                .expect_err("malformed failed work must be terminalized after its atomic claim");
+
+            assert!(error
+                .message
+                .contains("malformed failed durable continuation"));
+            assert!(root.join(format!("{hash}.failed")).exists());
+            assert!(fs::read_to_string(root.join(format!("{hash}.diagnostic")))
+                .unwrap()
+                .contains("malformed failed durable continuation"));
+            assert!(!root.join(format!("{hash}.pending")).exists());
+            assert!(!root
+                .join(format!("{hash}.claimed.{}", std::process::id()))
+                .exists());
+        });
+    }
+
+    #[test]
+    fn unreadable_stale_recovery_claim_is_terminalized_without_requeueing() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            write_recipe(&recipe()).unwrap();
+            let root = queue_root().unwrap();
+            fs::create_dir_all(&root).unwrap();
+            let hash = content_hash::sha256_hex(b"cook:run");
+            // A directory is unreadable as a continuation payload on every
+            // supported platform while still allowing the stale claim rename.
+            fs::create_dir(root.join(format!("{hash}.claimed.4294967295"))).unwrap();
+
+            let error = claim_continuation_for_recovery("cook", "run")
+                .expect_err("stale unreadable work must remain terminal failed");
+
+            assert!(
+                error
+                    .message
+                    .contains("unreadable failed durable continuation"),
+                "{error:?}"
+            );
+            assert!(root.join(format!("{hash}.failed")).exists());
+            assert!(root.join(format!("{hash}.diagnostic")).exists());
+            assert!(!root.join(format!("{hash}.pending")).exists());
+            assert!(
+                !fs::read_dir(&root)
+                    .unwrap()
+                    .filter_map(std::result::Result::ok)
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .any(|name| name.starts_with(&format!("{hash}.claimed."))),
+                "a stale malformed claim must not remain claimed"
+            );
         });
     }
 

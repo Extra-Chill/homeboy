@@ -1484,7 +1484,7 @@ pub(super) fn runner_status_operator_commands(
         }
     }
 
-    if session.mode == RunnerTunnelMode::DirectSsh {
+    if session.mode == RunnerTunnelMode::DirectSsh && report.connected {
         commands.push(RunnerOperatorCommand {
             scope: "generation_reconcile",
             runner_id: report.runner_id.clone(),

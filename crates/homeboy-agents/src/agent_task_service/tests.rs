@@ -15,6 +15,7 @@ use crate::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry,
     AgentTaskProviderRotationPolicy, AgentTaskScheduler, AgentTaskState,
 };
+use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::run_lifecycle_record::RunExecutionState;
 use homeboy_core::test_support::with_isolated_home;
 use homeboy_core::worktree;
@@ -797,30 +798,348 @@ fn service_materializes_component_worktree_before_provider_dispatch() {
 }
 
 #[test]
-fn run_next_records_failed_lifecycle_when_prepare_after_claim_fails() {
+fn run_next_quarantines_missing_required_secret_before_claiming_and_runs_later_work() {
     with_isolated_home(|_| {
         let mut plan = test_plan();
+        plan.metadata = serde_json::json!({
+            "attempt_dispatch": { "kind": "test-detached" }
+        });
         plan.tasks[0]
             .executor
             .secret_env
             .push("__HOMEBOY_TEST_MISSING_SECRET_ENV_RUN_NEXT__".to_string());
         std::env::remove_var("__HOMEBOY_TEST_MISSING_SECRET_ENV_RUN_NEXT__");
-        agent_task_lifecycle::submit_plan(&plan, Some("run-next-preexecution-fails"))
+        agent_task_lifecycle::submit_plan(&plan, Some("run-next-a-missing-secret"))
             .expect("submitted");
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("run-next-b-eligible"))
+            .expect("eligible work submitted");
 
-        let error = run_next(SucceedingExecutor).expect_err("prepare failure returned");
-        let record = lifecycle_status("run-next-preexecution-fails").expect("status persisted");
+        let result = run_next(SucceedingExecutor).expect("eligible work runs");
+        let record =
+            lifecycle_status("run-next-a-missing-secret").expect("quarantined record persisted");
 
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert_eq!(record.state, AgentTaskRunState::Failed);
-        assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
-        assert_eq!(record.lifecycle.execution.state, RunExecutionState::Failed);
-        assert!(record.lifecycle.execution.finished_at.is_some());
         assert_eq!(
-            record.metadata["pre_execution_failure"]["phase"],
-            "prepare_plan_for_execution"
+            result.value.expect("eligible aggregate").plan_id,
+            "service-plan"
         );
-        assert!(record.aggregate_path.is_some());
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].run_id, "run-next-a-missing-secret");
+        assert_eq!(
+            result.skipped[0].dispatcher_kind.as_deref(),
+            Some("test-detached")
+        );
+        assert_eq!(
+            result.skipped[0].category,
+            "required_environment_preflight_failed"
+        );
+        assert_eq!(result.skipped[0].error_code, "validation.invalid_argument");
+        assert_eq!(
+            result.skipped[0].summary,
+            "required environment is unavailable for queued execution"
+        );
+        assert_eq!(result.skipped[0].provider_id.as_deref(), Some("service"));
+        assert_eq!(
+            result.skipped[0].required_environment_variables,
+            vec!["__HOMEBOY_TEST_MISSING_SECRET_ENV_RUN_NEXT__"]
+        );
+        assert_eq!(record.state, AgentTaskRunState::Queued);
+        assert_eq!(record.tasks[0].state, AgentTaskState::Queued);
+        assert_eq!(record.lifecycle.execution.state, RunExecutionState::Queued);
+        assert_eq!(
+            record.metadata["queue_quarantine"]["error_code"],
+            "validation.invalid_argument"
+        );
+        assert!(record.aggregate_path.is_none());
+        assert_eq!(
+            lifecycle_status("run-next-b-eligible")
+                .expect("eligible record")
+                .state,
+            AgentTaskRunState::Succeeded
+        );
+    });
+}
+
+#[test]
+fn run_next_quarantines_an_older_ineligible_record_and_executes_the_next_record() {
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("run-next-test-detached"))
+            .expect("older record submitted");
+        let plan_path = homeboy_core::paths::homeboy_data()
+            .expect("data path")
+            .join("agent-task-runs/run-next-test-detached/plan.json");
+        let mut malformed: Value =
+            serde_json::from_slice(&std::fs::read(&plan_path).expect("older plan"))
+                .expect("plan JSON");
+        malformed["options"]["execution_budget"]["version"] = serde_json::json!(999);
+        std::fs::write(
+            &plan_path,
+            serde_json::to_vec(&malformed).expect("encode plan"),
+        )
+        .expect("persist malformed plan");
+
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("run-next-eligible"))
+            .expect("eligible record submitted");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let result = run_next(CountingExecutor {
+            calls: Arc::clone(&calls),
+        })
+        .expect("next eligible record executes");
+        let quarantined = agent_task_lifecycle::exact_record("run-next-test-detached")
+            .expect("quarantined record");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.value.expect("aggregate").plan_id, "service-plan");
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].run_id, "run-next-test-detached");
+        assert_eq!(quarantined.state, AgentTaskRunState::Queued);
+        assert_eq!(
+            quarantined.metadata["queue_quarantine"]["category"],
+            "queue_admission_preflight_failed"
+        );
+        assert_eq!(
+            lifecycle_status("run-next-eligible")
+                .expect("eligible record")
+                .state,
+            AgentTaskRunState::Succeeded
+        );
+    });
+}
+
+#[test]
+fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
+    with_isolated_home(|_| {
+        const LEAKS: [&str; 5] = [
+            "LEAK_READINESS_REASON",
+            "LEAK_REMEDIATION",
+            "LEAK_IDENTITY",
+            "LEAK_COMMAND_OUTPUT",
+            "LEAK_ENV_VALUE",
+        ];
+        let temp = tempfile::tempdir().expect("temporary readiness provider");
+        let script = temp.path().join("adversarial-readiness.js");
+        std::fs::write(
+            &script,
+            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'LEAK_COMMAND_OUTPUT',retryable:false,remediation:'LEAK_REMEDIATION',reason:'LEAK_READINESS_REASON',cache_key:'LEAK_ENV_VALUE',identity:{value:'LEAK_IDENTITY'}}));",
+        )
+        .expect("readiness script written");
+        let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+            serde_json::from_value(serde_json::json!({
+                "id": "locally-trusted-readiness-provider",
+                "backend": "adversarial-readiness"
+            }))
+            .expect("provider fixture");
+        provider.readiness_invocation = Some(CommandInvocation {
+            argv: vec!["node".to_string(), script.display().to_string()],
+            ..CommandInvocation::default()
+        });
+        assert_eq!(provider.backend, "adversarial-readiness");
+        assert!(provider.readiness_invocation.is_some());
+
+        let mut adversarial = test_plan();
+        adversarial.tasks[0].executor.backend = "adversarial-readiness".to_string();
+        adversarial.tasks[0].executor.selector = None;
+        assert_eq!(
+            adversarial.tasks[0].executor.backend,
+            "adversarial-readiness"
+        );
+        crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
+            &adversarial,
+            &[provider.clone()],
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )
+        .expect_err("adversarial readiness provider rejects the plan");
+        agent_task_lifecycle::submit_plan(&adversarial, Some("run-next-a-adversarial-readiness"))
+            .expect("adversarial run submitted");
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("run-next-b-eligible"))
+            .expect("eligible run submitted");
+
+        let result = run_next_with_cook_dispatcher_and_queue_preflight(
+            SucceedingExecutor,
+            |_| Ok(None),
+            |plan| {
+                if plan.tasks[0].executor.backend == "adversarial-readiness" {
+                    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
+                        plan,
+                        &[provider.clone()],
+                        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+                    )
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect("adversarial readiness skip does not block eligible work");
+        let record =
+            lifecycle_status("run-next-a-adversarial-readiness").expect("quarantined record");
+        let status = agent_task_lifecycle::status("run-next-a-adversarial-readiness")
+            .expect("status projection");
+        let logs = agent_task_lifecycle::logs("run-next-a-adversarial-readiness")
+            .expect("logs projection");
+        let rendered = serde_json::to_string(&serde_json::json!({
+            "record": record,
+            "status": status,
+            "logs": logs,
+            "queue_skips": result.skipped,
+        }))
+        .expect("queue projections serialize");
+
+        assert_eq!(
+            result.value.expect("eligible aggregate").plan_id,
+            "service-plan"
+        );
+        assert_eq!(
+            record.metadata["queue_quarantine"]["category"],
+            "queue_admission_preflight_failed"
+        );
+        assert_eq!(
+            record.metadata["queue_quarantine"]["error_code"],
+            "validation.invalid_argument"
+        );
+        assert!(record.metadata["queue_quarantine"].get("details").is_none());
+        assert!(record.metadata["queue_quarantine"].get("reason").is_none());
+        for leak in LEAKS {
+            assert!(
+                !rendered.contains(leak),
+                "redacted queue output leaked {leak}"
+            );
+        }
+    });
+}
+
+#[test]
+fn run_submitted_selects_an_exact_run_id_without_claiming_older_queued_work() {
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("run-exact-older"))
+            .expect("older run submitted");
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("run-exact-target"))
+            .expect("target run submitted");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let result = run_submitted(
+            "run-exact-target".to_string(),
+            CountingExecutor {
+                calls: Arc::clone(&calls),
+            },
+        )
+        .expect("exact run executes");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.value.plan_id, "service-plan");
+        assert_eq!(
+            lifecycle_status("run-exact-older")
+                .expect("older record")
+                .state,
+            AgentTaskRunState::Queued
+        );
+        assert_eq!(
+            lifecycle_status("run-exact-target")
+                .expect("target record")
+                .state,
+            AgentTaskRunState::Succeeded
+        );
+    });
+}
+
+#[test]
+fn quarantine_and_cancellation_race_keeps_cancellation_terminal() {
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("quarantine-cancel-race"))
+            .expect("run submitted");
+        let barrier = Arc::new(Barrier::new(2));
+        let cancel_barrier = Arc::clone(&barrier);
+        let cancel = std::thread::spawn(move || {
+            cancel_barrier.wait();
+            agent_task_lifecycle::cancel_run("quarantine-cancel-race", Some("operator cancel"))
+        });
+        barrier.wait();
+        let quarantine = agent_task_lifecycle::quarantine_queued_run_exact(
+            "quarantine-cancel-race",
+            "operator quarantine",
+        );
+
+        let cancelled = cancel.join().expect("cancellation thread completes");
+        let record = lifecycle_status("quarantine-cancel-race").expect("durable record");
+
+        assert!(cancelled.is_ok());
+        if quarantine.is_ok() {
+            assert_eq!(
+                record.metadata["queue_quarantine"]["category"],
+                "operator_quarantine"
+            );
+        }
+        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert_eq!(record.metadata["cancel_reason"], "operator cancel");
+    });
+}
+
+#[test]
+fn quarantined_run_requires_explicit_rearm_before_it_is_eligible() {
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("quarantine-rearm"))
+            .expect("run submitted");
+        let operator_reason = format!("maintenance\n{}", "x".repeat(300));
+        let quarantined =
+            agent_task_lifecycle::quarantine_queued_run_exact("quarantine-rearm", &operator_reason)
+                .expect("exact queued run quarantined");
+
+        assert_eq!(quarantined.state, AgentTaskRunState::Queued);
+        assert!(!quarantined.state.is_terminal());
+        assert_eq!(
+            quarantined.metadata["queue_quarantine"]["category"],
+            "operator_quarantine"
+        );
+        assert_eq!(
+            quarantined.metadata["queue_quarantine"]["operator_reason"]
+                .as_str()
+                .expect("normalized operator reason")
+                .len(),
+            240
+        );
+        assert!(!quarantined.metadata["queue_quarantine"]["operator_reason"]
+            .as_str()
+            .expect("normalized operator reason")
+            .contains('\n'));
+        assert!(agent_task_lifecycle::mark_running("quarantine-rearm").is_err());
+
+        let rearmed = agent_task_lifecycle::rearm_quarantined_run("quarantine-rearm")
+            .expect("exact quarantined run rearmed");
+        assert_eq!(rearmed.state, AgentTaskRunState::Queued);
+        assert!(rearmed.metadata.get("queue_quarantine").is_none());
+    });
+}
+
+#[test]
+fn quarantine_and_rearm_reject_sanitized_aliases_without_mutating_the_literal_record() {
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("foo_bar"))
+            .expect("literal record submitted");
+
+        let quarantine_error = agent_task_lifecycle::quarantine_queued_run_exact("foo/bar", "bad")
+            .expect_err("sanitized alias rejected");
+        let unchanged = lifecycle_status("foo_bar").expect("literal record remains queued");
+        assert_eq!(
+            quarantine_error.code.as_str(),
+            "validation.invalid_argument"
+        );
+        assert_eq!(unchanged.state, AgentTaskRunState::Queued);
+        assert!(unchanged.metadata.get("queue_quarantine").is_none());
+
+        agent_task_lifecycle::quarantine_queued_run_exact("foo_bar", "explicit quarantine")
+            .expect("literal record quarantined");
+        let rearm_error = agent_task_lifecycle::rearm_quarantined_run("foo/bar")
+            .expect_err("sanitized alias rejected");
+        let quarantined = lifecycle_status("foo_bar").expect("quarantine remains intact");
+        assert_eq!(rearm_error.code.as_str(), "validation.invalid_argument");
+        assert_eq!(quarantined.state, AgentTaskRunState::Queued);
+        assert_eq!(
+            quarantined.metadata["queue_quarantine"]["category"],
+            "operator_quarantine"
+        );
+        assert_eq!(
+            quarantined.metadata["queue_quarantine"]["operator_reason"],
+            "explicit quarantine"
+        );
     });
 }
 
@@ -1848,6 +2167,7 @@ struct CapturingExecutor {
     observed_request: Arc<Mutex<Option<AgentTaskRequest>>>,
 }
 
+#[derive(Clone)]
 struct CountingExecutor {
     calls: Arc<AtomicUsize>,
 }
