@@ -36,7 +36,8 @@ pub use types::{
     GlobalActivityStatus, GlobalDaemonStatus, GlobalInventoryStatus, GlobalRunnerStatus,
     GlobalStatusOutput, ProjectComponentDashboardStatus, ProjectDashboardOutput,
     ProjectDashboardSummary, ProjectStatusRow, StatusArgs, StatusOutput, StatusResult,
-    StatusTiming, UnregisteredContextStatusOutput, UnreleasedMerge, UpstreamDrift,
+    StatusTiming, UnregisteredContextStatusOutput, UnregisteredControlPlaneStatus, UnreleasedMerge,
+    UpstreamDrift,
 };
 use types::{StatusProgress, StatusTimer, READY_TO_DEPLOY_NOTE, UNRELEASED_MERGES_NOTE};
 
@@ -117,7 +118,11 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
                     "Repo not attached. Prefer: `homeboy project components attach-path <project-id> <path>`"
                         .to_string()
                 }),
-                action: "Run `homeboy status --all` to inspect every configured component, or attach this checkout to a project/component first.",
+                action: "Run `homeboy status --global` for bounded local runner/control-plane health, `homeboy status --all` to inspect every configured component, or attach this checkout to a project/component first.",
+                control_plane: UnregisteredControlPlaneStatus {
+                    status: "not_checked",
+                    command: "homeboy status --global",
+                },
             }),
             0,
         ));
@@ -820,6 +825,10 @@ mod tests {
     fn global_status_from_an_unregistered_cwd_is_local_and_bounded() {
         let _guard = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         crate::test_support::with_isolated_home(|_| {
+            // A configured runner with no session is disconnected. The global
+            // follow-up must expose that persisted fact without contacting it.
+            runner::create(r#"{"id":"disconnected","kind":"local"}"#, false)
+                .expect("register disconnected runner");
             let original_cwd = env::current_dir().expect("current dir");
             let dir = TempDir::new().expect("tempdir");
             env::set_current_dir(dir.path()).expect("set unregistered cwd");
@@ -842,6 +851,8 @@ mod tests {
             assert_eq!(output.inventory.projects, 0);
             assert_eq!(output.inventory.components, 0);
             assert_eq!(output.runners.inspected, output.runners.registered);
+            assert!(output.runners.registered >= 1);
+            assert!(output.runners.disconnected >= 1);
             assert_eq!(output.activity.active, 0);
             assert!(output.drill_down.contains(&"homeboy daemon status"));
         });
@@ -1182,6 +1193,9 @@ mod tests {
                         dir.path().canonicalize().ok()
                     );
                     assert!(output.suggestion.contains("attach"));
+                    assert_eq!(output.control_plane.status, "not_checked");
+                    assert_eq!(output.control_plane.command, "homeboy status --global");
+                    assert!(output.action.contains("homeboy status --global"));
                     assert!(output.action.contains("homeboy status --all"));
                 }
                 _ => panic!("expected unregistered context output"),
