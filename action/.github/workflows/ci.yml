@@ -638,6 +638,7 @@ jobs:
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - name: Reserve action-owned candidate Test shard paths
+        id: prepare-workspace
         run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
       - id: candidate-binary
         env:
@@ -722,6 +723,9 @@ jobs:
         run: |
           echo '::error::Candidate Test inventory generation failed; shard execution was not started. Inspect the inventory provenance artifact and this job for the underlying command failure.'
           exit 1
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-workspace.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
 
   candidate-test-shards:
     name: Candidate Test shard ${{ matrix.shard_id }}
@@ -747,6 +751,7 @@ jobs:
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - name: Reserve action-owned candidate Test shard paths
+        id: prepare-workspace
         run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
       - id: candidate-binary
         env:
@@ -823,6 +828,9 @@ jobs:
       - name: Fail candidate Test shard when terminal evidence is not pass
         if: always() && steps.phase.outcome == 'failure'
         run: exit 1
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-workspace.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
 
   reconcile-test-shards:
     name: Test
@@ -939,6 +947,7 @@ jobs:
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - name: Reserve action-owned baseline Test shard paths
+        id: prepare-workspace
         run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
       - id: candidate-binary
         env:
@@ -1000,6 +1009,9 @@ jobs:
             homeboy-test-inventory.json
             homeboy-test-shard-plan.json
           if-no-files-found: error
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-workspace.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
 
   baseline-test-shards:
     name: Baseline Test shard ${{ matrix.shard_id }}
@@ -1025,6 +1037,7 @@ jobs:
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - name: Reserve action-owned baseline Test shard paths
+        id: prepare-workspace
         run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
       - id: candidate-binary
         env:
@@ -1081,6 +1094,9 @@ jobs:
         with:
           name: homeboy-test-shard-baseline-${{ matrix.shard_id }}-${{ github.run_attempt }}
           path: differential-phase
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-workspace.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
 
   reconcile:
     # This is the sole verdict and retains the established required-check name.
