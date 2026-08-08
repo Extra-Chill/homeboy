@@ -322,6 +322,25 @@ impl ObservationStore {
         Ok(rows == 1)
     }
 
+    /// Persist a retryable recovery blocker only while this child still owns the
+    /// source lease. The replacement metadata deliberately releases the lease
+    /// so a later, bounded retry can make progress.
+    pub fn defer_running_runner_exec_recovery_source(
+        &self,
+        run_id: &str,
+        child_token: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<bool> {
+        let metadata_json = serialize_metadata(&metadata_json)?;
+        let rows = execute_with_retry("defer claimed runner recovery source", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = ?1 WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?3",
+                params![metadata_json, run_id, child_token],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
     pub fn start_run_with_context(
         &self,
         run: NewRunRecord,

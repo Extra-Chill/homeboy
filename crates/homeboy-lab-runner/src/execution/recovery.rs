@@ -19,6 +19,7 @@ const RECOVERY_OWNER_ID: &str = "runner-exec-recovery";
 const RECOVERY_CHILD_KIND: &str = "runner_exec_recovery_child";
 const RECOVERY_OWNER_LEASE: Duration = Duration::from_secs(30);
 const RECOVERY_LEASE_HEARTBEAT: Duration = Duration::from_secs(1);
+const MAX_SOURCE_RECOVERY_DEFERRALS: u64 = 3;
 #[derive(Clone)]
 struct RecoveryWorker {
     id: String,
@@ -223,7 +224,9 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
                     unavailable_endpoints.insert(endpoint);
                 }
-                deferred += 1;
+                if defer_or_fail_recovery_source(&store, run, &worker.token, job_id, &error)? {
+                    deferred += 1;
+                }
                 continue;
             }
         };
@@ -335,6 +338,54 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
         reconciled += 1;
     }
     Ok((reconciled, deferred))
+}
+
+/// A runner that remains unavailable cannot be retried by every unrelated
+/// command forever. Keep a small, inspectable retry budget, then terminalize
+/// the source with the exact blocker retained in its durable metadata.
+fn defer_or_fail_recovery_source(
+    store: &ObservationStore,
+    run: &homeboy_core::observation::RunRecord,
+    child_token: &str,
+    runner_job_id: &str,
+    error: &Error,
+) -> Result<bool> {
+    let attempts = run
+        .metadata_json
+        .pointer("/runner_exec_recovery/deferral_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        + 1;
+    let mut metadata = run.metadata_json.clone();
+    metadata.as_object_mut().map(|metadata| {
+        metadata.remove("runner_exec_source_lease");
+    });
+    metadata["runner_exec_recovery"] = json!({
+        "schema": "homeboy/runner-exec-recovery/v1",
+        "phase": if attempts >= MAX_SOURCE_RECOVERY_DEFERRALS { "blocked" } else { "deferred" },
+        "deferral_count": attempts,
+        "max_deferrals": MAX_SOURCE_RECOVERY_DEFERRALS,
+        "reason": error.message,
+        "details": error.details,
+        "inspection_action": format!("homeboy runs show {}", run.id),
+    });
+    if attempts >= MAX_SOURCE_RECOVERY_DEFERRALS {
+        metadata["runner_terminal_projection"] = json!({
+            "state": "recovery_blocked",
+            "classification": "runner_unavailable_after_bounded_recovery",
+            "runner_id": run.metadata_json["runner_id"],
+            "runner_job_id": runner_job_id,
+        });
+        store.fail_running_runner_exec_recovery_source(
+            &run.id,
+            child_token,
+            runner_job_id,
+            metadata,
+        )?;
+        return Ok(false);
+    }
+    store.defer_running_runner_exec_recovery_source(&run.id, child_token, metadata)?;
+    Ok(true)
 }
 
 fn endpoint_identity(session: &crate::RunnerSession) -> String {
@@ -1009,6 +1060,102 @@ mod tests {
                     "job",
                 )
                 .expect("expired takeover"));
+        });
+    }
+
+    #[test]
+    fn repeated_deferred_recovery_converges_without_stale_children() {
+        with_isolated_home(|_| {
+            let run_id = "unavailable-source";
+            let runner_job_id = "unavailable-job";
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                run_id,
+                "unavailable-runner",
+                runner_job_id,
+                "/workspace",
+                &[],
+            )
+            .expect("source");
+            let store = ObservationStore::open_initialized().expect("store");
+            let error = Error::validation_invalid_argument(
+                "runner",
+                "runner has no persisted daemon session for recovery",
+                Some("unavailable-runner".to_string()),
+                None,
+            );
+
+            let mut child_ids = BTreeSet::new();
+            for attempt in 1..=MAX_SOURCE_RECOVERY_DEFERRALS {
+                let owner = schedule_terminal_runner_exec_recovery()
+                    .expect("schedule")
+                    .expect("owner");
+                let work = run_scheduled_terminal_runner_exec_recovery(
+                    &owner.owner_id,
+                    &owner.owner_token,
+                )
+                .expect("schedule child")
+                .expect("owner work");
+                assert_eq!(work.children.len(), 1);
+                let child = &work.children[0];
+                child_ids.insert(child.child_id.clone());
+                let source = store.get_run(run_id).expect("read").expect("source");
+                assert_eq!(
+                    defer_or_fail_recovery_source(
+                        &store,
+                        &source,
+                        &child.child_token,
+                        runner_job_id,
+                        &error,
+                    )
+                    .expect("record bounded deferral"),
+                    attempt < MAX_SOURCE_RECOVERY_DEFERRALS,
+                );
+                let child_record = store
+                    .get_run(&child.child_id)
+                    .expect("read")
+                    .expect("child");
+                store
+                    .finish_running_run_with_owner_token(
+                        &child.child_id,
+                        &child.child_token,
+                        RunStatus::Pass,
+                        child_record.metadata_json,
+                    )
+                    .expect("finish child");
+                finish_scheduled_terminal_runner_exec_recovery(
+                    &owner.owner_id,
+                    &owner.owner_token,
+                    1,
+                    0,
+                    usize::from(attempt < MAX_SOURCE_RECOVERY_DEFERRALS),
+                )
+                .expect("finish owner");
+            }
+
+            let source = store.get_run(run_id).expect("read").expect("source");
+            assert_eq!(source.status, RunStatus::Fail.as_str());
+            assert_eq!(
+                source.metadata_json["runner_exec_recovery"]["deferral_count"],
+                MAX_SOURCE_RECOVERY_DEFERRALS
+            );
+            assert_eq!(
+                source.metadata_json["runner_terminal_projection"]["classification"],
+                "runner_unavailable_after_bounded_recovery"
+            );
+            let reader = ObservationStore::open_scheduler_reader().expect("reader");
+            assert!(recovery_candidates(&reader).expect("candidates").is_empty());
+            let children = store
+                .list_runs(RunListFilter {
+                    kind: Some(RECOVERY_CHILD_KIND.to_string()),
+                    ..RunListFilter::default()
+                })
+                .expect("list children");
+            assert_eq!(child_ids.len(), 1, "retries reuse one child identity");
+            assert_eq!(children.len(), 1, "retries do not accumulate children");
+            assert_ne!(children[0].status, RunStatus::Running.as_str());
+            assert!(schedule_terminal_runner_exec_recovery()
+                .expect("final schedule")
+                .is_none());
         });
     }
 
