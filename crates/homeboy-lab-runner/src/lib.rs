@@ -235,7 +235,8 @@ pub use connection::{
     statuses, statuses_indexed, submit_reverse_broker_job,
 };
 pub(crate) use connection::{
-    configured_runner_homeboy_build_identity, local_live_session, status_for_admission,
+    configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,
+    daemon_lab_handoff_capabilities, local_live_session, status_for_admission,
 };
 #[allow(
     dead_code,

@@ -103,10 +103,15 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
         StartupFastPath::Version => {
             StartupFastPathOutput::Version(upgrade::current_build_version())
         }
-        StartupFastPath::Identity => StartupFastPathOutput::Identity(
-            serde_json::to_value(homeboy::core::build_identity::current())
-                .expect("build identity serializes"),
-        ),
+        StartupFastPath::Identity => {
+            let mut identity = serde_json::to_value(homeboy::core::build_identity::current())
+                .expect("build identity serializes");
+            identity["lab_handoff_capabilities"] = serde_json::to_value(
+                homeboy_lab_runner_contract::required_lab_handoff_capabilities(),
+            )
+            .expect("Lab capabilities serialize");
+            StartupFastPathOutput::Identity(identity)
+        }
     })
 }
 

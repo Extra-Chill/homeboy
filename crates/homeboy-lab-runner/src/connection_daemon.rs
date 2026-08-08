@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use homeboy_lab_runner_contract::LabCapabilityVersion;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -307,6 +308,15 @@ pub(super) fn daemon_http_version(local_url: &str) -> std::result::Result<String
                 response_body_excerpt(&response.raw_body)
             )
         })
+}
+
+pub(crate) fn daemon_http_lab_handoff_capabilities(
+    local_url: &str,
+) -> std::result::Result<Vec<LabCapabilityVersion>, String> {
+    let response = daemon_http_body(local_url)?;
+    serde_json::from_value(response.body["lab_handoff_capabilities"].clone()).map_err(|_| {
+        "remote daemon version response did not include Lab handoff capabilities".to_string()
+    })
 }
 
 pub(super) fn daemon_http_runtime_stale_paths(
