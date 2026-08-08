@@ -1223,6 +1223,81 @@ fn dead_owner_process_run_is_classified_stale_and_reconciled() {
 }
 
 #[test]
+fn concurrent_provider_children_keep_liveness_attributed_to_their_own_processes() {
+    with_isolated_home(|_| {
+        let mut child_a = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start first provider child");
+        let mut child_b = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start second provider child");
+
+        let result = (|| {
+            for (run_id, pid) in [("run-child-a", child_a.id()), ("run-child-b", child_b.id())] {
+                let plan = discovery_plan();
+                agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit child");
+                agent_task_lifecycle::mark_running(run_id).expect("mark child running");
+                agent_task_lifecycle::reserve_provider_execution(run_id, &plan.tasks[0], 1)
+                    .expect("reserve provider execution");
+                agent_task_lifecycle::record_provider_execution_process(
+                    run_id,
+                    &plan.tasks[0].task_id,
+                    1,
+                    pid,
+                )
+                .expect("bind provider process");
+            }
+
+            let active =
+                discover_runs(AgentTaskDiscoveryFilter::Active).expect("discover children");
+            assert!(active
+                .runs
+                .iter()
+                .all(|run| run.liveness == Some(AgentTaskLiveness::Active)));
+
+            child_a.kill().expect("kill first provider child");
+            child_a.wait().expect("reap first provider child");
+            let observed =
+                discover_runs(AgentTaskDiscoveryFilter::Active).expect("rediscover children");
+            assert_eq!(
+                observed
+                    .runs
+                    .iter()
+                    .find(|run| run.run_id == "run-child-a")
+                    .expect("first child")
+                    .liveness,
+                Some(AgentTaskLiveness::Stale)
+            );
+            assert_eq!(
+                observed
+                    .runs
+                    .iter()
+                    .find(|run| run.run_id == "run-child-a")
+                    .expect("first child")
+                    .stale_reason
+                    .as_deref(),
+                Some("owner_process_not_running")
+            );
+            assert_eq!(
+                observed
+                    .runs
+                    .iter()
+                    .find(|run| run.run_id == "run-child-b")
+                    .expect("second child")
+                    .liveness,
+                Some(AgentTaskLiveness::Active)
+            );
+        })();
+
+        let _ = child_b.kill();
+        let _ = child_b.wait();
+        result
+    });
+}
+
+#[test]
 fn discovery_latest_returns_only_newest_run() {
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-latest-a"))

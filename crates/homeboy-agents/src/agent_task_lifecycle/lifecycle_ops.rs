@@ -1643,6 +1643,52 @@ pub fn reserve_provider_execution(
     Ok(reservation)
 }
 
+/// Bind a reserved provider execution to the subprocess that actually runs it.
+///
+/// Fanout workers are threads and therefore share the coordinator PID. The
+/// provider subprocess is the first process identity unique to one child run;
+/// using it keeps liveness and activity evidence from crossing child records.
+pub fn record_provider_execution_process(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    pid: u32,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let key = format!("{task_id}:{attempt}");
+    let record = store::mutate_record(&run_id, |record| {
+        let Some(execution) = record.metadata["provider_executions"]
+            .as_array_mut()
+            .and_then(|executions| {
+                executions
+                    .iter_mut()
+                    .find(|execution| execution["key"] == key)
+            })
+        else {
+            return false;
+        };
+        execution["owner_pid"] = json!(pid);
+        execution["owner_linux_starttime_ticks"] =
+            json!(homeboy_core::process::linux_process_starttime_ticks(pid)
+                .ok()
+                .flatten());
+        true
+    })?;
+    record.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "provider_execution",
+            "cannot bind a process to an unreserved provider execution",
+            Some(key),
+            None,
+        )
+    })
+}
+
+/// Return the unambiguous running provider PID for activity sampling.
+pub fn running_owner_pid(run_id: &str) -> Result<Option<u32>> {
+    Ok(store::read_record(&sanitize_run_id(run_id))?.owner_pid())
+}
+
 /// Persist the controller-owned Cook phase independently of provider output.
 /// This gives foreground observers a restart-safe liveness source without
 /// treating an arbitrary provider transcript line as durable state.

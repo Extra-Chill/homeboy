@@ -3705,7 +3705,13 @@ where
                             while let Err(mpsc::RecvTimeoutError::Timeout) =
                                 heartbeat_wait.recv_timeout(COOK_HEARTBEAT_INTERVAL)
                             {
-                                let activity = heartbeat_activity.sample(heartbeat_owner_pid);
+                                let activity_owner_pid = agent_task_lifecycle::running_owner_pid(
+                                    &heartbeat_run_id,
+                                )
+                                .ok()
+                                .flatten()
+                                .unwrap_or(heartbeat_owner_pid);
+                                let activity = heartbeat_activity.sample(activity_owner_pid);
                                 let tick = supervisor.observe(&activity);
                                 let detail = tick.detail_line();
                                 let _ = report_cook_progress_with_activity(
