@@ -2162,6 +2162,30 @@ fn direct_daemon_fresh_live_job_suppresses_false_orphan_inference() {
 }
 
 #[test]
+fn daemon_count_divergence_projects_bounded_unknown_owners_and_converges() {
+    let session = direct_ssh_session("lease-live");
+    let typed = vec![sample_active_job(Some("run-live"), "live runner job")];
+
+    let projected = project_unknown_daemon_owners("homeboy-lab", &session, typed.clone(), Some(2));
+    let repeated = project_unknown_daemon_owners("homeboy-lab", &session, typed, Some(2));
+
+    assert_eq!(
+        projected, repeated,
+        "projection is deterministic across polls"
+    );
+    assert_eq!(projected.len(), 2);
+    let unknown = &projected[1];
+    assert_eq!(unknown.lifecycle_state.as_deref(), Some("unknown_owner"));
+    assert_eq!(unknown.status, JobStatus::Running);
+    assert_eq!(unknown.retryable, Some(false));
+    assert!(unknown.job_id.contains("lease-live"));
+    assert!(unknown.command.contains("daemon_pid=4242"));
+    assert!(unknown.command.contains("daemon_active_count=2"));
+    assert!(unknown.command.contains("typed_jobs_count=1"));
+    assert!(unknown.command.contains("store=/jobs"));
+}
+
+#[test]
 fn synthetic_active_job_run_summaries_are_not_child_runs() {
     let mut synthetic = sample_run_summary("runner-job-job-1");
     synthetic.status_note =
