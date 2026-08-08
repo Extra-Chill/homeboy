@@ -17,7 +17,7 @@ homeboy runs show <run-id> [--format json|--json]
 homeboy runs dossier <run-id> [--format json|--json]
 homeboy runs resume-plan <run-id>
 homeboy runs evidence <run-id>
-homeboy runs artifacts <run-id> [--runner <runner-id>] [--pull] [--pull-dir <dir>]
+homeboy runs artifacts <run-id> [--runner <runner-id>] [--pull] [--pull-dir <dir>] [--limit <count>] [--offset <count>] [--full]
 homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
 homeboy runs artifact attach <run-id> --runner <runner-id> --path <runner-path> --name <artifact-name>
 homeboy runs artifact get <run-id> <artifact-id> [--runner <runner-id>] [--output <path>]
@@ -115,6 +115,8 @@ for generic runner, static HTML, and matrix examples.
 `homeboy runs artifacts <run-id> --pull` retrieves every retrievable artifact's bytes for a run to the operator-local artifact root in one pass, so a completed run is self-contained instead of pointing only at runner-resident paths or non-resolving tunnel URLs. The retrieval is best-effort and per-artifact: the listing still prints, and the JSON output gains a `pull` summary where each artifact reports `already_local` (file/directory already on the controller), `pulled` (bytes copied from a runner/remote store), `skipped` (metadata-only or non-file artifacts), or `failed` (with the error message) — so it is clear exactly which diagnostics are unreachable and why. Pass `--pull-dir <dir>` to write pulled bytes into a chosen directory instead of the default run-scoped path under the artifact root. `--pull` operates on the local mirrored observation store and is mutually exclusive with `--runner`.
 
 `homeboy runs artifacts <run-id> --runner <runner-id>` queries a connected runner daemon for the run's artifact records from the controller machine. `homeboy runs artifact get <run-id> <artifact-id> --runner <runner-id>` pulls selected runner-side artifact bytes through that connection into the local artifact cache, or into `--output` when provided, and reports the runner id plus source content path in JSON output. The Lab-oriented wrapper form `homeboy --runner <runner-id> runs artifact get <run-id> <artifact-id>` is accepted for the same fetch path. Use these commands when a controller-side agent has a run id and artifact id but should not SSH into the runner or know runner filesystem paths.
+
+`homeboy runs artifacts` requests a 50-record page by default and returns `page.total`, `page.offset`, and `page.next_offset`; use `--limit` and `--offset` to traverse a larger inventory. `--full` explicitly requests the exhaustive legacy listing and derived summaries. The daemon HTTP route remains mixed-version compatible: `GET /runs/<run-id>/artifacts` without pagination parameters keeps its original exhaustive response, while callers that send `limit` or `offset` receive the paginated response.
 
 `homeboy runs artifact attach <run-id> --runner <runner-id> --path <runner-path> --name <artifact-name>` copies an existing runner-side file into the local persisted artifact store and records it against an existing run. The runner path must be absolute and under the runner's configured `workspace_root`, `policy.workspace_roots`, or `HOMEBOY_ARTIFACT_ROOT` output root. Use this for post-run evidence files that already exist on the runner; it does not promote runner exec output or infer changed files.
 

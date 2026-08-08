@@ -893,6 +893,43 @@ fn test_handle() {
 }
 
 #[test]
+fn run_artifacts_keeps_legacy_http_clients_exhaustive_and_pages_explicit_requests() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy", "artifact-pagination"))
+            .expect("run");
+        let artifact_path = home.path().join("artifact.json");
+        std::fs::write(&artifact_path, b"{}").expect("artifact");
+        for index in 0..51 {
+            store
+                .record_artifact(&run.id, &format!("artifact-{index}"), &artifact_path)
+                .expect("record artifact");
+        }
+
+        let legacy = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: format!("/runs/{}/artifacts", run.id),
+            body: None,
+        })
+        .expect("legacy artifacts");
+        assert_eq!(legacy.body["artifacts"].as_array().unwrap().len(), 51);
+        assert!(legacy.body.get("page").is_none());
+
+        let paged = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: format!("/runs/{}/artifacts?limit=50&offset=0", run.id),
+            body: None,
+        })
+        .expect("paged artifacts");
+        assert_eq!(paged.body["artifacts"].as_array().unwrap().len(), 50);
+        assert_eq!(paged.body["page"]["total"], 51);
+        assert_eq!(paged.body["page"]["next_offset"], 50);
+    });
+}
+
+#[test]
 fn runs_list_reconciles_old_ownerless_running_records_before_responding() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();

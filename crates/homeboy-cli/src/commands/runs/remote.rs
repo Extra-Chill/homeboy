@@ -231,31 +231,7 @@ fn active_runner_job_run_summary_if_durable(
 
 pub fn runner_artifacts(runner_id: &str, args: &RunsArtifactsArgs) -> CmdResult<RunsOutput> {
     let run_id = &args.run_id;
-    let mut query = Vec::new();
-    for (key, value) in [
-        ("token", args.token.as_deref()),
-        ("kind", args.kind.as_deref()),
-        ("mime", args.mime.as_deref()),
-        ("original_path", args.original_path.as_deref()),
-        ("path_suffix", args.path_suffix.as_deref()),
-        ("fixture", args.fixture.as_deref()),
-        ("surface", args.surface.as_deref()),
-        ("scenario", args.scenario.as_deref()),
-        ("name_glob", args.name_glob.as_deref()),
-    ] {
-        if let Some(value) = value {
-            query.push(format!("{key}={}", encode_uri_component(value)));
-        }
-    }
-    if !args.full {
-        query.push(format!("limit={}", args.limit.clamp(1, 1000)));
-        query.push(format!("offset={}", args.offset.max(0)));
-    } else {
-        query.push("full=1".to_string());
-    }
-    let query = (!query.is_empty())
-        .then(|| format!("?{}", query.join("&")))
-        .unwrap_or_default();
+    let query = artifact_query(args);
     let data = runner::daemon_api_get(
         runner_id,
         &format!("/runs/{}/artifacts{}", encode_uri_component(run_id), query),
@@ -293,6 +269,34 @@ pub fn runner_artifacts(runner_id: &str, args: &RunsArtifactsArgs) -> CmdResult<
         }),
         0,
     ))
+}
+
+fn artifact_query(args: &RunsArtifactsArgs) -> String {
+    let mut query = Vec::new();
+    for (key, value) in [
+        ("token", args.token.as_deref()),
+        ("kind", args.kind.as_deref()),
+        ("mime", args.mime.as_deref()),
+        ("original_path", args.original_path.as_deref()),
+        ("path_suffix", args.path_suffix.as_deref()),
+        ("fixture", args.fixture.as_deref()),
+        ("surface", args.surface.as_deref()),
+        ("scenario", args.scenario.as_deref()),
+        ("name_glob", args.name_glob.as_deref()),
+    ] {
+        if let Some(value) = value {
+            query.push(format!("{key}={}", encode_uri_component(value)));
+        }
+    }
+    if !args.full {
+        query.push(format!("limit={}", args.limit.clamp(1, 1000)));
+        query.push(format!("offset={}", args.offset.max(0)));
+    } else {
+        query.push("full=1".to_string());
+    }
+    (!query.is_empty())
+        .then(|| format!("?{}", query.join("&")))
+        .unwrap_or_default()
 }
 
 fn directory_publication_guidance_for_artifacts(
@@ -429,6 +433,19 @@ mod tests {
             .runner_path_scope
             .contains("not operator-local filesystem paths"));
         assert!(guide.fetch_hint.contains("--runner <runner-id>"));
+    }
+
+    #[test]
+    fn cli_artifact_listing_explicitly_requests_its_bounded_page() {
+        #[derive(clap::Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: RunsArtifactsArgs,
+        }
+
+        let args = <Wrapper as clap::Parser>::parse_from(["homeboy", "run-123"]).args;
+
+        assert_eq!(artifact_query(&args), "?limit=50&offset=0");
     }
 
     #[test]

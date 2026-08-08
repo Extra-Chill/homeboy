@@ -239,35 +239,44 @@ where
         HttpEndpoint::RunArtifacts { id } => {
             let store = ObservationStore::open_initialized()?;
             require_run(&store, id)?;
-            let filter = ArtifactListFilter {
-                token: query_value(&request.path, "token"),
-                kind: query_value(&request.path, "kind"),
-                mime: query_value(&request.path, "mime"),
-                original_path: query_value(&request.path, "original_path"),
-                path_suffix: query_value(&request.path, "path_suffix"),
-                fixture: query_value(&request.path, "fixture"),
-                surface: query_value(&request.path, "surface"),
-                scenario: query_value(&request.path, "scenario"),
-                name_glob: query_value(&request.path, "name_glob"),
-                limit: if query_value(&request.path, "full").as_deref() == Some("1") {
-                    0
-                } else {
-                    query_value(&request.path, "limit")
+            // This route predates pagination. Keep an absent pagination request
+            // exhaustive for deployed old clients; new CLI clients opt in by
+            // sending `limit` and `offset` explicitly.
+            if query_value(&request.path, "limit").is_none()
+                && query_value(&request.path, "offset").is_none()
+            {
+                json!({
+                    "command": "api.runs.artifacts",
+                    "run_id": id,
+                    "artifacts": store.list_artifacts(id)?,
+                })
+            } else {
+                let filter = ArtifactListFilter {
+                    token: query_value(&request.path, "token"),
+                    kind: query_value(&request.path, "kind"),
+                    mime: query_value(&request.path, "mime"),
+                    original_path: query_value(&request.path, "original_path"),
+                    path_suffix: query_value(&request.path, "path_suffix"),
+                    fixture: query_value(&request.path, "fixture"),
+                    surface: query_value(&request.path, "surface"),
+                    scenario: query_value(&request.path, "scenario"),
+                    name_glob: query_value(&request.path, "name_glob"),
+                    limit: query_value(&request.path, "limit")
                         .and_then(|value| value.parse().ok())
-                        .unwrap_or(50)
-                },
-                offset: query_value(&request.path, "offset")
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(0),
-            };
-            let page = store.list_artifacts_page(id, &filter)?;
-            json!({
-                "command": "api.runs.artifacts",
-                "run_id": id,
-                "artifacts": page.artifacts,
-                "page": { "total": page.total, "limit": page.limit, "offset": page.offset,
-                    "next_offset": (page.offset + page.artifacts.len() < page.total).then_some(page.offset + page.artifacts.len()) },
-            })
+                        .unwrap_or(50),
+                    offset: query_value(&request.path, "offset")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0),
+                };
+                let page = store.list_artifacts_page(id, &filter)?;
+                json!({
+                    "command": "api.runs.artifacts",
+                    "run_id": id,
+                    "artifacts": page.artifacts,
+                    "page": { "total": page.total, "limit": page.limit, "offset": page.offset,
+                        "next_offset": (page.offset + page.artifacts.len() < page.total).then_some(page.offset + page.artifacts.len()) },
+                })
+            }
         }
         HttpEndpoint::RunArtifactContent { id, artifact_id } => artifact_content(id, artifact_id)?,
         HttpEndpoint::RunFindings { id } => {
