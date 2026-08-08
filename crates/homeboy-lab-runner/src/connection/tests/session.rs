@@ -2183,6 +2183,7 @@ fn daemon_count_divergence_projects_bounded_unknown_owners_and_converges() {
     assert!(unknown.command.contains("daemon_active_count=2"));
     assert!(unknown.command.contains("typed_jobs_count=1"));
     assert!(unknown.command.contains("store=/jobs"));
+    assert!(is_unknown_daemon_owner(unknown));
 }
 
 #[test]

@@ -2491,6 +2491,11 @@ fn project_unknown_daemon_owners(
     active_jobs
 }
 
+pub(crate) fn is_unknown_daemon_owner(job: &ActiveRunnerJobSummary) -> bool {
+    job.lifecycle_state.as_deref() == Some("unknown_owner")
+        && job.job_id.starts_with("unknown-daemon-owner-")
+}
+
 /// Query the daemon job store before an operation replaces its process.
 /// Controller observation may classify child runs as recoverable orphans, but
 /// those inferred records are not authoritative enough to interrupt a daemon.
@@ -2525,6 +2530,19 @@ pub(super) fn active_jobs_before_daemon_replacement(
             ),
             Some(runner_id.to_string()),
             Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
+        ));
+    }
+    if report.active_jobs.iter().any(is_unknown_daemon_owner) {
+        return Err(Error::validation_invalid_argument(
+            "reconnect",
+            format!(
+                "runner `{runner_id}` has active daemon work without a typed /jobs owner; refusing to replace the daemon until its lease and store projection are reconciled"
+            ),
+            Some(runner_id.to_string()),
+            Some(vec![format!(
+                "homeboy runner reconcile {}",
+                shell::quote_arg(runner_id)
+            )]),
         ));
     }
     Ok(report.active_jobs)
@@ -3600,7 +3618,29 @@ pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
         let (active_jobs, active_job_state, active_job_error) = if connected {
             match session.as_ref() {
                 Some(session) => match runner_jobs(&runner.id, session) {
-                    Ok((active, _stale)) => (active, RunnerActiveJobState::Available, None),
+                    Ok((active, _stale)) => {
+                        let direct_daemon_active_jobs =
+                            session.local_url.as_deref().and_then(|url| {
+                                daemon_http_freshness(
+                                    &runner.id,
+                                    url,
+                                    &session.homeboy_version,
+                                    session.homeboy_build_identity.as_deref().unwrap_or(""),
+                                )
+                                .ok()
+                                .map(|freshness| freshness.active_jobs)
+                            });
+                        (
+                            project_unknown_daemon_owners(
+                                &runner.id,
+                                session,
+                                active,
+                                direct_daemon_active_jobs,
+                            ),
+                            RunnerActiveJobState::Available,
+                            None,
+                        )
+                    }
                     Err(error) => (
                         Vec::new(),
                         RunnerActiveJobState::Unavailable,
