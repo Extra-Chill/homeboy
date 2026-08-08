@@ -2676,6 +2676,34 @@ fn approved_empty_provider_failure_retry_stays_attached_and_becomes_continuation
 }
 
 #[test]
+fn cancelled_provider_child_retry_stays_attached_to_its_cook() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-cancelled-provider-retry";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = format!("{cook_id}-attempt-1");
+        options.max_attempts = 2;
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize first attempt");
+        agent_task_lifecycle::cancel_run(&options.initial_run_id, Some("owner exited"))
+            .expect("cancel detached provider child");
+
+        let retry = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+            .expect("cancelled Cook child retry remains Cook-owned");
+
+        assert_eq!(retry.record.metadata["retry_of"], options.initial_run_id);
+        assert_eq!(retry.record.metadata["cook_id"], cook_id);
+        assert_eq!(retry.record.metadata["cook_attempt"], 2);
+        assert_eq!(
+            agent_task_lifecycle::cook_index(cook_id)
+                .expect("Cook retry index")
+                .latest_run_id,
+            retry.record.run_id
+        );
+    });
+}
+
+#[test]
 fn retryable_pre_provider_retry_propagates_force_after_terminal_successor() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = retryable_pre_provider_cook("cook-forced-terminal-retry", 3);

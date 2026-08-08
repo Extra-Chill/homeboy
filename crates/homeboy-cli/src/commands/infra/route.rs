@@ -2402,6 +2402,11 @@ fn materialize_agent_task_retry_handoff(
     if !agent_task_lifecycle::run_record_exists_resolved(&retry.run_id)? {
         return Ok(None);
     }
+    if agent_task_lifecycle::status(&retry.run_id)?.metadata["cook_id"].is_string() {
+        // Cook retries must return through the controller so its promotion,
+        // gates, and finalization lifecycle consumes the successful patch.
+        return Ok(None);
+    }
 
     let retry_result = crate::agents::agent_task_service::retry(
         &retry.run_id,
