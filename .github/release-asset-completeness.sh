@@ -232,7 +232,7 @@ for sidecar in "${REQUIRED[@]}"; do
   case "${sidecar}" in *.sha256|sha256.sum) ;; *) continue ;; esac
   references=0
   sidecar_payload=""
-  while read -r digest name extra; do
+  while read -r digest name extra || [ -n "${digest:-}" ]; do
     [ -n "${digest}" ] || continue
     name="${name#\*}"
     [[ "${digest}" =~ ^[[:xdigit:]]{64}$ ]] || fail "Invalid checksum contract in ${sidecar}"
