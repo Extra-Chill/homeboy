@@ -3045,7 +3045,9 @@ fn start_agent_task_fanout_lab_dispatch_observation(
 ) -> Option<AgentTaskFanoutLabDispatchObservation> {
     let store = ObservationStore::open_initialized().ok()?;
     let cwd = std::env::current_dir().ok();
-    let fanout_id = agent_task_fanout_cook_batch_dispatch_id(args);
+    // Planning owns generated batch identities. Reusing its exact result keeps
+    // the observer's status command pointed at the record admission creates.
+    let fanout_id = crate::commands::agent_task::fanout::cook_batch_fanout_id(args).ok()?;
     let run = store
         .start_run(
             NewRunRecord::builder("agent-task")
@@ -3081,26 +3083,6 @@ fn start_agent_task_fanout_lab_dispatch_observation(
         store,
         run_id: run.id,
         fanout_id,
-    })
-}
-
-fn agent_task_fanout_cook_batch_dispatch_id(
-    args: &crate::commands::agent_task::AgentTaskFanoutCookBatchArgs,
-) -> String {
-    args.fanout_id.clone().unwrap_or_else(|| {
-        let first = args
-            .issues
-            .first()
-            .and_then(|issue| issue.split_once("/issues/").map(|(_, number)| number))
-            .and_then(|number| number.split(['/', '?', '#']).next())
-            .filter(|value| !value.is_empty())
-            .unwrap_or("batch");
-        format!(
-            "cook-batch-{}-issue-{}-{}",
-            args.repo,
-            first,
-            args.issues.len()
-        )
     })
 }
 
