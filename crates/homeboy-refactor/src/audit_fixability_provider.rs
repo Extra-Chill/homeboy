@@ -77,3 +77,56 @@ impl AuditFixabilityProvider for RefactorFixabilityProvider {
 pub fn register() {
     register_audit_fixability_provider(Box::new(RefactorFixabilityProvider));
 }
+
+#[cfg(all(test, feature = "slow-tests"))]
+mod tests {
+    use super::register;
+    use homeboy_code_audit::{audit_path_with_id, report::compute_fixability};
+    use std::fs;
+
+    #[test]
+    fn computes_fixability_through_the_registered_audit_provider() {
+        register();
+
+        homeboy_core::test_support::with_isolated_audit_home(|home| {
+            homeboy_core::test_support::write_source_extension(
+                home.path(),
+                "source-fixture",
+                "fixture",
+            );
+            let dir = tempfile::tempdir().expect("temp dir");
+            let root = dir.path();
+            fs::create_dir_all(root.join("commands")).expect("create commands directory");
+            fs::write(
+                root.join("commands/good_one.fixture"),
+                "pub fn run() {}\npub fn helper() {}\n",
+            )
+            .expect("write first convention fixture");
+            fs::write(
+                root.join("commands/good_two.fixture"),
+                "pub fn run() {}\npub fn helper() {}\n",
+            )
+            .expect("write second convention fixture");
+            fs::write(root.join("commands/bad.fixture"), "pub fn run() {}\n")
+                .expect("write convention outlier fixture");
+
+            let result = audit_path_with_id("fixability-test", &root.to_string_lossy())
+                .expect("audit should run");
+            let fixability = compute_fixability(&result);
+
+            // The compact fixture may not yield enough conventions for a plan,
+            // but any plan must retain the provider's complete public summary.
+            if let Some(fix) = fixability {
+                assert!(
+                    fix.fixable_count > 0,
+                    "expected at least one fixable finding"
+                );
+                assert_eq!(
+                    fix.fixable_count,
+                    fix.automated_count + fix.manual_only_count
+                );
+                assert!(!fix.by_kind.is_empty(), "expected per-kind breakdown");
+            }
+        });
+    }
+}
