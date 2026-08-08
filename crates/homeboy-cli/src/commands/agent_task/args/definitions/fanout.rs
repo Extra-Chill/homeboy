@@ -45,7 +45,11 @@ pub enum AgentTaskFanoutCommand {
 pub struct AgentTaskFanoutCookBatchArgs {
     #[arg(value_name = "ISSUE_URL", required = true)]
     pub issues: Vec<String>,
-    #[arg(long = "repo", value_name = "REPO")]
+    /// Registered repository slug or exact registered primary checkout path.
+    ///
+    /// A primary path resolves to its slug before child planning. Use a repo
+    /// slug for worktree handles and other workspace paths.
+    #[arg(long = "repo", value_name = "REPO_SLUG_OR_PRIMARY_PATH")]
     pub repo: String,
     #[arg(long = "from", default_value = "origin/main", value_name = "REF")]
     pub from: String,
