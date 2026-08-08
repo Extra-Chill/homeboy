@@ -178,6 +178,7 @@ Continue a detached Cook from its durable Cook ID or provider attempt ID. The pe
 | Option | Value | Description |
 | --- | --- | --- |
 | `--preflight` | flag | Validate continuation admission without dispatching a provider or mutating lifecycle state |
+| `--rearm` | flag | Explicitly rearm one failed terminal continuation before consuming it |
 | `--full` | flag | Include the complete Cook report rather than the compact lifecycle view |
 
 ## `homeboy agent-task loop`
