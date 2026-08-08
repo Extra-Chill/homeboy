@@ -434,7 +434,7 @@ fn full_extension_test_supplies_canonical_result_sidecar() {
 set -eu
 test -n "$HOMEBOY_TEST_RESULTS_FILE"
 test -f "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
-source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+. "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
 homeboy_write_test_results 2 2 0 0
 "#,
         )
@@ -446,7 +446,7 @@ homeboy_write_test_results 2 2 0 0
 set -eu
 test "$1" = "$HOMEBOY_TEST_RESULTS_FILE"
 test "${2:-}" = "fixture-json"
-source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+. "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
 homeboy_write_test_results 2 2 0 0
 "#,
         )
@@ -520,7 +520,7 @@ printf 'artifact://files/test-results.json artifact://files/phpunit-output.log\n
 set -eu
 test "${2:-}" = provider-json
 grep -q 'provider/test-results/v1' "$1"
-source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+. "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
 homeboy_write_test_results 3 3 0 0
 "#,
         )
