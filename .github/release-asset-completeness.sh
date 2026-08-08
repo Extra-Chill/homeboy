@@ -231,6 +231,7 @@ done
 for sidecar in "${REQUIRED[@]}"; do
   case "${sidecar}" in *.sha256|sha256.sum) ;; *) continue ;; esac
   references=0
+  sidecar_payload=""
   while read -r digest name extra; do
     [ -n "${digest}" ] || continue
     name="${name#\*}"
@@ -242,10 +243,11 @@ for sidecar in "${REQUIRED[@]}"; do
     [ "${LOCAL_DIGESTS[${name}]}" = "${expected}" ] || fail "Checksum contract ${sidecar} does not match rebuilt payload ${name}"
     [ -z "${CONTRACT_DIGESTS[${name}]:-}" ] || [ "${CONTRACT_DIGESTS[${name}]}" = "${expected}" ] || fail "Checksum contracts disagree for ${name}"
     CONTRACT_DIGESTS["${name}"]="${expected}"
+    sidecar_payload="${name}"
     references=$((references + 1))
   done < "${ASSET_DIR}/${sidecar}"
   [ "${references}" -gt 0 ] || fail "Checksum contract ${sidecar} is empty"
-  case "${sidecar}" in *.sha256) [ "${references}" -eq 1 ] && [ "${sidecar%.sha256}" = "${name}" ] || fail "Checksum contract ${sidecar} is incomplete" ;; esac
+  case "${sidecar}" in *.sha256) [ "${references}" -eq 1 ] && [ "${sidecar%.sha256}" = "${sidecar_payload}" ] || fail "Checksum contract ${sidecar} is incomplete" ;; esac
 done
 for asset in "${REQUIRED[@]}"; do
   case "${asset}" in *.sha256|sha256.sum) continue ;; esac
