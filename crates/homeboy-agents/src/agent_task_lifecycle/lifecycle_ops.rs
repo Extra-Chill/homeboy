@@ -845,7 +845,7 @@ mod execution_placement_tests {
     }
 
     #[test]
-    fn normalization_only_projects_an_explicit_plan_decision() {
+    fn normalization_preserves_submission_stamp_and_projects_explicit_plan_decision() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let plan = super::super::tests::test_plan();
             let record =
@@ -853,10 +853,19 @@ mod execution_placement_tests {
                     .expect("submit plan");
 
             let normalized = normalize_local_execution_placement(&record.run_id)
-                .expect("unclassified controller plan remains unchanged");
+                .expect("submission stamp remains authoritative");
+            let submission_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
+                serde_json::from_value(normalized.metadata["execution_placement_decision"].clone())
+                    .expect("controller-local submission records a canonical decision");
+            assert!(submission_decision.is_submission_stamp());
+            assert_eq!(
+                submission_decision.selected,
+                EffectiveExecutionPlacement::Local
+            );
+            assert!(submission_decision.permits_local_execution());
             assert!(normalized
                 .metadata
-                .get("execution_placement_decision")
+                .get("execution_placement_normalization")
                 .is_none());
             assert_eq!(load_plan(&record.run_id).expect("durable plan"), plan);
 
