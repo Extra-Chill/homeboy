@@ -64,6 +64,7 @@ struct CliEnvelope {
     success: bool,
     data: Option<Value>,
     error: Option<Value>,
+    diagnostics: Option<Value>,
 }
 
 struct RemoteDaemonConnectOptions<'a> {
@@ -674,6 +675,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 REMOTE_LEASELESS_RECOVERY_TIMEOUT,
             );
             if !output.success {
+                if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &output,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
@@ -691,6 +697,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 )
             })?;
             if !envelope.success {
+                if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &output,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
@@ -800,6 +811,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 REMOTE_LEASELESS_RECOVERY_TIMEOUT,
             );
             if !recovery.success {
+                if is_terminal_state_loss_refusal(&recovery) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &recovery,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
@@ -814,6 +830,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 )
             })?;
             if !envelope.success {
+                if is_terminal_state_loss_refusal(&recovery) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &recovery,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
@@ -1489,6 +1510,25 @@ fn state_loss_recovery_failure_message(output: &homeboy_core::server::CommandOut
     }
 }
 
+fn is_terminal_state_loss_refusal(output: &homeboy_core::server::CommandOutput) -> bool {
+    if output.timed_out {
+        return false;
+    }
+    let Ok(envelope) = parse_envelope(&output.stdout) else {
+        return false;
+    };
+    if envelope.success {
+        return false;
+    }
+    let code = envelope
+        .diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.get("code"))
+        .or_else(|| envelope.error.as_ref().and_then(|error| error.get("code")))
+        .and_then(Value::as_str);
+    matches!(code, Some(code) if code.starts_with("validation.") || code.starts_with("policy."))
+}
+
 fn remote_state_loss_recovery_command(
     homeboy: &str,
     lease_id: &str,
@@ -1809,9 +1849,12 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
     if report.connected {
         reconcile_session_metadata_with_observed_daemon(&runner, &mut report.session, true)?;
     }
-    // Terminal-job settlement was formerly coupled to status. Keep it under
-    // this explicit lifecycle owner so status remains safe to parallelize.
-    reconcile_terminal_jobs(runner_id)?;
+    // Terminal-job settlement needs a live session transport. Generation
+    // reconciliation below can instead inspect a disconnected SSH runner, so
+    // do not let the terminal-job preflight block its advertised recovery path.
+    if report.connected {
+        reconcile_terminal_jobs(runner_id)?;
+    }
     if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(&runner) {
         super::generation_store::reconcile_with_ssh(runner_id, report.session.as_ref(), &client)?;
     } else {
@@ -2209,6 +2252,60 @@ pub(crate) fn configured_runner_homeboy_build_identity(
             .ok()
             .and_then(|identity| identity.build_identity),
     )
+}
+
+pub(crate) fn configured_runner_homeboy_handshake_evidence(
+    runner: &Runner,
+    homeboy: &str,
+) -> Result<
+    Option<(
+        homeboy_lab_runner_contract::LabRuntimeIdentity,
+        Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
+    )>,
+> {
+    let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
+        return Ok(None);
+    };
+    let output = client.execute_with_timeout(
+        &format!("{} self identity", shell::quote_arg(homeboy)),
+        Duration::from_secs(15),
+    );
+    if !output.success {
+        return Ok(None);
+    }
+    let body: Value = parse_json_from_mixed_stdout(&output.stdout).map_err(|error| {
+        Error::validation_invalid_argument(
+            "runner",
+            format!("parse runner Homeboy identity: {error}"),
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    let data = body.get("data").unwrap_or(&body);
+    let commit = data
+        .get("git_commit")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let display = data
+        .get("display")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let capabilities =
+        serde_json::from_value(data["lab_handoff_capabilities"].clone()).unwrap_or_default();
+    Ok(Some((
+        homeboy_lab_runner_contract::LabRuntimeIdentity {
+            build_identity: display.to_string(),
+            source_revision: commit.to_string(),
+            clean: data.get("git_dirty").and_then(Value::as_bool) == Some(false),
+        },
+        capabilities,
+    )))
+}
+
+pub(crate) fn daemon_lab_handoff_capabilities(
+    local_url: &str,
+) -> std::result::Result<Vec<homeboy_lab_runner_contract::LabCapabilityVersion>, String> {
+    connection_daemon::daemon_http_lab_handoff_capabilities(local_url)
 }
 
 fn status_for_admission_with<Status, Reconnect>(

@@ -1,9 +1,9 @@
 use homeboy_core::component::{self, Component};
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_extension as extension;
 use homeboy_extension::{self, ExtensionManifest};
 
-use super::types::ReleaseOptions;
+use super::types::{ReleaseOptions, ReleaseReadinessProvenance};
 
 /// Load a component with portable config fallback when path_override is set.
 /// In CI environments, the component may not be registered — only homeboy.json exists.
@@ -26,6 +26,48 @@ pub(super) fn resolve_extensions(component: &Component) -> Result<Vec<ExtensionM
         }
     }
     Ok(extensions)
+}
+
+/// Capture immutable identities from the dependency adapters and materialized
+/// extension manifests in the process that executed a portable review gate.
+pub fn readiness_provenance(component: &Component) -> Result<ReleaseReadinessProvenance> {
+    let mut provenance = ReleaseReadinessProvenance::default();
+    let dependencies =
+        match homeboy_core::deps::status(Some(&component.id), Some(&component.local_path), None) {
+            Ok(status) => status.packages,
+            // Dependency hydration treats a component with no declared provider as
+            // a no-op; provenance must preserve that same contract.
+            Err(error)
+                if error.code == ErrorCode::ValidationInvalidArgument
+                    && error.details.get("field").and_then(|value| value.as_str())
+                        == Some("dependency_provider") =>
+            {
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
+    for dependency in dependencies {
+        if let Some(revision) = dependency.locked_reference.or(dependency.locked_version) {
+            provenance.dependencies.insert(dependency.name, revision);
+        }
+    }
+    for extension in resolve_extensions(component)? {
+        let path = extension.extension_path.as_deref().ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "resolved extension '{}' has no materialized path",
+                extension.id
+            ))
+        })?;
+        let manifest = std::path::Path::new(path).join(format!("{}.json", extension.id));
+        let revision =
+            homeboy_engine_primitives::content_hash::sha256_file(&manifest).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(manifest.display().to_string()))
+            })?;
+        provenance
+            .extensions
+            .insert(extension.id, format!("sha256:{revision}"));
+    }
+    Ok(provenance)
 }
 
 #[cfg(test)]

@@ -6,8 +6,9 @@ use crate::agent_task::{
     AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::agent_task_gate::{
-    text_tail, AgentTaskGateDiagnosticProducer, AgentTaskGateDiagnosticRecord, AgentTaskGateReport,
-    AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
+    text_tail, AgentTaskGateDiagnosticProducer, AgentTaskGateDiagnosticRecord,
+    AgentTaskGateFailureClassification, AgentTaskGateReport, AgentTaskGateRevealPolicy,
+    AgentTaskGateStatus, AgentTaskGateVisibility,
 };
 use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use crate::agent_task_review_dossier::AiFilledReviewForm;
@@ -175,6 +176,8 @@ pub struct AgentTaskCookLoopGateFailure {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
     pub exit_code: i32,
+    #[serde(default)]
+    pub classification: AgentTaskGateFailureClassification,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stdout_tail: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -249,6 +252,9 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     apply_failure_progression_to_quality(&mut quality, &failure_progression);
     let should_retry = options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
         && !failed_gates.is_empty()
+        && failed_gates
+            .iter()
+            .all(|gate| gate.classification == AgentTaskGateFailureClassification::CandidateCode)
         && !baseline_red
         && retry_budget_remaining > 0;
     // Deterministic gates take precedence: a red gate must be fixed before the
@@ -608,6 +614,11 @@ fn gate_failure(
         reveal_policy: gate.reveal_policy,
         command,
         exit_code: gate.exit_code,
+        classification: gate
+            .failure_evidence
+            .as_ref()
+            .map(|evidence| evidence.classification)
+            .unwrap_or_default(),
         stdout_tail,
         stderr_tail,
         summary,
@@ -641,6 +652,7 @@ fn agent_visible_gate_failure(
             reveal_policy: failure.reveal_policy,
             command: String::new(),
             exit_code: failure.exit_code,
+            classification: failure.classification,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
             summary: format!(
@@ -657,6 +669,7 @@ fn agent_visible_gate_failure(
             reveal_policy: failure.reveal_policy,
             command: String::new(),
             exit_code: failure.exit_code,
+            classification: failure.classification,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
             summary: "private deterministic gate failed; evidence redacted".to_string(),
@@ -670,6 +683,7 @@ fn agent_visible_gate_failure(
             reveal_policy: failure.reveal_policy,
             command: String::new(),
             exit_code: failure.exit_code,
+            classification: failure.classification,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
             summary: "private deterministic gate failed".to_string(),
@@ -979,6 +993,33 @@ mod tests {
             AgentToolExecutionLocation::Runner
         );
         assert_eq!(request.policy.write, "artifacts_only");
+    }
+
+    #[test]
+    fn gate_declaration_failure_never_creates_code_remediation() {
+        let mut gate = failed_gate();
+        gate.failure_evidence
+            .as_mut()
+            .expect("failure evidence")
+            .classification = AgentTaskGateFailureClassification::GateDeclaration;
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(AgentTaskPromotionStatus::GateFailed, vec![gate]),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-declaration".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::RetriesExhausted);
+        assert!(report.follow_up_request.is_none());
+        assert_eq!(
+            report.failed_gates[0].classification,
+            AgentTaskGateFailureClassification::GateDeclaration
+        );
     }
 
     #[test]
@@ -1381,6 +1422,7 @@ mod tests {
             "producer output is opaque",
             String::new(),
             Some(AgentTaskGateFailureEvidence {
+                classification: AgentTaskGateFailureClassification::CandidateCode,
                 summary: "producer reported a failure".to_string(),
                 command: "opaque-gate".to_string(),
                 exit_code: 1,
@@ -1451,6 +1493,7 @@ mod tests {
             reveal_policy: AgentTaskGateRevealPolicy::FullEvidence,
             command: "opaque-gate".to_string(),
             exit_code: 101,
+            classification: AgentTaskGateFailureClassification::CandidateCode,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
             summary: String::new(),
@@ -1898,6 +1941,7 @@ mod tests {
             "running tests",
             "boom",
             Some(AgentTaskGateFailureEvidence {
+                classification: AgentTaskGateFailureClassification::CandidateCode,
                 summary: "opaque gate failed".to_string(),
                 command: "opaque-gate".to_string(),
                 exit_code: 101,
@@ -1942,6 +1986,7 @@ mod tests {
             "secret fixture mismatch",
             "private evaluator stack trace",
             Some(AgentTaskGateFailureEvidence {
+                classification: AgentTaskGateFailureClassification::CandidateCode,
                 summary: "secret fixture mismatch on randomized private corpus".to_string(),
                 command: "./hidden-heldout-check --fixture secret".to_string(),
                 exit_code: 7,

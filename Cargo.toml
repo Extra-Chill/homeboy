@@ -84,6 +84,9 @@ clap = { version = "4.5", features = ["derive", "env", "string"] }
 homeboy-core = { version = "0.1.0", path = "crates/homeboy-core", features = ["test-support"] }
 homeboy-extension = { version = "0.1.0", path = "crates/homeboy-extension" }
 homeboy-engine-primitives = { version = "0.1.0", path = "crates/homeboy-engine-primitives" }
+# Enables CLI argument fixtures used by root integration tests without adding a
+# production default for those constructors.
+homeboy-cli = { version = "0.1.0", path = "crates/homeboy-cli", features = ["test-support"] }
 # Integration tests here spawn the real binary via CARGO_BIN_EXE_homeboy and
 # dispatch `--backend fixture` (tests/reverse_cook_queue_acceptance.rs). That
 # executor double is compiled only under `homeboy-agents/test-support`, and this

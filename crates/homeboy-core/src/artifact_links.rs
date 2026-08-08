@@ -250,16 +250,22 @@ pub fn cached_validated_viewer_links(
     if links.is_empty() {
         return links;
     }
-    if artifact
-        .metadata_json
-        .get("public_url_validation")
-        .and_then(|validation| validation.get("reachable"))
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
+    if public_artifact_url_is_reachable_or_legacy(artifact) {
         links
     } else {
         Vec::new()
+    }
+}
+
+/// Return whether a persisted public URL may be presented to a reviewer.
+///
+/// Records written before validation was introduced have no validation metadata
+/// and retain their persisted links. New records carry validation metadata, so
+/// malformed or failed validation suppresses their generated links.
+pub fn public_artifact_url_is_reachable_or_legacy(artifact: &ArtifactRecord) -> bool {
+    match artifact.metadata_json.get("public_url_validation") {
+        None => true,
+        Some(validation) => validation.get("reachable").and_then(Value::as_bool) == Some(true),
     }
 }
 
@@ -267,9 +273,6 @@ pub fn annotate_public_artifact_url_validation(
     artifact: &mut ArtifactRecord,
 ) -> Option<PublicArtifactUrlValidation> {
     let public_url = public_artifact_url(artifact)?;
-    if viewer_links(artifact, Some(&public_url)).is_empty() {
-        return None;
-    }
     let validation = validate_public_artifact_url(&public_url);
     artifact.metadata_json["public_url_validation"] =
         public_artifact_url_validation_json(&validation);
@@ -542,6 +545,27 @@ mod tests {
             created_at: "2026-06-12T00:00:00Z".to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn public_url_validation_preserves_legacy_records_and_gates_new_records() {
+        let legacy = viewer_artifact();
+        let reachable = ArtifactRecord {
+            metadata_json: serde_json::json!({
+                "public_url_validation": { "reachable": true }
+            }),
+            ..viewer_artifact()
+        };
+        let unreachable = ArtifactRecord {
+            metadata_json: serde_json::json!({
+                "public_url_validation": { "reachable": false }
+            }),
+            ..viewer_artifact()
+        };
+
+        assert!(public_artifact_url_is_reachable_or_legacy(&legacy));
+        assert!(public_artifact_url_is_reachable_or_legacy(&reachable));
+        assert!(!public_artifact_url_is_reachable_or_legacy(&unreachable));
     }
 
     struct EnvGuard {

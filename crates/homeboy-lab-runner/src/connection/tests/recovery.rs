@@ -1345,6 +1345,170 @@ esac
     });
 }
 
+#[cfg(unix)]
+fn rejected_state_loss_refusal_is_retired_before_plain_connect_retries(
+    legacy_replay: bool,
+    transport_success: bool,
+) {
+    test_support::with_isolated_home(|home| {
+        let daemon = home.path().join("remote-homeboy");
+        let generation_count = home.path().join("daemon-generations");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let endpoint = std::thread::spawn(move || {
+            for _ in 0..16 {
+                let (mut stream, _) = listener.accept().expect("endpoint request");
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("read endpoint request");
+                let request = String::from_utf8_lossy(&request[..length]);
+                let body = if request.starts_with("GET /health ") {
+                    r#"{"freshness":{"fresh":true,"restartable":true,"lease_id":"lease-b","pid":4242,"active_jobs":0},"pid":4242}"#
+                } else {
+                    r#"{"version":"0.284.0","build_identity":{"display":"homeboy 0.284.0+test"},"lease":{"lease_id":"lease-b"}}"#
+                };
+                stream
+                    .write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
+                    .expect("endpoint response");
+            }
+        });
+        std::fs::write(
+            &daemon,
+            format!(
+                r#"#!/bin/sh
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    ;;
+  "daemon status")
+    printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":0}}}}}}'
+    ;;
+  "daemon recover-missing-lease-state")
+    if [ "$3" = "--help" ]; then
+      printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
+    else
+      printf '%s\n' '{{"success":false,"diagnostics":{{"code":"validation.invalid_argument"}}}}'
+{rejection_exit}
+    fi
+    ;;
+  "daemon ensure-running")
+    if [ "$3" = "--help" ]; then
+      printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
+    else
+      printf '%s' '1' > "{generation_count}"
+      printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
+    fi
+    ;;
+esac
+"#,
+                address = address,
+                generation_count = generation_count.display(),
+                rejection_exit = if transport_success { "" } else { "      exit 2" },
+            ),
+        )
+        .expect("write remote Homeboy shim");
+        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+        server::create(
+            &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
+                .to_string(),
+            false,
+        )
+        .expect("create local server");
+        crate::create(
+            &serde_json::json!({ "id": "local-runner", "kind": "ssh", "homeboy_path": daemon })
+                .to_string(),
+            false,
+        )
+        .expect("enable local runner");
+
+        if legacy_replay {
+            let operation_id = crate::generation_store::replacement_operation("local-runner")
+                .expect("create legacy operation");
+            crate::generation_store::record_replacement_operation_replay(
+                "local-runner",
+                "state-loss",
+                &remote_state_loss_recovery_command(
+                    daemon.to_str().expect("daemon path"),
+                    "lease-lost",
+                    41,
+                    "127.0.0.1:7419",
+                    &operation_id,
+                ),
+            )
+            .expect("write legacy state-loss replay");
+        }
+
+        let (_rejected, exit_code) = connect_with_orphan_adoption(
+            "local-runner",
+            None,
+            &[],
+            false,
+            (!legacy_replay).then_some("lease-lost"),
+            (!legacy_replay).then_some(41),
+            (!legacy_replay).then_some("127.0.0.1:7419"),
+        )
+        .expect("rejected state-loss result");
+        assert_eq!(exit_code, 20);
+        let journal_dir = homeboy_core::paths::runner_sessions_dir()
+            .expect("runner sessions")
+            .join("local-runner");
+        assert!(!journal_dir.join("pending-replacement.json").exists());
+        let operation: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(journal_dir.join("replacement-operation.json"))
+                .expect("replacement operation"),
+        )
+        .expect("replacement operation JSON");
+        assert!(operation["kind"].is_null());
+        assert!(operation["replay_command"].is_null());
+        let evidence = std::fs::read_dir(journal_dir.join("rejected-replacements"))
+            .expect("rejection evidence")
+            .next()
+            .expect("one rejection evidence")
+            .expect("evidence entry");
+        let evidence: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(evidence.path()).expect("read rejection evidence"),
+        )
+        .expect("rejection evidence JSON");
+        assert_eq!(evidence["kind"], "state-loss");
+        assert_eq!(evidence["exit_code"], if transport_success { 0 } else { 2 });
+
+        let (connected, exit_code) =
+            connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
+                .expect("plain connect result");
+        assert_eq!(
+            exit_code, 0,
+            "plain connect: {:?}",
+            connected.failure_message
+        );
+        assert!(connected.connected);
+        assert_eq!(connected.remote_daemon_pid, Some(4242));
+        assert_eq!(
+            std::fs::read_to_string(generation_count).expect("start count"),
+            "1"
+        );
+        drop(endpoint);
+    });
+}
+
+/// #11901: a legacy replay journal can contain an already-refused exact
+/// recovery. Its evidence is retained, but its pending authority must not block
+/// a retry of plain connect.
+#[cfg(unix)]
+#[test]
+fn rejected_legacy_state_loss_replay_is_retired_before_plain_connect_retries() {
+    rejected_state_loss_refusal_is_retired_before_plain_connect_retries(true, false);
+}
+
+/// #11901: the fresh exact state-loss command can receive a typed failure
+/// envelope over a successful transport. That terminal refusal must retire its
+/// replay authority before the next plain connect.
+#[cfg(unix)]
+#[test]
+fn rejected_fresh_state_loss_envelope_is_retired_before_plain_connect_retries() {
+    rejected_state_loss_refusal_is_retired_before_plain_connect_retries(false, true);
+}
+
 /// #10430: once recovery creates B, losing the controller's bounded health
 /// requests must leave enough durable evidence for the next invocation to
 /// authenticate B. It must never create an unjournaled C.

@@ -100,6 +100,7 @@ fn run_with_plan_inner(
     staging_source_sha: Option<&str>,
 ) -> Result<(ReleasePlan, ReleaseRun)> {
     let mut results: Vec<ReleaseStepResult> = Vec::new();
+    ensure_readiness_passed(options)?;
 
     let initial_plan = build_initial_preflight_plan(component_id, options);
     let mut timer = PhaseTimer::new();
@@ -120,6 +121,16 @@ fn run_with_plan_inner(
         return Ok((initial_plan, run));
     }
 
+    // The portable portion of preflight is now complete. Freeze its source
+    // identity before building the mutation plan; any later checkout movement
+    // invalidates its evidence and must block controller-owned mutation.
+    let preflight_component = super::context::load_component(component_id, options)?;
+    let preflight_source = options
+        .readiness
+        .as_ref()
+        .map(|readiness| readiness.source.clone())
+        .unwrap_or(super::preflight_identity::capture(&preflight_component)?);
+
     // Rebuild the full plan after executable preflights. `preflight.remote_sync`
     // may fast-forward HEAD and `preflight.changelog_bootstrap` may create the
     // first changelog file; changelog/version planning must observe those
@@ -128,6 +139,7 @@ fn run_with_plan_inner(
     let completed_preflights: HashSet<&'static str> =
         initial_executable_preflight_ids().iter().copied().collect();
 
+    super::preflight_identity::revalidate(&preflight_component, &preflight_source)?;
     timer.time("package", || {
         super::execution_plan::execute_plan_steps_at_source(
             &release_plan.plan.steps,
@@ -143,6 +155,27 @@ fn run_with_plan_inner(
     restore_checkout_after_failed_run(checkout_guard, &mut run)?;
 
     Ok((release_plan, run))
+}
+
+fn ensure_readiness_passed(options: &ReleaseOptions) -> Result<()> {
+    let Some(readiness) = options.readiness.as_ref() else {
+        return Ok(());
+    };
+    if super::types::readiness_is_valid(readiness) {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "release.preflight",
+        format!("Portable release preflight has invalid selected gate evidence"),
+        Some(readiness.source.commit.clone()),
+        Some(
+            readiness
+                .evidence_refs
+                .iter()
+                .map(|reference| format!("Inspect durable readiness evidence: {reference}"))
+                .collect(),
+        ),
+    ))
 }
 
 /// Wrap the accumulated step results into a `ReleaseRun` with an overall

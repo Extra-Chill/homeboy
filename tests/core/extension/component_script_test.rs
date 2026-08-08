@@ -5,9 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::commands::test::{run as run_test, TestArgs};
-use crate::commands::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, LabChangedScopeArgs, PositionalComponentArgs, SettingArgs,
-};
 use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::test_support::with_isolated_home;
@@ -17,32 +14,8 @@ use homeboy_extension::component_script::{
 };
 use homeboy_extension::ExtensionCapability;
 
-fn component_script_args(root: &Path) -> PositionalComponentArgs {
-    PositionalComponentArgs {
-        component: Some("fixture".to_string()),
-        path: Some(root.to_string_lossy().to_string()),
-    }
-}
-
 fn test_command_args(root: &Path) -> TestArgs {
-    TestArgs {
-        comp: component_script_args(root),
-        extension_override: ExtensionOverrideArgs::default(),
-        skip_lint: false,
-        coverage: false,
-        coverage_min: None,
-        baseline_args: BaselineArgs::default(),
-        analyze: false,
-        drift: false,
-        write: false,
-        since: "HEAD~10".to_string(),
-        changed: LabChangedScopeArgs::default(),
-        ci_job: None,
-        setting_args: SettingArgs::default(),
-        args: Vec::new(),
-        json_summary: false,
-        restore_checkout: false,
-    }
+    TestArgs::for_test("fixture", root)
 }
 
 fn write_component_script(root: &Path, name: &str, body: &str) {

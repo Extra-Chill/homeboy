@@ -728,6 +728,37 @@ fn release_fails_loudly_when_prepared_release_does_not_publish() {
 }
 
 #[test]
+fn release_proves_latest_is_consumable_by_the_linux_homeboy_action() {
+    let workflow = release_workflow();
+    let consumer = job_section(workflow, "verify-linux-consumer");
+    let record_failure = job_section(workflow, "record-failure");
+    let clear_failure = job_section(workflow, "clear-failure");
+
+    assert!(consumer.contains("runs-on: ubuntu-22.04"));
+    assert!(consumer.contains("permissions:\n      contents: read"));
+    assert!(consumer.contains("needs.verify-published.result == 'success'"));
+    assert!(consumer.contains("uses: Extra-Chill/homeboy-action@v2"));
+    assert!(consumer.contains("commands: review lint"));
+    assert!(consumer.contains("expected-commands: review lint"));
+    assert!(consumer.contains("ACTUAL_VERSION=\"$(homeboy --version)\""));
+    assert!(consumer.contains("Linux consumer resolved"));
+    assert!(consumer.contains("must not fall back to an older release"));
+
+    // The consumer action must use its ordinary latest-release resolver. A
+    // source build or injected binary would only test this checkout, not the
+    // Linux archive downstream CI downloads.
+    assert!(!consumer.contains("source:"));
+    assert!(!consumer.contains("binary-path:"));
+    assert!(!consumer.contains("write"));
+
+    // Consumer failure is release failure; it cannot be hidden by the cleanup
+    // bookkeeping jobs that otherwise turn a failed publish chain into green.
+    for section in [record_failure, clear_failure] {
+        assert!(section.contains("- verify-linux-consumer"));
+    }
+}
+
+#[test]
 fn release_artifact_builds_survive_recovery_skips_but_fail_closed_on_required_builds() {
     let workflow = release_workflow();
     let local = job_section(workflow, "build-local-artifacts");
@@ -1152,6 +1183,29 @@ fn release_fast_path_keeps_every_publication_verification() {
     assert!(
         host.contains("| artifact bytes |"),
         "recovery evidence must record whether the published bytes were rebuilt or pre-existing"
+    );
+}
+
+#[test]
+fn release_recovery_runs_publication_gate_from_the_control_revision() {
+    let workflow = release_workflow();
+    let host = job_section(workflow, "host");
+    let gate = release_step_block(host, "name: Gate publication on the declared asset set");
+
+    assert!(
+        gate.contains("CONTROL_SHA: ${{ github.sha }}"),
+        "the publication helper must be pinned to the workflow control revision"
+    );
+    assert!(
+        gate.contains(
+            "git show \"${CONTROL_SHA}:.github/release-asset-completeness.sh\" > \"${CONTROL_HELPER}\""
+        ),
+        "a stranded target tag may predate the helper, so recovery must materialize it from the control revision"
+    );
+    assert!(gate.contains("bash \"${CONTROL_HELPER}\""));
+    assert!(
+        !gate.contains("bash .github/release-asset-completeness.sh"),
+        "the target-tag checkout must not own recovery control helpers"
     );
 }
 

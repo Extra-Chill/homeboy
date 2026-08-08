@@ -5,7 +5,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
@@ -290,6 +290,9 @@ const FINALIZATION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_
 /// Foreground liveness is deliberately bounded. Provider-native progress still
 /// wins when available; this durable heartbeat covers quiet providers.
 const COOK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+/// Poll durable provider state between samples so post-provider artifact work
+/// does not hold the foreground liveness loop for a full heartbeat interval.
+const COOK_PROVIDER_TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// One Cook progress event, as delivered to a foreground observer.
 ///
@@ -2454,6 +2457,19 @@ fn review_budget_authority(
     })
 }
 
+fn child_execution_budget(
+    scope: CookFollowUpBudgetScope,
+    budget_limit: &AgentTaskExecutionBudget,
+) -> AgentTaskExecutionBudget {
+    match scope {
+        CookFollowUpBudgetScope::Cook => budget_limit.clone(),
+        CookFollowUpBudgetScope::FreshCookReview
+        | CookFollowUpBudgetScope::CandidateAdoptionReview => {
+            AgentTaskExecutionBudget::new(1, 0, 0)
+        }
+    }
+}
+
 /// Append and dispatch one remediation attempt from an authenticated promoted
 /// candidate. Both ordinary Cook feedback and external candidate adoption use
 /// this boundary so their budget, provenance, and baseline authority match.
@@ -2638,8 +2654,13 @@ where
                 vec![follow_up_request],
             );
             follow_up_plan.options = plan.options.clone();
-            follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
-            follow_up_plan.options.retry.max_attempts = 1;
+            // Gate-feedback is a child execution, not a fresh one-shot policy.
+            // Review-only continuations retain their separately bounded plan.
+            follow_up_plan.options.execution_budget =
+                child_execution_budget(budget_scope, &budget_limit);
+            if budget_scope != CookFollowUpBudgetScope::Cook {
+                follow_up_plan.options.retry.max_attempts = 1;
+            }
             (next_attempt, next_run_id, follow_up_plan, None)
         }
     };
@@ -3335,6 +3356,40 @@ where
         options.max_attempts,
         &options.ai_tool,
     );
+    if options.gates.has_npm_run_declaration() {
+        let gate_workspace = options.source_worktree_path.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace",
+                "Cook requires a workspace before gate declaration preflight",
+                Some(options.to_worktree.clone()),
+                None,
+            )
+        })?;
+        if let Err(error) = options
+            .gates
+            .preflight_declarations(std::path::Path::new(gate_workspace))
+        {
+            let error = with_pre_execution_phase(error, "gate_declaration_preflight");
+            record_pre_execution_failure(
+                &options.initial_plan,
+                &options.initial_run_id,
+                &error,
+                "gate_declaration_preflight",
+            )?;
+            return Ok(pre_execution_failure_report(
+                options.cook_id.clone(),
+                Vec::new(),
+                pre_execution_failure_details(
+                    agent_task_lifecycle::exact_record(&options.initial_run_id)
+                        .ok()
+                        .as_ref(),
+                    &error,
+                ),
+                error,
+                Some(&options.initial_run_id),
+            ));
+        }
+    }
     let required_toolchains = options.gates.required_toolchains();
     let preflight = if required_toolchains.is_empty()
         && options.gates.gate_package_artifacts.is_empty()
@@ -3702,10 +3757,38 @@ where
                             let mut supervisor =
                                 CookSupervisor::new(supervision_policy, supervision_backend);
                             let mut deadline_stop_issued = false;
-                            while let Err(mpsc::RecvTimeoutError::Timeout) =
-                                heartbeat_wait.recv_timeout(COOK_HEARTBEAT_INTERVAL)
-                            {
-                                let activity = heartbeat_activity.sample(heartbeat_owner_pid);
+                            let mut next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
+                            loop {
+                                let poll_for = next_heartbeat
+                                    .saturating_duration_since(Instant::now())
+                                    .min(COOK_PROVIDER_TERMINAL_POLL_INTERVAL);
+                                match heartbeat_wait.recv_timeout(poll_for) {
+                                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                }
+                                // Scheduler terminalization precedes
+                                // controller-owned artifact harvesting. Once no
+                                // provider execution is active, this heartbeat
+                                // would otherwise sample only its own `ps`
+                                // subprocess while that cleanup completes.
+                                if !agent_task_lifecycle::has_active_provider_execution(
+                                    &heartbeat_run_id,
+                                )
+                                .unwrap_or(true)
+                                {
+                                    break;
+                                }
+                                if Instant::now() < next_heartbeat {
+                                    continue;
+                                }
+                                next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
+                                let activity_owner_pid = agent_task_lifecycle::running_owner_pid(
+                                    &heartbeat_run_id,
+                                )
+                                .ok()
+                                .flatten()
+                                .unwrap_or(heartbeat_owner_pid);
+                                let activity = heartbeat_activity.sample(activity_owner_pid);
                                 let tick = supervisor.observe(&activity);
                                 let detail = tick.detail_line();
                                 let _ = report_cook_progress_with_activity(

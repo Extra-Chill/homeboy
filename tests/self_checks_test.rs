@@ -1,9 +1,5 @@
 use homeboy::commands::lint::{run as run_lint, LintArgs};
 use homeboy::commands::test::{run as run_test, TestArgs};
-use homeboy::commands::utils::args::{
-    BaselineArgs, ChangedScopeArgs, ExtensionOverrideArgs, LabChangedScopeArgs, LintSniffArgs,
-    PositionalComponentArgs, SettingArgs,
-};
 use std::fs;
 use std::path::Path;
 
@@ -27,52 +23,12 @@ fn write_script(root: &Path, name: &str, body: &str) {
     fs::write(script_dir.join(name), body).expect("script should be written");
 }
 
-fn component_args(root: &Path) -> PositionalComponentArgs {
-    PositionalComponentArgs {
-        component: Some("fixture".to_string()),
-        path: Some(root.to_string_lossy().to_string()),
-    }
-}
-
 fn lint_args(root: &Path) -> LintArgs {
-    LintArgs {
-        comp: component_args(root),
-        extension_override: ExtensionOverrideArgs::default(),
-        summary: false,
-        file: None,
-        glob: None,
-        changed: ChangedScopeArgs::default(),
-        force_main_workflow: false,
-        ci_job: None,
-        sniff_filters: LintSniffArgs::default(),
-        category: None,
-        fix: false,
-        force: false,
-        setting_args: SettingArgs::default(),
-        baseline_args: BaselineArgs::default(),
-        json_summary: false,
-    }
+    LintArgs::for_test("fixture", root)
 }
 
 fn test_args(root: &Path) -> TestArgs {
-    TestArgs {
-        comp: component_args(root),
-        extension_override: ExtensionOverrideArgs::default(),
-        skip_lint: false,
-        coverage: false,
-        coverage_min: None,
-        baseline_args: BaselineArgs::default(),
-        analyze: false,
-        drift: false,
-        write: false,
-        since: "HEAD~10".to_string(),
-        changed: LabChangedScopeArgs::default(),
-        ci_job: None,
-        setting_args: SettingArgs::default(),
-        args: Vec::new(),
-        json_summary: false,
-        restore_checkout: false,
-    }
+    TestArgs::for_test("fixture", root)
 }
 
 fn json_test_args(root: &Path) -> TestArgs {

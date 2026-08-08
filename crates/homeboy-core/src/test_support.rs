@@ -35,6 +35,13 @@ static SHORT_EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock
 /// Runs the leaked-tempdir sweep exactly once per test process.
 static LEAKED_TEMPDIR_SWEEP: OnceLock<()> = OnceLock::new();
 
+// `tempfile::Builder` appends six random ASCII characters by default. Keep the
+// base acceptance calculation aligned with the allocated directory shape.
+#[cfg(unix)]
+const TEMPFILE_RANDOM_SUFFIX_BYTES: usize = 6;
+#[cfg(unix)]
+const TEST_INVOCATION_ID: &str = "0123456789";
+
 /// An explicit executable selection for a hermetic test command.
 ///
 /// Fixture commands never resolve `homeboy` through `PATH`: integration tests
@@ -630,7 +637,7 @@ fn short_invocation_tempdir() -> TempDir {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        if let Some(base) = cached {
+        if let Some(base) = cached.filter(|base| invocation_temp_base_fits(base)) {
             if let Ok(directory) = tempfile::Builder::new()
                 .prefix(&owned_tempdir_prefix())
                 .tempdir_in(&base)
@@ -684,7 +691,7 @@ fn marked_tempdir(context: &str) -> TempDir {
 fn short_tempdir_candidates() -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     let mut push_if_usable = |path: PathBuf| {
-        if path.is_dir() && !candidates.contains(&path) {
+        if path.is_dir() && invocation_temp_base_fits(&path) && !candidates.contains(&path) {
             candidates.push(path);
         }
     };
@@ -695,11 +702,23 @@ fn short_tempdir_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-/// Verify the actual generated root plus the 10-byte invocation leaf. Checking
-/// the root alone misses the path component every workload receives.
+/// Verify the actual generated root plus the 10-byte invocation state leaf.
+/// Checking the root alone misses the path component every workload receives.
 #[cfg(unix)]
 fn invocation_runtime_dir_fits(root: &Path) -> bool {
-    crate::engine::invocation::enforce_path_budget(&root.join("0123456789")).is_ok()
+    crate::engine::invocation::enforce_path_budget(&root.join(TEST_INVOCATION_ID)).is_ok()
+}
+
+/// Verify a candidate base can contain the PID-owned `tempfile` directory and
+/// the state leaf that production appends beneath the allocated runtime root.
+#[cfg(unix)]
+fn invocation_temp_base_fits(base: &Path) -> bool {
+    let allocated_root = base.join(format!(
+        "{}{}",
+        owned_tempdir_prefix(),
+        "x".repeat(TEMPFILE_RANDOM_SUFFIX_BYTES)
+    ));
+    invocation_runtime_dir_fits(&allocated_root)
 }
 
 /// Probe whether files created under `dir` can actually be executed.
@@ -2320,7 +2339,62 @@ mod tests {
     #[test]
     fn the_invocation_tempdir_still_fits_the_socket_budget() {
         let dir = short_invocation_tempdir();
-        crate::engine::invocation::enforce_path_budget(&dir.path().join("0123456789"))
+        crate::engine::invocation::enforce_path_budget(&dir.path().join(TEST_INVOCATION_ID))
             .expect("invocation runtime plus its leaf must leave room for a workload socket name");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_invocation_temp_base_keeps_the_state_leaf_within_the_socket_budget() {
+        let max_state_leaf_len = crate::engine::invocation::SUN_PATH_CAPACITY
+            - crate::engine::invocation::SOCKET_HEADROOM_BYTES
+            - 1;
+        let allocated_root_suffix_len = 1
+            + owned_tempdir_prefix().len()
+            + TEMPFILE_RANDOM_SUFFIX_BYTES
+            + 1
+            + TEST_INVOCATION_ID.len();
+        let max_base_len = max_state_leaf_len - allocated_root_suffix_len;
+        let accepted = PathBuf::from(format!("/{}", "a".repeat(max_base_len - 1)));
+        let rejected = PathBuf::from(format!("/{}", "a".repeat(max_base_len)));
+
+        assert!(
+            invocation_temp_base_fits(&accepted),
+            "a base whose allocated state leaf is exactly at the budget must fit"
+        );
+        assert!(
+            !invocation_temp_base_fits(&rejected),
+            "a base whose allocated state leaf exceeds the budget must be rejected"
+        );
+
+        let fixture = tempfile::tempdir_in("/tmp").expect("short fixture root");
+        let fixture_len = fixture.path().to_string_lossy().len();
+        assert!(
+            fixture_len < max_base_len,
+            "fixture root must leave room for the modeled base"
+        );
+        let base = fixture
+            .path()
+            .join("a".repeat(max_base_len - fixture_len - 1));
+        fs::create_dir(&base).expect("create exact-budget base");
+        let state_root = tempfile::Builder::new()
+            .prefix(&owned_tempdir_prefix())
+            .tempdir_in(&base)
+            .expect("create PID-owned state root");
+        let suffix = state_root
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(&owned_tempdir_prefix()))
+            .expect("state root retains its PID-owned prefix");
+        assert_eq!(
+            suffix.len(),
+            TEMPFILE_RANDOM_SUFFIX_BYTES,
+            "tempfile suffix length must match the modeled allocation shape"
+        );
+        assert!(
+            invocation_runtime_dir_fits(state_root.path()),
+            "an allocated state leaf at the budget must fit"
+        );
     }
 }

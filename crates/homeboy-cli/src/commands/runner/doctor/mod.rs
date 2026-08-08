@@ -75,7 +75,8 @@ pub fn run_with_options(
     }
 
     report.status = checks::overall_status(&report.checks);
-    Ok((report, 0))
+    let exit_code = report.status.operational_exit_code();
+    Ok((report, exit_code))
 }
 
 fn runner_summary(

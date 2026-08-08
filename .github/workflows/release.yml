@@ -1364,8 +1364,15 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
           REQUIRE_ANNOUNCE_ASSETS: 'false'
+          CONTROL_SHA: ${{ github.sha }}
         run: |
-          bash .github/release-asset-completeness.sh
+          set -euo pipefail
+          if ! git cat-file -e "${CONTROL_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${CONTROL_SHA}"
+          fi
+          CONTROL_HELPER="${RUNNER_TEMP}/release-asset-completeness.sh"
+          git show "${CONTROL_SHA}:.github/release-asset-completeness.sh" > "${CONTROL_HELPER}"
+          bash "${CONTROL_HELPER}"
 
       - name: Finish Homeboy release pipeline at tag
         uses: Extra-Chill/homeboy-action@v2
@@ -1454,6 +1461,52 @@ jobs:
           fi
           echo "::notice::Release ${RELEASE_TAG} contains every planned asset."
 
+  # A complete remote inventory proves that every archive was uploaded. It does
+  # not prove that the consumer resolver selects this release rather than
+  # falling back to an older installable one. Exercise the public action on
+  # Linux with no source or binary override, which is the same resolution path
+  # used by downstream CI consumers.
+  verify-linux-consumer:
+    name: Verify Linux consumer
+    needs:
+      - prepare
+      - verify-published
+    if: ${{ always() && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.verify-published.result == 'success' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs['release-tag'] }}
+          persist-credentials: false
+
+      - name: Resolve latest release and run Homeboy Action
+        uses: Extra-Chill/homeboy-action@v2
+        with:
+          # Deliberately omit local-build and supplied-executable inputs: the
+          # action must install the Linux archive a downstream consumer
+          # resolves from latest.
+          commands: review lint
+          expected-commands: review lint
+
+      - name: Verify Homeboy Action installed the published version
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
+        run: |
+          set -euo pipefail
+          EXPECTED_VERSION="${RELEASE_TAG#v}"
+          ACTUAL_VERSION="$(homeboy --version)"
+          case "${ACTUAL_VERSION}" in
+            *"${EXPECTED_VERSION}"*)
+              echo "::notice::Linux consumer resolved ${ACTUAL_VERSION} for ${RELEASE_TAG}"
+              ;;
+            *)
+              echo "::error::Linux consumer resolved '${ACTUAL_VERSION}', not the release just published (${RELEASE_TAG}). The action must not fall back to an older release." >&2
+              exit 1
+              ;;
+          esac
+
   announce:
     needs:
       - plan
@@ -1482,6 +1535,7 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - host
+      - verify-linux-consumer
       - verify-published
       - announce
     if: ${{ always() && github.event_name == 'push' && needs.check.outputs.should-release == 'true' && contains(toJson(needs), '"result":"failure"') }}
@@ -1553,6 +1607,7 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - host
+      - verify-linux-consumer
       - verify-published
       - announce
     if: ${{ always() && github.event_name == 'push' && needs.check.outputs.should-release == 'true' && !contains(toJson(needs), '"result":"failure"') && !contains(toJson(needs), '"result":"cancelled"') }}

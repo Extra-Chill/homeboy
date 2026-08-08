@@ -5,6 +5,7 @@
 //! provider, keeping this contract independent of any product integration.
 
 use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -20,7 +21,8 @@ use homeboy_core::process::{
 use serde_json::{json, Value};
 
 use super::{
-    AgentTaskManagedService, AgentTaskManagedServiceLifecycle, AgentTaskManagedServiceReadinessKind,
+    AgentTaskEvidenceRef, AgentTaskManagedService, AgentTaskManagedServiceLifecycle,
+    AgentTaskManagedServiceReadinessKind,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -33,6 +35,11 @@ pub struct AgentTaskManagedServiceRecord {
     pub local_url: Option<String>,
     pub public_url: Option<String>,
     pub log_path: Option<String>,
+    /// The supervisor combines process stdout and stderr in one retained file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_uri: Option<String>,
     pub pid: Option<u32>,
     pub cleanup: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,6 +217,8 @@ impl AgentTaskServiceSupervisor {
             local_url: local_url.clone(),
             public_url: spec.public_url.clone(),
             log_path: Some(log_path.display().to_string()),
+            stdout_uri: Some(format!("file://{}", log_path.display())),
+            stderr_uri: Some(format!("file://{}", log_path.display())),
             pid: None,
             cleanup: None,
             requested_cleanup_deadline_ms: Some(spec.cleanup_deadline_ms),
@@ -725,6 +734,97 @@ fn persist_record(run_id: &str, record: &AgentTaskManagedServiceRecord) -> Resul
         .map_err(|error| format!("commit managed service ownership: {error}"))
 }
 
+pub(super) fn startup_failure_evidence(run_id: &str) -> (Vec<AgentTaskEvidenceRef>, Value) {
+    let records = read_service_records(run_id);
+    let services = records
+        .iter()
+        .map(|record| {
+            let record_uri = service_record_path(run_id, &record.id)
+                .map(|path| format!("file://{}", path.display()));
+            json!({
+                "id": record.id,
+                "state": record.state,
+                "record_uri": record_uri,
+                "stdout_uri": record.stdout_uri,
+                "stderr_uri": record.stderr_uri,
+                "stdout_excerpt": record.log_path.as_deref().and_then(redacted_log_excerpt),
+                "readiness_attempts": record.readiness_attempts,
+                "cleanup": record.cleanup,
+                "cleanup_outcome": record.cleanup_outcome,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut evidence_refs = Vec::new();
+    for record in &records {
+        if let Ok(path) = service_record_path(run_id, &record.id) {
+            evidence_refs.push(AgentTaskEvidenceRef {
+                kind: "managed-service-record".to_string(),
+                uri: format!("file://{}", path.display()),
+                label: Some(format!("managed service '{}' startup record", record.id)),
+            });
+        }
+        for (kind, uri) in [
+            ("managed-service-stdout", record.stdout_uri.as_ref()),
+            ("managed-service-stderr", record.stderr_uri.as_ref()),
+        ] {
+            if let Some(uri) = uri {
+                evidence_refs.push(AgentTaskEvidenceRef {
+                    kind: kind.to_string(),
+                    uri: uri.clone(),
+                    label: Some(format!("managed service '{}' {kind}", record.id)),
+                });
+            }
+        }
+    }
+    (
+        evidence_refs,
+        json!({
+            "run_id": run_id,
+            "service_supervisor_state_uri": service_worker_state_path(run_id)
+                .ok()
+                .map(|path| format!("file://{}", path.display())),
+            "services": services,
+        }),
+    )
+}
+
+fn redacted_log_excerpt(path: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(4 * 1024);
+    File::open(path)
+        .ok()?
+        .take(4 * 1024)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(homeboy_core::redaction::redact_string(
+        &String::from_utf8_lossy(&bytes),
+    ))
+}
+
+fn service_record_path(run_id: &str, service_id: &str) -> Result<PathBuf, String> {
+    Ok(homeboy_core::paths::homeboy_data()
+        .map_err(|error| error.message)?
+        .join("agent-task-runs")
+        .join(run_id)
+        .join("services")
+        .join(format!("{service_id}.json")))
+}
+
+fn read_service_records(run_id: &str) -> Vec<AgentTaskManagedServiceRecord> {
+    let directory = match homeboy_core::paths::homeboy_data() {
+        Ok(path) => path.join("agent-task-runs").join(run_id).join("services"),
+        Err(_) => return Vec::new(),
+    };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .filter_map(|entry| std::fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice(&bytes).ok())
+        .collect()
+}
+
 fn worker_root(run_id: &str) -> Result<PathBuf, String> {
     Ok(homeboy_core::paths::homeboy_data()
         .map_err(|error| error.message)?
@@ -867,6 +967,7 @@ pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
         Err(error) => {
             state.state = "failed".to_string();
             state.detail = Some(error);
+            state.services = read_service_records(&request.run_id);
             state.heartbeat_unix_ms = now_unix_ms();
             return write_json_atomically(&state_path, &state);
         }
@@ -1605,7 +1706,8 @@ mod tests {
             service.command = vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                "trap '' TERM; while :; do sleep 1; done".to_string(),
+                "echo token=managed-service-secret >&2; trap '' TERM; while :; do sleep 1; done"
+                    .to_string(),
             ];
             service.readiness.as_mut().unwrap().timeout_ms = Some(50);
             service.cleanup_deadline_ms = 100;
@@ -1620,6 +1722,11 @@ mod tests {
             assert!(error.contains("readiness probe timed out"));
             worker.join().expect("worker joins").expect("worker exits");
             let state = wait_for_worker_state(run_id, "failed");
+            assert_eq!(
+                state.services.len(),
+                1,
+                "failed services remain discoverable"
+            );
             assert!(state
                 .detail
                 .as_deref()
@@ -1646,6 +1753,15 @@ mod tests {
                 Some("deadline_escalation_forced")
             );
             assert!(record.pid.is_some_and(|pid| !super::process_is_alive(pid)));
+            assert_eq!(record.stdout_uri, record.stderr_uri);
+
+            let (refs, evidence) = startup_failure_evidence(run_id);
+            assert_eq!(refs.len(), 3, "record plus stdout and stderr refs");
+            assert_eq!(evidence["services"][0]["state"], "failed");
+            assert!(evidence["services"][0]["stdout_uri"]
+                .as_str()
+                .is_some_and(|uri| uri.starts_with("file://")));
+            assert!(!evidence.to_string().contains("managed-service-secret"));
         });
     }
 

@@ -46,6 +46,12 @@ pub(crate) use collector::ActivityCollector;
 
 pub const ACTIVITY_REPORT_SCHEMA: &str = "homeboy/activity-report/v1";
 
+/// Extra records inspected by the default view after its requested result
+/// count. This lets current work survive a stale-runner backlog without making
+/// the interactive command perform an unbounded historical scan.
+const DEFAULT_STALE_PROJECTION_WINDOW: usize = 100;
+const DEFAULT_NEXT_ACTION_LIMIT: usize = 20;
+
 /// Environment opt-out for runner federation. Any of `0`/`false`/`no`/`off`
 /// disables it; anything else (including absence) leaves it on.
 pub const ACTIVITY_FEDERATE_RUNNERS_ENV: &str = "HOMEBOY_ACTIVITY_FEDERATE_RUNNERS";
@@ -116,7 +122,17 @@ pub fn activity_report_with(
     // bound can only ever add to a complete local answer — it can never delay
     // or lose one.
     let federation = runner_sessions::collect(&mut collector, options.federate_runners);
-    let mut report = report_from_items(collector.items(scope, limit), "activity");
+    let collection_limit = if scope == ActivityScope::ActiveRecent {
+        limit.saturating_add(DEFAULT_STALE_PROJECTION_WINDOW)
+    } else {
+        limit
+    };
+    let mut report = report_from_items(
+        collector.items(ActivityScope::All, collection_limit),
+        scope,
+        limit,
+        "activity",
+    );
     report.agent_task_record_health = agent_task_record_health;
     report.partial = federation.partial;
     report.runner_federation = federation;
@@ -213,7 +229,7 @@ pub fn show_activity_with(id: &str, options: ActivityOptions) -> Result<Activity
     // Attaching it here re-read every durable agent-task record just to answer
     // one id, so it stays null — the report shape carries the field either way
     // (#10308).
-    let mut report = report_from_items(vec![item], "activity.show");
+    let mut report = report_from_items(vec![item], ActivityScope::All, 1, "activity.show");
     // A `show` that had to fall back through the federation inherits its
     // partiality: an id resolved while a runner was unreachable is answered from
     // an incomplete corpus, and the caller is entitled to know that.
@@ -282,10 +298,27 @@ fn reclassify_stale_running(items: &mut [ActivityItem]) {
     }
 }
 
-fn report_from_items(mut items: Vec<ActivityItem>, command: &'static str) -> ActivityReport {
+fn report_from_items(
+    mut items: Vec<ActivityItem>,
+    scope: ActivityScope,
+    limit: usize,
+    command: &'static str,
+) -> ActivityReport {
     reclassify_stale_running(&mut items);
     let counts = counts_for_items(&items);
-    let next_actions = items
+    items.sort_by_key(|item| std::cmp::Reverse(activity_sort_key(item)));
+    let collected_items = items.len();
+    if scope == ActivityScope::ActiveRecent {
+        items.retain(|item| is_active(item.state) || item.finished_at.is_some());
+    }
+    items.truncate(limit.max(1));
+    let stale_items_omitted = counts.stale.saturating_sub(
+        items
+            .iter()
+            .filter(|item| item.state == ActivityState::Stale)
+            .count(),
+    );
+    let all_next_actions = items
         .iter()
         .flat_map(|item| {
             item.next_actions
@@ -294,7 +327,18 @@ fn report_from_items(mut items: Vec<ActivityItem>, command: &'static str) -> Act
         })
         .collect::<BTreeSet<_>>()
         .into_iter()
+        .collect::<Vec<_>>();
+    let next_action_limit = if scope == ActivityScope::ActiveRecent {
+        DEFAULT_NEXT_ACTION_LIMIT
+    } else {
+        usize::MAX
+    };
+    let next_actions: Vec<_> = all_next_actions
+        .iter()
+        .take(next_action_limit)
+        .cloned()
         .collect();
+    let displayed_items = items.len();
     ActivityReport {
         schema: ACTIVITY_REPORT_SCHEMA,
         command,
@@ -307,8 +351,24 @@ fn report_from_items(mut items: Vec<ActivityItem>, command: &'static str) -> Act
         partial: false,
         runner_federation: ActivityRunnerFederation::default(),
         agent_task_record_health: Value::Null,
+        truncation: ActivityTruncation {
+            items_omitted: collected_items.saturating_sub(displayed_items),
+            stale_items_omitted,
+            next_actions_omitted: all_next_actions.len().saturating_sub(next_actions.len()),
+        },
         next_actions,
     }
+}
+
+fn activity_sort_key(item: &ActivityItem) -> (bool, Option<chrono::DateTime<chrono::Utc>>, String) {
+    (
+        is_active(item.state),
+        item.updated_at
+            .as_deref()
+            .or(Some(item.created_at.as_str()))
+            .and_then(parse_ts),
+        item.id.clone(),
+    )
 }
 
 fn counts_for_items(items: &[ActivityItem]) -> ActivityCounts {
@@ -513,7 +573,12 @@ mod tests {
         // it is left as Running (not reclassified).
         let no_heartbeat = item("no-heartbeat-running", ActivityState::Running);
 
-        let report = report_from_items(vec![fresh, stale, no_heartbeat], "homeboy activity");
+        let report = report_from_items(
+            vec![fresh, stale, no_heartbeat],
+            ActivityScope::All,
+            10,
+            "homeboy activity",
+        );
 
         // Fresh + heartbeat-less stay running; the stale-heartbeat row moves to stale.
         assert_eq!(report.counts.running, 2);
@@ -539,13 +604,58 @@ mod tests {
         stale.updated_at = Some((now - chrono::Duration::hours(6)).to_rfc3339());
         stale.runner.runner_id = Some("lab-a".to_string());
 
-        let report = report_from_items(vec![stale], "homeboy activity");
+        let report = report_from_items(vec![stale], ActivityScope::All, 10, "homeboy activity");
 
         assert_eq!(report.items[0].state, ActivityState::Stale);
         assert!(report.items[0].next_actions.iter().any(|action| {
             action.command
                 == "homeboy runner exec lab-a -- homeboy agent-task reconcile agent-task-stale --dry-run"
         }));
+    }
+
+    #[test]
+    fn default_view_prioritizes_active_tasks_and_explicitly_compacts_stale_runner_records() {
+        let mut items = (0..100)
+            .map(|index| {
+                let mut stale = item(&format!("stale-runner-{index:03}"), ActivityState::Stale);
+                stale.kind = "runner_execution".to_string();
+                stale.runner.runner_id = Some("lab-a".to_string());
+                stale
+            })
+            .collect::<Vec<_>>();
+        let mut active_one = item("active-agent-task-one", ActivityState::Running);
+        active_one.kind = "agent-task".to_string();
+        active_one.next_actions = (0..12)
+            .map(|index| action("next", format!("homeboy action active-one-{index}")))
+            .collect();
+        let mut active_two = item("active-agent-task-two", ActivityState::Queued);
+        active_two.kind = "agent-task".to_string();
+        active_two.next_actions = (0..12)
+            .map(|index| action("next", format!("homeboy action active-two-{index}")))
+            .collect();
+        items.extend([active_one, active_two]);
+
+        let default = report_from_items(items.clone(), ActivityScope::ActiveRecent, 20, "activity");
+        assert_eq!(
+            default
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["active-agent-task-two", "active-agent-task-one"],
+        );
+        assert_eq!(default.counts.stale, 100);
+        assert_eq!(default.truncation.items_omitted, 100);
+        assert_eq!(default.truncation.stale_items_omitted, 100);
+        assert_eq!(default.next_actions.len(), DEFAULT_NEXT_ACTION_LIMIT);
+        assert_eq!(default.truncation.next_actions_omitted, 4);
+
+        let all = report_from_items(items, ActivityScope::All, 102, "activity");
+        assert_eq!(all.items.len(), 102);
+        assert_eq!(all.truncation.items_omitted, 0);
+        assert_eq!(all.truncation.stale_items_omitted, 0);
+        assert_eq!(all.next_actions.len(), 124);
+        assert_eq!(all.truncation.next_actions_omitted, 0);
     }
 
     #[test]
@@ -584,7 +694,12 @@ mod tests {
 
     #[test]
     fn next_actions_are_lifted_as_exact_commands() {
-        let report = report_from_items(vec![item("run-1", ActivityState::Running)], "activity");
+        let report = report_from_items(
+            vec![item("run-1", ActivityState::Running)],
+            ActivityScope::All,
+            10,
+            "activity",
+        );
         assert_eq!(report.next_actions, vec!["homeboy runs show run-1"]);
         assert_eq!(report.items[0].next_actions[0].label, "show");
     }
@@ -717,7 +832,7 @@ mod tests {
 
     #[test]
     fn empty_state_output_has_zero_counts() {
-        let report = report_from_items(Vec::new(), "activity");
+        let report = report_from_items(Vec::new(), ActivityScope::All, 10, "activity");
         assert_eq!(report.counts.total, 0);
         assert!(report.items.is_empty());
         assert!(report.next_actions.is_empty());
@@ -745,7 +860,12 @@ mod tests {
     /// and therefore *changes* what a later `activity show` returns.
     #[test]
     fn activity_reports_are_marked_unreconciled() {
-        let report = report_from_items(vec![item("run-1", ActivityState::Running)], "activity");
+        let report = report_from_items(
+            vec![item("run-1", ActivityState::Running)],
+            ActivityScope::All,
+            10,
+            "activity",
+        );
         assert!(!report.reconciled);
     }
 
