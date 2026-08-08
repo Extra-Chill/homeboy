@@ -110,6 +110,33 @@ pub struct TestArgs {
 }
 
 impl TestArgs {
+    /// Canonical test fixture with explicit command target and no internal source.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(component: impl Into<String>, path: impl AsRef<std::path::Path>) -> Self {
+        Self {
+            comp: PositionalComponentArgs {
+                component: Some(component.into()),
+                path: Some(path.as_ref().to_string_lossy().into_owned()),
+            },
+            release_readiness_source: None,
+            extension_override: ExtensionOverrideArgs::default(),
+            skip_lint: false,
+            coverage: false,
+            coverage_min: None,
+            baseline_args: BaselineArgs::default(),
+            analyze: false,
+            drift: false,
+            write: false,
+            since: "HEAD~10".to_string(),
+            changed: LabChangedScopeArgs::default(),
+            ci_job: None,
+            setting_args: SettingArgs::default(),
+            args: Vec::new(),
+            json_summary: false,
+            restore_checkout: false,
+        }
+    }
+
     pub(crate) fn lab_contract(&self) -> LabCommandContract {
         if self.baseline_args.baseline || self.baseline_args.ratchet {
             return LabCommandContract::local_only(
@@ -1160,6 +1187,15 @@ mod tests {
             .expect("test should parse --ci-job");
 
         assert_eq!(cli.test.ci_job.as_deref(), Some("unit"));
+    }
+
+    #[test]
+    fn test_fixture_keeps_target_explicit_and_internal_source_absent() {
+        let args = TestArgs::for_test("fixture", "/tmp/fixture");
+
+        assert_eq!(args.comp.component.as_deref(), Some("fixture"));
+        assert_eq!(args.comp.path.as_deref(), Some("/tmp/fixture"));
+        assert!(args.release_readiness_source.is_none());
     }
 
     #[test]
