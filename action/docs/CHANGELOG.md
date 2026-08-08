@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.14] - 2026-08-08
+
+### Fixed
+- restore shard workspace exclusions [AI: OpenAI GPT-5.6 Sol via OpenCode - review fixes and tests]
+- isolate Test shard transport [AI: OpenAI GPT-5.6 Sol via OpenCode - workflow implementation and tests]
+
 ## [2.11.13] - 2026-08-08
 
 ### Fixed
