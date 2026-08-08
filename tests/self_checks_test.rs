@@ -50,6 +50,7 @@ fn lint_args(root: &Path) -> LintArgs {
         force: false,
         setting_args: SettingArgs::default(),
         baseline_args: BaselineArgs::default(),
+        release_readiness_source: None,
         json_summary: false,
     }
 }
@@ -69,6 +70,7 @@ fn test_args(root: &Path) -> TestArgs {
         changed: LabChangedScopeArgs::default(),
         ci_job: None,
         setting_args: SettingArgs::default(),
+        release_readiness_source: None,
         args: Vec::new(),
         json_summary: false,
         restore_checkout: false,
