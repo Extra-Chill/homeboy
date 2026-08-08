@@ -2,13 +2,24 @@ use super::*;
 
 /// Enrich a single artifact record with public/viewer link metadata.
 ///
-/// Mirrors the original CLI helper exactly: derive a public URL (from
-/// stored artifact metadata or by treating the artifact path as the URL
-/// for `url`-typed artifacts), then resolve any cached viewer links.
+/// Derive a public URL from stored artifact metadata or, for explicitly
+/// URL-typed artifacts, from the recorded URL. Generated public URLs are only
+/// emitted after the persistence-time probe verified them, so a successful
+/// terminal handoff never advertises an already-broken tunnel URL.
 pub(crate) fn enrich_artifact_link(mut artifact: ArtifactRecord) -> ArtifactRecord {
     let public_url =
         public_artifact_url(&artifact).or_else(|| public_url_for_url_artifact(&artifact));
     if let Some(url) = public_url.clone() {
+        if artifact.artifact_type != "url"
+            && artifact
+                .metadata_json
+                .get("public_url_validation")
+                .and_then(|validation| validation.get("reachable"))
+                .and_then(Value::as_bool)
+                != Some(true)
+        {
+            return artifact;
+        }
         artifact.public_url = Some(url.clone());
         artifact.viewer_links = cached_validated_viewer_links(&artifact, &url);
         artifact.viewer_url = artifact.viewer_links.first().map(|link| link.url.clone());
@@ -51,13 +62,10 @@ pub fn related_lab_artifacts_for_runner_job(
     if run.kind != "runner-exec" {
         return Ok(Vec::new());
     }
-    // Resolve the runner-exec run's Lab job id. Prefer authoritative runner
-    // evidence; fall back to the persisted metadata in either shape.
-    let Some(job_id) =
-        runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))
-            .map(|(_runner_id, job_id)| job_id)
-            .or_else(|| lab_remote_job_id(run).map(str::to_string))
-    else {
+    // The terminal envelope persists the Lab identity. Do not ask a live
+    // runner from a durable reader: the runner can be gone precisely when its
+    // already-recorded evidence is needed for review.
+    let Some(job_id) = lab_remote_job_id(run).map(str::to_string) else {
         return Ok(Vec::new());
     };
     let mut artifacts = Vec::new();
@@ -83,15 +91,15 @@ pub fn related_lab_artifacts_for_runner_job(
 
 /// List the enriched artifact records attached to a run.
 ///
-/// Side-effect ordering matches the CLI: refresh mirrored daemon evidence,
-/// then index nested publication artifact refs, then list and enrich.
+/// This reader only consults the durable local store. Runner reconciliation and
+/// remote manifest indexing are explicit operations, so a disconnected or
+/// stuck runner cannot block an artifact receipt, evidence report, or terminal
+/// handoff.
 pub fn list_artifacts_for_run(
     store: &ObservationStore,
     run_id: &str,
 ) -> Result<Vec<ArtifactRecord>> {
     let run = require_run(store, run_id)?;
-    refresh_mirrored_daemon_evidence_best_effort(&run.id);
-    crate::artifacts::index_remote_published_artifact_refs_for_run(store, &run.id)?;
     let artifacts = store.list_artifacts(&run.id)?;
     Ok(enrich_artifact_links(artifacts))
 }
