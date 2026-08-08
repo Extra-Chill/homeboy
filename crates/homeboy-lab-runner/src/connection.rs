@@ -1749,6 +1749,12 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
                             &active_jobs,
                         ));
                     }
+                    let active_jobs = project_unknown_daemon_owners(
+                        runner_id,
+                        session,
+                        active_jobs,
+                        direct_daemon_active_jobs,
+                    );
                     (
                         active_jobs,
                         stale_jobs,
@@ -2427,6 +2433,62 @@ fn should_infer_child_run_orphans(
     direct_daemon_active_jobs: Option<usize>,
 ) -> bool {
     direct_daemon_active_jobs.is_none_or(|count| typed_active_jobs >= count)
+}
+
+/// Preserve the daemon's authoritative count when its typed `/jobs` projection
+/// is incomplete. These records deliberately have no cancellable job identity:
+/// reconciliation may settle stale store state, but live daemon work stays
+/// protected until the daemon itself supplies a typed owner.
+fn project_unknown_daemon_owners(
+    runner_id: &str,
+    session: &RunnerSession,
+    mut active_jobs: Vec<ActiveRunnerJobSummary>,
+    direct_daemon_active_jobs: Option<usize>,
+) -> Vec<ActiveRunnerJobSummary> {
+    let Some(authoritative_count) = direct_daemon_active_jobs else {
+        return active_jobs;
+    };
+    let missing_count = authoritative_count.saturating_sub(active_jobs.len());
+    let lease_id = session
+        .remote_daemon_lease_id
+        .as_deref()
+        .unwrap_or("unrecorded-lease");
+    let daemon_pid = session
+        .remote_daemon_pid
+        .map(|pid| pid.to_string())
+        .unwrap_or_else(|| "unrecorded-pid".to_string());
+    let typed_job_count = active_jobs.len();
+    active_jobs.extend((0..missing_count).map(|index| ActiveRunnerJobSummary {
+        runner_id: runner_id.to_string(),
+        job_id: format!("unknown-daemon-owner-{lease_id}-{}", index + 1),
+        operation: "daemon.unknown_owner".to_string(),
+        source: RunnerJobSource::Daemon.label().to_string(),
+        kind: "unknown".to_string(),
+        status: JobStatus::Running,
+        command: format!(
+            "unprojected daemon child: lease_id={lease_id}; daemon_pid={daemon_pid}; daemon_active_count={authoritative_count}; typed_jobs_count={typed_job_count}; store=/jobs"
+        ),
+        cwd: None,
+        started_at_ms: 0,
+        updated_at_ms: 0,
+        elapsed_ms: 0,
+        heartbeat_age_ms: 0,
+        claim: JobClaimMetadata {
+            claim_id: None,
+            claimed_by_runner_id: Some(runner_id.to_string()),
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+        },
+        claim_expires_in_ms: None,
+        lifecycle: None,
+        durable_run_id: None,
+        stale_reason: Some("daemon_freshness_count_exceeds_typed_jobs".to_string()),
+        lifecycle_state: Some("unknown_owner".to_string()),
+        retryable: Some(false),
+        active_child_count: None,
+        active_cell_count: None,
+    }));
+    active_jobs
 }
 
 /// Query the daemon job store before an operation replaces its process.
