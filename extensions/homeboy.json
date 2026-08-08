@@ -8,6 +8,7 @@
       "node tests/agent-task-provider-contract-smoke.mjs",
       "node agent-runtimes/codex/tests/declared-artifact-harvester.test.js",
       "node agent-runtimes/opencode/tests/opencode-agent-task-executor-boundary.test.js",
+      "node agent-runtimes/opencode/tests/opencode-progress-relay.test.js",
       "node agent-runtimes/claude-code/tests/claude-code-agent-task-executor-boundary.test.js",
       "node agent-runtimes/pi/tests/pi-agent-task-executor-boundary.test.js",
       "node tests/browser-result-shapes-smoke.mjs",

@@ -19,7 +19,8 @@
     "check:runtime-manifest": "node scripts/agent/homeboy-opencode-runtime-manifest.cjs --check",
     "test:opencode-agent-task-executor": "node tests/opencode-agent-task-executor-boundary.test.js",
     "test:opencode-agent-task-executor-boundary": "node tests/opencode-agent-task-executor-boundary.test.js",
-    "test:opencode-progress-events": "node tests/opencode-progress-events.test.js"
+    "test:opencode-progress-events": "node tests/opencode-progress-events.test.js",
+    "test:opencode-progress-relay": "node tests/opencode-progress-relay.test.js"
   },
   "engines": {
     "node": ">=18.12.0"

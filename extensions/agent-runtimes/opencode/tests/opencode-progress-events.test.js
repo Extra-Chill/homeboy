@@ -16,7 +16,7 @@ try {
 		taskId: 'task-2311', cwd: workspace, filePath: eventPath,
 		env: { ACCESS_TOKEN: 'top-secret-token' }, now: '2026-07-20T12:00:00.000Z', onProgress: (event) => live.push(event),
 	});
-	adapter.consume('stdout', `${JSON.stringify({ timestamp: '2026-07-20T12:00:01.000Z', parts: [{ tool: 'read', input: { path: path.join(workspace, 'src/index.js') }, state: { status: 'completed' } }] })}\n`);
+	adapter.consume('stdout', `${JSON.stringify({ sessionID: 'ses_123', timestamp: '2026-07-20T12:00:01.000Z', parts: [{ tool: 'read', input: { path: path.join(workspace, 'src/index.js') }, state: { status: 'completed' } }] })}\n`);
 	adapter.consume('stdout', `${JSON.stringify({ parts: [{ tool: 'bash', input: { command: `ACCESS_TOKEN=top-secret-token npm test ${path.join(workspace, 'package.json')}` }, state: { status: 'completed', exit_code: 0 } }] })}\n`);
 	adapter.consume('stderr', `${JSON.stringify({ error: 'Rate limit reached; retrying with token top-secret-token.' })}\n`);
 	const summary = adapter.finish();
@@ -24,6 +24,7 @@ try {
 	assert.deepEqual(live.map((event) => event.type), ['file.read.completed', 'command.completed', 'provider.retrying']);
 	assert.deepEqual(live.map((event) => event.sequence), [1, 2, 3]);
 	assert.deepEqual(live.map((event) => event.cursor), ['opencode:1', 'opencode:2', 'opencode:3']);
+	assert.equal(live[0].session_id, 'ses_123');
 	assert.equal(live[0].data.path, 'src/index.js');
 	assert.equal(live[1].data.command.includes('top-secret-token'), false);
 	assert.equal(live[1].data.command.includes('ACCESS_TOKEN=[redacted]'), true);

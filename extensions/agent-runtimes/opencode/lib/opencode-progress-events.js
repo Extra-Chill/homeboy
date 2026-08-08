@@ -74,11 +74,11 @@ function translateOpenCodeEvent(frame = {}, context = {}) {
 		const failed = Boolean(part.state?.error || part.error || frame.error) || ['error', 'failed'].includes(status);
 		const completed = ['completed', 'complete', 'done', 'success', 'succeeded'].includes(status);
 		const type = progressType(tool, failed ? 'failed' : completed ? 'completed' : 'started');
-		return progressEnvelope(type, tool, input, frame, context, failed ? part.state?.error || part.error || frame.error : '');
+		return progressEnvelope(type, tool, input, frame, context, failed ? part.state?.error || part.error || frame.error : '', sessionId(part, frame));
 	}
 	const error = stringValue(frame.error || frame.message);
 	if (error && /(retry|rate limit|quota|backoff)/i.test(error)) {
-		return progressEnvelope('provider.retrying', '', {}, frame, context, error);
+		return progressEnvelope('provider.retrying', '', {}, frame, context, error, sessionId({}, frame));
 	}
 	return null;
 }
@@ -92,7 +92,7 @@ function progressType(tool, state) {
 	return `tool.${state}`;
 }
 
-function progressEnvelope(type, tool, input, frame, context, error) {
+function progressEnvelope(type, tool, input, frame, context, error, session_id) {
 	const data = {};
 	if (tool) data.tool = bounded(sanitize(tool, context), 80);
 	const candidatePath = stringValue(input.path || input.filePath || input.filepath || input.file || input.pattern);
@@ -106,11 +106,20 @@ function progressEnvelope(type, tool, input, frame, context, error) {
 	return {
 		schema: OPENCODE_PROGRESS_EVENT_SCHEMA,
 		task_id: context.taskId || 'unknown-task',
+		session_id,
 		source: 'provider',
 		type,
 		timestamp: validTimestamp(frame.timestamp || frame.time?.created || frame.created_at) || timestamp(context.now),
 		data,
 	};
+}
+
+function sessionId(part, frame) {
+	const value = stringValue(
+		part.session_id || part.sessionID || part.session?.id
+		|| frame.session_id || frame.sessionID || frame.session?.id
+	);
+	return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value) ? value : 'unknown';
 }
 
 function workspaceRelativePath(value, workspace) {

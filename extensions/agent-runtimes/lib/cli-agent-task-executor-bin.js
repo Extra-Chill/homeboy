@@ -19,7 +19,7 @@ const fs = require('node:fs');
  *
  * @param {{execute: Function, outcome: Function, providerContract: Function}} executor Provider executor surface.
  */
-async function runCliAgentTaskExecutorBin({ execute, outcome, providerContract }) {
+async function runCliAgentTaskExecutorBin({ execute, outcome, providerContract, onProgress }) {
 	if (process.argv.includes('--provider-contract')) {
 		process.stdout.write(`${JSON.stringify(providerContract(), null, 2)}\n`);
 		process.exit(0);
@@ -42,7 +42,7 @@ async function runCliAgentTaskExecutorBin({ execute, outcome, providerContract }
 		}
 	}
 
-	process.stdout.write(`${JSON.stringify(await execute(request), null, 2)}\n`);
+	process.stdout.write(`${JSON.stringify(await execute(request, { onProgress }), null, 2)}\n`);
 	process.exit(0);
 }
 
