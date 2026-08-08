@@ -475,25 +475,47 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
             agent_task_service::AgentTaskCandidateAdoptionOptions {
                 ai_model: args.ai_model.clone(),
                 replace_interrupted: args.replace_interrupted,
+                accept_inherited_failures: args.accept_inherited_failures,
             },
             crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
             ExtensionProviderAgentTaskExecutor::discover(),
         )?;
     let exit_code = result.exit_code;
+    let cook_id = result.value.cook_id.clone();
+    let selected_attempt = result.value.attempts.first().ok_or_else(|| {
+        homeboy::core::Error::internal_unexpected(
+            "candidate adoption report is missing its resolved attempt".to_string(),
+        )
+    })?;
+    let selected_attempt_number = selected_attempt.attempt;
+    let selected_run_id = selected_attempt.run_id.clone();
     let mut value = super::status::compact_cook_report(
         serde_json::to_value(result.value).unwrap_or(Value::Null),
         args.full,
     );
-    value["adoption"] = serde_json::json!({
+    value["adoption"] =
+        adoption_envelope(&args, &cook_id, selected_attempt_number, &selected_run_id);
+    Ok((value, exit_code))
+}
+
+fn adoption_envelope(
+    args: &AdoptArgs,
+    cook_id: &str,
+    selected_attempt: u32,
+    selected_run_id: &str,
+) -> Value {
+    serde_json::json!({
         "schema": "homeboy/agent-task-candidate-adoption/v1",
         "source": args.run_or_cook_id,
-        "attempt": args.attempt,
+        "cook_id": cook_id,
+        "attempt": selected_attempt,
+        "run_id": selected_run_id,
         "candidate_ref": args.candidate_ref,
         "ai_model": args.ai_model,
         "replace_interrupted": args.replace_interrupted,
+        "accept_inherited_failures": args.accept_inherited_failures,
         "controller_owned": true,
-    });
-    Ok((value, exit_code))
+    })
 }
 
 pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
@@ -1796,6 +1818,7 @@ pub(crate) fn read_promotion_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use homeboy::agents::agent_tasks::promotion::{
         AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
         AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
@@ -1805,6 +1828,26 @@ mod tests {
         AgentTaskOutcomeStatus, AgentTaskReconciliationDecision, AGENT_TASK_ARTIFACT_SCHEMA,
     };
     use sha2::{Digest, Sha256};
+    use std::process::Command;
+
+    #[test]
+    fn adoption_envelope_reports_canonical_selection_for_a_child_run_source() {
+        let args = AdoptArgs {
+            run_or_cook_id: "cook-42-attempt-2".to_string(),
+            attempt: None,
+            candidate_ref: "deadbeef".to_string(),
+            ai_model: Some("openai/gpt-5.6-terra".to_string()),
+            replace_interrupted: false,
+            full: false,
+        };
+
+        let envelope = adoption_envelope(&args, "cook-42", 2, "cook-42-attempt-2");
+
+        assert_eq!(envelope["source"], "cook-42-attempt-2");
+        assert_eq!(envelope["cook_id"], "cook-42");
+        assert_eq!(envelope["attempt"], 2);
+        assert_eq!(envelope["run_id"], "cook-42-attempt-2");
+    }
 
     #[test]
     fn compact_provider_bounds_extensions_and_large_diagnostics() {
@@ -2549,6 +2592,234 @@ mod tests {
             handoff["next_actions"][0],
             "PR was not opened; inspect finalization status and git/PR errors"
         );
+    }
+
+    #[test]
+    fn manual_preflight_continuation_dispatches_once_and_is_idempotent() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("fixture root");
+            let remote = root.path().join("origin.git");
+            let checkout = root.path().join("checkout");
+            run_git(
+                root.path(),
+                &[
+                    "init",
+                    "--bare",
+                    "--initial-branch=main",
+                    remote.to_str().expect("remote path"),
+                ],
+            );
+            run_git(
+                root.path(),
+                &[
+                    "init",
+                    "--initial-branch=main",
+                    checkout.to_str().expect("checkout path"),
+                ],
+            );
+            run_git(&checkout, &["config", "user.email", "test@example.test"]);
+            run_git(&checkout, &["config", "user.name", "Finalization Test"]);
+            std::fs::write(
+                checkout.join("homeboy.json"),
+                r#"{"id":"manual-finalization","remote_url":"https://github.com/example/manual-finalization.git"}"#,
+            )
+            .expect("write portable component config");
+            std::fs::write(checkout.join("base.txt"), "base\n").expect("write base");
+            run_git(&checkout, &["add", "."]);
+            run_git(&checkout, &["commit", "-m", "base"]);
+            run_git(
+                &checkout,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    remote.to_str().expect("remote path"),
+                ],
+            );
+            run_git(&checkout, &["push", "-u", "origin", "main"]);
+            let base_sha = git_output(&checkout, &["rev-parse", "HEAD"]);
+            run_git(&checkout, &["checkout", "-b", "feature"]);
+            std::fs::write(checkout.join("feature.txt"), "feature\n").expect("write feature");
+            run_git(&checkout, &["add", "."]);
+            run_git(&checkout, &["commit", "-m", "feature"]);
+            run_git(&checkout, &["push", "-u", "origin", "feature"]);
+            run_git(
+                &checkout,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "git@github.com:example/manual-finalization.git",
+                ],
+            );
+
+            let bin = root.path().join("bin");
+            std::fs::create_dir(&bin).expect("fake gh bin");
+            let ssh = bin.join("ssh");
+            std::fs::write(
+                &ssh,
+                r#"#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    *git-upload-pack*) exec git-upload-pack "$HOMEBOY_FAKE_GIT_REMOTE" ;;
+    *git-receive-pack*) exec git-receive-pack "$HOMEBOY_FAKE_GIT_REMOTE" ;;
+  esac
+done
+exit 2
+"#,
+            )
+            .expect("write fake SSH transport");
+            let gh = bin.join("gh");
+            std::fs::write(
+                &gh,
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
+case "$1 $2" in
+  "auth status"|"repo view") printf '%s\n' '{"nameWithOwner":"example/manual-finalization"}' ;;
+  "pr list") printf '%s\n' '[]' ;;
+  "pr create") printf '%s\n' 'https://github.com/example/manual-finalization/pull/1' ;;
+  "pr view") sha=$(git rev-parse HEAD); printf '{"baseRefName":"main","headRefName":"feature","headRefOid":"%s","headRepository":{"nameWithOwner":"example/manual-finalization"}}\n' "$sha" ;;
+  *) [ "$1" = "--version" ] || exit 2 ;;
+esac
+"#,
+            )
+            .expect("write fake gh");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake SSH transport executable");
+                std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake gh executable");
+            }
+            let log = root.path().join("gh.log");
+            let old_path = std::env::var_os("PATH");
+            let old_ssh_command = std::env::var_os("GIT_SSH_COMMAND");
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    old_path.as_deref().unwrap_or_default().to_string_lossy()
+                ),
+            );
+            std::env::set_var("HOMEBOY_FAKE_GH_LOG", &log);
+            std::env::set_var("HOMEBOY_FAKE_GIT_REMOTE", &remote);
+            std::env::set_var("GIT_SSH_COMMAND", &ssh);
+
+            let preflight = dispatch_agent_task(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--preflight",
+                "--run-id",
+                "manual-cli-11974",
+                "--path",
+                checkout.to_str().expect("checkout path"),
+                "--base",
+                "main",
+                "--verified-base-sha",
+                &base_sha,
+                "--head",
+                "feature",
+                "--title",
+                "Manual continuation",
+                "--commit-message",
+                "fixture",
+                "--gate-result",
+                "fixture=passed",
+                "--changed-file",
+                "feature.txt",
+                "--targeted-check-run",
+                "cargo test fixture",
+                "--ai-model",
+                "fixture-model",
+                "--ai-used-for",
+                "CLI recovery coverage",
+            ]);
+            assert_eq!(preflight["status"], "validated");
+            let continuation = preflight["handoff"]["finalize_command"]
+                .as_str()
+                .expect("emitted continuation")
+                .to_string();
+            let argv = continuation.split_whitespace().collect::<Vec<_>>();
+            let published = dispatch_agent_task(&argv);
+            assert_eq!(published["status"], "review_ready");
+            let repeated = dispatch_agent_task(&argv);
+            assert_eq!(repeated, published);
+            let error = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--recover",
+                "missing-manual-finalization",
+            ]);
+            assert!(error
+                .message
+                .contains("no durable Cook recipe or manual finalization record"));
+            let created = std::fs::read_to_string(&log)
+                .expect("fake gh log")
+                .lines()
+                .filter(|line| line.starts_with("pr create "))
+                .count();
+            assert_eq!(
+                created, 1,
+                "the emitted continuation publishes exactly once"
+            );
+
+            match old_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+            std::env::remove_var("HOMEBOY_FAKE_GH_LOG");
+            std::env::remove_var("HOMEBOY_FAKE_GIT_REMOTE");
+            match old_ssh_command {
+                Some(command) => std::env::set_var("GIT_SSH_COMMAND", command),
+                None => std::env::remove_var("GIT_SSH_COMMAND"),
+            }
+        });
+    }
+
+    fn dispatch_agent_task(argv: &[&str]) -> Value {
+        let cli = crate::cli_surface::Cli::try_parse_from(argv).expect("parse CLI command");
+        let crate::cli_surface::Commands::AgentTask(args) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let (value, exit_code) =
+            crate::commands::agent_task::run(args).expect("dispatch CLI command");
+        assert_eq!(exit_code, 0, "CLI command succeeds");
+        value
+    }
+
+    fn dispatch_agent_task_error(argv: &[&str]) -> homeboy::core::Error {
+        let cli = crate::cli_surface::Cli::try_parse_from(argv).expect("parse CLI command");
+        let crate::cli_surface::Commands::AgentTask(args) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        crate::commands::agent_task::run(args).expect_err("CLI command fails")
+    }
+
+    fn run_git(path: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn git_output(path: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout)
+            .expect("Git output is UTF-8")
+            .trim()
+            .to_string()
     }
 
     #[test]

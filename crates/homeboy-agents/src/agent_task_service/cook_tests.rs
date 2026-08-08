@@ -2313,7 +2313,8 @@ fn no_finalize_initial_request_preserves_its_existing_contract() {
 /// be promoted and adopted.
 struct CandidateAdoptionFixture {
     _temp: tempfile::TempDir,
-    _source: std::path::PathBuf,
+    source: std::path::PathBuf,
+    provider: std::path::PathBuf,
     target: std::path::PathBuf,
     candidate: String,
     cook_id: String,
@@ -2450,7 +2451,8 @@ impl CandidateAdoptionFixture {
 
         let mut fixture = Self {
             _temp: temp,
-            _source: source,
+            source,
+            provider,
             target,
             candidate,
             cook_id: cook_id.to_string(),
@@ -2516,12 +2518,31 @@ impl CandidateAdoptionFixture {
         executor: E,
         backend: &mut CaptureBackend,
     ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-        self.adopt_run(&self.run_id, dispatcher, executor, backend)
+        self.adopt_run_with_inherited_failure_acceptance(
+            &self.run_id,
+            false,
+            dispatcher,
+            executor,
+            backend,
+        )
     }
 
     fn adopt_run<E: AgentTaskExecutorAdapter + Clone>(
         &self,
         run_id: &str,
+        dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+        executor: E,
+        backend: &mut CaptureBackend,
+    ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+        self.adopt_run_with_inherited_failure_acceptance(
+            run_id, false, dispatcher, executor, backend,
+        )
+    }
+
+    fn adopt_run_with_inherited_failure_acceptance<E: AgentTaskExecutorAdapter + Clone>(
+        &self,
+        run_id: &str,
+        accept_inherited_failures: bool,
         dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
         executor: E,
         backend: &mut CaptureBackend,
@@ -2532,12 +2553,189 @@ impl CandidateAdoptionFixture {
             AgentTaskCandidateAdoptionOptions {
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
                 replace_interrupted: false,
+                accept_inherited_failures,
             },
             dispatcher,
             executor,
             backend,
         )
     }
+}
+
+#[test]
+fn adoption_accepts_an_identical_immutable_baseline_failure_when_explicitly_authorized() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture = CandidateAdoptionFixture::new("cook-11978-inherited", 1, 0, true, None);
+        fixture.options.gates.verify = vec![
+            "printf inherited >&2; exit 1".to_string(),
+            "test \"$(cat lib.rs)\" = candidate".to_string(),
+        ];
+        fixture.options.gates.execution_policy =
+            crate::agent_task_gate::AgentTaskGateExecutionPolicy::ContinueAll;
+        persist_initial_recipe(&fixture.options).expect("persist inherited-failure recipe");
+        let mut backend = CaptureBackend::default();
+
+        let result = fixture
+            .adopt_run_with_inherited_failure_acceptance(
+                &fixture.run_id,
+                true,
+                |_| Ok(None),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("identical inherited failure is accepted");
+
+        assert_eq!(result.exit_code, 0, "{:#?}", result.value);
+        assert_eq!(result.value.status, "green_no_finalize");
+        let promotion = result.value.attempts[0].promotion.as_ref().unwrap();
+        assert_eq!(
+            promotion.deterministic_gates[0].status,
+            crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+        assert_eq!(
+            promotion.deterministic_gates[0]
+                .baseline_comparison
+                .as_ref()
+                .unwrap()
+                .result,
+            crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
+        );
+        assert_eq!(
+            promotion.deterministic_gates[1].status,
+            crate::agent_task_gate::AgentTaskGateStatus::Succeeded
+        );
+        assert_eq!(
+            promotion.provenance["candidate"]["fingerprint"]["head"],
+            fixture.candidate
+        );
+        assert!(
+            promotion.deterministic_gates[0]
+                .candidate_checkout
+                .is_some(),
+            "normalized inherited-red evidence remains bound to its immutable candidate checkout"
+        );
+
+        let reused = fixture
+            .adopt(|_| Ok(None), UnusedExecutor, &mut backend)
+            .expect("completed adoption returns its durable report");
+        assert_eq!(reused.exit_code, 1, "{:#?}", reused.value);
+        assert_eq!(reused.value.status, "baseline_red");
+        assert!(reused
+            .value
+            .stop_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("--accept-inherited-failures")));
+    });
+}
+
+#[test]
+fn adoption_blocks_a_changed_failure_despite_inherited_failure_authorization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture = CandidateAdoptionFixture::new("cook-11978-regression", 1, 0, true, None);
+        fixture.options.gates.verify = vec!["cat lib.rs >&2; exit 1".to_string()];
+        persist_initial_recipe(&fixture.options).expect("persist regression recipe");
+        let mut backend = CaptureBackend::default();
+
+        let result = fixture
+            .adopt_run_with_inherited_failure_acceptance(
+                &fixture.run_id,
+                true,
+                |_| Ok(None),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("regression produces a blocking report");
+
+        assert_eq!(result.exit_code, 1, "{:#?}", result.value);
+        assert_eq!(result.value.status, "gate_failed");
+        let promotion = result.value.attempts[0].promotion.as_ref().unwrap();
+        assert_eq!(
+            promotion.deterministic_gates[0].status,
+            crate::agent_task_gate::AgentTaskGateStatus::Failed
+        );
+        assert_eq!(
+            promotion.deterministic_gates[0]
+                .baseline_comparison
+                .as_ref()
+                .unwrap()
+                .result,
+            crate::agent_task_gate::AgentTaskGateDifferentialResult::CandidateRegression
+        );
+    });
+}
+
+#[test]
+fn adoption_blocks_inherited_failure_when_candidate_package_artifact_differs_from_base() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture = CandidateAdoptionFixture::new("cook-11978-artifact", 1, 0, true, None);
+        let artifact = fixture.source.join("fixtures/input.bin");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, b"candidate package input").unwrap();
+        git_output(&fixture.source, &["add", "fixtures/input.bin"]).unwrap();
+        git_output(
+            &fixture.source,
+            &["commit", "-m", "candidate package input"],
+        )
+        .unwrap();
+        fixture.candidate = git_output(&fixture.source, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(
+            &fixture.provider,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} reset --hard --quiet FETCH_HEAD\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+                target = fixture.target.display(),
+                candidate = fixture.candidate,
+            ),
+        )
+        .unwrap();
+        fixture.options.gates.verify = vec!["printf inherited >&2; exit 1".to_string()];
+        fixture.options.gates.gate_package_artifacts = vec![
+            crate::agent_task_gate::AgentTaskGatePackageArtifactRequirement {
+                id: "candidate-input".to_string(),
+                environment: crate::agent_task_gate::AgentTaskGateArtifactEnvironmentMapping {
+                    name: "CANDIDATE_INPUT".to_string(),
+                    source: None,
+                    default: Some("fixtures".to_string()),
+                },
+                required_paths: vec![
+                    crate::agent_task_gate::AgentTaskGateArtifactPathRequirement {
+                        path: "fixtures/input.bin".to_string(),
+                        sha256: None,
+                    },
+                ],
+                remediation: serde_json::json!({"action": "restore_candidate_input"}),
+            },
+        ];
+        persist_initial_recipe(&fixture.options).expect("persist package-artifact recipe");
+        let mut backend = CaptureBackend::default();
+
+        let result = fixture
+            .adopt_run_with_inherited_failure_acceptance(
+                &fixture.run_id,
+                true,
+                |_| Ok(None),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("package drift produces a blocking report");
+
+        assert_eq!(result.exit_code, 1, "{:#?}", result.value);
+        assert_eq!(result.value.status, "gate_failed");
+        let promotion = result.value.attempts[0].promotion.as_ref().unwrap();
+        assert_eq!(
+            promotion.deterministic_gates[0]
+                .baseline_comparison
+                .as_ref()
+                .unwrap()
+                .result,
+            crate::agent_task_gate::AgentTaskGateDifferentialResult::Inconclusive
+        );
+        assert!(promotion.deterministic_gates[0]
+            .environment
+            .package_artifacts[0]
+            .artifacts[0]
+            .sha256
+            .is_some());
+    });
 }
 
 #[test]
@@ -5162,6 +5360,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
                 AgentTaskCandidateAdoptionOptions {
                     ai_model: Some("openai/gpt-5.6-sol".to_string()),
                     replace_interrupted: false,
+                    accept_inherited_failures: false,
                 },
                 |_| Ok(None),
                 ReviewFormOnlyExecutor,
@@ -5380,6 +5579,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             AgentTaskCandidateAdoptionOptions {
                 ai_model: Some("fixture-model-review".to_string()),
                 replace_interrupted: false,
+                accept_inherited_failures: false,
             },
             |_| Ok(None),
             ReviewFormOnlyExecutor,
@@ -6833,6 +7033,83 @@ fn adoption_attempt_selector_disambiguates_a_first_run_id_equal_to_its_cook_id()
             .expect("attempt selector resolves the first attempt despite the ID collision");
         assert_eq!(recipe.cook_id, cook_id);
         assert_eq!(record.run_id, cook_id);
+    });
+}
+
+#[test]
+fn adoption_attempt_selector_resolves_cook_and_child_run_ids_to_the_same_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-adopt-attempt-id-forms";
+        let child_run_id = "cook-adopt-attempt-id-forms-attempt-2";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = "cook-adopt-attempt-id-forms-attempt-1".to_string();
+        super::super::persist_initial_recipe(&options).expect("persist recipe");
+        let mut second_plan = options.initial_plan.clone();
+        second_plan.plan_id = "attempt-two-policy".to_string();
+        super::super::record_recipe_attempt(cook_id, 2, child_run_id, &second_plan)
+            .expect("persist second recipe attempt");
+        agent_task_lifecycle::submit_plan(&second_plan, Some(child_run_id))
+            .expect("persist second lifecycle record");
+
+        let (cook_record, cook_recipe) = resolve_adoption_target_with_attempt(cook_id, Some(2))
+            .expect("Cook id selects attempt two");
+        let (run_record, run_recipe) = resolve_adoption_target_with_attempt(child_run_id, Some(2))
+            .expect("child attempt run id selects the same attempt");
+
+        assert_eq!(cook_recipe.cook_id, cook_id);
+        assert_eq!(run_recipe.cook_id, cook_recipe.cook_id);
+        assert_eq!(cook_record.run_id, child_run_id);
+        assert_eq!(run_record.run_id, cook_record.run_id);
+
+        let cook_error = resolve_adoption_target_with_attempt(cook_id, Some(3))
+            .expect_err("Cook id rejects an undeclared attempt");
+        let run_error = resolve_adoption_target_with_attempt(child_run_id, Some(3))
+            .expect_err("child attempt run id rejects the same undeclared attempt");
+        assert_eq!(run_error.details, cook_error.details);
+        assert_eq!(run_error.message, cook_error.message);
+    });
+}
+
+#[test]
+fn adoption_rejects_an_id_that_is_a_cook_and_another_cooks_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let shared_id = "cook-adoption-ambiguous-id";
+        let mut cook_options =
+            batch_cook_options(shared_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        cook_options.initial_run_id = "cook-adoption-ambiguous-id-attempt-1".to_string();
+        super::super::persist_initial_recipe(&cook_options).expect("persist Cook recipe");
+
+        let foreign_cook_id = "cook-adoption-foreign-owner";
+        let foreign_options =
+            batch_cook_options(foreign_cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        super::super::persist_initial_recipe(&foreign_options)
+            .expect("persist foreign Cook recipe");
+        super::super::record_recipe_attempt(
+            foreign_cook_id,
+            2,
+            shared_id,
+            &foreign_options.initial_plan,
+        )
+        .expect("record foreign attempt with the colliding id");
+        let foreign_recipe =
+            super::super::load_recipe(foreign_cook_id).expect("reload foreign Cook recipe");
+        assert!(foreign_recipe
+            .attempts
+            .iter()
+            .any(|attempt| attempt.run_id == shared_id));
+        assert_eq!(
+            super::super::load_recipe_for_attempt(shared_id)
+                .expect("find foreign recipe by its attempt")
+                .expect("foreign attempt is persisted")
+                .cook_id,
+            foreign_cook_id
+        );
+
+        let error = resolve_adoption_target_with_attempt(shared_id, Some(1))
+            .expect_err("cross-Cook identifier collision fails closed");
+        assert_eq!(error.details["field"], "run_or_cook_id");
+        assert!(error.message.contains(shared_id));
+        assert!(error.message.contains(foreign_cook_id));
     });
 }
 
@@ -8404,6 +8681,84 @@ fn manual_finalization_identity_resolves_cook_and_failed_attempt_or_reserves_fre
                 .expect("reserved identity remains reusable"),
             fresh_id
         );
+    });
+}
+
+#[test]
+fn standalone_manual_preflight_continuation_recovers_and_is_idempotent() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "manual-11974";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(
+            "cook-11974-fixture",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.initial_run_id = run_id.to_string();
+        options.head = Some("fix/8058".to_string());
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        options.gates = VerifyGateOptions {
+            verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
+            ..Default::default()
+        };
+        // Reuse the Cook fixture builder to construct a valid dossier, then
+        // remove its recipe before recovery so this exercises the standalone
+        // durable manual-record route used by a fresh manual identity.
+        persist_initial_recipe(&options).expect("persist fixture recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+            .expect("submit standalone manual record");
+        agent_task_lifecycle::record_metadata_value(
+            run_id,
+            "manual_finalization_identity",
+            serde_json::json!(true),
+        )
+        .expect("mark manual identity");
+        seed_review_form_aggregate(run_id, &options.initial_plan);
+        let promotion = promotion_with_existing_path(run_id, target.path());
+        let mut finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("manual finalization options");
+        finalization.manual_finalization = true;
+        let candidate = crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["src/lib.rs".to_string()],
+            push_required: false,
+        };
+        let preflight = crate::agent_task_finalization::preflight_pr_with_backend(
+            finalization,
+            &mut CaptureBackend {
+                candidate_state: Some(candidate.clone()),
+                ..Default::default()
+            },
+        )
+        .expect("manual preflight");
+        persist_manual_finalization_intent(run_id, &preflight).expect("persist validated intent");
+        std::fs::remove_file(
+            homeboy_core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join("agent-task-cooks/cook-11974-fixture/recipe.json"),
+        )
+        .expect("remove fixture recipe before continuation");
+
+        let continuation = format!("homeboy agent-task finalize-pr --recover {run_id}");
+        assert_eq!(
+            continuation,
+            "homeboy agent-task finalize-pr --recover manual-11974"
+        );
+        let mut publish_backend = CaptureBackend {
+            candidate_state: Some(candidate),
+            ..Default::default()
+        };
+        let published =
+            recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut publish_backend)
+                .expect("continuation resolves standalone validated intent");
+        assert_eq!(published["status"], "review_ready");
+        assert!(publish_backend.created);
+
+        let mut repeated_backend = CaptureBackend::default();
+        assert_eq!(
+            recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut repeated_backend)
+                .expect("continuation is idempotent after publication"),
+            published
+        );
+        assert!(!repeated_backend.created);
     });
 }
 

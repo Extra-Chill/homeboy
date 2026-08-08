@@ -527,7 +527,7 @@ fn recipe_mismatch_fields(
     if left.gate_policy != right.gate_policy {
         fields.push("gate_policy");
     }
-    if left.retry_budget != right.retry_budget {
+    if !retry_budgets_match(&left.retry_budget, &right.retry_budget) {
         fields.push("retry_budget");
     }
     if left.finalization != right.finalization {
@@ -580,6 +580,22 @@ fn recipe_mismatch_fields(
         fields.push("attempts");
     }
     fields
+}
+
+/// Retry-policy provenance may gain these descriptive views as the controller
+/// learns to explain a resolved budget more completely. Every other policy
+/// field remains immutable, including future policy-bearing fields.
+fn retry_budgets_match(left: &Value, right: &Value) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    for budget in [&mut left, &mut right] {
+        if let Some(policy) = budget.get_mut("policy").and_then(Value::as_object_mut) {
+            for field in ["requested", "effective", "truncated"] {
+                policy.remove(field);
+            }
+        }
+    }
+    left == right
 }
 
 fn attempt_inputs_match(
@@ -2192,6 +2208,9 @@ mod tests {
             persisted.retry_budget["policy"] = serde_json::json!({
                 "operator_intent": { "max_attempts": 2, "max_provider_executions": null, "max_same_provider_retries": null, "max_provider_rotations": null },
                 "resolved": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
+                "requested": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
+                "effective": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
+                "truncated": { "max_provider_rotations": 0 },
             });
             write_recipe(&persisted).unwrap();
 
@@ -2210,6 +2229,50 @@ mod tests {
                 load_recipe("cook").unwrap().retry_budget["policy"]["resolved"]
                     ["max_provider_rotations"],
                 1
+            );
+            assert_eq!(
+                load_recipe("cook").unwrap().retry_budget["policy"]["truncated"]
+                    ["max_provider_rotations"],
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn persisted_old_retry_policy_remains_compatible_after_provider_execution() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut persisted = recipe();
+            let old_policy = serde_json::json!({
+                "operator_intent": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": null, "max_provider_rotations": null },
+                "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
+            });
+            persisted.attempts[0].plan.metadata["cook_retry_policy"] = old_policy.clone();
+            persisted.retry_budget["policy"] = old_policy;
+            write_recipe(&persisted).unwrap();
+            crate::agent_task_lifecycle::submit_plan(&persisted.attempts[0].plan, Some("run"))
+                .expect("materialize old provider attempt");
+            crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
+                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+            })
+            .expect("record provider execution");
+
+            let mut options = reconstruct_options(&persisted).expect("old recipe reconstructs");
+            options.initial_plan.metadata["cook_retry_policy"] = serde_json::json!({
+                "operator_intent": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": null, "max_provider_rotations": null },
+                "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
+                "requested": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
+                "effective": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
+                "truncated": { "max_provider_rotations": 0 },
+            });
+
+            validate_initial_recipe_compatibility(&options)
+                .expect("descriptive retry-policy additions preserve the frozen recipe");
+
+            options.initial_plan.metadata["cook_retry_policy"]["resolved"]
+                ["max_provider_executions"] = serde_json::json!(2);
+            assert!(
+                validate_initial_recipe_compatibility(&options).is_err(),
+                "a resolved execution budget mutation remains fenced after provider execution"
             );
         });
     }
