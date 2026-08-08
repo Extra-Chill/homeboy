@@ -5,7 +5,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
@@ -290,6 +290,9 @@ const FINALIZATION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_
 /// Foreground liveness is deliberately bounded. Provider-native progress still
 /// wins when available; this durable heartbeat covers quiet providers.
 const COOK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+/// Poll durable provider state between samples so post-provider artifact work
+/// does not hold the foreground liveness loop for a full heartbeat interval.
+const COOK_PROVIDER_TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// One Cook progress event, as delivered to a foreground observer.
 ///
@@ -3702,9 +3705,31 @@ where
                             let mut supervisor =
                                 CookSupervisor::new(supervision_policy, supervision_backend);
                             let mut deadline_stop_issued = false;
-                            while let Err(mpsc::RecvTimeoutError::Timeout) =
-                                heartbeat_wait.recv_timeout(COOK_HEARTBEAT_INTERVAL)
-                            {
+                            let mut next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
+                            loop {
+                                let poll_for = next_heartbeat
+                                    .saturating_duration_since(Instant::now())
+                                    .min(COOK_PROVIDER_TERMINAL_POLL_INTERVAL);
+                                match heartbeat_wait.recv_timeout(poll_for) {
+                                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                }
+                                // Scheduler terminalization precedes
+                                // controller-owned artifact harvesting. Once no
+                                // provider execution is active, this heartbeat
+                                // would otherwise sample only its own `ps`
+                                // subprocess while that cleanup completes.
+                                if !agent_task_lifecycle::has_active_provider_execution(
+                                    &heartbeat_run_id,
+                                )
+                                .unwrap_or(true)
+                                {
+                                    break;
+                                }
+                                if Instant::now() < next_heartbeat {
+                                    continue;
+                                }
+                                next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
                                 let activity = heartbeat_activity.sample(heartbeat_owner_pid);
                                 let tick = supervisor.observe(&activity);
                                 let detail = tick.detail_line();

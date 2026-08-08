@@ -710,6 +710,7 @@ where
                             attempt,
                             outcome,
                             scratch,
+                            completed_at: Instant::now(),
                         })));
                     })
                 });
@@ -770,6 +771,7 @@ where
                         let _ = join_handle.join();
                     }
                     let mut outcome = result.outcome;
+                    let provider_completed_at = result.completed_at;
                     if let Some(run_id) = running_task.run_id.as_deref() {
                         let terminal_state = match outcome.status {
                             AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
@@ -1104,6 +1106,15 @@ where
                         },
                         &outcome,
                     );
+                    if let Some(run_id) = running_task.run_id.as_deref() {
+                        let _ =
+                            crate::agent_task_lifecycle::record_provider_execution_cleanup_elapsed(
+                                run_id,
+                                &outcome.task_id,
+                                result.attempt,
+                                provider_completed_at.elapsed().as_millis() as u64,
+                            );
+                    }
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                     if candidate_completion == AgentTaskCandidateCompletionPolicy::FirstGreen
                         && outcomes.last().is_some_and(|outcome| {
@@ -1323,6 +1334,8 @@ struct TaskResult {
     attempt: u32,
     outcome: AgentTaskOutcome,
     scratch: crate::controller_scratch::ControllerScratchAllocation,
+    /// Captured by the provider worker before controller-owned artifact work.
+    completed_at: Instant,
 }
 
 pub(super) fn deferred_cleanup_action_artifact(
