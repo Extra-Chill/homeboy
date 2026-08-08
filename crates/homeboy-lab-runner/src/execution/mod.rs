@@ -510,6 +510,21 @@ fn orchestration_target_provenance(
     )
 }
 
+/// Snapshot the identities available to the controller before runner dispatch.
+/// A later child failure must not erase this submission-time provenance.
+pub fn runner_exec_orchestration_provenance(
+    runner_id: &str,
+) -> Result<OrchestrationTargetProvenance> {
+    let runner = super::load(runner_id)?;
+    let session = super::status(runner_id)
+        .ok()
+        .and_then(|report| report.session);
+    Ok(
+        orchestration_target_provenance(&runner, session.as_ref(), None, &[])
+            .expect("runner execution provenance is always present"),
+    )
+}
+
 fn binary_provenance(binary: RunnerExecHomeboyBinary) -> BinaryProvenance {
     BinaryProvenance {
         owner: binary.owner.to_string(),

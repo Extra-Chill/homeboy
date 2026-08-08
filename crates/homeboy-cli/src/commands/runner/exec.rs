@@ -185,6 +185,17 @@ pub(super) fn exec_with_hydration(
             &artifact_dir_outputs,
             &summary_outputs,
         )?;
+        let execution_record =
+            homeboy::core::runner_execution_envelope::RunnerExecutionRecord::planned(
+                run_id, runner_id, "dispatch",
+            )
+            .with_orchestration_provenance(Some(
+                runner::runner_exec_orchestration_provenance(runner_id)?,
+            ));
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_execution_record(
+            run_id,
+            &execution_record,
+        )?;
     }
 
     let (mut output, exit_code) = runner::exec(
@@ -229,6 +240,12 @@ pub(super) fn exec_with_hydration(
         },
     )?;
     if let Some(run_id) = validated_run_id.as_deref() {
+        if let Some(execution_record) = output.execution_record.as_ref() {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_execution_record(
+                run_id,
+                execution_record,
+            )?;
+        }
         if let (Some(job), Some(events)) = (output.job.as_ref(), output.job_events.as_ref()) {
             homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
                 run_id,
