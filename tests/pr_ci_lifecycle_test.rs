@@ -78,7 +78,8 @@ fn closed_prs_stop_candidate_admission_at_every_fanout_boundary() {
     ] {
         let candidate = job_section(workflow, job);
         assert!(
-            candidate.contains("needs: pr-state"),
+            candidate.contains("needs: pr-state")
+                || candidate.contains("needs: [pr-state, ci-capacity-admission]"),
             "{phase} must await PR state"
         );
         assert!(
@@ -88,6 +89,7 @@ fn closed_prs_stop_candidate_admission_at_every_fanout_boundary() {
     }
 
     for job in [
+        "ci-capacity-admission",
         "required-gates-declaration",
         "workspace-tests-compile",
         "warning-clean",
@@ -98,7 +100,8 @@ fn closed_prs_stop_candidate_admission_at_every_fanout_boundary() {
     ] {
         let section = job_section(workflow, job);
         assert!(
-            section.contains("needs: pr-state"),
+            section.contains("needs: pr-state")
+                || section.contains("needs: [pr-state, ci-capacity-admission]"),
             "{job} must await PR state"
         );
         assert!(
@@ -109,7 +112,8 @@ fn closed_prs_stop_candidate_admission_at_every_fanout_boundary() {
 
     let test = job_section(workflow, "homeboy");
     assert!(test.contains("uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2"));
-    assert!(test.contains("test-shards: '16'"));
+    assert!(test.contains("needs: [pr-state, ci-capacity-admission]"));
+    assert!(test.contains("test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}"));
 }
 
 #[test]
@@ -117,4 +121,22 @@ fn non_pr_ci_invocations_remain_admitted() {
     assert_eq!(pr_state("pull_request", "synchronize"), "active=true\n");
     assert_eq!(pr_state("workflow_dispatch", ""), "active=true\n");
     assert_eq!(pr_state("push", ""), "active=true\n");
+}
+
+#[test]
+fn ci_admits_only_the_configured_shard_budget_and_publishes_timing_evidence() {
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../.github/ci-capacity.json")).expect("capacity config");
+    assert_eq!(config["schema"], "homeboy/ci-capacity/v1");
+    assert_eq!(config["test_shards"], 4);
+    assert_eq!(config["queue_delay_slo_seconds"]["window_days"], 7);
+    assert_eq!(config["queue_delay_slo_seconds"]["p95"], 300);
+    assert_eq!(config["queue_delay_slo_seconds"]["p99"], 600);
+
+    let workflow = ci_workflow();
+    let admission = job_section(workflow, "ci-capacity-admission");
+    assert!(admission.contains("bash .github/ci-capacity-admission.sh"));
+    let evidence = job_section(workflow, "ci-capacity-evidence");
+    assert!(evidence.contains("bash .github/ci-capacity-evidence.sh"));
+    assert!(evidence.contains("homeboy-ci-capacity-evidence-"));
 }
