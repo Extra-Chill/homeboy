@@ -534,7 +534,9 @@ pub struct AgentTaskCookArgs {
     /// provider with a `commands.ensure` argv template, and without one you must
     /// create the destination first with `homeboy worktree create`. When
     /// omitted, --repo plus --task-url derives an issue-owned destination
-    /// through that same configured provider.
+    /// through that same configured provider. An explicit --workspace or --cwd
+    /// Git checkout can infer --repo when its remote maps to exactly one
+    /// configured component; an explicit --repo must match that checkout.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
     #[arg(
@@ -620,6 +622,10 @@ pub struct AgentTaskCookArgs {
     /// Policy the acceptance authority applies.
     #[arg(long, requires = "require_acceptance")]
     pub acceptance_policy: Option<String>,
+    /// Controller-resolved repository identity for a supplied checkout. This is
+    /// not caller input: Cook persists it with the compiled plan.
+    #[arg(skip)]
+    pub repository_identity: Option<serde_json::Value>,
 }
 
 #[derive(Args, Clone, Debug)]
