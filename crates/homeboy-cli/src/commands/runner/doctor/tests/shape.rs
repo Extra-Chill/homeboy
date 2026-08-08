@@ -64,3 +64,21 @@ fn overall_status_promotes_errors_over_warnings() {
     ];
     assert_eq!(checks::overall_status(&checks), RunnerDoctorStatus::Error);
 }
+
+#[test]
+fn operational_exit_code_matches_the_doctor_readiness_verdict() {
+    for (scenario, status, expected_exit_code) in [
+        ("healthy", RunnerDoctorStatus::Ok, 0),
+        ("degraded", RunnerDoctorStatus::Warning, 0),
+        // A disconnected runner with a recoverable daemon is still not ready
+        // until `--repair` has rerun its probe successfully.
+        ("disconnected_recoverable", RunnerDoctorStatus::Error, 1),
+        ("terminal_error", RunnerDoctorStatus::Error, 1),
+    ] {
+        assert_eq!(
+            status.operational_exit_code(),
+            expected_exit_code,
+            "{scenario}"
+        );
+    }
+}

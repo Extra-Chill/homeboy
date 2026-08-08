@@ -243,7 +243,7 @@ pub enum Commands {
     Tunnel(tunnel::TunnelArgs),
     /// Inspect persisted observation runs and artifacts
     Runs(runs::RunsArgs),
-    /// Inspect the active Homeboy binary and install signals
+    /// Inspect the active Homeboy binary; `self identity` reports its local build identity
     #[command(name = "self")]
     SelfCmd(self_cmd::SelfArgs),
     /// Manage stacks (combined-fixes branches built from base + cherry-picked PRs)

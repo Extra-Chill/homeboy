@@ -65,6 +65,10 @@ pub(crate) fn accepted_lab_runner_job_identity_from_record(
 pub const RUNNER_EXEC_RUN_KIND: &str = "runner_exec";
 
 const RUNNER_EXEC_OBSERVATION_KIND: &str = "runner_execution";
+const COMMAND_RESULT_SCHEMA: &str = "homeboy/command-result/v3";
+const COMMAND_RESULT_STDOUT_LIMIT_BYTES: usize = 64 * 1024;
+const COMMAND_RESULT_RUN_REF_LIMIT: usize = 32;
+const DESCENDANT_RUN_GRAPH_LIMIT: usize = 64;
 
 fn ensure_runner_exec_observation_run(
     run_id: &str,
@@ -531,6 +535,12 @@ pub fn project_terminal_runner_exec_result(
         1
     };
     let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    if let Some(descendants) = terminal_command_result_descendants(&store, &run.id, snapshot) {
+        metadata.insert(
+            "descendant_run_evidence".to_string(),
+            serde_json::to_value(descendants).expect("descendant refs serialize"),
+        );
+    }
     metadata.insert("runner_job_id".to_string(), json!(snapshot.job.id));
     metadata.insert("runner_job_status".to_string(), json!(snapshot.job.status));
     metadata.insert("runner_job_events".to_string(), json!(snapshot.events));
@@ -571,6 +581,135 @@ pub fn project_terminal_runner_exec_result(
     };
     store.finish_run(&run.id, status, Some(run.metadata_json))?;
     Ok(true)
+}
+
+/// Accept only a complete, bounded command-result envelope whose run refs point
+/// to locally persisted child observations. A terminal log is runner-controlled,
+/// so any malformed field, truncation marker, or unresolved reference rejects
+/// the whole projection rather than preserving a plausible false edge.
+pub(crate) fn terminal_command_result_descendants(
+    store: &homeboy_core::observation::ObservationStore,
+    parent_run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+) -> Option<Vec<homeboy_core::observation::evidence_report::DescendantRunEvidenceRef>> {
+    let result = snapshot
+        .events
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, homeboy_core::api_jobs::JobEventKind::Result))?
+        .data
+        .as_ref()?;
+    if result
+        .pointer("/capture/stdout/truncated")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return None;
+    }
+    let stdout = result.get("stdout")?.as_str()?;
+    if stdout.len() > COMMAND_RESULT_STDOUT_LIMIT_BYTES {
+        return None;
+    }
+    let envelope: Value = serde_json::from_str(stdout).ok()?;
+    if envelope.get("schema").and_then(Value::as_str) != Some(COMMAND_RESULT_SCHEMA)
+        || !bounded_string(&envelope, "command", 128)
+        || envelope.get("success").and_then(Value::as_bool).is_none()
+        || envelope
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok())
+            .is_none()
+        || !bounded_string(&envelope, "status", 64)
+    {
+        return None;
+    }
+    let runs = envelope.pointer("/refs/runs")?.as_array()?;
+    if runs.len() > COMMAND_RESULT_RUN_REF_LIMIT {
+        return None;
+    }
+    let mut descendants = Vec::with_capacity(runs.len());
+    for run in runs {
+        let id = bounded_required_string(run, "id", 256)?;
+        let kind = bounded_required_string(run, "kind", 128)?;
+        let _source = bounded_required_string(run, "source", 256)?;
+        if id == parent_run_id {
+            return None;
+        }
+        let child = store.get_run(id).ok().flatten()?;
+        if kind != child.kind {
+            return None;
+        }
+        if descendant_run_reaches(store, &child.id, parent_run_id)? {
+            return None;
+        }
+        let reference = homeboy_core::observation::evidence_report::DescendantRunEvidenceRef {
+            schema: homeboy_core::observation::evidence_report::DESCENDANT_RUN_EVIDENCE_REF_SCHEMA
+                .to_string(),
+            run_id: child.id,
+            kind: child.kind,
+            source: homeboy_core::observation::evidence_report::DESCENDANT_RUN_EVIDENCE_SOURCE_TERMINAL_COMMAND_RESULT.to_string(),
+        };
+        if !reference.is_valid() || descendants.iter().any(|existing: &homeboy_core::observation::evidence_report::DescendantRunEvidenceRef| existing.run_id == reference.run_id) {
+            return None;
+        }
+        descendants.push(reference);
+    }
+    Some(descendants)
+}
+
+/// Follow only persisted, typed descendant edges. Every hop is revalidated
+/// against the current observation record and the traversal fails closed once
+/// its bounded budget is exhausted.
+fn descendant_run_reaches(
+    store: &homeboy_core::observation::ObservationStore,
+    start_run_id: &str,
+    target_run_id: &str,
+) -> Option<bool> {
+    let mut pending = vec![start_run_id.to_string()];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(run_id) = pending.pop() {
+        if run_id == target_run_id {
+            return Some(true);
+        }
+        if !visited.insert(run_id.clone()) {
+            continue;
+        }
+        if visited.len() > DESCENDANT_RUN_GRAPH_LIMIT {
+            return None;
+        }
+        let run = store.get_run(&run_id).ok().flatten()?;
+        let Some(value) = run.metadata_json.get("descendant_run_evidence") else {
+            continue;
+        };
+        let refs = serde_json::from_value::<
+            Vec<homeboy_core::observation::evidence_report::DescendantRunEvidenceRef>,
+        >(value.clone())
+        .ok()?;
+        if refs.len() > COMMAND_RESULT_RUN_REF_LIMIT {
+            return None;
+        }
+        for reference in refs {
+            if !reference.is_valid() {
+                return None;
+            }
+            let child = store.get_run(&reference.run_id).ok().flatten()?;
+            if child.kind != reference.kind {
+                return None;
+            }
+            pending.push(child.id);
+        }
+    }
+    Some(false)
+}
+
+fn bounded_string(value: &Value, field: &str, limit: usize) -> bool {
+    bounded_required_string(value, field, limit).is_some()
+}
+
+fn bounded_required_string<'a>(value: &'a Value, field: &str, limit: usize) -> Option<&'a str> {
+    let value = value.get(field)?.as_str()?;
+    (!value.is_empty() && value.len() <= limit && !value.chars().any(char::is_control))
+        .then_some(value)
 }
 
 /// Finish a synchronous transport that has no daemon job identity (diagnostic

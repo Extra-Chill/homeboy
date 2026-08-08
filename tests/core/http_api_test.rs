@@ -928,14 +928,19 @@ fn runs_list_reconciles_old_ownerless_running_records_before_responding() {
 
 #[test]
 fn artifact_content_serves_encoded_artifact_store_locator() {
-    with_isolated_home(|home| {
+    with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("bench", "homeboy", "studio"))
             .expect("bench run");
         let locator = "homeboy/workflow-bench/runs/run-1/artifacts/blueprint.after.json";
-        let artifact_root = home.path().join(".local/share/homeboy/artifacts");
+        // Ask the resolver rather than hardcoding a layout. `with_isolated_home`
+        // sets `HOMEBOY_DATA_DIR`, which `homeboy_data()` checks *before* the
+        // XDG fallback, so `<home>/.local/share/homeboy/artifacts` is not where
+        // this run's artifacts live. This test is about locator encoding, not
+        // path resolution -- it should write wherever the reader will look.
+        let artifact_root = crate::paths::artifact_root().expect("artifact root");
         let path = artifact_root.join(locator);
         std::fs::create_dir_all(path.parent().expect("artifact parent"))
             .expect("create artifact parent");

@@ -71,6 +71,7 @@ impl ObservationStore {
             path,
             readonly: false,
         };
+        store.backfill_artifact_handles()?;
         store.reconcile_unfinished_artifact_publications()?;
         Ok(store)
     }

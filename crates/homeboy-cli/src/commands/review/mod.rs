@@ -116,6 +116,16 @@ pub enum ReviewCommand {
     Ci(ci::CiArgs),
 }
 
+/// Typed portable-release evidence emitted by a review child after its stage
+/// executes in the selected checkout.
+#[derive(Serialize)]
+struct ReviewChildReadinessEvidence {
+    requested_source_commit: String,
+    source_commit: String,
+    runner_id: Option<String>,
+    provenance: homeboy_release::release::ReleaseReadinessProvenance,
+}
+
 impl ReviewCommand {
     fn lab_label(&self) -> &'static str {
         match self {
@@ -327,14 +337,82 @@ fn dispatch_review_plan_step(
 
 pub fn run(args: ReviewArgs) -> CmdResult<Value> {
     match args.command {
-        Some(ReviewCommand::Audit(args)) => to_value(audit::run(args.audit)),
+        Some(ReviewCommand::Audit(args)) => {
+            let requested_source = args.audit.release_readiness_source.clone();
+            let component = args.audit.comp.load()?;
+            to_value_with_readiness_provenance(
+                audit::run(args.audit),
+                &component,
+                requested_source.as_deref(),
+            )
+        }
         Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args)),
-        Some(ReviewCommand::Lint(args)) => to_value(lint::run(review_lint_args(args))),
-        Some(ReviewCommand::Test(args)) => to_value(test::run(args)),
+        Some(ReviewCommand::Lint(args)) => {
+            let requested_source = args.release_readiness_source.clone();
+            let component = args.comp.load()?;
+            to_value_with_readiness_provenance(
+                lint::run(review_lint_args(args)),
+                &component,
+                requested_source.as_deref(),
+            )
+        }
+        Some(ReviewCommand::Test(args)) => {
+            let requested_source = args.release_readiness_source.clone();
+            let component = args.comp.load()?;
+            to_value_with_readiness_provenance(
+                test::run(args),
+                &component,
+                requested_source.as_deref(),
+            )
+        }
         Some(ReviewCommand::Build(args)) => to_value(build::run(args)),
         Some(ReviewCommand::Ci(args)) => to_value(ci::run(args)),
         None => to_value(run_umbrella(args)),
     }
+}
+
+/// Portable release preflight consumes this child-produced provenance from the
+/// command result. Capture it after execution on the runner that tested it.
+fn to_value_with_readiness_provenance<T: Serialize>(
+    result: CmdResult<T>,
+    component: &homeboy::core::component::Component,
+    requested_source: Option<&str>,
+) -> CmdResult<Value> {
+    let (output, exit_code) = result?;
+    let mut value = serde_json::to_value(output).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "failed to serialize review command output: {error}"
+        ))
+    })?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        homeboy::core::Error::internal_unexpected("review command output was not an object")
+    })?;
+    if let Some(requested_source) = requested_source {
+        let provenance = homeboy_release::release::readiness_provenance(component)?;
+        let source_commit = homeboy::core::git::get_head_commit(&component.local_path)?;
+        let runner_id =
+            crate::commands::utils::execution_provenance::captured().and_then(|value| {
+                value
+                    .pointer("/resolved_execution/runner_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            });
+        object.insert(
+            "release_readiness".to_string(),
+            serde_json::to_value(ReviewChildReadinessEvidence {
+                requested_source_commit: requested_source.to_string(),
+                source_commit,
+                runner_id,
+                provenance,
+            })
+            .map_err(|error| {
+                homeboy::core::Error::internal_unexpected(format!(
+                    "failed to serialize review readiness evidence: {error}"
+                ))
+            })?,
+        );
+    }
+    Ok((value, exit_code))
 }
 
 fn to_value<T: Serialize>(result: CmdResult<T>) -> CmdResult<Value> {
@@ -818,6 +896,7 @@ fn build_audit_args(
 ) -> audit::AuditArgs {
     audit::AuditArgs {
         comp: args.effective_component_args().clone(),
+        release_readiness_source: None,
         extension_override: args.extension_override.clone(),
         conventions: false,
         only: Vec::new(),
@@ -850,6 +929,7 @@ fn selected_audit_profile(args: &ReviewArgs, review_context: &ReviewExecutionCon
 fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> lint::LintArgs {
     lint::LintArgs {
         comp: args.effective_component_args().clone(),
+        release_readiness_source: None,
         summary: args.summary,
         file: None,
         glob: None,
@@ -881,6 +961,7 @@ fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
 fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> test::TestArgs {
     test::TestArgs {
         comp: args.effective_component_args().clone(),
+        release_readiness_source: None,
         extension_override: args.extension_override.clone(),
         skip_lint: true,
         coverage: false,

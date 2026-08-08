@@ -48,12 +48,155 @@ pub fn run_command_with_recovery_owner(
 /// Additive staging-aware command entry point. CLI callers use the workspace
 /// envelope when provider staging or recovery reconciliation produced metadata.
 pub fn run_command_with_workspace(
+    mut input: ReleaseCommandInput,
+    recovery_owner_run_ref: Option<&str>,
+) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
+    let readiness_owner_run_ref = if let Some(readiness) = input.readiness.as_mut() {
+        let owner_run_ref = format!("release-readiness-{}", uuid::Uuid::new_v4());
+        let operation_ref = format!("operation://{owner_run_ref}");
+        if !readiness.evidence_refs.contains(&operation_ref) {
+            readiness.evidence_refs.push(operation_ref.clone());
+        }
+        for gate in readiness
+            .gate_results
+            .iter_mut()
+            .filter(|gate| gate.status == "failed")
+        {
+            if !gate.evidence_refs.contains(&operation_ref) {
+                gate.evidence_refs.push(operation_ref.clone());
+            }
+        }
+        super::operation_record::OperationRecordStore::create(
+            &super::operation_record::OperationRecord {
+                owner_run_ref: owner_run_ref.clone(),
+                operation: "release_readiness".to_string(),
+                subject: input.component_id.clone(),
+                provider: readiness
+                    .runner_id
+                    .clone()
+                    .unwrap_or_else(|| "controller".to_string()),
+                handle: readiness.source.commit.clone(),
+                path: None,
+                source_sha: readiness.source.commit.clone(),
+                cleanup_policy: "retain".to_string(),
+                lifecycle_state: "running".to_string(),
+                terminal_disposition: None,
+                finalization_status: "pending".to_string(),
+                finalization_lease: None,
+                finalization_lease_started_ms: None,
+                attempt_count: 1,
+                continuation_evidence: readiness.evidence_refs.clone(),
+                attributes: serde_json::Map::from_iter([(
+                    "readiness".to_string(),
+                    serde_json::to_value(&*readiness).map_err(|error| {
+                        Error::internal_json(
+                            error.to_string(),
+                            Some("release readiness".to_string()),
+                        )
+                    })?,
+                )]),
+            },
+        )?;
+        Some(owner_run_ref)
+    } else {
+        None
+    };
+    let readiness = input.readiness.clone();
+    let readiness_succeeded = readiness
+        .as_ref()
+        .map(super::types::readiness_is_valid)
+        .unwrap_or(false);
+    if readiness.is_some() && !readiness_succeeded {
+        let error = Error::validation_invalid_argument(
+            "release.preflight",
+            "Portable release preflight has invalid selected gate evidence",
+            None,
+            None,
+        );
+        if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
+            complete_readiness_operation(
+                owner_run_ref,
+                false,
+                serde_json::json!({ "error": error.to_string() }),
+            )?;
+        }
+        return Err(error);
+    }
+    match run_command_with_workspace_inner(input, recovery_owner_run_ref) {
+        Ok((mut output, exit_code)) => {
+            if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
+                complete_readiness_operation(
+                    owner_run_ref,
+                    readiness_succeeded,
+                    serde_json::json!({
+                        "exit_code": exit_code,
+                        "status": output.result.status,
+                    }),
+                )?;
+            }
+            output.result.readiness = readiness;
+            Ok((output, exit_code))
+        }
+        Err(error) => {
+            if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
+                complete_readiness_operation(
+                    owner_run_ref,
+                    readiness_succeeded,
+                    serde_json::json!({ "error": error.to_string() }),
+                )?;
+                return Err(error.with_hint(format!(
+                    "Inspect readiness evidence: homeboy release readiness show {owner_run_ref}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn complete_readiness_operation(
+    owner_run_ref: &str,
+    succeeded: bool,
+    downstream_release: serde_json::Value,
+) -> Result<()> {
+    super::operation_record::OperationRecordStore::update(owner_run_ref, |record| {
+        let mut record = record.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "owner_run_ref",
+                "release readiness operation record does not exist",
+                Some(owner_run_ref.to_string()),
+                None,
+            )
+        })?;
+        record.lifecycle_state = "finalized".to_string();
+        record.terminal_disposition =
+            Some(if succeeded { "succeeded" } else { "failed" }.to_string());
+        record.finalization_status = "completed".to_string();
+        record
+            .attributes
+            .insert("downstream_release".to_string(), downstream_release);
+        Ok(record)
+    })?;
+    Ok(())
+}
+
+fn run_command_with_workspace_inner(
     input: ReleaseCommandInput,
     recovery_owner_run_ref: Option<&str>,
 ) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
     let execution = release_execution_plan(&input);
 
     if input.recover {
+        if let Some(readiness) = input.readiness.as_ref() {
+            let component = load_component(
+                &input.component_id,
+                &ReleaseOptions {
+                    path_override: input.path_override.clone(),
+                    ..Default::default()
+                },
+            )?;
+            super::preflight_identity::revalidate(&component, &readiness.source)?;
+            super::executor::package_preflight::run_package_preflight(&component.local_path)?;
+        }
         return run_recover(&input, recovery_owner_run_ref).map(
             |(result, workspace, exit_code)| {
                 (
@@ -200,6 +343,8 @@ pub fn run_command_with_workspace(
             force_empty_release: input.bump_override.is_some(),
             require_explicit_major,
         },
+        preflight_placement: Default::default(),
+        readiness: input.readiness.clone(),
     };
 
     if options.dry_run {
@@ -248,6 +393,7 @@ pub fn run_command_with_workspace(
                         deployment: None,
                         continuation_command: None,
                         release_summary: release_summary_for_skipped_plan(),
+                        readiness: None,
                     },
                     workspace: None,
                 },
@@ -276,6 +422,7 @@ pub fn run_command_with_workspace(
                         deployment: None,
                         continuation_command: None,
                         release_summary,
+                        readiness: None,
                     },
                     workspace: None,
                 },
@@ -314,6 +461,7 @@ pub fn run_command_with_workspace(
                     deployment,
                     continuation_command: None,
                     release_summary: release_summary_for_skipped_plan(),
+                    readiness: None,
                 },
                 workspace: None,
             },
@@ -391,6 +539,7 @@ pub fn run_command_with_workspace(
                 deployment,
                 continuation_command: None,
                 release_summary,
+                readiness: None,
             },
             workspace,
         },
@@ -469,6 +618,7 @@ fn prepared_tag_publish_recovery_decision(
             release_summary: vec![format!(
                 "Prepared tag {tag} exists at HEAD; GitHub Release is missing and should be published"
             )],
+            readiness: None,
         }),
         Some(true) | None => None,
     }
@@ -887,6 +1037,7 @@ pub fn run_batch(
             skip_github_release: input_template.skip_github_release,
             git_identity: input_template.git_identity.clone(),
             execution: input_template.execution.clone(),
+            readiness: None,
         };
 
         match run_command(input) {
@@ -955,9 +1106,49 @@ mod tests {
     use super::*;
     use crate::release::types::ReleasePhase;
     use crate::release::{
-        ReleaseRollbackEvidence, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+        ReleasePreflightPlacement, ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope,
+        ReleaseReadinessGateResult, ReleaseRollbackEvidence, ReleaseRunResult, ReleaseStepResult,
+        ReleaseStepStatus,
     };
     use homeboy_core::plan::{PlanStep, PlanStepStatus, PlanValues};
+    use homeboy_core::test_support::with_isolated_home;
+
+    fn failed_readiness(source: &str) -> ReleaseReadinessEnvelope {
+        ReleaseReadinessEnvelope {
+            source: ReleasePreflightSourceIdentity {
+                commit: source.to_string(),
+            },
+            placement: ReleasePreflightPlacement::default(),
+            runner_id: Some("lab-test".to_string()),
+            evidence_refs: vec!["evidence://lint".to_string()],
+            provenance: Default::default(),
+            gate_results: vec![ReleaseReadinessGateResult {
+                gate: "lint".to_string(),
+                status: "failed".to_string(),
+                reason: Some("portable dispatch failed".to_string()),
+                source_sha: Some(source.to_string()),
+                runner_id: Some("lab-test".to_string()),
+                evidence_refs: Vec::new(),
+                provenance: None,
+                local_only: None,
+            }],
+        }
+    }
+
+    fn successful_readiness(source: &str) -> ReleaseReadinessEnvelope {
+        let mut readiness = failed_readiness(source);
+        let gate = &mut readiness.gate_results[0];
+        gate.status = "passed".to_string();
+        gate.reason = None;
+        gate.provenance = Some(super::super::types::ReleaseReadinessProvenance {
+            dependencies: std::collections::BTreeMap::from([(
+                "dependency".to_string(),
+                "locked-sha".to_string(),
+            )]),
+            extensions: Default::default(),
+        });
+        readiness
+    }
 
     #[test]
     fn batch_status_bucket_rolls_up_non_released_outcomes_as_failed() {
@@ -968,6 +1159,307 @@ mod tests {
         assert_eq!(batch_status_bucket("missing"), BatchStatusBucket::Failed);
         assert_eq!(batch_status_bucket("partial"), BatchStatusBucket::Failed);
         assert_eq!(batch_status_bucket("unknown"), BatchStatusBucket::Failed);
+    }
+
+    #[test]
+    fn failed_readiness_is_durable_and_blocks_controller_mutation() {
+        with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            setup_release_range_fixture(temp.path(), "1.2.3", 1);
+            let source =
+                String::from_utf8_lossy(&run_in(temp.path(), &["git", "rev-parse", "HEAD"]).stdout)
+                    .trim()
+                    .to_string();
+            let version_before = std::fs::read_to_string(temp.path().join("VERSION"))
+                .expect("read version before release");
+            let readiness = ReleaseReadinessEnvelope {
+                source: ReleasePreflightSourceIdentity {
+                    commit: source.clone(),
+                },
+                placement: ReleasePreflightPlacement::default(),
+                runner_id: Some("lab-test".to_string()),
+                evidence_refs: vec!["evidence://lint".to_string()],
+                provenance: Default::default(),
+                gate_results: vec![ReleaseReadinessGateResult {
+                    gate: "lint".to_string(),
+                    status: "failed".to_string(),
+                    reason: Some("portable dispatch failed".to_string()),
+                    source_sha: Some(source.clone()),
+                    runner_id: Some("lab-test".to_string()),
+                    evidence_refs: Vec::new(),
+                    provenance: None,
+                    local_only: None,
+                }],
+            };
+
+            let error = run_command_with_workspace(
+                ReleaseCommandInput {
+                    component_id: "fixture".to_string(),
+                    path_override: Some(temp.path().to_string_lossy().to_string()),
+                    readiness: Some(readiness),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect_err("failed readiness must stop release before controller mutation");
+
+            let record = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "fixture",
+                false,
+            )
+            .expect("list readiness records")
+            .into_iter()
+            .find(|record| record.source_sha == source)
+            .expect("readiness record is retained");
+            let owner = record.owner_run_ref.clone();
+            assert!(error.hints.iter().any(|hint| hint.message
+                == format!("Inspect readiness evidence: homeboy release readiness show {owner}")));
+            assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
+            assert_eq!(record.finalization_status, "completed");
+            assert_eq!(
+                record.attributes["readiness"]["gate_results"][0]["evidence_refs"][0],
+                format!("operation://{owner}")
+            );
+            assert_eq!(
+                std::fs::read_to_string(temp.path().join("VERSION")).expect("read version after"),
+                version_before
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&run_in(temp.path(), &["git", "rev-parse", "HEAD"]).stdout)
+                    .trim(),
+                source
+            );
+        });
+    }
+
+    #[test]
+    fn sequential_same_commit_readiness_invocations_retain_distinct_records() {
+        with_isolated_home(|_| {
+            let source = "same-commit";
+            for _ in 0..2 {
+                run_command_with_workspace(
+                    ReleaseCommandInput {
+                        component_id: "fixture".to_string(),
+                        readiness: Some(failed_readiness(source)),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .expect_err("failed readiness blocks before component resolution");
+            }
+
+            let records = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "fixture",
+                false,
+            )
+            .expect("list records");
+            assert_eq!(records.len(), 2);
+            assert_ne!(records[0].owner_run_ref, records[1].owner_run_ref);
+            assert!(records.iter().all(|record| {
+                record.source_sha == source
+                    && record.terminal_disposition.as_deref() == Some("failed")
+                    && record.finalization_status == "completed"
+            }));
+        });
+    }
+
+    #[test]
+    fn concurrent_same_commit_readiness_invocations_retain_distinct_records() {
+        with_isolated_home(|_| {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let workers = (0..2)
+                .map(|_| {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        run_command_with_workspace(
+                            ReleaseCommandInput {
+                                component_id: "fixture".to_string(),
+                                readiness: Some(failed_readiness("concurrent-commit")),
+                                ..Default::default()
+                            },
+                            None,
+                        )
+                        .expect_err("failed readiness blocks before component resolution");
+                    })
+                })
+                .collect::<Vec<_>>();
+            for worker in workers {
+                worker.join().expect("worker succeeds");
+            }
+
+            let records = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "fixture",
+                false,
+            )
+            .expect("list records");
+            assert_eq!(records.len(), 2);
+            assert_ne!(records[0].owner_run_ref, records[1].owner_run_ref);
+            assert!(records.iter().all(|record| {
+                record.source_sha == "concurrent-commit"
+                    && record.terminal_disposition.as_deref() == Some("failed")
+                    && record.finalization_status == "completed"
+            }));
+        });
+    }
+
+    #[test]
+    fn readiness_succeeds_when_downstream_release_is_intentionally_skipped() {
+        with_isolated_home(|_| {
+            let owner = "release-readiness-skip";
+            super::super::operation_record::OperationRecordStore::create(
+                &super::super::operation_record::OperationRecord {
+                    owner_run_ref: owner.to_string(),
+                    operation: "release_readiness".to_string(),
+                    subject: "fixture".to_string(),
+                    provider: "lab".to_string(),
+                    handle: "commit".to_string(),
+                    path: None,
+                    source_sha: "commit".to_string(),
+                    cleanup_policy: "retain".to_string(),
+                    lifecycle_state: "running".to_string(),
+                    terminal_disposition: None,
+                    finalization_status: "pending".to_string(),
+                    finalization_lease: None,
+                    finalization_lease_started_ms: None,
+                    attempt_count: 1,
+                    continuation_evidence: Vec::new(),
+                    attributes: Default::default(),
+                },
+            )
+            .expect("create readiness");
+
+            complete_readiness_operation(
+                owner,
+                true,
+                serde_json::json!({ "exit_code": SKIPPED_RELEASE_EXIT_CODE, "status": "skipped" }),
+            )
+            .expect("complete readiness");
+
+            let record = super::super::operation_record::OperationRecordStore::load(owner)
+                .expect("load")
+                .expect("record");
+            assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
+            assert_eq!(
+                record.attributes["downstream_release"]["exit_code"],
+                SKIPPED_RELEASE_EXIT_CODE
+            );
+            assert_eq!(record.attributes["downstream_release"]["status"], "skipped");
+        });
+    }
+
+    #[test]
+    fn failed_readiness_remains_failed_for_dry_run() {
+        with_isolated_home(|_| {
+            run_command_with_workspace(
+                ReleaseCommandInput {
+                    component_id: "fixture".to_string(),
+                    dry_run: true,
+                    readiness: Some(failed_readiness("dry-run-source")),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect_err("failed readiness blocks dry-run planning");
+            let record = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "fixture",
+                false,
+            )
+            .expect("records")
+            .pop()
+            .expect("record");
+            assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
+            assert!(record.attributes["downstream_release"]["error"].is_string());
+        });
+    }
+
+    #[test]
+    fn successful_readiness_remains_succeeded_after_downstream_error() {
+        with_isolated_home(|_| {
+            run_command_with_workspace(
+                ReleaseCommandInput {
+                    component_id: "missing-component".to_string(),
+                    readiness: Some(successful_readiness("success-source")),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect_err("missing component is downstream of validated readiness");
+            let record = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "missing-component",
+                false,
+            )
+            .expect("records")
+            .pop()
+            .expect("record");
+            assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
+            assert!(record.attributes["downstream_release"]["error"].is_string());
+        });
+    }
+
+    #[test]
+    fn empty_and_unknown_readiness_gates_fail_durably_and_block_mutation() {
+        with_isolated_home(|_| {
+            for (source, mutate) in [("empty-gates", None), ("unknown-gate", Some("unknown"))] {
+                let mut readiness = successful_readiness(source);
+                if let Some(status) = mutate {
+                    readiness.gate_results[0].status = status.to_string();
+                } else {
+                    readiness.gate_results.clear();
+                }
+                run_command_with_workspace(
+                    ReleaseCommandInput {
+                        component_id: source.to_string(),
+                        readiness: Some(readiness),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .expect_err("invalid readiness blocks before component mutation");
+                let record = super::super::operation_record::OperationRecordStore::for_subject(
+                    "release_readiness",
+                    source,
+                    false,
+                )
+                .expect("records")
+                .pop()
+                .expect("record");
+                assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
+            }
+        });
+    }
+
+    #[test]
+    fn explicitly_skipped_gates_authorize_readiness() {
+        with_isolated_home(|_| {
+            let mut readiness = successful_readiness("skipped-gates");
+            let gate = &mut readiness.gate_results[0];
+            gate.status = "skipped".to_string();
+            gate.provenance = None;
+            run_command_with_workspace(
+                ReleaseCommandInput {
+                    component_id: "missing-component".to_string(),
+                    readiness: Some(readiness),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect_err("downstream component error follows authorized skipped readiness");
+            let record = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "missing-component",
+                false,
+            )
+            .expect("records")
+            .pop()
+            .expect("record");
+            assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
+        });
     }
 
     #[test]
@@ -1935,6 +2427,7 @@ fn legacy_release_command_input_struct_literal_remains_source_compatible() {
         skip_github_release: false,
         git_identity: None,
         execution: None,
+        readiness: None,
     };
     let _ = ReleaseOptions {
         bump_type: "patch".to_string(),
@@ -1948,5 +2441,7 @@ fn legacy_release_command_input_struct_literal_remains_source_compatible() {
         skip_github_release: false,
         git_identity: None,
         bump_policy: Default::default(),
+        preflight_placement: Default::default(),
+        readiness: None,
     };
 }
