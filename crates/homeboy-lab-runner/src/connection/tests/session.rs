@@ -1932,7 +1932,7 @@ fn full_status_projection_leaves_large_legacy_shared_state_and_observation_db_un
 }
 
 #[test]
-fn disconnected_generation_reconcile_action_passes_reconcile_preflight() {
+fn disconnected_generation_status_connects_and_reconcile_preflight_remains_safe() {
     test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
         let mut session = direct_ssh_session("lease-stale");
@@ -1956,11 +1956,11 @@ fn disconnected_generation_reconcile_action_passes_reconcile_preflight() {
                 .admission_summary_with_generations(&inventory, &[], inventory.len())
                 .next_action
                 .as_deref(),
-            Some("homeboy runner reconcile homeboy-lab")
+            Some("homeboy runner connect homeboy-lab")
         );
 
         let reconciled = reconcile_status("homeboy-lab")
-            .expect("status-recommended reconciliation accepts a disconnected runner");
+            .expect("reconciliation preflight accepts a disconnected runner");
         assert!(!reconciled.connected);
     });
 }
