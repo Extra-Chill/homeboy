@@ -843,6 +843,9 @@ fn has_cook_continue_route(options: &AgentTaskCookServiceOptions) -> bool {
 pub struct AgentTaskCandidateAdoptionOptions {
     pub ai_model: Option<String>,
     pub replace_interrupted: bool,
+    /// Explicitly permit a candidate whose failed gate reproduces on the
+    /// immutable base. Regressions remain ineligible after differential replay.
+    pub accept_inherited_failures: bool,
 }
 
 /// A Cook outcome.

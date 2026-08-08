@@ -40,6 +40,27 @@ fn cook_args_from_cli(args: Vec<String>) -> AgentTaskCookArgs {
     *cook
 }
 
+fn register_component(id: &str, path: &std::path::Path, remote_url: &str) {
+    homeboy::core::component::write_standalone_component_config(
+        &homeboy::core::component::Component {
+            id: id.to_string(),
+            local_path: path.display().to_string(),
+            remote_url: Some(remote_url.to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("register component");
+}
+
+fn add_remote(path: &std::path::Path, name: &str, remote_url: &str) {
+    let status = Command::new("git")
+        .args(["remote", "add", name, remote_url])
+        .current_dir(path)
+        .status()
+        .expect("add fixture remote");
+    assert!(status.success(), "git remote add {name} failed");
+}
+
 #[test]
 fn cook_derives_issue_destination_and_preserves_explicit_override() {
     with_isolated_home(|_| {
@@ -94,6 +115,349 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
             Some("homeboy@caller-selected")
         );
         assert_eq!(explicit.head, None);
+    });
+}
+
+#[test]
+fn cook_infers_repo_from_an_explicit_git_workspace_and_persists_its_provenance() {
+    with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source checkout");
+        init_runtime_component_checkout(source.path());
+        let remote = "https://github.com/example/inferred.git";
+        add_remote(source.path(), "origin", remote);
+        register_component("inferred", source.path(), remote);
+        let destination_root = tempfile::tempdir().expect("destination root");
+        let destination = destination_root.path().join("task");
+        let status = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/inferred",
+                destination.to_str().expect("destination path"),
+                "HEAD",
+            ])
+            .current_dir(source.path())
+            .status()
+            .expect("create linked worktree");
+        assert!(status.success(), "create linked worktree");
+
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--workspace".to_string(),
+            source.path().display().to_string(),
+            "--to-worktree".to_string(),
+            destination.display().to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("infer repository from workspace");
+        assert_eq!(args.dispatch.repo.as_deref(), Some("inferred"));
+        assert_eq!(
+            args.repository_identity.as_ref().expect("identity")["remote_identity"],
+            "git://github.com/example/inferred"
+        );
+        assert_eq!(
+            args.repository_identity.as_ref().expect("identity")["provenance"],
+            "--workspace:git-remote:origin"
+        );
+
+        let plan = super::super::run::compile_cook_plan(&args, json!({ "path": destination }))
+            .expect("compile Cook plan");
+        assert_eq!(
+            plan.metadata["cook_repository_identity"],
+            args.repository_identity.expect("identity")
+        );
+    });
+}
+
+#[test]
+fn cook_rejects_ambiguous_or_mismatching_workspace_repository_identity() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        add_remote(
+            workspace.path(),
+            "origin",
+            "https://github.com/example/one.git",
+        );
+        add_remote(
+            workspace.path(),
+            "upstream",
+            "https://github.com/example/two.git",
+        );
+        register_component(
+            "one",
+            workspace.path(),
+            "https://github.com/example/one.git",
+        );
+        register_component(
+            "two",
+            workspace.path(),
+            "https://github.com/example/two.git",
+        );
+
+        let ambiguous = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--workspace".to_string(),
+            workspace.path().display().to_string(),
+            "--to-worktree".to_string(),
+            workspace.path().display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect_err("multiple configured remotes are ambiguous");
+        assert!(
+            ambiguous
+                .message
+                .contains("cannot select one conflicting checkout"),
+            "{}",
+            ambiguous.message
+        );
+        assert!(
+            ambiguous.message.contains("git://github.com/example/one"),
+            "{}",
+            ambiguous.message
+        );
+        assert_eq!(ambiguous.details["field"], "workspace");
+
+        let mismatch_workspace = tempfile::tempdir().expect("mismatch workspace");
+        init_runtime_component_checkout(mismatch_workspace.path());
+        add_remote(
+            mismatch_workspace.path(),
+            "origin",
+            "https://github.com/example/one.git",
+        );
+        let mismatch = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--workspace".to_string(),
+            mismatch_workspace.path().display().to_string(),
+            "--to-worktree".to_string(),
+            mismatch_workspace.path().display().to_string(),
+            "--repo".to_string(),
+            "other".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect_err("explicit repo must match workspace identity");
+        assert!(
+            mismatch.message.contains("does not match"),
+            "{}",
+            mismatch.message
+        );
+        assert!(
+            mismatch
+                .message
+                .contains("one (git://github.com/example/one"),
+            "{}",
+            mismatch.message
+        );
+    });
+}
+
+#[test]
+fn cook_requires_repo_for_an_explicit_non_git_workspace() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--cwd".to_string(),
+            workspace.path().display().to_string(),
+            "--to-worktree".to_string(),
+            workspace.path().display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect_err("non-Git workspace cannot infer a repository");
+        assert_eq!(
+            error.details["args"][0],
+            "--repo <repo> is required because the supplied workspace is not a Git checkout with a configured repository remote; provide --repo <configured-component>"
+        );
+    });
+}
+
+#[test]
+fn cook_rejects_conflicting_workspace_and_cwd_even_with_an_explicit_repo() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = tempfile::tempdir().expect("cwd");
+        init_runtime_component_checkout(workspace.path());
+        init_runtime_component_checkout(cwd.path());
+        add_remote(
+            workspace.path(),
+            "origin",
+            "https://github.com/example/one.git",
+        );
+        add_remote(cwd.path(), "origin", "https://github.com/example/two.git");
+        register_component(
+            "one",
+            workspace.path(),
+            "https://github.com/example/one.git",
+        );
+        register_component("two", cwd.path(), "https://github.com/example/two.git");
+
+        for repo in ["one", "two"] {
+            let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--workspace".to_string(),
+                workspace.path().display().to_string(),
+                "--cwd".to_string(),
+                cwd.path().display().to_string(),
+                "--to-worktree".to_string(),
+                workspace.path().display().to_string(),
+                "--repo".to_string(),
+                repo.to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect_err("explicit repo cannot select a conflicting checkout");
+            assert!(error
+                .message
+                .contains("cannot select one conflicting checkout"));
+            assert!(error.message.contains("git://github.com/example/one"));
+            assert!(error.message.contains("git://github.com/example/two"));
+        }
+    });
+}
+
+#[test]
+fn cook_rejects_destination_with_a_different_repository_identity() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let destination = tempfile::tempdir().expect("destination");
+        init_runtime_component_checkout(workspace.path());
+        init_runtime_component_checkout(destination.path());
+        add_remote(
+            workspace.path(),
+            "origin",
+            "https://github.com/example/one.git",
+        );
+        add_remote(
+            destination.path(),
+            "origin",
+            "https://github.com/example/two.git",
+        );
+        register_component(
+            "one",
+            workspace.path(),
+            "https://github.com/example/one.git",
+        );
+        register_component(
+            "two",
+            destination.path(),
+            "https://github.com/example/two.git",
+        );
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--workspace".to_string(),
+            workspace.path().display().to_string(),
+            "--to-worktree".to_string(),
+            destination.path().display().to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("resolve source identity");
+
+        let error =
+            super::super::run::compile_cook_plan(&args, json!({ "path": destination.path() }))
+                .expect_err("destination remote must match Cook repository identity");
+        assert!(error
+            .message
+            .contains("does not match resolved `git://github.com/example/one`"));
+        assert!(error.message.contains("git://github.com/example/two"));
+    });
+}
+
+#[test]
+fn cook_infers_an_ssh_scheme_remote_and_redacts_credentials_from_provenance() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        add_remote(
+            workspace.path(),
+            "origin",
+            "ssh://git@github.com/example/secure.git",
+        );
+        register_component(
+            "secure",
+            workspace.path(),
+            "https://github.com/example/secure.git",
+        );
+
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--cwd".to_string(),
+            workspace.path().display().to_string(),
+            "--to-worktree".to_string(),
+            workspace.path().display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("infer ssh remote");
+        assert_eq!(args.dispatch.repo.as_deref(), Some("secure"));
+        assert_eq!(
+            args.repository_identity.expect("identity")["remote_identity"],
+            "git://github.com/example/secure"
+        );
+
+        let credentialed = "https://token:secret@github.com/example/secure.git";
+        let status = Command::new("git")
+            .args(["remote", "set-url", "origin", credentialed])
+            .current_dir(workspace.path())
+            .status()
+            .expect("set credentialed fixture remote");
+        assert!(status.success(), "set credentialed fixture remote");
+        let credentialed_args =
+            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--cwd".to_string(),
+                workspace.path().display().to_string(),
+                "--to-worktree".to_string(),
+                workspace.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect("infer credentialed remote without persisting its credential");
+        assert!(!credentialed_args
+            .repository_identity
+            .expect("identity")
+            .to_string()
+            .contains("secret"));
+        assert_eq!(
+            super::super::run::canonical_remote_identity(credentialed).as_deref(),
+            Some("git://github.com/example/secure")
+        );
+        assert!(!super::super::run::canonical_remote_identity(credentialed)
+            .expect("canonical identity")
+            .contains("secret"));
     });
 }
 
@@ -941,6 +1305,38 @@ fn adopt_attempt_selector_parses_as_an_explicit_cook_attempt() {
     };
     assert_eq!(args.run_or_cook_id, "cook-with-colliding-first-run-id");
     assert_eq!(args.attempt, Some(1));
+}
+
+#[test]
+fn adopt_inherited_failure_acceptance_is_explicit_and_documented() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "adopt",
+        "cook-11978",
+        "--candidate-ref",
+        "deadbeef",
+        "--accept-inherited-failures",
+    ])
+    .expect("explicit inherited-failure acceptance parses");
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Adopt(args) = agent_task.command else {
+        panic!("expected adopt command");
+    };
+    assert!(args.accept_inherited_failures);
+
+    let Err(error) = Cli::try_parse_from(["homeboy", "agent-task", "adopt", "--help"]) else {
+        panic!("help exits after rendering");
+    };
+    let help = error.to_string();
+    assert!(help.contains("--accept-inherited-failures"), "{help}");
+    assert!(help.contains("immutable candidate base"), "{help}");
+    assert!(
+        help.contains("New or changed failures remain blocking"),
+        "{help}"
+    );
 }
 
 #[test]

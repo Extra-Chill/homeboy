@@ -29,9 +29,13 @@ pub struct DispatchCoreArgs {
     /// Maximum total provider executions per task, including same-provider
     /// retries and provider rotations. For Cook, this must be at least
     /// --max-attempts; use --max-same-provider-retries for gate and review-form
-    /// remediation. `--attempts 1` runs exactly once. When omitted, defaults to
-    /// the total attempts the configured provider rotation needs, or 1 when no
-    /// rotation is configured.
+    /// remediation. `--attempts 1` runs exactly once. An explicit total cap
+    /// bounds rotations inherited from configuration: for example,
+    /// `--max-attempts 1 --max-provider-executions 1` runs once even when a
+    /// rotation is configured, and reports those rotations as unreachable. An
+    /// explicit `--max-provider-rotations` must fit within this total. When
+    /// omitted, defaults to the total attempts the configured provider rotation
+    /// needs, or 1 when no rotation is configured.
     #[arg(long = "max-provider-executions", alias = "attempts", value_name = "N")]
     pub attempts: Option<u32>,
 
@@ -50,7 +54,9 @@ pub struct DispatchCoreArgs {
     /// Rotations are distinct from same-provider Cook remediation and do not
     /// satisfy its required review-form retry budget. When omitted, defaults to
     /// the number of entries in the configured provider rotation, or 0 when no
-    /// rotation is configured.
+    /// rotation is configured. When supplied with an explicit total execution
+    /// cap, this request must fit within that cap; only inherited rotations are
+    /// truncated automatically.
     #[arg(
         long = "max-provider-rotations",
         alias = "provider-rotations",
@@ -147,15 +153,22 @@ pub struct DispatchArgs {
     #[arg(long = "task", value_name = "PROMPT", hide = true)]
     pub tasks: Vec<String>,
 
-    /// Existing local repo checkout or worktree path to cook in.
+    /// Existing local repo checkout or worktree path to cook in. For Cook,
+    /// omitting --repo infers its configured component when the Git remote maps
+    /// unambiguously to one registered component.
     #[arg(long, value_name = "PATH")]
     pub cwd: Option<String>,
 
-    /// Homeboy workspace ID or existing local workspace path to cook in.
+    /// Homeboy workspace ID or existing local workspace path to cook in. For
+    /// Cook, omitting --repo infers its configured component when the workspace
+    /// Git remote maps unambiguously to one registered component.
     #[arg(long, value_name = "ID_OR_PATH")]
     pub workspace: Option<String>,
 
     /// Repo/component slug for metadata and task grouping, e.g. sample-plugin.
+    /// Cook infers this from an explicit --workspace or --cwd Git checkout when
+    /// its configured remote mapping is unambiguous; an explicit value must
+    /// match the checkout.
     #[arg(long, value_name = "REPO")]
     pub repo: Option<String>,
 

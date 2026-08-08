@@ -247,6 +247,51 @@ fn cook_preflight_rejects_contradictory_retry_budget_with_corrected_command() {
     );
 }
 
+#[test]
+fn cook_preflight_allows_explicit_execution_cap_to_clamp_configured_rotations() {
+    with_isolated_home(|_| {
+        let mut config = homeboy::core::defaults::load_config();
+        config.agent_task.rotation = Some(
+            serde_json::to_value(
+                homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            model: Some("fallback-one".to_string()),
+                            ..Default::default()
+                        },
+                        homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            model: Some("fallback-two".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            )
+            .expect("serialize configured rotation"),
+        );
+        homeboy::core::defaults::save_config(&config).expect("save configured rotation");
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "Implement the outcome".to_string(),
+            "--to-worktree".to_string(),
+            "sample-plugin@fix-issue".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--no-finalize".to_string(),
+            "--max-attempts".to_string(),
+            "1".to_string(),
+            "--max-provider-executions".to_string(),
+            "1".to_string(),
+        ]);
+
+        validate_cook_request(&args)
+            .expect("explicit total cap truncates rotations inherited from configuration");
+    });
+}
+
 impl AgentTaskCookAttemptDispatcher for RecoverableRunnerDispatcher {
     fn durable_recipe(&self) -> Result<Value> {
         Ok(json!({ "kind": "test-recoverable-runner" }))
