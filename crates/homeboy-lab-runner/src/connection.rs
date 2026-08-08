@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,6 +45,7 @@ const REMOTE_RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 // controller-local tunnel that disappeared during a link flap.
 const DIRECT_TUNNEL_RECOVERY_WAIT: Duration = Duration::from_secs(30);
 const CONTROLLER_PROXY_ENV: &str = "HOMEBOY_CONTROLLER_PROXY";
+static CONTROLLER_PROXY_FORWARD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
 pub(crate) use connection_daemon::versions_match;
@@ -161,6 +163,68 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
         tunnel_pid,
         tunnel_process_start_identity: capture_tunnel_process_start_identity(Some(tunnel_pid))?,
     }))
+}
+
+/// Return the runner-loopback proxy URL for an explicitly requesting direct SSH
+/// job. The controller endpoint is read only here and never enters job data.
+pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String> {
+    let _guard = CONTROLLER_PROXY_FORWARD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("controller proxy forward lock poisoned");
+    let mut session = recorded_session(runner_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "controller_proxy",
+            "controller proxy access requires a connected direct SSH runner session",
+            Some(runner_id.to_string()),
+            Some(vec![format!(
+                "Run `homeboy runner connect {runner_id}` and retry."
+            )]),
+        )
+    })?;
+    if session.mode != RunnerTunnelMode::DirectSsh {
+        return Err(Error::validation_invalid_argument(
+            "controller_proxy",
+            "controller proxy access is available only to direct SSH runner jobs",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    if let Some(forward) = session.proxy_forward.as_ref() {
+        if homeboy_core::process::pid_is_running(forward.tunnel_pid) {
+            return Ok(forward.runner_url.clone());
+        }
+    }
+    let server_id = session.server_id.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "controller_proxy",
+            "direct SSH runner session has no server identity",
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    let server = server::load(server_id)?;
+    let forward = open_controller_proxy_forward(&server)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            CONTROLLER_PROXY_ENV,
+            "is required when a runner job requests controller proxy access",
+            None,
+            Some(vec![format!(
+                "Set {CONTROLLER_PROXY_ENV} on the controller and retry."
+            )]),
+        )
+    })?;
+    session.proxy_forward = Some(forward.clone());
+    if let Err(error) = write_session(&session) {
+        terminate_tunnel_with_identity(
+            forward.tunnel_pid,
+            forward.tunnel_process_start_identity.as_ref(),
+            homeboy_core::process::process_start_identity,
+            terminate_pid,
+        );
+        return Err(error);
+    }
+    Ok(forward.runner_url)
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
@@ -1048,25 +1112,9 @@ fn connect_with_orphan_adoption_and_live_lease(
             return Ok((report, exit_code));
         }
     };
-    let proxy_forward = match open_controller_proxy_forward(&server) {
-        Ok(proxy_forward) => proxy_forward,
-        Err(error) => {
-            if let Some(pid) = tunnel_pid {
-                terminate_pid(pid);
-            }
-            let (mut report, exit_code) = failed_connect(
-                runner_id,
-                session_path,
-                RunnerFailureKind::TunnelFailure,
-                error.message,
-            );
-            if let Some(evidence) = &mut report.failure_evidence {
-                evidence.classification = "proxy_forward".to_string();
-                evidence.tunnel_state = Some("proxy_forward_not_established".to_string());
-            }
-            return Ok((report, exit_code));
-        }
-    };
+    // Proxy exposure belongs to explicitly requesting jobs. Connecting a runner
+    // must not capture an ambient controller endpoint or create an idle tunnel.
+    let proxy_forward = None;
 
     let remote_daemon_lease_id = daemon.lease_id.clone();
     if let Err(error) = verify_live_lease_adoption(

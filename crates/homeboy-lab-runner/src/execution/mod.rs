@@ -834,7 +834,8 @@ pub(crate) fn exec_with_status_snapshot(
         apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref());
     let runner = plan.runner.clone();
     let cwd = plan.cwd.clone();
-    let request_env = plan.env.clone();
+    let mut request_env = plan.env.clone();
+    let controller_proxy_projection = process::controller_proxy_projection_names(&request_env)?;
     super::workload::validate_lab_runner_workload_dispatch(
         options.lab_runner_workload.as_ref(),
         runner_id,
@@ -1039,6 +1040,10 @@ pub(crate) fn exec_with_status_snapshot(
     let result = match select_runner_transport(&runner, Some(&connected), false) {
         RunnerTransport::DirectDaemon(handle) => {
             run_capability_preflight(&runner)?;
+            if !controller_proxy_projection.is_empty() {
+                let runner_url = crate::connection::controller_proxy_forward_for_job(runner_id)?;
+                process::apply_controller_proxy_projection(&mut request_env, &runner_url)?;
+            }
             let endpoint = handle.endpoint_url().to_string();
             exec_via_daemon(
                 &runner,
@@ -1067,6 +1072,14 @@ pub(crate) fn exec_with_status_snapshot(
             )
         }
         RunnerTransport::ReverseBroker(handle) => {
+            if !controller_proxy_projection.is_empty() {
+                return Err(Error::validation_invalid_argument(
+                    "controller_proxy",
+                    "controller proxy projection requires a direct SSH runner session",
+                    Some(runner_id.to_string()),
+                    None,
+                ));
+            }
             run_capability_preflight(&runner)?;
             exec_via_reverse_broker(
                 &runner,

@@ -29,6 +29,10 @@ use super::policy::{validate_runner_policy, RunnerPolicyRequest};
 #[allow(unused_imports)]
 use super::*;
 
+/// Explicit, non-secret job value requesting a controller-owned proxy
+/// projection. Callers choose the destination environment variable themselves.
+pub(crate) const CONTROLLER_PROXY_PROJECTION: &str = "homeboy://controller-proxy";
+
 pub(super) fn exec_local(plan: PreparedRunnerProcess) -> Result<(RunnerExecOutput, i32)> {
     let output = execute_runner_process(&plan)?;
     Ok(exec_output(
@@ -401,7 +405,6 @@ pub(crate) fn prepare_daemon_local_process(
     env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
     env.insert(RUNNER_PLACEMENT_RESOLVED_ENV.to_string(), "1".to_string());
     env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
-    inject_controller_proxy_forward(&mut env, &runner.id)?;
     // Execution provenance is distinct from the dispatch markers above. It
     // survives CLI routing so runner-local agent-task plans do not open a
     // second controller-to-runner handoff.
@@ -437,21 +440,52 @@ pub(crate) fn prepare_daemon_local_process(
     })
 }
 
-fn inject_controller_proxy_forward(
-    env: &mut HashMap<String, String>,
-    runner_id: &str,
-) -> Result<()> {
-    let Some(session) = crate::connection::recorded_session(runner_id)? else {
-        return Ok(());
-    };
-    let Some(proxy_forward) = session.proxy_forward else {
-        return Ok(());
-    };
-    for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
-        env.entry(name.to_string())
-            .or_insert_with(|| proxy_forward.runner_url.clone());
+pub(crate) fn controller_proxy_projection_names(
+    env: &HashMap<String, String>,
+) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for (name, value) in env {
+        if value == CONTROLLER_PROXY_PROJECTION {
+            names.push(name.clone());
+            continue;
+        }
+        if matches!(name.as_str(), "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY")
+            && controller_loopback_proxy(value)
+        {
+            return Err(Error::validation_invalid_argument(
+                name,
+                "controller-loopback proxy URLs must use the explicit homeboy://controller-proxy projection request",
+                None,
+                Some(vec![format!("Set {name}={CONTROLLER_PROXY_PROJECTION} so Homeboy can project a runner-loopback URL.")]),
+            ));
+        }
     }
-    Ok(())
+    names.sort();
+    Ok(names)
+}
+
+pub(crate) fn apply_controller_proxy_projection(
+    env: &mut HashMap<String, String>,
+    runner_url: &str,
+) -> Result<bool> {
+    let names = controller_proxy_projection_names(env)?;
+    for name in &names {
+        env.insert(name.clone(), runner_url.to_string());
+    }
+    Ok(!names.is_empty())
+}
+
+fn controller_loopback_proxy(value: &str) -> bool {
+    let Some((_, authority)) = value.split_once("://") else {
+        return false;
+    };
+    let endpoint = authority.split('/').next().unwrap_or_default();
+    let host = endpoint.rsplit_once('@').map_or(endpoint, |(_, host)| host);
+    let host = host.rsplit_once(':').map_or(host, |(host, _)| host);
+    matches!(
+        host.trim_matches(['[', ']']),
+        "127.0.0.1" | "localhost" | "::1"
+    )
 }
 
 pub(crate) fn execute_runner_process(plan: &PreparedRunnerProcess) -> Result<ProcessOutput> {
@@ -499,12 +533,81 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
 )]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::{Arc, Barrier};
 
     const GUTENBERG_LAB_OFFLOAD_BYTES: usize = 142_952;
     const GUTENBERG_SOURCE_SNAPSHOT_BYTES: usize = 44_680;
     const GUTENBERG_EXECUTION_BUNDLE_BYTES: usize = 8_552;
     const SAFE_CHILD_PROVENANCE_ENV_BYTES: usize = 16 * 1024;
+
+    #[test]
+    fn controller_proxy_projection_is_explicit_and_replaces_only_the_requested_name() {
+        let mut env = HashMap::from([
+            (
+                "ALL_PROXY".to_string(),
+                CONTROLLER_PROXY_PROJECTION.to_string(),
+            ),
+            ("UNRELATED".to_string(), "value".to_string()),
+        ]);
+        assert_eq!(
+            controller_proxy_projection_names(&env).expect("projection request"),
+            vec!["ALL_PROXY".to_string()]
+        );
+        assert!(
+            apply_controller_proxy_projection(&mut env, "socks5://127.0.0.1:43123")
+                .expect("apply projection")
+        );
+        assert_eq!(env["ALL_PROXY"], "socks5://127.0.0.1:43123");
+        assert_eq!(env["UNRELATED"], "value");
+    }
+
+    #[test]
+    fn controller_loopback_proxy_is_rejected_without_an_explicit_projection() {
+        let env = HashMap::from([(
+            "HTTPS_PROXY".to_string(),
+            "socks5://127.0.0.1:8080".to_string(),
+        )]);
+        let error = controller_proxy_projection_names(&env)
+            .expect_err("raw controller loopback must not reach a remote runner");
+        assert_eq!(
+            error.code,
+            homeboy_core::error::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(error.message.contains("homeboy://controller-proxy"));
+    }
+
+    #[test]
+    fn runner_command_reaches_a_controller_only_proxy_through_projected_loopback_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("controller-only proxy");
+        let proxy_url = format!("http://{}", listener.local_addr().expect("proxy address"));
+        let proxy = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("runner proxy request");
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).expect("read proxy request");
+            assert!(std::str::from_utf8(&request[..read])
+                .expect("request text")
+                .starts_with("GET http://controller-only.invalid/ HTTP/1.1"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("proxy response");
+        });
+        let mut env = HashMap::from([(
+            "ALL_PROXY".to_string(),
+            CONTROLLER_PROXY_PROJECTION.to_string(),
+        )]);
+        apply_controller_proxy_projection(&mut env, &proxy_url).expect("project runner loopback");
+        let output = std::process::Command::new("curl")
+            .args(["-fsS", "http://controller-only.invalid/"])
+            .env_clear()
+            .envs(&env)
+            .output()
+            .expect("run runner command");
+        assert!(output.status.success(), "curl failed: {output:?}");
+        assert_eq!(output.stdout, b"ok");
+        proxy.join().expect("controller proxy");
+    }
 
     fn json_payload(bytes: usize) -> String {
         let mut value = serde_json::json!({ "payload": "" });
