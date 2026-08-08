@@ -233,7 +233,12 @@ jobs:
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
 
+      - name: Reserve action checkout during candidate binary setup
+        id: prepare-binary-workspace
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh prepare .homeboy-action
+
       - name: Binary setup
+        id: binary-setup
         uses: ./.homeboy-action
         with:
           commands: __prepare__
@@ -243,6 +248,10 @@ jobs:
           binary-path: ${{ inputs.build-command != '' && inputs.build-artifact-path || inputs.binary-path }}
           rust-toolchain: ${{ inputs.rust-toolchain }}
           auto-setup: 'false'
+
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-binary-workspace.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
 
       - name: Upload candidate Homeboy binary
         uses: actions/upload-artifact@v7
@@ -781,7 +790,9 @@ jobs:
           commands: ${{ matrix.command }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
-          scope: ${{ inputs.scope }}
+          # The immutable manifest is the shard selector; changed-scope routing
+          # must not further filter its assigned test membership.
+          scope: full
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}
@@ -913,7 +924,7 @@ jobs:
             *) baseline_exit=1 ;;
           esac
           structured_output=false
-          [ ! -f "homeboy-baseline-results/${result_filename}" ] || structured_output=true
+          [ -f "homeboy-baseline-results/${result_filename}" ] && structured_output=true
           jq -cn --arg command "${COMMAND}" --arg status "${baseline_result}" --argjson exit_code "${baseline_exit}" --argjson structured_output "${structured_output}" \
             '{($command):{status:$status,exit_code:$exit_code,command:$command,structured_output:$structured_output}}' > homeboy-baseline-results/baseline-status.json
           python3 .homeboy-action/scripts/core/apply-differential-gate.py "$(cat homeboy-ci-results/results.json)" homeboy-ci-results homeboy-baseline-results > reconciled-results.json
@@ -1066,7 +1077,9 @@ jobs:
           commands: ${{ matrix.command }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
-          scope: ${{ inputs.scope }}
+          # The immutable manifest is the shard selector; baseline attribution
+          # must replay its complete assigned membership at the base revision.
+          scope: full
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
-# Reserves the action-owned paths used to transport Test shard state. The action
-# checkout has already materialized; transport must not make consumer checks
-# mistake it for a consumer workspace change.
+# Temporarily hides action-owned paths from Git status without masking consumer
+# changes. The original exclusions are restored exactly by `cleanup`.
 set -euo pipefail
 
 workspace="${GITHUB_WORKSPACE:-$PWD}"
 mode="${1:-prepare}"
+shift || true
 git -C "${workspace}" rev-parse --is-inside-work-tree >/dev/null || {
   echo "::error::Test shard workspace is not a Git worktree: ${workspace}" >&2
   exit 1
@@ -47,15 +47,30 @@ case "${mode}" in
     ;;
 esac
 
-for path in homeboy-test-inventory.json homeboy-test-shard-plan.json homeboy-test-shard.json; do
+paths=("$@")
+if [ "${#paths[@]}" -eq 0 ]; then
+  paths=(.homeboy-action homeboy-test-inventory.json homeboy-test-shard-plan.json homeboy-test-shard.json)
+fi
+
+for path in "${paths[@]}"; do
+  case "${path}" in
+    .homeboy-action|homeboy-test-inventory.json|homeboy-test-shard-plan.json|homeboy-test-shard.json) ;;
+    *)
+      echo "::error::Unsupported action-owned exclusion path: ${path}" >&2
+      exit 1
+      ;;
+  esac
   if git -C "${workspace}" ls-files --error-unmatch -- "${path}" >/dev/null 2>&1 || [ -e "${workspace}/${path}" ] || [ -L "${workspace}/${path}" ]; then
+    if [ "${path}" = .homeboy-action ]; then
+      continue
+    fi
     echo "::error::Refusing to overwrite consumer path reserved for Test shard transport: ${path}" >&2
     exit 1
   fi
 done
 
 action_checkout="${workspace}/.homeboy-action"
-if [ -L "${action_checkout}" ] || ! action_toplevel="$(git -C "${action_checkout}" rev-parse --show-toplevel 2>/dev/null)" || [ "${action_toplevel}" != "$(cd "${action_checkout}" && pwd -P)" ]; then
+if [[ " ${paths[*]} " == *" .homeboy-action "* ]] && { [ -L "${action_checkout}" ] || ! action_toplevel="$(git -C "${action_checkout}" rev-parse --show-toplevel 2>/dev/null)" || [ "${action_toplevel}" != "$(cd "${action_checkout}" && pwd -P)" ]; }; then
   echo "::error::Homeboy Action checkout is missing or unsafe." >&2
   exit 1
 fi
@@ -79,6 +94,11 @@ else
   : > "${state_dir}/exclude-absent"
 fi
 
-# Replace, rather than append to, consumer exclusions while replay runs. This
-# prevents a preexisting broad exclusion from hiding a real consumer change.
-printf '%s\n' '/.homeboy-action/' '/homeboy-test-inventory.json' '/homeboy-test-shard-plan.json' '/homeboy-test-shard.json' > "${exclude_file}"
+# Replace, rather than append to, consumer exclusions while action work runs.
+# This prevents a preexisting broad exclusion from hiding a real consumer change.
+for path in "${paths[@]}"; do
+  case "${path}" in
+    .homeboy-action) printf '/%s/\n' "${path}" ;;
+    *) printf '/%s\n' "${path}" ;;
+  esac
+done > "${exclude_file}"

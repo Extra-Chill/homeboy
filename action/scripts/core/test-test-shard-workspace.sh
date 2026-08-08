@@ -17,7 +17,7 @@ for phase in candidate baseline; do
   git -C "${workspace}" add consumer.txt
   git -C "${workspace}" commit -qm fixture
   git -C "${workspace}" init -q .homeboy-action
-  printf 'consumer-change.txt\n' > "$(git -C "${workspace}" rev-parse --git-path info/exclude)"
+  printf 'consumer-change.txt\n' > "$(git -C "${workspace}" rev-parse --path-format=absolute --git-path info/exclude)"
 
   GITHUB_WORKSPACE="${workspace}" bash "${PREPARE}"
   mkdir -p "${workspace}/.homeboy-action"
@@ -38,8 +38,30 @@ for phase in candidate baseline; do
   printf '%s\n' "${status}" | grep -Fx '?? components/nested/homeboy-test-shard.json' >/dev/null || { printf 'FAIL: %s replay hid a nested consumer path\n' "${phase}"; exit 1; }
 
   GITHUB_WORKSPACE="${workspace}" bash "${PREPARE}" cleanup
-  cmp <(printf 'consumer-change.txt\n') "$(git -C "${workspace}" rev-parse --git-path info/exclude)" || { printf 'FAIL: %s replay did not restore consumer exclusions\n' "${phase}"; exit 1; }
+  cmp <(printf 'consumer-change.txt\n') "$(git -C "${workspace}" rev-parse --path-format=absolute --git-path info/exclude)" || { printf 'FAIL: %s replay did not restore consumer exclusions\n' "${phase}"; exit 1; }
 done
+
+workspace="${tmp}/binary-identity"
+mkdir -p "${workspace}"
+git -C "${workspace}" init -q
+git -C "${workspace}" config user.name fixture
+git -C "${workspace}" config user.email fixture@example.invalid
+printf 'consumer\n' > "${workspace}/consumer.txt"
+git -C "${workspace}" add consumer.txt
+git -C "${workspace}" commit -qm fixture
+git -C "${workspace}" init -q .homeboy-action
+printf 'existing-exclusion.txt\n' > "$(git -C "${workspace}" rev-parse --path-format=absolute --git-path info/exclude)"
+GITHUB_WORKSPACE="${workspace}" bash "${PREPARE}" prepare .homeboy-action
+printf 'dirty\n' >> "${workspace}/consumer.txt"
+status="$(git -C "${workspace}" status --porcelain --untracked-files=all)"
+printf '%s\n' "${status}" | grep -Fx ' M consumer.txt' >/dev/null || { printf 'FAIL: candidate binary identity setup hid a real consumer change\n'; exit 1; }
+if printf '%s\n' "${status}" | grep -F .homeboy-action >/dev/null; then
+  printf 'FAIL: candidate binary identity setup exposed the action checkout\n'
+  exit 1
+fi
+GITHUB_WORKSPACE="${workspace}" bash "${PREPARE}" cleanup
+cmp <(printf 'existing-exclusion.txt\n') "$(git -C "${workspace}" rev-parse --path-format=absolute --git-path info/exclude)" || { printf 'FAIL: candidate binary identity setup did not restore consumer exclusions\n'; exit 1; }
+printf 'PASS: candidate binary identity setup excludes only the action checkout and restores consumer exclusions\n'
 
 workspace="${tmp}/tracked-collision"
 mkdir -p "${workspace}"
