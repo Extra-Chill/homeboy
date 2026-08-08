@@ -16,11 +16,13 @@ homeboy runs hotspots --baseline-run <run-id> --candidate-run <run-id> [--limit 
 homeboy runs show <run-id> [--format json|--json]
 homeboy runs dossier <run-id> [--format json|--json]
 homeboy runs resume-plan <run-id>
-homeboy runs evidence <run-id>
+homeboy runs evidence <run-id> [--full] [-q <jsonpath>...]
 homeboy runs artifacts <run-id> [--runner <runner-id>] [--pull] [--pull-dir <dir>] [--limit <count>] [--offset <count>] [--full]
 homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
 homeboy runs artifact attach <run-id> --runner <runner-id> --path <runner-path> --name <artifact-name>
 homeboy runs artifact get <run-id> <artifact-id> [--runner <runner-id>] [--output <path>]
+homeboy runs artifact get-handle <opaque-handle> [--output <path>]
+homeboy runs artifact preview-handle <opaque-handle> [--port <port>]
 homeboy runs artifact postprocess [OPTIONS] <PLAN>
 homeboy runs artifact cleanup-downloads [--runner <runner-id>] [--run-id <run-id>] [--apply]
 homeboy runs artifact cleanup-persisted [--older-than-days <days>] [--run-id <run-id>] [--apply]
@@ -65,7 +67,7 @@ homeboy --output json runs refs --kind trace --component gutenberg --aggregate-a
 
 `homeboy runs resume-plan <run-id>` reads generic `validation_progress` metadata from a run and reports the last completed command, any active command, and the next pending command. Homeboy core records this ledger for Homeboy-managed validation command sets without understanding npm, smoke groups, benchmarks, or implementation-specific command names; command manifests come from project configuration or extension-provided runners.
 
-`homeboy runs evidence <run-id>` emits reviewer-facing evidence using generic artifact addresses. Local operator files are represented as non-reviewer-visible `homeboy://run/<run-id>/artifact/<artifact-id>` handles with a fetch command instead of absolute machine paths. Remote runner artifacts use `runner-artifact://...` refs, validated public HTTP(S) URLs are emitted as public evidence links, and metadata-only evidence remains non-public. Lab-specific publication or mirroring policy belongs in runner/extension enrichment, not in the generic evidence serializer.
+`homeboy runs evidence <run-id>` emits a byte- and cardinality-bounded operator projection: run status, failure summary, selected `failure.diagnostic`, its exact continuation, artifact totals, and returned/omitted counts. The complete pretty-serialized `homeboy/command-result/v3` envelope is capped at 16,384 bytes for both stdout and `--output`; when necessary, optional artifact rows and guidance are omitted deterministically while schema, status, counts, and the selected diagnostic handle remain available. Standard bounded run IDs remain exact in `run_id`, `complete_command`, and `full_report_command`; an abnormal persisted ID that exceeds the public budget causes those optional locator fields to be omitted rather than truncated. Each returned artifact carries a stable opaque `ah_...` handle derived from durable ownership identity; `homeboy runs artifact get-handle <opaque-handle>` resolves file artifacts and `homeboy runs artifact preview-handle <opaque-handle>` safely serves directory artifacts without a run id, ordinal, name token, or shell interpolation. The selected diagnostic is first in the bounded artifact list; strings are deterministically shortened with an omitted-byte marker. The output is explicitly versioned as `homeboy/runs-evidence-summary/v1` under the `evidence_summary` variant. Consumers that require the established lossless `evidence` variant must use `--full`; this preserves the prior report schema unchanged. Use `runs artifacts <run-id>` for the full artifact inventory, or `-q/--field` with JSONPath selectors such as `-q '$.failure.diagnostic'` for a narrow machine-readable projection. Lab sibling artifacts sharing the runner job are included in both views. Local operator files are represented as non-reviewer-visible handles with a fetch command instead of absolute machine paths. Directory diagnostics continue with `runs artifact preview-handle`, and URL diagnostics continue with their validated URL. Lab-specific publication or mirroring policy belongs in runner/extension enrichment, not in the generic evidence serializer.
 
 ### Evidence manifest
 

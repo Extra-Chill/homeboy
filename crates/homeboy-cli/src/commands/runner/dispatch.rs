@@ -8,7 +8,7 @@ use super::super::output_runtime::{CommandPresentation, CommandRun};
 use super::super::CmdResult;
 use super::broker::run_broker;
 use super::cli::{RunnerArgs, RunnerCommand};
-use super::exec::exec;
+use super::exec::exec_with_hydration;
 use super::jobs::RunnerJobCommandOutput;
 use super::registry::{add, connect, enable, list, remove, set, show, RunnerAddInput};
 use super::types::{RunnerCommandOutput, RunnerEnvOutput, RunnerOutput};
@@ -246,6 +246,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             id,
             cwd,
             sync_workspace,
+            hydrate_deps,
             project,
             ssh,
             capture_patch,
@@ -265,10 +266,11 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             json: _,
             raw,
             command,
-        } => map_execution(exec(
+        } => map_execution(exec_with_hydration(
             &id,
             cwd,
             sync_workspace,
+            hydrate_deps,
             project,
             ssh,
             capture_patch,
@@ -351,6 +353,7 @@ pub fn run_command_output(args: RunnerArgs) -> CommandRun {
             id,
             cwd,
             sync_workspace,
+            hydrate_deps,
             project,
             ssh,
             capture_patch,
@@ -374,6 +377,7 @@ pub fn run_command_output(args: RunnerArgs) -> CommandRun {
             id,
             cwd,
             sync_workspace,
+            hydrate_deps,
             project,
             ssh,
             capture_patch,
@@ -396,6 +400,7 @@ pub fn run_command_output(args: RunnerArgs) -> CommandRun {
             id,
             cwd,
             sync_workspace,
+            hydrate_deps,
             project,
             ssh,
             capture_patch,
@@ -419,6 +424,7 @@ pub fn run_command_output(args: RunnerArgs) -> CommandRun {
             id,
             cwd,
             sync_workspace,
+            hydrate_deps,
             project,
             ssh,
             capture_patch,
@@ -441,6 +447,7 @@ pub fn run_command_output(args: RunnerArgs) -> CommandRun {
             id,
             cwd,
             sync_workspace,
+            hydrate_deps,
             project,
             ssh,
             capture_patch,
@@ -464,6 +471,7 @@ pub fn run_command_output(args: RunnerArgs) -> CommandRun {
             id,
             cwd,
             sync_workspace,
+            hydrate_deps,
             project,
             ssh,
             capture_patch,
@@ -497,6 +505,7 @@ fn run_json_exec(
     id: String,
     cwd: Option<String>,
     sync_workspace: Option<String>,
+    hydrate_deps: bool,
     project: Option<String>,
     ssh: bool,
     capture_patch: bool,
@@ -516,10 +525,11 @@ fn run_json_exec(
     extension_env_providers: Vec<String>,
 ) -> CommandRun {
     let (stdout_result, exit_code) = crate::commands::utils::response::map_cmd_result_to_json(
-        exec(
+        exec_with_hydration(
             &id,
             cwd,
             sync_workspace,
+            hydrate_deps,
             project,
             ssh,
             capture_patch,
@@ -554,6 +564,7 @@ fn run_raw_exec(
     id: String,
     cwd: Option<String>,
     sync_workspace: Option<String>,
+    hydrate_deps: bool,
     project: Option<String>,
     ssh: bool,
     capture_patch: bool,
@@ -572,10 +583,11 @@ fn run_raw_exec(
     command: Vec<String>,
     extension_env_providers: Vec<String>,
 ) -> CommandRun {
-    match exec(
+    match exec_with_hydration(
         &id,
         cwd,
         sync_workspace,
+        hydrate_deps,
         project,
         ssh,
         capture_patch,
@@ -611,6 +623,7 @@ fn run_compact_exec_json(
     id: String,
     cwd: Option<String>,
     sync_workspace: Option<String>,
+    hydrate_deps: bool,
     project: Option<String>,
     ssh: bool,
     capture_patch: bool,
@@ -633,6 +646,7 @@ fn run_compact_exec_json(
         id,
         cwd,
         sync_workspace,
+        hydrate_deps,
         project,
         ssh,
         capture_patch,
@@ -668,6 +682,7 @@ pub(super) fn run_compact_exec(
     id: String,
     cwd: Option<String>,
     sync_workspace: Option<String>,
+    hydrate_deps: bool,
     project: Option<String>,
     ssh: bool,
     capture_patch: bool,
@@ -686,10 +701,11 @@ pub(super) fn run_compact_exec(
     command: Vec<String>,
     extension_env_providers: Vec<String>,
 ) -> CommandRun {
-    match exec(
+    match exec_with_hydration(
         &id,
         cwd,
         sync_workspace,
+        hydrate_deps,
         project,
         ssh,
         capture_patch,

@@ -48,6 +48,17 @@ pub fn related_lab_artifacts_for_runner_job(
     store: &ObservationStore,
     run: &RunRecord,
 ) -> Result<Vec<ArtifactRecord>> {
+    let run_ids = related_lab_run_ids(store, run)?;
+    let mut artifacts = Vec::new();
+    for run_id in run_ids {
+        artifacts.extend(store.list_artifacts(&run_id)?);
+    }
+    Ok(artifacts)
+}
+
+/// IDs of Lab sibling runs in the same order their artifacts are included in a
+/// full evidence report. The owner itself is excluded.
+pub fn related_lab_run_ids(store: &ObservationStore, run: &RunRecord) -> Result<Vec<String>> {
     if run.kind != "runner-exec" {
         return Ok(Vec::new());
     }
@@ -60,7 +71,7 @@ pub fn related_lab_artifacts_for_runner_job(
     else {
         return Ok(Vec::new());
     };
-    let mut artifacts = Vec::new();
+    let mut run_ids = Vec::new();
     for candidate in store.list_runs(RunListFilter {
         kind: None,
         component_id: None,
@@ -76,9 +87,9 @@ pub fn related_lab_artifacts_for_runner_job(
         if lab_remote_job_id(&candidate) != Some(job_id.as_str()) {
             continue;
         }
-        artifacts.extend(store.list_artifacts(&candidate.id)?);
+        run_ids.push(candidate.id);
     }
-    Ok(artifacts)
+    Ok(run_ids)
 }
 
 /// List the enriched artifact records attached to a run.

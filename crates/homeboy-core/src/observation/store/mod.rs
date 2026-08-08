@@ -25,6 +25,7 @@ use crate::{paths, Error, Result};
 pub use artifacts::directory_tree_sha256;
 pub use artifacts::{
     ArtifactListFilter, ArtifactListPage, ArtifactPublication, ArtifactPublicationType,
+    BoundedArtifactProjection,
 };
 pub use runs::{DEFAULT_RUN_PAGE_LIMIT, MAX_EXHAUSTIVE_RUN_ROWS, MAX_RUN_PAGE_LIMIT};
 

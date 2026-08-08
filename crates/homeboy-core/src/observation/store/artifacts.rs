@@ -47,6 +47,42 @@ fn add_artifact_filter(
 const PUBLICATION_LEASE_MS: i64 = 5 * 60 * 1000;
 const PUBLICATION_ARTIFACT_FILENAME_LIMIT: usize = 240;
 
+fn artifact_handle(run_id: &str, artifact_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"homeboy/artifact-handle/v1\0");
+    hasher.update(run_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(artifact_id.as_bytes());
+    format!("ah_{:x}", hasher.finalize())
+}
+
+fn bounded_artifact_record(
+    handle: String,
+    kind: String,
+    artifact_type: String,
+    path: String,
+    created_at: String,
+) -> ArtifactRecord {
+    ArtifactRecord {
+        // The opaque handle intentionally replaces the durable identity in
+        // bounded output. Exact identity is resolved only by handle lookup.
+        id: handle,
+        run_id: String::new(),
+        kind,
+        artifact_type,
+        path,
+        url: None,
+        public_url: None,
+        viewer_url: None,
+        viewer_links: Vec::new(),
+        sha256: None,
+        size_bytes: None,
+        mime: None,
+        metadata_json: serde_json::Value::Null,
+        created_at,
+    }
+}
+
 /// A filesystem artifact staged by a caller for atomic publication with its run record.
 /// The store computes controller-owned integrity metadata from `source_path`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +105,71 @@ pub struct ArtifactPublication {
     pub artifact_type: ArtifactPublicationType,
 }
 
+/// Bounded artifact inventory for operator-facing projections. Counts come from
+/// SQLite aggregates; only `artifacts` are materialized, so callers do not walk
+/// or size an unbounded filesystem inventory.
+#[derive(Debug, Clone)]
+pub struct BoundedArtifactProjection {
+    pub count: usize,
+    pub file_count: usize,
+    pub directory_count: usize,
+    pub url_count: usize,
+    pub total_size_bytes: u64,
+    pub diagnostic: Option<ArtifactRecord>,
+    pub diagnostic_handle: Option<String>,
+    pub artifacts: Vec<ArtifactRecord>,
+}
+
 impl ObservationStore {
+    /// Backfill the stable opaque handle for legacy rows. The source identity is
+    /// immutable (`run_id`, `artifact.id`), and the unique index makes a hash
+    /// collision a hard integrity failure instead of resolving another artifact.
+    pub(super) fn backfill_artifact_handles(&self) -> Result<()> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, run_id, metadata_json FROM artifacts WHERE artifact_handle IS NULL OR failure_diagnostic IS NULL",
+        ).map_err(sqlite_error("read artifact handle backfill rows"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(sqlite_error("query artifact handle backfill rows"))?;
+        for row in rows {
+            let (id, run_id, metadata_json) =
+                row.map_err(sqlite_error("collect artifact handle backfill rows"))?;
+            let handle = artifact_handle(&run_id, &id);
+            let metadata = serde_json::from_str::<serde_json::Value>(&metadata_json)
+                .unwrap_or(serde_json::Value::Null);
+            let diagnostic =
+                i64::from(metadata["failure_diagnostic"] == serde_json::Value::Bool(true));
+            let rank = metadata["failure_diagnostic_rank"]
+                .as_u64()
+                .unwrap_or_default()
+                .to_string();
+            let updated = self.connection.execute(
+                "UPDATE artifacts SET artifact_handle = COALESCE(artifact_handle, ?1), failure_diagnostic = ?2, failure_diagnostic_rank = ?3 WHERE id = ?4 AND run_id = ?5",
+                params![handle, diagnostic, rank, id, run_id],
+            ).map_err(sqlite_error("backfill artifact handle"))?;
+            if updated == 0 {
+                continue;
+            }
+        }
+        // Verify the index's collision boundary explicitly. This remains useful
+        // for stores created during a partial/manual migration.
+        let collisions: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM (SELECT artifact_handle FROM artifacts WHERE artifact_handle IS NOT NULL GROUP BY artifact_handle HAVING COUNT(*) > 1)",
+            [], |row| row.get(0),
+        ).map_err(sqlite_error("verify artifact handle collisions"))?;
+        if collisions != 0 {
+            return Err(Error::internal_unexpected(
+                "artifact handle collision detected",
+            ));
+        }
+        Ok(())
+    }
     /// Publish a run and all of its filesystem artifacts as one reader-visible unit.
     ///
     /// Files are copied and verified before the SQLite transaction begins. The
@@ -1228,6 +1328,130 @@ impl ObservationStore {
             limit: limit as usize,
             offset: filter.offset.max(0) as usize,
         })
+    }
+
+    /// Return aggregate artifact counts plus at most `limit` records, with the
+    /// highest-ranked declared failure diagnostic first when one exists.
+    pub fn bounded_artifact_projection_for_runs(
+        &self,
+        run_ids: &[String],
+        limit: usize,
+    ) -> Result<BoundedArtifactProjection> {
+        for run_id in run_ids {
+            validate_required("run_id", run_id)?;
+        }
+        if run_ids.is_empty() {
+            return Ok(BoundedArtifactProjection {
+                count: 0,
+                file_count: 0,
+                directory_count: 0,
+                url_count: 0,
+                total_size_bytes: 0,
+                diagnostic: None,
+                diagnostic_handle: None,
+                artifacts: Vec::new(),
+            });
+        }
+        let placeholders = std::iter::repeat_n("?", run_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let params = rusqlite::params_from_iter(run_ids.iter());
+        let (count, file_count, directory_count, url_count, total_size_bytes) = self
+            .connection
+            .query_row(
+                &format!("SELECT COUNT(*), \
+                 COALESCE(SUM(CASE WHEN artifact_type = 'file' THEN 1 ELSE 0 END), 0), \
+                 COALESCE(SUM(CASE WHEN artifact_type = 'directory' THEN 1 ELSE 0 END), 0), \
+                 COALESCE(SUM(CASE WHEN artifact_type = 'url' THEN 1 ELSE 0 END), 0), \
+                 COALESCE(SUM(COALESCE(size_bytes, 0)), 0) FROM artifacts WHERE run_id IN ({placeholders})"),
+                params,
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .map_err(|error| self.read_error("count bounded artifact projection", error))?;
+        // Read metadata scalars, not paths or artifact metadata documents. Rust
+        // applies the exact `as_u64().unwrap_or_default()` rank semantics used
+        // by the full report; SQLite never coerces ranks for selection.
+        let mut diagnostic = None;
+        let mut best_rank = 0_u64;
+        let mut artifacts = Vec::new();
+        for run_id in run_ids {
+            let mut statement = self.connection.prepare(
+                "SELECT artifact_handle, substr(kind, 1, 128), substr(artifact_type, 1, 32), substr(path, 1, 256), created_at, failure_diagnostic, failure_diagnostic_rank FROM artifacts WHERE run_id = ?1 ORDER BY created_at ASC, id ASC",
+            ).map_err(|error| self.read_error("prepare bounded artifact metadata", error))?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                })
+                .map_err(|error| self.read_error("query bounded artifact metadata", error))?;
+            for row in rows {
+                let (handle, kind, artifact_type, path, created_at, marked, rank) = row
+                    .map_err(|error| self.read_error("collect bounded artifact metadata", error))?;
+                let handle = handle.ok_or_else(|| {
+                    Error::internal_unexpected("artifact handle backfill is incomplete")
+                })?;
+                let artifact =
+                    bounded_artifact_record(handle.clone(), kind, artifact_type, path, created_at);
+                if marked == Some(1) {
+                    let rank = rank
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or_default();
+                    // `max_by_key` keeps the last equal item; use >= to share it.
+                    if diagnostic.is_none() || rank >= best_rank {
+                        best_rank = rank;
+                        diagnostic = Some(artifact.clone());
+                    }
+                }
+                if artifacts.len() < limit {
+                    artifacts.push(artifact);
+                }
+            }
+        }
+        if let Some(diagnostic) = diagnostic.clone() {
+            artifacts.retain(|artifact| artifact.id != diagnostic.id);
+            artifacts.insert(0, diagnostic);
+            artifacts.truncate(limit);
+        }
+        let diagnostic_handle = diagnostic.as_ref().map(|artifact| artifact.id.clone());
+        Ok(BoundedArtifactProjection {
+            count: count.max(0) as usize,
+            file_count: file_count.max(0) as usize,
+            directory_count: directory_count.max(0) as usize,
+            url_count: url_count.max(0) as usize,
+            total_size_bytes: total_size_bytes.max(0) as u64,
+            diagnostic,
+            diagnostic_handle,
+            artifacts,
+        })
+    }
+
+    pub fn get_artifact_for_handle(&self, handle: &str) -> Result<Option<ArtifactRecord>> {
+        validate_required("artifact_handle", handle)?;
+        if handle.len() != 67
+            || !handle.starts_with("ah_")
+            || !handle[3..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Ok(None);
+        }
+        self.connection.query_row(
+            "SELECT id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at FROM artifacts WHERE artifact_handle = ?1",
+            [handle], row_to_artifact_record,
+        ).optional().map_err(sqlite_error("read artifact record for opaque handle"))
     }
 
     fn artifact_columns_for_read(&self) -> Result<HashSet<String>> {
