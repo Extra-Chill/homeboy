@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.13] - 2026-08-08
+
+### Fixed
+- terminalize Test inventory failures [AI: OpenAI gpt-5.6-terra via OpenCode - workflow implementation and tests]
+
 ## [2.11.12] - 2026-08-08
 
 ### Fixed
