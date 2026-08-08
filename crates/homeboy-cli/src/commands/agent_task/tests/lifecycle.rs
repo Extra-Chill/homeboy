@@ -7,6 +7,7 @@ use homeboy::agents::agent_task_service::{
 };
 use homeboy::core::{Error, Result};
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::cli_surface::{Cli, Commands};
@@ -386,6 +387,244 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
         assert!(error
             .message
             .contains("durable cook recipe already exists with different execution inputs"));
+    });
+}
+
+#[test]
+fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_recipe_once() {
+    with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        let provider = workspace.path().join("worktree-provider.sh");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@delayed\",\"path\":\"{}\",\"branch\":\"main\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                workspace.path().display()
+            ),
+        )
+        .expect("write worktree provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("worktree provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions)
+            .expect("make worktree provider executable");
+        let mut config = homeboy::core::defaults::load_config();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        provider.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save worktree provider config");
+        let promotion_count = workspace.path().join("promotion-count");
+        let promotion_provider = workspace.path().join("promotion-provider.sh");
+        let patch = workspace.path().join("delayed-provider.patch");
+        std::fs::write(
+            &promotion_provider,
+            format!(
+                "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '1\\n' >> {}\ngit -C {} apply {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                promotion_count.display(),
+                workspace.path().display(),
+                patch.display(),
+                workspace.path().display(),
+            ),
+        )
+        .expect("write deterministic promotion provider");
+        let cook_id = "cook-continue-delayed";
+        let run_id = "cook-continue-delayed-attempt-1";
+        let plan = AgentTaskPlan::new(
+            "cook-continue-delayed-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture", "model": "fixture-model" },
+                "instructions": "complete the delayed provider attempt",
+                "workspace": { "root": workspace.path() }
+            }))
+            .expect("provider task")],
+        );
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: plan.clone(),
+            to_worktree: "fixture@delayed".to_string(),
+            source_worktree_path: Some(workspace.path().to_path_buf()),
+            provider_command: None,
+            provider_invocation: Some(homeboy::core::command_invocation::CommandInvocation {
+                argv: vec!["sh".to_string(), promotion_provider.display().to_string()],
+                ..Default::default()
+            }),
+            gates: Default::default(),
+            max_attempts: 1,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Delayed Cook continuation".to_string(),
+            commit_message: "Delayed Cook continuation".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: Some("fixture-model".to_string()),
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: None,
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist immutable recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist provider attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id)
+            .expect("bind immutable Cook attempt");
+        let executor = CountingCookExecutor::default();
+        let before = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: false,
+                rearm: false,
+                full: true,
+            },
+            executor.clone(),
+            |_| Ok(None),
+        )
+        .expect("cook-continue observes the queued attempt before provider scheduling");
+        assert_eq!(before.0["status"], "accepted_unscheduled");
+        assert_eq!(before.0["guidance"]["action"], "schedule_queued_run");
+        assert_eq!(
+            before.0["guidance"]["command"],
+            format!("homeboy agent-task run {run_id}")
+        );
+        assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
+
+        let patch_contents = "diff --git a/delayed-provider.txt b/delayed-provider.txt\nnew file mode 100644\nindex 0000000..e69de29\n--- /dev/null\n+++ b/delayed-provider.txt\n@@ -0,0 +1 @@\n+completed after runner reconciliation\n";
+        std::fs::write(&patch, patch_contents).expect("write delayed provider patch");
+        let patch_sha256 = format!("{:x}", Sha256::digest(patch_contents.as_bytes()));
+        agent_task_lifecycle::record_run_aggregate(
+            run_id,
+            &plan,
+            &AgentTaskAggregate {
+                schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                plan_id: plan.plan_id.clone(),
+                status:
+                    homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Succeeded,
+                totals: Default::default(),
+                outcomes: vec![AgentTaskOutcome {
+                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "provider".to_string(),
+                    status: AgentTaskOutcomeStatus::Succeeded,
+                    summary: Some("delayed provider completed".to_string()),
+                    failure_classification: None,
+                    artifacts: vec![AgentTaskArtifact {
+                        id: "delayed-provider-patch".to_string(),
+                        kind: "patch".to_string(),
+                        path: Some(patch.display().to_string()),
+                        size_bytes: Some(patch_contents.len() as u64),
+                        sha256: Some(patch_sha256),
+                        ..Default::default()
+                    }],
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: Value::Null,
+                    workflow: None,
+                    follow_up: None,
+                    metadata: Value::Null,
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .expect("publish delayed provider aggregate");
+
+        let after = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: false,
+                rearm: false,
+                full: true,
+            },
+            executor.clone(),
+            |_| Ok(None),
+        )
+        .expect("the same cook-continue advances the terminal attempt");
+        assert_eq!(
+            after.1, 1,
+            "the deterministic promotion fixture surfaces its declared gate failure"
+        );
+        assert_eq!(std::fs::read_to_string(&promotion_count).unwrap(), "1\n");
+        assert_eq!(after.0["failure_context"]["phase"], "promotion");
+        assert_ne!(after.0["status"], "observation_in_progress");
+        assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
+
+        let replay = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: false,
+                rearm: false,
+                full: true,
+            },
+            executor.clone(),
+            |_| Ok(None),
+        )
+        .expect("replaying cook-continue is idempotent");
+        assert_eq!(replay.1, 0, "the failed continuation claim is not replayed");
+        assert_eq!(replay.0["status"], "continuation_recovery_required");
+        assert_eq!(
+            replay.0["guidance"]["command"],
+            format!("homeboy agent-task cook-continue {run_id} --rearm")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&promotion_count).unwrap(),
+            "1\n",
+            "a failed continuation never silently replays its promotion provider"
+        );
+        let rearmed = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: false,
+                rearm: true,
+                full: true,
+            },
+            executor.clone(),
+            |_| Ok(None),
+        )
+        .expect("an explicit rearm may retry the failed continuation");
+        assert_eq!(rearmed.1, 1);
+        assert_eq!(
+            std::fs::read_to_string(&promotion_count).unwrap(),
+            "1\n",
+            "explicit rearm resumes the durable promotion result without reapplying its provider side effect"
+        );
+        assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
     });
 }
 

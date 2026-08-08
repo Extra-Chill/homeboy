@@ -222,6 +222,9 @@ pub struct CookContinueArgs {
     /// Validate continuation admission without dispatching a provider or mutating lifecycle state.
     #[arg(long)]
     pub preflight: bool,
+    /// Explicitly rearm one failed terminal continuation before consuming it.
+    #[arg(long, conflicts_with = "preflight")]
+    pub rearm: bool,
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,
