@@ -6901,20 +6901,37 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     }
 }
 
+/// A real, existing directory for promotion fixtures to point at.
+///
+/// `--path` overrides are validated for existence (`a50702c9d`), so a fixture
+/// that names a literal like `/repo` now fails resolution rather than being
+/// treated as opaque test data. These tests already run inside
+/// `with_isolated_home`, which sets `HOME`, so materialize the directory there
+/// and let every fixture share it.
+fn promotion_worktree_path() -> String {
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let path = home.join("promotion-fixture-worktree");
+    std::fs::create_dir_all(&path).expect("promotion fixture worktree");
+    path.display().to_string()
+}
+
 fn promotion(run_id: &str) -> AgentTaskPromotionReport {
+    let worktree_path = promotion_worktree_path();
     serde_json::from_value(serde_json::json!({
             "schema": "homeboy/agent-task-promotion-report/v1",
             "status": "applied",
             "source": {"kind": "aggregate", "task_id": "task", "run_id": run_id},
             "to_worktree": "homeboy@8058",
-            "target": {"worktree": "homeboy@8058", "path": "/repo"},
+            "target": {"worktree": "homeboy@8058", "path": worktree_path},
             "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
             "changed_files": ["src/lib.rs"],
             "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-lc", "cargo test --locked agent_task_promotion --lib"], "exit_code": 0, "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v1", "commit": "candidate", "tree": "candidate-tree", "candidate_sha256": "candidate-sha"}}],
             "gate_results": [{"id": "gate", "name": "cargo test --locked agent_task_promotion --lib", "kind": "command", "status": "passed"}],
             "operator_notification": {"status": "completed", "message": "complete"},
             "verified_base": {"base": "main", "sha": "verified-base"},
-            "provenance": {"worktree_path": "/repo", "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v1", "commit": "candidate", "tree": "candidate-tree", "candidate_sha256": "candidate-sha"}}
+            "provenance": {"worktree_path": worktree_path, "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v1", "commit": "candidate", "tree": "candidate-tree", "candidate_sha256": "candidate-sha"}}
         })).unwrap()
 }
 
@@ -10013,6 +10030,19 @@ fn post_recipe_failure_without_lifecycle_retains_identity_but_offers_no_recovery
     });
 }
 
+/// Passes under `cargo nextest` (one process per test) and under
+/// `cargo test -- --test-threads=1`. It can fail under multi-threaded
+/// `cargo test`, at the `baseline_path.exists()` assertion.
+///
+/// That is a harness limitation, not a product defect. `HomeGuard` holds
+/// `home_lock()` for its lifetime, which serializes *writers* — but as its own
+/// doc states, readers never take it, including worker threads a test spawns.
+/// This test materializes and then deliberately deletes a worktree, so a
+/// concurrent test repointing the home root mid-flight can observe the path
+/// after deletion and before re-materialization.
+///
+/// CI runs nextest, so it does not see this. Do not "fix" it by making the hot
+/// path resolvers take the lock on every read.
 #[test]
 fn re_materialize_follow_up_baseline_recovers_after_worktree_deletion() {
     let temp = tempfile::tempdir().expect("tempdir");
