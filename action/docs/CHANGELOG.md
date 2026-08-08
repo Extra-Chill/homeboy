@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.12] - 2026-08-08
+
+### Fixed
+- name reusable workflow phases
+
 ## [2.11.11] - 2026-08-07
 
 ### Fixed
