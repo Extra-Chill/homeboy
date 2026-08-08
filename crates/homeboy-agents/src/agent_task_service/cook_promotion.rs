@@ -1337,6 +1337,24 @@ pub(crate) fn cook_finalization_options(
         .iter()
         .map(|step| step.command.clone())
         .collect();
+    let inherited_failure_count = promotion
+        .deterministic_gates
+        .iter()
+        .filter(|gate| {
+            gate.status == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+        })
+        .count();
+    let attempt_summary = if inherited_failure_count == 0 {
+        format!(
+            "{} deterministic cook gate attempt(s) completed green",
+            promotion.deterministic_gates.len()
+        )
+    } else {
+        format!(
+            "{} deterministic cook gate attempt(s) completed; {inherited_failure_count} inherited baseline-red failure(s) were reproduced on the immutable base and explicitly accepted",
+            promotion.deterministic_gates.len()
+        )
+    };
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
         run_id: successful_run_id.to_string(),
@@ -1352,10 +1370,7 @@ pub(crate) fn cook_finalization_options(
         evidence: AgentTaskPrEvidence {
             source_refs,
             artifact_refs,
-            attempt_summary: format!(
-                "{} deterministic cook gate attempt(s) completed green",
-                promotion.deterministic_gates.len()
-            ),
+            attempt_summary,
             ai_tool: options.ai_tool.clone(),
             ai_model: options.ai_model.clone(),
             source_relationship: AgentTaskPrSourceRelationship::default(),
