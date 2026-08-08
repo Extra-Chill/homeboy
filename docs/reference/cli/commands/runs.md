@@ -72,6 +72,7 @@ List persisted observation runs
 | `--until` | `<UNTIL>` | Only include runs started at or before this RFC-3339 timestamp or a relative age (`2d`, `6h`, `30m`) |
 | `--id` | `<ID>` | Match runs whose persisted id or run-label contains this fragment |
 | `--command-contains` | `<COMMAND_CONTAINS>` | Match runs whose command string contains this substring |
+| `--workspace` | `<WORKSPACE>` | Match a persisted working directory or durable agent-task workspace locator |
 | `--correlation` | `<CORRELATION>` | Resolve controller run, runner job, and mirrored observation records that share this correlation/lineage fragment (matches persisted id, run-label, runner id, or job id) |
 | `--include-mirrors` | flag | Show every underlying observation row, including runner-execution mirrors that are collapsed into one canonical row by default |
 | `--limit` | `<LIMIT>` | Maximum runs to return |

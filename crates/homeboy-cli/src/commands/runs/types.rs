@@ -224,6 +224,9 @@ pub struct RunsListArgs {
     /// Match runs whose command string contains this substring.
     #[arg(long = "command-contains")]
     pub command_contains: Option<String>,
+    /// Match a persisted working directory or durable agent-task workspace locator.
+    #[arg(long)]
+    pub workspace: Option<String>,
     /// Resolve controller run, runner job, and mirrored observation records that
     /// share this correlation/lineage fragment (matches persisted id, run-label,
     /// runner id, or job id).

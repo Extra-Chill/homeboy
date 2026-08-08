@@ -177,6 +177,7 @@ fn list_prefetch_limit(args: &RunsListArgs) -> i64 {
         || args.until.is_some()
         || args.id.is_some()
         || args.command_contains.is_some()
+        || args.workspace.is_some()
         || args.correlation.is_some();
     if post_processing {
         // Cap the amplification so a large `--limit` can't trigger an unbounded
@@ -200,8 +201,9 @@ pub(super) fn resolve_time_bound(raw: &str) -> homeboy::core::Result<String> {
     super::common::since_threshold(trimmed)
 }
 
-/// Post-store filters that operate on fields not indexed by `RunListFilter`:
-/// time window, id/label fragment, command substring, and correlation lineage.
+/// Post-store filters that operate on fields not indexed by `RunListFilter`.
+/// Agent-task lifecycle state is already copied into the canonical observation
+/// record; search its durable provenance rather than requiring a second store.
 fn run_matches_list_filters(
     run: &RunRecord,
     args: &RunsListArgs,
@@ -226,11 +228,12 @@ fn run_matches_list_filters(
         }
     }
     if let Some(needle) = args.command_contains.as_deref() {
-        if !run
-            .command
-            .as_deref()
-            .is_some_and(|command| command.contains(needle))
-        {
+        if !run_command_contains(run, needle) {
+            return false;
+        }
+    }
+    if let Some(workspace) = args.workspace.as_deref() {
+        if !run_workspace_contains(run, workspace) {
             return false;
         }
     }
@@ -251,6 +254,81 @@ fn run_id_or_label_contains(run: &RunRecord, fragment: &str) -> bool {
         .as_deref()
         .and_then(runs_service::command_run_id_label)
         .is_some_and(|label| label.contains(fragment))
+        || metadata_values(
+            run,
+            &[
+                "/agent_task_run/run_id",
+                "/agent_task_run/plan_id",
+                "/agent_task_aggregate/plan_id",
+            ],
+        )
+        .iter()
+        .any(|value| value.contains(fragment))
+}
+
+fn run_command_contains(run: &RunRecord, needle: &str) -> bool {
+    run.command
+        .as_deref()
+        .is_some_and(|command| command.contains(needle))
+        || metadata_values(
+            run,
+            &[
+                "/agent_task_run/metadata/remote_command",
+                "/agent_task_run/metadata/local_command",
+                "/agent_task_run/metadata/command",
+                "/agent_task_run/latest_executor_evidence",
+                "/agent_task_aggregate",
+                "/remote_command",
+            ],
+        )
+        .iter()
+        .any(|value| value.contains(needle))
+}
+
+fn run_workspace_contains(run: &RunRecord, needle: &str) -> bool {
+    run.cwd.as_deref().is_some_and(|cwd| cwd.contains(needle))
+        || metadata_values(
+            run,
+            &[
+                "/agent_task_run/workspace_identity/locator",
+                "/agent_task_run/workspace_claim/workspace/locator",
+                "/agent_task_run/workspace_owner_lease/workspace/locator",
+                "/agent_task_run/metadata/remote_workspace",
+                "/remote_workspace",
+                "/lab/remote_workspace",
+            ],
+        )
+        .iter()
+        .any(|value| value.contains(needle))
+}
+
+/// Flatten only named provenance subtrees. This deliberately avoids a broad
+/// metadata scan, which could make unrelated diagnostic text searchable.
+fn metadata_values(run: &RunRecord, pointers: &[&str]) -> Vec<String> {
+    let mut values = Vec::new();
+    for pointer in pointers {
+        if let Some(value) = run.metadata_json.pointer(pointer) {
+            collect_metadata_strings(value, &mut values);
+        }
+    }
+    values
+}
+
+fn collect_metadata_strings(value: &Value, values: &mut Vec<String>) {
+    match value {
+        Value::String(value) => values.push(value.clone()),
+        Value::Array(items) => {
+            for item in items {
+                collect_metadata_strings(item, values);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values() {
+                collect_metadata_strings(value, values);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// True when the run shares the `correlation` fragment across its id, run-label,
@@ -265,7 +343,19 @@ fn run_correlates_with(run: &RunRecord, correlation: &str) -> bool {
             return true;
         }
     }
-    false
+    metadata_values(
+        run,
+        &[
+            "/agent_task_run/plan_id",
+            "/agent_task_aggregate/plan_id",
+            "/agent_task_run/provider_handles",
+            "/agent_task_run/lab_handoff",
+            "/agent_task_run/metadata/runner_id",
+            "/agent_task_run/metadata/runner_job_id",
+        ],
+    )
+    .iter()
+    .any(|value| value.contains(correlation))
 }
 
 /// Active runner jobs for `runs list --include-active-runner-jobs`.

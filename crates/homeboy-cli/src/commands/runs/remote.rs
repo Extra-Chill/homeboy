@@ -143,6 +143,15 @@ fn remote_run_matches_filters(
             return false;
         }
     }
+    if let Some(workspace) = args.workspace.as_deref() {
+        if !run
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| cwd.contains(workspace))
+        {
+            return false;
+        }
+    }
     if let Some(correlation) = args.correlation.as_deref() {
         // Remote summaries carry id + command; match the correlation fragment
         // against both (the runner-id/job-id lineage is controller-store only).
