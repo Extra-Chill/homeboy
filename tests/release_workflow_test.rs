@@ -735,6 +735,7 @@ fn release_proves_latest_is_consumable_by_the_linux_homeboy_action() {
     let clear_failure = job_section(workflow, "clear-failure");
 
     assert!(consumer.contains("runs-on: ubuntu-22.04"));
+    assert!(consumer.contains("permissions:\n      contents: read"));
     assert!(consumer.contains("needs.verify-published.result == 'success'"));
     assert!(consumer.contains("uses: Extra-Chill/homeboy-action@v2"));
     assert!(consumer.contains("commands: review lint"));
@@ -748,6 +749,7 @@ fn release_proves_latest_is_consumable_by_the_linux_homeboy_action() {
     // Linux archive downstream CI downloads.
     assert!(!consumer.contains("source:"));
     assert!(!consumer.contains("binary-path:"));
+    assert!(!consumer.contains("write"));
 
     // Consumer failure is release failure; it cannot be hidden by the cleanup
     // bookkeeping jobs that otherwise turn a failed publish chain into green.

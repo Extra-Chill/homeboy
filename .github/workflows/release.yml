@@ -1466,6 +1466,8 @@ jobs:
       - verify-published
     if: ${{ always() && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.verify-published.result == 'success' }}
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
         with:
