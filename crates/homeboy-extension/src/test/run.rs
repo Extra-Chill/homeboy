@@ -150,6 +150,15 @@ fn prepare_test_inventory(path: &Path) -> bool {
     }
 }
 
+/// Inventory planning currently runs on Unix CI. Other platforms lack an
+/// equivalent no-follow open here, so this optional evidence stays closed.
+#[cfg(not(unix))]
+fn valid_test_inventory(path: &Path) -> bool {
+    let _ = path;
+    false
+}
+
+#[cfg(unix)]
 fn valid_test_inventory(path: &Path) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return false;
@@ -158,7 +167,6 @@ fn valid_test_inventory(path: &Path) -> bool {
         return false;
     }
 
-    #[cfg(unix)]
     let file = {
         use std::os::unix::fs::OpenOptionsExt;
 
@@ -167,8 +175,6 @@ fn valid_test_inventory(path: &Path) -> bool {
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)
     };
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(path);
     let Ok(mut file) = file else {
         return false;
     };
