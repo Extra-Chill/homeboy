@@ -37,6 +37,7 @@ fn component_args(root: &Path) -> PositionalComponentArgs {
 fn lint_args(root: &Path) -> LintArgs {
     LintArgs {
         comp: component_args(root),
+        release_readiness_source: None,
         extension_override: ExtensionOverrideArgs::default(),
         summary: false,
         file: None,
@@ -57,6 +58,7 @@ fn lint_args(root: &Path) -> LintArgs {
 fn test_args(root: &Path) -> TestArgs {
     TestArgs {
         comp: component_args(root),
+        release_readiness_source: None,
         extension_override: ExtensionOverrideArgs::default(),
         skip_lint: false,
         coverage: false,
