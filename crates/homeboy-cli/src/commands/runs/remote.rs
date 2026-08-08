@@ -18,6 +18,7 @@ pub fn list_runner_runs(
     args: RunsListArgs,
     command: &'static str,
 ) -> CmdResult<RunsOutput> {
+    super::handlers::validate_list_search_args(&args)?;
     let mut query = Vec::new();
     let kind_filter = args.kind.clone();
     if let Some(kind) = args.kind.clone() {
@@ -41,7 +42,7 @@ pub fn list_runner_runs(
     if let Some(scenario) = args.scenario_id.clone() {
         query.push(("scenario", scenario));
     }
-    query.push(("limit", args.limit.to_string()));
+    query.push(("limit", args.limit.clamp(1, 1000).to_string()));
     let query = query
         .into_iter()
         .map(|(key, value)| format!("{}={}", key, url_encode_component(&value)))
@@ -55,6 +56,7 @@ pub fn list_runner_runs(
                 Some("parse runner daemon runs list".to_string()),
             )
         })?;
+    let fetched_rows = runs.len();
     merge_active_runner_jobs(
         &mut runs,
         runner_id,
@@ -82,6 +84,14 @@ pub fn list_runner_runs(
             probe_degradations: homeboy::runner::readonly_probe::take_degradations(),
             runner_enrichment: None,
             stale_runs: None,
+            search: super::types::RunsListSearch {
+                controller_store: "not_queried",
+                scanned_rows: fetched_rows,
+                row_limit: args.limit.clamp(1, 1000) as usize,
+                complete: false,
+                foreign_store_status: "connected_runner_only",
+                foreign_store_hint: "Runner summaries are a bounded remote page; import or mirror durable records into the controller observation store for complete provenance discovery.",
+            },
             actionable,
         }),
         0,
@@ -147,7 +157,7 @@ fn remote_run_matches_filters(
         if !run
             .cwd
             .as_deref()
-            .is_some_and(|cwd| cwd.contains(workspace))
+            .is_some_and(|cwd| super::handlers::workspace_matches(cwd, workspace))
         {
             return false;
         }
@@ -666,6 +676,18 @@ mod tests {
         apply_remote_list_filters(&mut runs, &args).expect("since filter");
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id, "r2");
+    }
+
+    #[test]
+    fn remote_workspace_filter_normalizes_path_boundaries() {
+        let mut runs = vec![RunSummary {
+            cwd: Some("/runner/work/team/../wp-build-other".to_string()),
+            ..summary("r1", "homeboy agent-task", "2026-07-22T00:00:00Z")
+        }];
+        let mut args = list_args();
+        args.workspace = Some("/runner/work/wp-build".to_string());
+        apply_remote_list_filters(&mut runs, &args).expect("workspace filter");
+        assert!(runs.is_empty());
     }
 
     #[test]

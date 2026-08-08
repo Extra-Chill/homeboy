@@ -14,8 +14,8 @@ use homeboy::core::artifact_address::ArtifactAddress;
 use homeboy::core::observation::evidence_report::directory_publication_guidance;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{
-    merge_metadata, ArtifactListFilter, FindingListFilter, ObservationStore, RunListFilter,
-    RunRecord, RunStatus,
+    merge_metadata, ArtifactListFilter, FindingListFilter, ObservationStore, RunCursor,
+    RunListFilter, RunRecord, RunStatus, MAX_RUN_PAGE_LIMIT,
 };
 use homeboy::core::resource_lifecycle_index::resource_lifecycle_index_from_artifacts;
 use homeboy::core::validation_progress::ValidationProgressLedger;
@@ -38,6 +38,7 @@ use super::types::{
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
 pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOutput> {
+    validate_list_search_args(&args)?;
     if let Some(runner_id) = args.runner.clone() {
         return remote::list_runner_runs(&runner_id, args, command);
     }
@@ -57,27 +58,8 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
     let since = args.since.as_deref().map(resolve_time_bound).transpose()?;
     let until = args.until.as_deref().map(resolve_time_bound).transpose()?;
 
-    let run_records = store.list_runs(RunListFilter {
-        kind: args.kind.clone(),
-        component_id: args.component_id.clone(),
-        status,
-        rig_id: args.rig.clone(),
-        // Over-fetch before post-filtering/dedup so the requested `--limit`
-        // counts canonical rows the caller actually sees, not mirrors that get
-        // collapsed away. The store already caps growth via retention.
-        limit: Some(list_prefetch_limit(&args)),
-        ..RunListFilter::default()
-    })?;
-
-    let run_records = run_records
-        .into_iter()
-        .filter(|run| {
-            args.scenario_id
-                .as_deref()
-                .is_none_or(|scenario| run_contains_scenario(run, scenario))
-        })
-        .filter(|run| run_matches_list_filters(run, &args, since.as_deref(), until.as_deref()))
-        .collect::<Vec<_>>();
+    let (run_records, search) =
+        list_runs_for_discovery(&store, &args, status, since.as_deref(), until.as_deref())?;
 
     // Collapse runner-execution mirrors into one canonical row per logical
     // execution unless the caller explicitly wants every underlying row.
@@ -120,6 +102,7 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
             probe_degradations: readonly_probe::take_degradations(),
             runner_enrichment,
             stale_runs,
+            search,
             actionable,
         }),
         0,
@@ -167,27 +150,80 @@ pub fn cancel_run(run_id: &str) -> CmdResult<RunsOutput> {
     ))
 }
 
-/// Pre-fetch bound for `runs list`. When dedup or post-filters are active we
-/// over-fetch so the final `--limit` counts canonical rows the caller sees,
-/// not mirrors/filtered rows. Bounded to keep the scan cost predictable.
-fn list_prefetch_limit(args: &RunsListArgs) -> i64 {
-    let base = args.limit.max(0);
-    let post_processing = !args.include_mirrors
+/// Hard cap for non-indexed provenance discovery. A zero result at this boundary
+/// is explicitly labelled partial rather than incorrectly reported as absence.
+pub(super) const DISCOVERY_SCAN_ROW_LIMIT: usize = 5_000;
+
+fn list_runs_for_discovery(
+    store: &ObservationStore,
+    args: &RunsListArgs,
+    status: Option<String>,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> homeboy::core::Result<(Vec<RunRecord>, super::types::RunsListSearch)> {
+    let mut runs = Vec::new();
+    let mut cursor: Option<RunCursor> = None;
+    let mut scanned_rows = 0;
+    let needs_post_filter = args.scenario_id.is_some()
         || args.since.is_some()
         || args.until.is_some()
         || args.id.is_some()
         || args.command_contains.is_some()
         || args.workspace.is_some()
         || args.correlation.is_some();
-    if post_processing {
-        // Cap the amplification so a large `--limit` can't trigger an unbounded
-        // scan; retention keeps the store from growing without bound anyway.
-        base.saturating_mul(4)
-            .min(base.saturating_add(2000))
-            .max(base)
+    let page_size = if needs_post_filter {
+        MAX_RUN_PAGE_LIMIT
     } else {
-        base
+        args.limit.clamp(1, MAX_RUN_PAGE_LIMIT)
+    };
+
+    loop {
+        let remaining = DISCOVERY_SCAN_ROW_LIMIT.saturating_sub(scanned_rows);
+        if remaining == 0 {
+            break;
+        }
+        let page = store.list_runs_page(RunListFilter {
+            kind: args.kind.clone(),
+            component_id: args.component_id.clone(),
+            status: status.clone(),
+            rig_id: args.rig.clone(),
+            limit: Some((remaining as i64).min(page_size)),
+            after: cursor,
+            ..RunListFilter::default()
+        })?;
+        scanned_rows += page.runs.len();
+        runs.extend(page.runs.into_iter().filter(|run| {
+            args.scenario_id
+                .as_deref()
+                .is_none_or(|scenario| run_contains_scenario(run, scenario))
+                && run_matches_list_filters(run, args, since, until)
+        }));
+        if !needs_post_filter || !page.truncated {
+            return Ok((runs, super::types::RunsListSearch::complete(scanned_rows)));
+        }
+        cursor = page.next_cursor;
     }
+
+    Ok((runs, super::types::RunsListSearch::bounded(scanned_rows)))
+}
+
+pub(super) fn validate_list_search_args(args: &RunsListArgs) -> homeboy::core::Result<()> {
+    for (name, value) in [
+        ("id", args.id.as_deref()),
+        ("command-contains", args.command_contains.as_deref()),
+        ("workspace", args.workspace.as_deref()),
+        ("correlation", args.correlation.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            return Err(Error::validation_invalid_argument(
+                name,
+                "search fragments must contain at least one non-whitespace character",
+                value.map(str::to_string),
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a `--since`/`--until` bound into an RFC-3339 timestamp. Accepts an
@@ -254,12 +290,14 @@ fn run_id_or_label_contains(run: &RunRecord, fragment: &str) -> bool {
         .as_deref()
         .and_then(runs_service::command_run_id_label)
         .is_some_and(|label| label.contains(fragment))
-        || metadata_values(
+        || metadata_string_values(
             run,
             &[
                 "/agent_task_run/run_id",
                 "/agent_task_run/plan_id",
                 "/agent_task_aggregate/plan_id",
+                "/agent_task_run/metadata/runner_id",
+                "/agent_task_run/metadata/runner_job_id",
             ],
         )
         .iter()
@@ -270,14 +308,12 @@ fn run_command_contains(run: &RunRecord, needle: &str) -> bool {
     run.command
         .as_deref()
         .is_some_and(|command| command.contains(needle))
-        || metadata_values(
+        || metadata_string_values(
             run,
             &[
                 "/agent_task_run/metadata/remote_command",
                 "/agent_task_run/metadata/local_command",
                 "/agent_task_run/metadata/command",
-                "/agent_task_run/latest_executor_evidence",
-                "/agent_task_aggregate",
                 "/remote_command",
             ],
         )
@@ -286,8 +322,10 @@ fn run_command_contains(run: &RunRecord, needle: &str) -> bool {
 }
 
 fn run_workspace_contains(run: &RunRecord, needle: &str) -> bool {
-    run.cwd.as_deref().is_some_and(|cwd| cwd.contains(needle))
-        || metadata_values(
+    run.cwd
+        .as_deref()
+        .is_some_and(|cwd| workspace_matches(cwd, needle))
+        || metadata_string_values(
             run,
             &[
                 "/agent_task_run/workspace_identity/locator",
@@ -299,32 +337,31 @@ fn run_workspace_contains(run: &RunRecord, needle: &str) -> bool {
             ],
         )
         .iter()
-        .any(|value| value.contains(needle))
+        .any(|value| workspace_matches(value, needle))
 }
 
-/// Flatten only named provenance subtrees. This deliberately avoids a broad
-/// metadata scan, which could make unrelated diagnostic text searchable.
-fn metadata_values(run: &RunRecord, pointers: &[&str]) -> Vec<String> {
+/// Read only explicitly named scalar provenance values. Agent-task metadata can
+/// retain diagnostics and secret-redacted environment records; recursively
+/// flattening it turns `runs list` into both a false-match source and a secret
+/// presence oracle.
+fn metadata_string_values(run: &RunRecord, pointers: &[&str]) -> Vec<String> {
     let mut values = Vec::new();
     for pointer in pointers {
         if let Some(value) = run.metadata_json.pointer(pointer) {
-            collect_metadata_strings(value, &mut values);
+            collect_metadata_string_or_array(value, &mut values);
         }
     }
     values
 }
 
-fn collect_metadata_strings(value: &Value, values: &mut Vec<String>) {
+fn collect_metadata_string_or_array(value: &Value, values: &mut Vec<String>) {
     match value {
         Value::String(value) => values.push(value.clone()),
         Value::Array(items) => {
             for item in items {
-                collect_metadata_strings(item, values);
-            }
-        }
-        Value::Object(fields) => {
-            for value in fields.values() {
-                collect_metadata_strings(value, values);
+                if let Value::String(value) = item {
+                    values.push(value.clone());
+                }
             }
         }
         _ => {}
@@ -343,19 +380,69 @@ fn run_correlates_with(run: &RunRecord, correlation: &str) -> bool {
             return true;
         }
     }
-    metadata_values(
+    metadata_string_values(
         run,
         &[
             "/agent_task_run/plan_id",
             "/agent_task_aggregate/plan_id",
-            "/agent_task_run/provider_handles",
-            "/agent_task_run/lab_handoff",
             "/agent_task_run/metadata/runner_id",
             "/agent_task_run/metadata/runner_job_id",
         ],
     )
     .iter()
     .any(|value| value.contains(correlation))
+        || metadata_array_field_values(
+            run,
+            "/agent_task_run/provider_handles",
+            &["provider_run_id", "session_id"],
+        )
+        .iter()
+        .any(|value| value.contains(correlation))
+}
+
+fn metadata_array_field_values(run: &RunRecord, pointer: &str, fields: &[&str]) -> Vec<String> {
+    run.metadata_json
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .flat_map(|item| {
+            fields
+                .iter()
+                .filter_map(move |field| item.get(*field).and_then(Value::as_str))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+pub(super) fn workspace_matches(candidate: &str, query: &str) -> bool {
+    let candidate = normalize_workspace_locator(candidate);
+    let query = normalize_workspace_locator(query);
+    candidate == query
+        || candidate
+            .strip_suffix(&query)
+            .is_some_and(|prefix| prefix.ends_with('/'))
+}
+
+fn normalize_workspace_locator(value: &str) -> String {
+    let absolute = value.starts_with(['/', '\\']);
+    let mut parts = Vec::new();
+    let normalized_separators = value.replace('\\', "/");
+    for part in normalized_separators.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|part| *part != "..") {
+                    parts.pop();
+                } else if !absolute {
+                    parts.push(part);
+                }
+            }
+            part => parts.push(part),
+        }
+    }
+    format!("{}{}", if absolute { "/" } else { "" }, parts.join("/"))
 }
 
 /// Active runner jobs for `runs list --include-active-runner-jobs`.

@@ -412,6 +412,167 @@ fn run_list_rediscovers_lab_agent_task_lineage_from_canonical_metadata() {
 }
 
 #[test]
+fn run_discovery_uses_named_provenance_and_normalized_workspace_boundaries() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        store
+            .import_run(&RunRecord {
+                id: "safe-provenance-run".to_string(),
+                kind: "agent-task".to_string(),
+                component_id: None,
+                started_at: "2026-08-08T12:00:00Z".to_string(),
+                finished_at: None,
+                status: RunStatus::Pass.as_str().to_string(),
+                command: Some("homeboy agent-task".to_string()),
+                cwd: Some("/work/wp-build-other".to_string()),
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: serde_json::json!({
+                    "agent_task_run": {
+                        "run_id": "safe-provenance-run",
+                        "plan_id": "safe-plan",
+                        "workspace_identity": { "locator": "/work/team/../wp-build" },
+                        "metadata": {
+                            "remote_command": ["homeboy", "agent-task", "cook"],
+                            "unrelated_diagnostic": "super-secret-value"
+                        },
+                        "latest_executor_evidence": { "input": "super-secret-value" },
+                        "provider_handles": [{ "session_id": "provider-session-11958" }]
+                    },
+                    "agent_task_aggregate": { "diagnostic": "super-secret-value" }
+                }),
+            })
+            .expect("run");
+
+        let (workspace, _) = list_runs(
+            RunsListArgs {
+                workspace: Some("/work/wp-build".to_string()),
+                ..list_args()
+            },
+            "runs.list",
+        )
+        .expect("normalized workspace match");
+        let RunsOutput::List(workspace) = workspace else {
+            panic!("expected list output")
+        };
+        assert_eq!(workspace.runs.len(), 1);
+
+        store
+            .import_run(&RunRecord {
+                id: "workspace-boundary-false-match".to_string(),
+                kind: "agent-task".to_string(),
+                component_id: None,
+                started_at: "2026-08-08T12:00:01Z".to_string(),
+                finished_at: None,
+                status: RunStatus::Pass.as_str().to_string(),
+                command: Some("homeboy agent-task".to_string()),
+                cwd: Some("/work/wp-build-other".to_string()),
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: Value::Null,
+            })
+            .expect("boundary run");
+
+        let (path_boundary, _) = list_runs(
+            RunsListArgs {
+                workspace: Some("wp-build".to_string()),
+                ..list_args()
+            },
+            "runs.list",
+        )
+        .expect("workspace boundary filter");
+        let RunsOutput::List(path_boundary) = path_boundary else {
+            panic!("expected list output")
+        };
+        assert!(
+            path_boundary
+                .runs
+                .iter()
+                .all(|run| run.id != "workspace-boundary-false-match"),
+            "wp-build must not match wp-build-other as a path segment"
+        );
+
+        let (secret, _) = list_runs(
+            RunsListArgs {
+                command_contains: Some("super-secret-value".to_string()),
+                ..list_args()
+            },
+            "runs.list",
+        )
+        .expect("secret values are not searchable");
+        let RunsOutput::List(secret) = secret else {
+            panic!("expected list output")
+        };
+        assert!(secret.runs.is_empty());
+
+        let (provider, _) = list_runs(
+            RunsListArgs {
+                correlation: Some("provider-session-11958".to_string()),
+                ..list_args()
+            },
+            "runs.list",
+        )
+        .expect("provider session match");
+        let RunsOutput::List(provider) = provider else {
+            panic!("expected list output")
+        };
+        assert_eq!(provider.runs.len(), 1);
+    });
+}
+
+#[test]
+fn run_discovery_walks_beyond_legacy_prefetch_prefix() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        for index in 0..5 {
+            store
+                .import_run(&RunRecord {
+                    id: format!("run-{index}"),
+                    kind: "bench".to_string(),
+                    component_id: None,
+                    started_at: format!("2026-08-08T12:00:0{index}Z"),
+                    finished_at: None,
+                    status: RunStatus::Pass.as_str().to_string(),
+                    command: Some(
+                        if index == 0 {
+                            "target-command"
+                        } else {
+                            "other-command"
+                        }
+                        .to_string(),
+                    ),
+                    cwd: None,
+                    homeboy_version: None,
+                    git_sha: None,
+                    rig_id: None,
+                    metadata_json: Value::Null,
+                })
+                .expect("run");
+        }
+        let (output, _) = list_runs(
+            RunsListArgs {
+                command_contains: Some("target-command".to_string()),
+                limit: 1,
+                ..list_args()
+            },
+            "runs.list",
+        )
+        .expect("list");
+        let RunsOutput::List(output) = output else {
+            panic!("expected list output")
+        };
+        assert_eq!(output.runs.len(), 1);
+        assert_eq!(output.runs[0].id, "run-0");
+        assert!(output.search.complete);
+        assert_eq!(output.search.scanned_rows, 5);
+    });
+}
+
+#[test]
 fn runs_reconcile_explicitly_reconciles_owned_dead_running_runs() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
