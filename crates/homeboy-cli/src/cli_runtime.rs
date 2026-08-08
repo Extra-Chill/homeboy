@@ -1763,6 +1763,7 @@ fn is_interactive_shell() -> bool {
 
 fn normalize_runs_runner_options(cli: &mut Cli, normalized_args: &[String]) {
     if is_runs_list_runner_option(normalized_args)
+        || matches!(&cli.command, Commands::Runs(args) if args.is_artifacts())
         || is_runs_artifact_get_runner_option(normalized_args)
         || matches!(&cli.command, Commands::Runs(args) if args.is_artifact_get())
     {
@@ -2842,6 +2843,68 @@ mod tests {
             None,
         )
         .expect("runs artifact get accepts global runner for command-local fetch");
+    }
+
+    #[test]
+    fn runs_artifacts_command_local_runner_is_routable_for_runner_only_and_mirrored_runs() {
+        let _env = EnvGuard::remove(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+
+        for run_id in ["runner-only-run", "mirrored-run"] {
+            let mut cli = Cli::parse_from([
+                "homeboy",
+                "runs",
+                "artifacts",
+                run_id,
+                "--runner",
+                "homeboy-lab",
+            ]);
+            let argv = vec![
+                "homeboy".into(),
+                "runs".into(),
+                "artifacts".into(),
+                run_id.into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+            ];
+
+            // Clap initially hydrates the global field. Normalize it into the
+            // command-local query option before generic Lab routing runs.
+            normalize_runs_runner_options(&mut cli, &argv);
+
+            assert_eq!(
+                cli.runner, None,
+                "{run_id} must not enter Lab offload routing"
+            );
+            let Commands::Runs(args) = &cli.command else {
+                panic!("expected runs command");
+            };
+            assert!(args.is_artifacts());
+            assert_eq!(args.artifacts_runner(), Some("homeboy-lab"));
+            crate::commands::route::route_after_parse(&cli, &argv, None)
+                .expect("command-local runner query is accepted");
+        }
+    }
+
+    #[test]
+    fn runs_artifacts_without_runner_remains_a_local_query() {
+        let _env = EnvGuard::remove(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let mut cli = Cli::parse_from(["homeboy", "runs", "artifacts", "local-run"]);
+        let argv = vec![
+            "homeboy".into(),
+            "runs".into(),
+            "artifacts".into(),
+            "local-run".into(),
+        ];
+
+        normalize_runs_runner_options(&mut cli, &argv);
+
+        assert_eq!(cli.runner, None);
+        let Commands::Runs(args) = &cli.command else {
+            panic!("expected runs command");
+        };
+        assert!(args.is_artifacts());
+        assert_eq!(args.artifacts_runner(), None);
+        assert!(!args.has_command_local_runner_option());
     }
 
     #[test]
