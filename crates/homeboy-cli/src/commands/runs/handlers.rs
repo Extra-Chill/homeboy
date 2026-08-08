@@ -14,7 +14,8 @@ use homeboy::core::artifact_address::ArtifactAddress;
 use homeboy::core::observation::evidence_report::directory_publication_guidance;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{
-    merge_metadata, FindingListFilter, ObservationStore, RunListFilter, RunRecord, RunStatus,
+    merge_metadata, ArtifactListFilter, FindingListFilter, ObservationStore, RunListFilter,
+    RunRecord, RunStatus,
 };
 use homeboy::core::resource_lifecycle_index::resource_lifecycle_index_from_artifacts;
 use homeboy::core::validation_progress::ValidationProgressLedger;
@@ -27,11 +28,12 @@ use super::common::{run_summaries_with_artifact_indexes, RunSummary};
 use super::types::{
     actionable_for_run_detail, actionable_for_run_list, RunDetail, RunsArtifactArgs,
     RunsArtifactCommand, RunsArtifactCommandHint, RunsArtifactGetArgs, RunsArtifactGetOutput,
-    RunsArtifactPathGuide, RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs,
-    RunsArtifactsOutput, RunsCancelOutput, RunsDirectoryArtifactPublicationGuidance,
-    RunsEnvKeyOutput, RunsEnvOutput, RunsEnvSourceLayerOutput, RunsEnvSummary,
-    RunsFieldSelectionOutput, RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput,
-    RunsSelectedField, RunsShowOutput, RunsStaleRunSummary,
+    RunsArtifactPage, RunsArtifactPathGuide, RunsArtifactPullEntry, RunsArtifactPullSummary,
+    RunsArtifactsArgs, RunsArtifactsOutput, RunsCancelOutput,
+    RunsDirectoryArtifactPublicationGuidance, RunsEnvKeyOutput, RunsEnvOutput,
+    RunsEnvSourceLayerOutput, RunsEnvSummary, RunsFieldSelectionOutput, RunsListArgs,
+    RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsSelectedField, RunsShowOutput,
+    RunsStaleRunSummary,
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
@@ -567,6 +569,20 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
         runner: None,
         pull: false,
         pull_dir: None,
+        token: None,
+        kind: None,
+        mime: None,
+        original_path: None,
+        path_suffix: None,
+        fixture: None,
+        surface: None,
+        scenario: None,
+        name_glob: None,
+        limit: 50,
+        offset: 0,
+        // Preserve the direct test helper's historical exhaustive projection;
+        // the public CLI defaults to the bounded discovery page.
+        full: true,
     })
 }
 
@@ -582,13 +598,61 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
                 ]),
             ));
         }
-        return remote::runner_artifacts(runner_id, &args.run_id);
+        return remote::runner_artifacts(runner_id, &args);
     }
 
     let store = ObservationStore::open_initialized()?;
     let run = runs_service::require_run(&store, &args.run_id)?;
     let run_id = run.id;
-    let artifacts = runs_service::list_artifacts_for_run(&store, &run_id)?;
+    let filter = ArtifactListFilter {
+        token: args.token.clone(),
+        kind: args.kind.clone(),
+        mime: args.mime.clone(),
+        original_path: args.original_path.clone(),
+        path_suffix: args.path_suffix.clone(),
+        fixture: args.fixture.clone(),
+        surface: args.surface.clone(),
+        scenario: args.scenario.clone(),
+        name_glob: args.name_glob.clone(),
+        limit: args.limit,
+        offset: args.offset,
+    };
+    let page = if args.full {
+        None
+    } else {
+        Some(store.list_artifacts_page(&run_id, &filter)?)
+    };
+    let artifacts = match page.as_ref() {
+        Some(page) => page.artifacts.clone(),
+        None => runs_service::list_artifacts_for_run(&store, &run_id)?,
+    };
+    if !args.full {
+        let page = page.expect("bounded artifact page is present");
+        return Ok((
+            RunsOutput::Artifacts(RunsArtifactsOutput {
+                command: "runs.artifacts",
+                run_id: run_id.clone(),
+                runner_id: None,
+                path_guide: RunsArtifactPathGuide::for_listing(&run_id, None),
+                next_commands: artifact_get_command_hints(&run_id, &artifacts),
+                artifacts,
+                page: Some(RunsArtifactPage {
+                    total: page.total,
+                    limit: page.limit,
+                    offset: page.offset,
+                    next_offset: (page.offset + page.artifacts.len() < page.total)
+                        .then_some(page.offset + page.artifacts.len()),
+                }),
+                resource_lifecycle_index: None,
+                directory_publication: Vec::new(),
+                preview_entrypoints: Vec::new(),
+                matrix_summary: None,
+                fuzz_result_envelopes: Vec::new(),
+                pull: None,
+            }),
+            0,
+        ));
+    }
     let preview_entrypoints = artifacts
         .iter()
         .flat_map(homeboy::core::artifacts::html_preview_entrypoints)
@@ -624,6 +688,7 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
             path_guide: RunsArtifactPathGuide::for_listing(&run_id, None),
             next_commands: artifact_get_command_hints(&run_id, &artifacts),
             artifacts,
+            page: None,
             resource_lifecycle_index,
             directory_publication,
             preview_entrypoints,
@@ -1389,6 +1454,18 @@ mod pull_tests {
             runner: Some("lab".to_string()),
             pull: true,
             pull_dir: None,
+            token: None,
+            kind: None,
+            mime: None,
+            original_path: None,
+            path_suffix: None,
+            fixture: None,
+            surface: None,
+            scenario: None,
+            name_glob: None,
+            limit: 50,
+            offset: 0,
+            full: false,
         });
         let Err(err) = result else {
             panic!("--pull with --runner should fail");

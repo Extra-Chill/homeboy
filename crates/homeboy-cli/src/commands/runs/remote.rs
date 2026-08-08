@@ -8,8 +8,8 @@ use homeboy::core::Error;
 use homeboy::runner::runners as runner;
 
 use super::types::{
-    actionable_for_run_list, RunsArtifactGetArgs, RunsArtifactPathGuide, RunsArtifactsOutput,
-    RunsDirectoryArtifactPublicationGuidance,
+    actionable_for_run_list, RunsArtifactGetArgs, RunsArtifactPage, RunsArtifactPathGuide,
+    RunsArtifactsArgs, RunsArtifactsOutput, RunsDirectoryArtifactPublicationGuidance,
 };
 use super::{remote_artifact, CmdResult, RunSummary, RunsListArgs, RunsListOutput, RunsOutput};
 
@@ -229,12 +229,49 @@ fn active_runner_job_run_summary_if_durable(
     })
 }
 
-pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> {
+pub fn runner_artifacts(runner_id: &str, args: &RunsArtifactsArgs) -> CmdResult<RunsOutput> {
+    let run_id = &args.run_id;
+    let mut query = Vec::new();
+    for (key, value) in [
+        ("token", args.token.as_deref()),
+        ("kind", args.kind.as_deref()),
+        ("mime", args.mime.as_deref()),
+        ("original_path", args.original_path.as_deref()),
+        ("path_suffix", args.path_suffix.as_deref()),
+        ("fixture", args.fixture.as_deref()),
+        ("surface", args.surface.as_deref()),
+        ("scenario", args.scenario.as_deref()),
+        ("name_glob", args.name_glob.as_deref()),
+    ] {
+        if let Some(value) = value {
+            query.push(format!("{key}={}", encode_uri_component(value)));
+        }
+    }
+    if !args.full {
+        query.push(format!("limit={}", args.limit.clamp(1, 1000)));
+        query.push(format!("offset={}", args.offset.max(0)));
+    } else {
+        query.push("full=1".to_string());
+    }
+    let query = (!query.is_empty())
+        .then(|| format!("?{}", query.join("&")))
+        .unwrap_or_default();
     let data = runner::daemon_api_get(
         runner_id,
-        &format!("/runs/{}/artifacts", encode_uri_component(run_id)),
+        &format!("/runs/{}/artifacts{}", encode_uri_component(run_id), query),
     )?;
     let artifacts = parse_runner_artifacts(&data)?;
+    let page = data.get("page").and_then(|page| {
+        Some(RunsArtifactPage {
+            total: page.get("total")?.as_u64()? as usize,
+            limit: page.get("limit")?.as_u64()? as usize,
+            offset: page.get("offset")?.as_u64()? as usize,
+            next_offset: page
+                .get("next_offset")
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| value as usize),
+        })
+    });
     let directory_publication = directory_publication_guidance_for_artifacts(&artifacts);
     let resource_lifecycle_index = resource_lifecycle_index_from_artifacts(&artifacts)?;
 
@@ -245,6 +282,7 @@ pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> 
             runner_id: Some(runner_id.to_string()),
             path_guide: RunsArtifactPathGuide::for_listing(run_id, Some(runner_id)),
             artifacts,
+            page,
             next_commands: Vec::new(),
             resource_lifecycle_index,
             directory_publication,

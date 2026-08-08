@@ -329,6 +329,18 @@ List artifacts recorded for one run
 | `--runner` | `<RUNNER>` | Query artifacts from a connected execution runner daemon |
 | `--pull` | flag | Pull runner/remote artifact bytes to the operator-local artifact root so the completed run is self-contained. Best-effort and per-artifact: the listing still prints, and each artifact reports a pull status |
 | `--pull-dir` | `<PULL_DIR>` | Optional directory to write pulled artifact bytes into. Defaults to a run-scoped path under the operator-local artifact root |
+| `--token` | `<TOKEN>` | Exact persisted artifact id token |
+| `--kind` | `<KIND>` | Exact artifact kind |
+| `--mime` | `<MIME>` | Exact MIME type |
+| `--original-path` | `<ORIGINAL_PATH>` | Exact original persisted path |
+| `--path-suffix` | `<PATH_SUFFIX>` | Match a persisted path suffix |
+| `--fixture` | `<FIXTURE>` | Exact `fixture_id` artifact metadata value |
+| `--surface` | `<SURFACE>` | Exact `surface_id` artifact metadata value |
+| `--scenario` | `<SCENARIO>` | Exact `scenario_id` artifact metadata value |
+| `--name-glob` | `<NAME_GLOB>` | Glob match against the artifact kind/name |
+| `--limit` | `<LIMIT>` | Maximum records in this page (1-1000) |
+| `--offset` | `<OFFSET>` | Number of matching records to skip before this page |
+| `--full` | flag | Retain the exhaustive legacy listing and derived summaries |
 
 ## `homeboy runs artifact`
 

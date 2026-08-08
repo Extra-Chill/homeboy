@@ -2,6 +2,7 @@ use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy::test_support::with_isolated_home;
 use serde_json::Value;
 
+use super::types::RunsArtifactsArgs;
 use super::{handlers, list_runs, RunsListArgs, RunsOutput};
 
 struct XdgGuard(Option<String>);
@@ -220,6 +221,90 @@ fn runs_artifacts_surfaces_matrix_summary_from_typed_packets() {
         assert_eq!(summary.top_fixtures[0].key, "home");
         assert_eq!(summary.result_refs[0].kind, "matrix_summary");
         assert_eq!(summary.finding_packet_refs[0].kind, "finding_packets");
+    });
+}
+
+#[test]
+fn runs_artifacts_pages_large_inventory_and_filters_before_rendering() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "bench",
+                "homeboy",
+                "inventory-rig",
+                serde_json::json!({}),
+            ))
+            .expect("run");
+        let artifact_path = home.path().join("visual.png");
+        std::fs::write(&artifact_path, b"png").expect("artifact bytes");
+        for index in 0..240 {
+            store
+                .record_artifact_with_metadata(
+                    &run.id,
+                    if index % 3 == 0 { "visual_diff" } else { "log" },
+                    &artifact_path,
+                    serde_json::json!({
+                        "fixture_id": if index % 3 == 0 { "fixture-89" } else { "other" },
+                        "surface_id": if index % 3 == 0 { "desktop" } else { "other" },
+                        "scenario_id": "visual-regression",
+                    }),
+                )
+                .expect("record artifact");
+        }
+
+        let (output, _) = handlers::artifacts_from_args(RunsArtifactsArgs {
+            run_id: run.id.clone(),
+            runner: None,
+            pull: false,
+            pull_dir: None,
+            token: None,
+            kind: None,
+            mime: None,
+            original_path: None,
+            path_suffix: None,
+            fixture: None,
+            surface: None,
+            scenario: None,
+            name_glob: None,
+            limit: 50,
+            offset: 0,
+            full: false,
+        })
+        .expect("bounded listing");
+        let RunsOutput::Artifacts(output) = output else {
+            panic!("artifacts output")
+        };
+        assert_eq!(output.artifacts.len(), 50);
+        let page = output.page.expect("page metadata");
+        assert_eq!(page.total, 240);
+        assert_eq!(page.next_offset, Some(50));
+
+        let (output, _) = handlers::artifacts_from_args(RunsArtifactsArgs {
+            run_id: run.id,
+            runner: None,
+            pull: false,
+            pull_dir: None,
+            token: None,
+            kind: Some("visual_diff".to_string()),
+            mime: Some("image/png".to_string()),
+            original_path: None,
+            path_suffix: Some("visual.png".to_string()),
+            fixture: Some("fixture-89".to_string()),
+            surface: Some("desktop".to_string()),
+            scenario: Some("visual-regression".to_string()),
+            name_glob: Some("visual_*".to_string()),
+            limit: 100,
+            offset: 0,
+            full: false,
+        })
+        .expect("filtered listing");
+        let RunsOutput::Artifacts(output) = output else {
+            panic!("artifacts output")
+        };
+        assert_eq!(output.artifacts.len(), 80);
+        assert_eq!(output.page.expect("page metadata").total, 80);
     });
 }
 
