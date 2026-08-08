@@ -33,7 +33,6 @@ fn test_route() {
 #[test]
 fn route_serves_run_scoped_artifact_store_tokens() {
     let _home = HomeGuard::new();
-    let home_path = std::path::PathBuf::from(std::env::var("HOME").expect("home"));
     let store = ObservationStore::open_initialized().expect("store");
     let run = store
         .start_run(
@@ -45,7 +44,11 @@ fn route_serves_run_scoped_artifact_store_tokens() {
         .expect("run");
     let locator =
         "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/summary.json";
-    let artifact_root = home_path.join(".local/share/homeboy/artifacts");
+    // Ask the resolver. `HomeGuard` sets `HOMEBOY_DATA_DIR`, which
+    // `homeboy_data()` checks before the XDG fallback, so this run's artifacts
+    // do not live under `<home>/.local/share`. Same drift that broke
+    // `artifact_content_serves_encoded_artifact_store_locator` (#11919).
+    let artifact_root = crate::paths::artifact_root().expect("artifact root");
     let path = artifact_root.join(locator);
     fs::create_dir_all(path.parent().expect("artifact parent")).expect("artifact parent");
     fs::write(&path, br#"{"ok":true}"#).expect("artifact-store file");

@@ -174,11 +174,17 @@ pub fn homeboy_data() -> Result<PathBuf> {
 
     #[cfg(not(windows))]
     {
-        // A registered override outranks `XDG_DATA_HOME` deliberately. The
-        // harness that sets it also points `XDG_DATA_HOME` at
-        // `<home>/.local/share`, so the resolved path is identical — but
-        // reading the override avoids a second unsynchronized `getenv` on the
-        // same hot path.
+        // A registered override outranks `XDG_DATA_HOME` deliberately, and
+        // reading it avoids a second unsynchronized `getenv` on this hot path.
+        //
+        // Note this branch is only reached when `HOMEBOY_DATA_DIR` is unset.
+        // The test harness sets that variable to `<home>/data`, which the
+        // check above short-circuits on — so under test the resolved data root
+        // is NOT `<home>/.local/share/homeboy`. A test that hardcodes the XDG
+        // layout instead of calling these functions will look in the wrong
+        // place; `artifact_content_serves_encoded_artifact_store_locator` did
+        // exactly that and failed on main until it was pointed at
+        // `artifact_root()`.
         let override_home = {
             let guard = home_root_override()
                 .lock()
