@@ -107,6 +107,13 @@ Release execution:
 4. Stops on failure and returns structured step results.
 5. Leaves plan-only steps visible for review without executing them.
 
+For Homeboy's own binary release, the CI pipeline owns cross-platform
+publication. Before the run can succeed, it verifies the declared asset
+inventory and then runs `Extra-Chill/homeboy-action@v2` on Linux with its normal
+`latest` resolver. The action runs `review lint` and its installed version must
+match the release tag, proving downstream Linux CI consumes the newly published
+archive rather than falling back to an older release.
+
 Release requires a clean working tree except for files the release process owns,
 such as version targets and changelog targets.
 
