@@ -401,7 +401,7 @@ pub struct AdoptArgs {
 }
 #[derive(Args, Debug)]
 pub struct FinalizePrArgs {
-    /// Hydrate finalization from a durable Cook recipe and its applied promotion.
+    /// Hydrate finalization from a durable Cook recipe or a validated manual-finalization record.
     #[arg(
         long,
         value_name = "RUN_OR_COOK_ID",

@@ -8408,6 +8408,84 @@ fn manual_finalization_identity_resolves_cook_and_failed_attempt_or_reserves_fre
 }
 
 #[test]
+fn standalone_manual_preflight_continuation_recovers_and_is_idempotent() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "manual-11974";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(
+            "cook-11974-fixture",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.initial_run_id = run_id.to_string();
+        options.head = Some("fix/8058".to_string());
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        options.gates = VerifyGateOptions {
+            verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
+            ..Default::default()
+        };
+        // Reuse the Cook fixture builder to construct a valid dossier, then
+        // remove its recipe before recovery so this exercises the standalone
+        // durable manual-record route used by a fresh manual identity.
+        persist_initial_recipe(&options).expect("persist fixture recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+            .expect("submit standalone manual record");
+        agent_task_lifecycle::record_metadata_value(
+            run_id,
+            "manual_finalization_identity",
+            serde_json::json!(true),
+        )
+        .expect("mark manual identity");
+        seed_review_form_aggregate(run_id, &options.initial_plan);
+        let promotion = promotion_with_existing_path(run_id, target.path());
+        let mut finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("manual finalization options");
+        finalization.manual_finalization = true;
+        let candidate = crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["src/lib.rs".to_string()],
+            push_required: false,
+        };
+        let preflight = crate::agent_task_finalization::preflight_pr_with_backend(
+            finalization,
+            &mut CaptureBackend {
+                candidate_state: Some(candidate.clone()),
+                ..Default::default()
+            },
+        )
+        .expect("manual preflight");
+        persist_manual_finalization_intent(run_id, &preflight).expect("persist validated intent");
+        std::fs::remove_file(
+            homeboy_core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join("agent-task-cooks/cook-11974-fixture/recipe.json"),
+        )
+        .expect("remove fixture recipe before continuation");
+
+        let continuation = format!("homeboy agent-task finalize-pr --recover {run_id}");
+        assert_eq!(
+            continuation,
+            "homeboy agent-task finalize-pr --recover manual-11974"
+        );
+        let mut publish_backend = CaptureBackend {
+            candidate_state: Some(candidate),
+            ..Default::default()
+        };
+        let published =
+            recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut publish_backend)
+                .expect("continuation resolves standalone validated intent");
+        assert_eq!(published["status"], "review_ready");
+        assert!(publish_backend.created);
+
+        let mut repeated_backend = CaptureBackend::default();
+        assert_eq!(
+            recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut repeated_backend)
+                .expect("continuation is idempotent after publication"),
+            published
+        );
+        assert!(!repeated_backend.created);
+    });
+}
+
+#[test]
 fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-10980-normal";
