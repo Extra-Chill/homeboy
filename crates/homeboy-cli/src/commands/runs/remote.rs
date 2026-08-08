@@ -90,7 +90,7 @@ pub fn list_runner_runs(
                 row_limit: args.limit.clamp(1, 1000) as usize,
                 complete: false,
                 foreign_store_status: "connected_runner_only",
-                foreign_store_hint: "Runner summaries are a bounded remote page; import or mirror durable records into the controller observation store for complete provenance discovery.",
+                foreign_store_hint: "Runner summaries are a bounded remote page; mirror durable records into the controller observation store or run `homeboy runs import <bundle-dir>` for complete provenance discovery.",
             },
             actionable,
         }),

@@ -352,7 +352,7 @@ impl RunsListSearch {
             row_limit: super::handlers::DISCOVERY_SCAN_ROW_LIMIT,
             complete: true,
             foreign_store_status: "not_queried",
-            foreign_store_hint: "Candidate binaries and foreign observation stores must import or mirror records into the controller observation store before runs list can rediscover them.",
+            foreign_store_hint: "Candidate binaries and foreign observation stores must mirror records into the controller observation store, or export a bundle and run `homeboy runs import <bundle-dir>`, before runs list can rediscover them.",
         }
     }
 
@@ -363,7 +363,7 @@ impl RunsListSearch {
             row_limit: super::handlers::DISCOVERY_SCAN_ROW_LIMIT,
             complete: false,
             foreign_store_status: "not_queried",
-            foreign_store_hint: "Narrow the indexed filters or import/mirror candidate and foreign-store records into the controller observation store before treating this result as absent.",
+            foreign_store_hint: "Narrow the indexed filters or import/mirror candidate and foreign-store records with `homeboy runs import <bundle-dir>` before treating this result as absent.",
         }
     }
 }
