@@ -81,52 +81,63 @@ pub fn register() {
 #[cfg(all(test, feature = "slow-tests"))]
 mod tests {
     use super::register;
-    use homeboy_code_audit::{audit_path_with_id, report::compute_fixability};
+    use homeboy_code_audit::{
+        report::compute_fixability, AuditFinding, AuditSummary, CodeAuditResult, Finding, Severity,
+    };
     use std::fs;
 
     #[test]
     fn computes_fixability_through_the_registered_audit_provider() {
         register();
 
-        homeboy_core::test_support::with_isolated_audit_home(|home| {
-            homeboy_core::test_support::write_source_extension(
-                home.path(),
-                "source-fixture",
-                "fixture",
-            );
-            let dir = tempfile::tempdir().expect("temp dir");
-            let root = dir.path();
-            fs::create_dir_all(root.join("commands")).expect("create commands directory");
-            fs::write(
-                root.join("commands/good_one.fixture"),
-                "pub fn run() {}\npub fn helper() {}\n",
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        fs::write(
+            root.join("todo.rs"),
+            "// TODO: add helper\npub fn run() {}\n",
+        )
+        .expect("write TODO fixture");
+        let result = CodeAuditResult {
+            component_id: "fixability-test".to_string(),
+            source_path: root.to_string_lossy().to_string(),
+            summary: AuditSummary {
+                files_scanned: 1,
+                conventions_detected: 0,
+                outliers_found: 1,
+                alignment_score: None,
+                files_skipped: 0,
+                warnings: vec![],
+            },
+            conventions: vec![],
+            directory_conventions: vec![],
+            findings: vec![Finding {
+                convention: "comment_hygiene".to_string(),
+                severity: Severity::Info,
+                file: "todo.rs".to_string(),
+                description: "Comment marker 'TODO' found on line 1: TODO: add helper".to_string(),
+                suggestion: "Resolve the TODO".to_string(),
+                kind: AuditFinding::TodoMarker,
+                line: None,
+            }],
+            duplicate_groups: vec![],
+        };
+        let fixability = compute_fixability(&result).unwrap_or_else(|| {
+            panic!(
+                "registered fixability provider should produce a plan; audit findings: {:#?}",
+                result.findings
             )
-            .expect("write first convention fixture");
-            fs::write(
-                root.join("commands/good_two.fixture"),
-                "pub fn run() {}\npub fn helper() {}\n",
-            )
-            .expect("write second convention fixture");
-            fs::write(root.join("commands/bad.fixture"), "pub fn run() {}\n")
-                .expect("write convention outlier fixture");
-
-            let result = audit_path_with_id("fixability-test", &root.to_string_lossy())
-                .expect("audit should run");
-            let fixability = compute_fixability(&result);
-
-            // The compact fixture may not yield enough conventions for a plan,
-            // but any plan must retain the provider's complete public summary.
-            if let Some(fix) = fixability {
-                assert!(
-                    fix.fixable_count > 0,
-                    "expected at least one fixable finding"
-                );
-                assert_eq!(
-                    fix.fixable_count,
-                    fix.automated_count + fix.manual_only_count
-                );
-                assert!(!fix.by_kind.is_empty(), "expected per-kind breakdown");
-            }
         });
+
+        assert_eq!(fixability.fixable_count, 1);
+        assert_eq!(fixability.automated_count, 0);
+        assert_eq!(fixability.manual_only_count, 1);
+        assert_eq!(fixability.by_kind.len(), 1);
+        let todo_marker = fixability
+            .by_kind
+            .get("todo_marker")
+            .expect("fixability summary should include the TODO marker");
+        assert_eq!(todo_marker.total, 1);
+        assert_eq!(todo_marker.automated, 0);
+        assert_eq!(todo_marker.manual_only, 1);
     }
 }
