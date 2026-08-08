@@ -85,6 +85,22 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
     let funded = entries
         .min(budget.max_provider_rotations)
         .min(executions.saturating_sub(1));
+    let budget_facts = plan.metadata["cook_retry_policy"]
+        .get("truncated")
+        .and_then(|truncated| truncated.get("max_provider_rotations"))
+        .and_then(Value::as_u64)
+        .filter(|truncated| *truncated > 0)
+        .map(|truncated| {
+            let requested = plan.metadata["cook_retry_policy"]["requested"]
+                ["max_provider_rotations"]
+                .as_u64()
+                .unwrap_or(u64::from(budget.max_provider_rotations) + truncated);
+            format!(
+                "; requested {requested} rotation(s), effective {}, truncated {truncated}",
+                budget.max_provider_rotations
+            )
+        })
+        .unwrap_or_default();
     if funded == 0 {
         let unreachable = if entries > 0 {
             format!(
@@ -95,10 +111,12 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
         } else {
             String::new()
         };
-        format!("cook: rotation: disabled ({executions} provider execution(s)){unreachable}")
+        format!(
+            "cook: rotation: disabled ({executions} provider execution(s)){unreachable}{budget_facts}"
+        )
     } else {
         format!(
-            "cook: rotation: {funded} fallback provider(s), up to {executions} provider execution(s)"
+            "cook: rotation: {funded} fallback provider(s), up to {executions} provider execution(s){budget_facts}"
         )
     }
 }
@@ -1249,6 +1267,21 @@ fn resolve_cook_execution_budget(
             "max_same_provider_retries": resolved.same_provider_remediations,
             "max_provider_rotations": resolved.provider_rotations,
         },
+        "requested": {
+            "max_attempts": resolved.requested_attempts,
+            "max_provider_executions": resolved.requested_provider_executions,
+            "max_same_provider_retries": resolved.same_provider_remediations,
+            "max_provider_rotations": resolved.requested_provider_rotations,
+        },
+        "effective": {
+            "max_attempts": resolved.requested_attempts,
+            "max_provider_executions": resolved.provider_executions,
+            "max_same_provider_retries": resolved.same_provider_remediations,
+            "max_provider_rotations": resolved.provider_rotations,
+        },
+        "truncated": {
+            "max_provider_rotations": resolved.truncated_provider_rotations,
+        },
     });
     Ok(())
 }
@@ -1320,6 +1353,21 @@ mod rotation_disclosure_tests {
         assert!(disclosure.contains("disabled"), "{disclosure}");
         assert!(
             disclosure.contains("3 configured rotation provider(s) are unreachable"),
+            "{disclosure}"
+        );
+    }
+
+    #[test]
+    fn a_clamped_rotation_discloses_requested_effective_and_truncated_budgets() {
+        let mut plan = plan_with(1, 0, 2);
+        plan.metadata["cook_retry_policy"] = serde_json::json!({
+            "requested": { "max_provider_rotations": 2 },
+            "truncated": { "max_provider_rotations": 2 },
+        });
+
+        let disclosure = cook_rotation_disclosure(&plan);
+        assert!(
+            disclosure.contains("requested 2 rotation(s), effective 0, truncated 2"),
             "{disclosure}"
         );
     }
