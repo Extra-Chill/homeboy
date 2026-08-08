@@ -131,6 +131,7 @@ pub use recovery::{
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
     run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
     schedule_terminal_runner_exec_recovery, RunnerExecRecoveryChildSchedule,
+    RunnerExecRecoveryDiagnostic,
 };
 
 /// Retire a completed direct daemon generation only after controller-owned

@@ -268,7 +268,7 @@ pub use execution::{
     runner_job_cancel_for_session, runner_job_cancel_projection,
     schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics, RunnerExecMode,
     RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecRecoveryChildSchedule,
-    RunnerExecStructuredSummary,
+    RunnerExecRecoveryDiagnostic, RunnerExecStructuredSummary,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;

@@ -68,6 +68,13 @@ pub struct RunnerExecRecoveryChildSchedule {
     pub inspection_action: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunnerExecRecoveryDiagnostic {
+    pub source_run_id: String,
+    pub reason: String,
+    pub inspection_action: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunnerExecRecoveryOwnerWork {
     pub children: Vec<RunnerExecRecoveryChildSchedule>,
@@ -149,7 +156,7 @@ fn recovery_schedule(
 fn reconcile_terminal_runner_exec_runs_with_owner(
     worker: &RecoveryWorker,
     source_run_id: &str,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize, Option<RunnerExecRecoveryDiagnostic>)> {
     let store = ObservationStore::open_initialized()?;
     let mut reconciled = 0;
     let mut deferred = 0;
@@ -219,12 +226,25 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
             Err(error) => {
                 worker.renew(&store)?;
                 record_evicted_evidence_loss(&store, run, &error, &worker.token, job_id)?;
+                if store
+                    .get_run(&run.id)?
+                    .is_some_and(|source| source.status != RunStatus::Running.as_str())
+                {
+                    return Ok((
+                        reconciled,
+                        deferred,
+                        Some(recovery_diagnostic(run, &error.message)),
+                    ));
+                }
                 // A 404 is a durable per-job result. Other failures describe the
                 // endpoint, so avoid amplifying one unavailable daemon into N probes.
                 if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
                     unavailable_endpoints.insert(endpoint);
                 }
-                if defer_or_fail_recovery_source(&store, run, &worker.token, job_id, &error)? {
+                if let Some(diagnostic) = defer_recovery_source(&store, run, &worker.token, &error)?
+                {
+                    return Ok((reconciled, deferred, Some(diagnostic)));
+                } else {
                     deferred += 1;
                 }
                 continue;
@@ -337,19 +357,29 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
         homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(&run.id, &snapshot)?;
         reconciled += 1;
     }
-    Ok((reconciled, deferred))
+    Ok((reconciled, deferred, None))
 }
 
-/// A runner that remains unavailable cannot be retried by every unrelated
-/// command forever. Keep a small, inspectable retry budget, then terminalize
-/// the source with the exact blocker retained in its durable metadata.
-fn defer_or_fail_recovery_source(
+fn recovery_diagnostic(
+    run: &homeboy_core::observation::RunRecord,
+    reason: &str,
+) -> RunnerExecRecoveryDiagnostic {
+    RunnerExecRecoveryDiagnostic {
+        source_run_id: run.id.clone(),
+        reason: reason.to_string(),
+        inspection_action: format!("homeboy runs show {}", run.id),
+    }
+}
+
+/// A transient snapshot failure says nothing about whether the detached job is
+/// still live. After a small retry budget, preserve the source as a blocked,
+/// nonterminal record and require an operator to resolve it explicitly.
+fn defer_recovery_source(
     store: &ObservationStore,
     run: &homeboy_core::observation::RunRecord,
     child_token: &str,
-    runner_job_id: &str,
     error: &Error,
-) -> Result<bool> {
+) -> Result<Option<RunnerExecRecoveryDiagnostic>> {
     let attempts = run
         .metadata_json
         .pointer("/runner_exec_recovery/deferral_count")
@@ -370,22 +400,11 @@ fn defer_or_fail_recovery_source(
         "inspection_action": format!("homeboy runs show {}", run.id),
     });
     if attempts >= MAX_SOURCE_RECOVERY_DEFERRALS {
-        metadata["runner_terminal_projection"] = json!({
-            "state": "recovery_blocked",
-            "classification": "runner_unavailable_after_bounded_recovery",
-            "runner_id": run.metadata_json["runner_id"],
-            "runner_job_id": runner_job_id,
-        });
-        store.fail_running_runner_exec_recovery_source(
-            &run.id,
-            child_token,
-            runner_job_id,
-            metadata,
-        )?;
-        return Ok(false);
+        store.defer_running_runner_exec_recovery_source(&run.id, child_token, metadata)?;
+        return Ok(Some(recovery_diagnostic(run, &error.message)));
     }
     store.defer_running_runner_exec_recovery_source(&run.id, child_token, metadata)?;
-    Ok(true)
+    Ok(None)
 }
 
 fn endpoint_identity(session: &crate::RunnerSession) -> String {
@@ -631,27 +650,28 @@ fn schedule_recovery_children(
 pub fn run_scheduled_terminal_runner_exec_recovery_child(
     child_id: &str,
     child_token: &str,
-) -> Result<()> {
+) -> Result<Option<RunnerExecRecoveryDiagnostic>> {
     let store = ObservationStore::open_initialized()?;
     let Some(child) = store.get_run(child_id)? else {
-        return Ok(());
+        return Ok(None);
     };
     if child.kind != RECOVERY_CHILD_KIND
         || child.status != RunStatus::Running.as_str()
         || child.metadata_json["owner_token"].as_str() != Some(child_token)
     {
-        return Ok(());
+        return Ok(None);
     }
     let source_run_id = match child.metadata_json["source_run_id"].as_str() {
         Some(id) => id.to_string(),
         None => {
-            return terminalize_child_error(
+            terminalize_child_error(
                 &store,
                 child_id,
                 child_token,
                 &child,
                 "missing source run identity",
-            )
+            )?;
+            return Ok(None);
         }
     };
     let Some(_lock) = try_acquire_child_lock(child_id)? else {
@@ -664,7 +684,7 @@ pub fn run_scheduled_terminal_runner_exec_recovery_child(
             RunStatus::Pass,
             metadata,
         )?;
-        return Ok(());
+        return Ok(None);
     };
     let worker = RecoveryWorker {
         id: child_id.to_string(),
@@ -694,9 +714,9 @@ pub fn run_scheduled_terminal_runner_exec_recovery_child(
     stop.store(true, Ordering::Release);
     let _ = heartbeat.join();
     match result {
-        Ok((reconciled, deferred)) => {
+        Ok((reconciled, deferred, diagnostic)) => {
             let Some(child) = store.get_run(child_id)? else {
-                return Ok(());
+                return Ok(None);
             };
             let mut metadata = child.metadata_json;
             metadata["phase"] = json!(if deferred == 0 {
@@ -713,10 +733,11 @@ pub fn run_scheduled_terminal_runner_exec_recovery_child(
                 RunStatus::Pass,
                 metadata,
             )?;
-            Ok(())
+            Ok(diagnostic)
         }
         Err(error) => {
-            terminalize_child_error(&store, child_id, child_token, &child, &error.message)
+            terminalize_child_error(&store, child_id, child_token, &child, &error.message)?;
+            Ok(None)
         }
     }
 }
@@ -812,6 +833,11 @@ fn recovery_candidates(
                     .is_none_or(|expires_at_ms| {
                         expires_at_ms < chrono::Utc::now().timestamp_millis()
                     })
+                && run
+                    .metadata_json
+                    .pointer("/runner_exec_recovery/phase")
+                    .and_then(Value::as_str)
+                    != Some("blocked")
         })
         .collect())
 }
@@ -1064,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_deferred_recovery_converges_without_stale_children() {
+    fn repeated_transient_recovery_failures_leave_a_live_source_blocked() {
         with_isolated_home(|_| {
             let run_id = "unavailable-source";
             let runner_job_id = "unavailable-job";
@@ -1099,17 +1125,19 @@ mod tests {
                 let child = &work.children[0];
                 child_ids.insert(child.child_id.clone());
                 let source = store.get_run(run_id).expect("read").expect("source");
-                assert_eq!(
-                    defer_or_fail_recovery_source(
-                        &store,
-                        &source,
-                        &child.child_token,
-                        runner_job_id,
-                        &error,
-                    )
-                    .expect("record bounded deferral"),
-                    attempt < MAX_SOURCE_RECOVERY_DEFERRALS,
-                );
+                let diagnostic = defer_recovery_source(&store, &source, &child.child_token, &error)
+                    .expect("record bounded deferral");
+                if attempt < MAX_SOURCE_RECOVERY_DEFERRALS {
+                    assert!(diagnostic.is_none());
+                } else {
+                    let diagnostic = diagnostic.expect("blocked recovery diagnostic");
+                    assert_eq!(diagnostic.source_run_id, run_id);
+                    assert_eq!(diagnostic.reason, error.message);
+                    assert_eq!(
+                        diagnostic.inspection_action,
+                        format!("homeboy runs show {run_id}")
+                    );
+                }
                 let child_record = store
                     .get_run(&child.child_id)
                     .expect("read")
@@ -1133,14 +1161,14 @@ mod tests {
             }
 
             let source = store.get_run(run_id).expect("read").expect("source");
-            assert_eq!(source.status, RunStatus::Fail.as_str());
+            assert_eq!(source.status, RunStatus::Running.as_str());
             assert_eq!(
                 source.metadata_json["runner_exec_recovery"]["deferral_count"],
                 MAX_SOURCE_RECOVERY_DEFERRALS
             );
             assert_eq!(
-                source.metadata_json["runner_terminal_projection"]["classification"],
-                "runner_unavailable_after_bounded_recovery"
+                source.metadata_json["runner_exec_recovery"]["phase"],
+                "blocked"
             );
             let reader = ObservationStore::open_scheduler_reader().expect("reader");
             assert!(recovery_candidates(&reader).expect("candidates").is_empty());
@@ -1342,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_eviction_preserves_literal_declaration_paths_in_loss_detection() {
+    fn confirmed_daemon_eviction_terminalizes_unrecoverable_evidence_loss() {
         with_isolated_home(|_| {
             let run_id = "evicted-escaped-declaration";
             homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
