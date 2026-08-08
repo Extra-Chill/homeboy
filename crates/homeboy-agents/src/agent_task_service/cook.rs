@@ -2454,6 +2454,19 @@ fn review_budget_authority(
     })
 }
 
+fn child_execution_budget(
+    scope: CookFollowUpBudgetScope,
+    budget_limit: &AgentTaskExecutionBudget,
+) -> AgentTaskExecutionBudget {
+    match scope {
+        CookFollowUpBudgetScope::Cook => budget_limit.clone(),
+        CookFollowUpBudgetScope::FreshCookReview
+        | CookFollowUpBudgetScope::CandidateAdoptionReview => {
+            AgentTaskExecutionBudget::new(1, 0, 0)
+        }
+    }
+}
+
 /// Append and dispatch one remediation attempt from an authenticated promoted
 /// candidate. Both ordinary Cook feedback and external candidate adoption use
 /// this boundary so their budget, provenance, and baseline authority match.
@@ -2638,8 +2651,13 @@ where
                 vec![follow_up_request],
             );
             follow_up_plan.options = plan.options.clone();
-            follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
-            follow_up_plan.options.retry.max_attempts = 1;
+            // Gate-feedback is a child execution, not a fresh one-shot policy.
+            // Review-only continuations retain their separately bounded plan.
+            follow_up_plan.options.execution_budget =
+                child_execution_budget(budget_scope, &budget_limit);
+            if budget_scope != CookFollowUpBudgetScope::Cook {
+                follow_up_plan.options.retry.max_attempts = 1;
+            }
             (next_attempt, next_run_id, follow_up_plan, None)
         }
     };
@@ -3335,6 +3353,40 @@ where
         options.max_attempts,
         &options.ai_tool,
     );
+    if options.gates.has_npm_run_declaration() {
+        let gate_workspace = options.source_worktree_path.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace",
+                "Cook requires a workspace before gate declaration preflight",
+                Some(options.to_worktree.clone()),
+                None,
+            )
+        })?;
+        if let Err(error) = options
+            .gates
+            .preflight_declarations(std::path::Path::new(gate_workspace))
+        {
+            let error = with_pre_execution_phase(error, "gate_declaration_preflight");
+            record_pre_execution_failure(
+                &options.initial_plan,
+                &options.initial_run_id,
+                &error,
+                "gate_declaration_preflight",
+            )?;
+            return Ok(pre_execution_failure_report(
+                options.cook_id.clone(),
+                Vec::new(),
+                pre_execution_failure_details(
+                    agent_task_lifecycle::exact_record(&options.initial_run_id)
+                        .ok()
+                        .as_ref(),
+                    &error,
+                ),
+                error,
+                Some(&options.initial_run_id),
+            ));
+        }
+    }
     let required_toolchains = options.gates.required_toolchains();
     let preflight = if required_toolchains.is_empty()
         && options.gates.gate_package_artifacts.is_empty()

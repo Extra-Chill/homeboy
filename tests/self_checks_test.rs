@@ -62,6 +62,7 @@ fn test_args(root: &Path) -> TestArgs {
         comp: component_args(root),
         release_readiness_source: None,
         extension_override: ExtensionOverrideArgs::default(),
+        release_readiness_source: None,
         skip_lint: false,
         release_readiness_source: None,
         coverage: false,

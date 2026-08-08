@@ -963,6 +963,16 @@ fn fresh_cook_review_form_has_bounded_budget_independent_of_code_execution() {
 }
 
 #[test]
+fn gate_feedback_child_budget_preserves_declared_retry_and_rotation_capacity() {
+    let declared = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 1, 1);
+
+    assert_eq!(
+        child_execution_budget(CookFollowUpBudgetScope::Cook, &declared),
+        declared
+    );
+}
+
+#[test]
 fn persisted_review_budget_authority_preserves_lower_bounds_and_caps_larger_values() {
     let scope = CookFollowUpBudgetScope::FreshCookReview;
     let cook_budget = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(9, 9, 9);
@@ -5512,7 +5522,7 @@ fn pre_provider_adoption_retries_only_the_missing_form_binds_model_and_reaches_r
 }
 
 #[test]
-fn adoption_review_uses_one_bounded_execution_after_the_source_budget_is_consumed() {
+fn adoption_review_child_plan_remains_one_bounded_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let fixture = CandidateAdoptionFixture::new_with_execution_budget(
             "cook-9575-consumed-source-budget",
