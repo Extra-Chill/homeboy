@@ -552,6 +552,13 @@ fn discovery_run(
     let last_update_age_minutes = age_minutes(last_update.as_deref(), now);
     let source = run_source(&record);
     let liveness = classify.then(|| classify_liveness(&record, last_update_age_minutes, now));
+    let stale_reason = metadata_string(
+        &record.metadata,
+        agent_task_lifecycle::METADATA_KEY_STALE_RUNNING_REASON,
+    )
+    .or_else(|| {
+        (liveness == Some(AgentTaskLiveness::Stale)).then(|| stale_reason_for_record(&record))
+    });
 
     // Runner metadata describes execution placement, not necessarily lifecycle
     // record ownership. Controller handoff projections retain their durable
@@ -584,11 +591,12 @@ fn discovery_run(
         runner_id,
         runner_job_id,
         remote_run_id: metadata_string(&record.metadata, "remote_run_id"),
-        stale: metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_STALE_RUNNING),
-        stale_reason: metadata_string(
-            &record.metadata,
-            agent_task_lifecycle::METADATA_KEY_STALE_RUNNING_REASON,
-        ),
+        stale: (liveness == Some(AgentTaskLiveness::Stale))
+            .then_some(true)
+            .or_else(|| {
+                metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_STALE_RUNNING)
+            }),
+        stale_reason,
         retryable: metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_RETRYABLE),
         liveness,
         liveness_reconcilable: liveness.map(AgentTaskLiveness::is_reconcilable),
@@ -611,6 +619,21 @@ fn discovery_run(
             reconcile: format!("{command_prefix} reconcile {run_id} --dry-run"),
         },
     }
+}
+
+/// Explain every stale read projection, including a pure discovery read that
+/// deliberately leaves the durable record untouched.
+fn stale_reason_for_record(record: &AgentTaskRunRecord) -> String {
+    if record.owner_pid().is_some() && !record.owner_process_is_running() {
+        return "owner_process_not_running".to_string();
+    }
+    if record.runner_job_id().is_some() {
+        return "runner_job_unverified_after_daemon_restart".to_string();
+    }
+    if record.owner_pid().is_none() {
+        return "missing_runner_pid".to_string();
+    }
+    "stale_running_marked".to_string()
 }
 
 fn discovery_counts(tasks: &[agent_task_lifecycle::AgentTaskRunTask]) -> AgentTaskDiscoveryCounts {

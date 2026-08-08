@@ -53,16 +53,18 @@ pub(super) fn run_materialized_provider_command(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
     run_id: Option<&str>,
+    execution_attempt: u32,
 ) -> AgentTaskOutcome {
-    let mut attempt = 1;
+    let mut retry_attempt = 1;
     loop {
-        let mut outcome = run_materialized_provider_command_once(request, provider);
+        let mut outcome =
+            run_materialized_provider_command_once(request, provider, run_id, execution_attempt);
         classify_transient_provider_outcome(&mut outcome);
 
         let retryable = outcome_is_transient(&outcome);
-        if !retryable || attempt >= PROVIDER_TRANSIENT_MAX_ATTEMPTS {
-            if attempt > 1 {
-                annotate_transient_retry(&mut outcome, attempt, retryable);
+        if !retryable || retry_attempt >= PROVIDER_TRANSIENT_MAX_ATTEMPTS {
+            if retry_attempt > 1 {
+                annotate_transient_retry(&mut outcome, retry_attempt, retryable);
             }
             attach_runtime_tool_provenance(request, &mut outcome);
             // Preserve and link the latest raw executor input/result as
@@ -71,11 +73,12 @@ pub(super) fn run_materialized_provider_command(
             return outcome;
         }
 
-        let backoff_ms = PROVIDER_TRANSIENT_BASE_BACKOFF_MS.saturating_mul(1u64 << (attempt - 1));
+        let backoff_ms =
+            PROVIDER_TRANSIENT_BASE_BACKOFF_MS.saturating_mul(1u64 << (retry_attempt - 1));
         if backoff_ms > 0 {
             std::thread::sleep(Duration::from_millis(backoff_ms));
         }
-        attempt += 1;
+        retry_attempt += 1;
     }
 }
 
@@ -315,12 +318,16 @@ impl ProviderContainmentReport {
 pub(super) fn run_materialized_provider_command_once(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
+    run_id: Option<&str>,
+    attempt: u32,
 ) -> AgentTaskOutcome {
     let mut containment_report = ProviderContainmentReport::default();
     let mut outcome = run_materialized_provider_command_once_contained(
         request,
         provider,
         &mut containment_report,
+        run_id,
+        attempt,
     );
     containment_report.annotate(&mut outcome);
     if let Err(error) = retain_failed_workspace_artifacts(&mut outcome, request) {
@@ -339,6 +346,8 @@ fn run_materialized_provider_command_once_contained(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
     containment_report: &mut ProviderContainmentReport,
+    run_id: Option<&str>,
+    attempt: u32,
 ) -> AgentTaskOutcome {
     let command = render_provider_command_display(provider);
     let deadline_remaining_ms = crate::agent_task_timeout::remaining_execution_deadline_ms(
@@ -553,6 +562,17 @@ fn run_materialized_provider_command_once_contained(
             )
         }
     };
+
+    if let Some(run_id) = run_id {
+        // Failure to record this diagnostic identity must not interrupt provider
+        // execution. The reservation remains the execution authority.
+        let _ = crate::agent_task_lifecycle::record_provider_execution_process(
+            run_id,
+            &request.request.task_id,
+            attempt,
+            child.id(),
+        );
+    }
 
     if let Err(error) = containment.attach(&child) {
         let attach_error = error.to_string();
@@ -1084,7 +1104,7 @@ pub(super) fn run_provider_command(
     run_id: Option<&str>,
 ) -> AgentTaskOutcome {
     let materialized = test_executor_request(request);
-    run_materialized_provider_command(&materialized, provider, run_id)
+    run_materialized_provider_command(&materialized, provider, run_id, 1)
 }
 
 #[cfg(test)]
@@ -1093,7 +1113,7 @@ pub(super) fn run_provider_command_once(
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
     let materialized = test_executor_request(request);
-    run_materialized_provider_command_once(&materialized, provider)
+    run_materialized_provider_command_once(&materialized, provider, None, 1)
 }
 
 #[cfg(test)]

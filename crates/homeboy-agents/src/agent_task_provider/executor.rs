@@ -211,7 +211,12 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 &ready_tools,
             ));
 
-        run_materialized_provider_command(&request, &provider, context.run_id.as_deref())
+        run_materialized_provider_command(
+            &request,
+            &provider,
+            context.run_id.as_deref(),
+            context.attempt,
+        )
     }
 }
 
