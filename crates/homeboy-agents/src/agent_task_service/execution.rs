@@ -716,9 +716,11 @@ fn retryable_cook_attempt(
     };
     let retryable_pre_execution_failure =
         source.metadata["pre_execution_failure"]["retryable"] == serde_json::Value::Bool(true);
-    let failed_provider_without_candidate = source.state
-        == agent_task_lifecycle::AgentTaskRunState::Failed
-        && !retryable_pre_execution_failure
+    let failed_provider_without_candidate = matches!(
+        source.state,
+        agent_task_lifecycle::AgentTaskRunState::Failed
+            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+    ) && !retryable_pre_execution_failure
         && agent_task_lifecycle::select_cook_candidate(cook_id)
             .ok()
             .is_some_and(|selection| {

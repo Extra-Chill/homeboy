@@ -1873,7 +1873,7 @@ fn lab_cook_plan_preserves_actual_cli_provenance_through_handoff_serialization()
 }
 
 #[test]
-fn lab_run_retry_keeps_a_retryable_cook_failure_attached_to_its_recipe() {
+fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path());
@@ -1932,15 +1932,19 @@ fn lab_run_retry_keeps_a_retryable_cook_failure_attached_to_its_recipe() {
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
-        let handoff = materialize_agent_task_retry_handoff(&Cli::parse_from(&args), &args)
-            .expect("materialize Cook retry handoff")
-            .expect("Cook retry handoff");
-
-        assert!(handoff.run_id.starts_with(&format!("{cook_id}-attempt-2-")));
-        let replacement = agent_task_lifecycle::status(&handoff.run_id)
-            .expect("Cook-aware Lab retry is persisted");
-        assert_eq!(replacement.metadata["cook_id"], cook_id);
-        assert_eq!(replacement.metadata["cook_attempt"], 2);
+        assert!(
+            materialize_agent_task_retry_handoff(&Cli::parse_from(&args), &args)
+                .expect("inspect Cook retry route")
+                .is_none()
+        );
+        assert!(
+            agent_task_lifecycle::cook_index(cook_id)
+                .expect("Cook index")
+                .attempts
+                .iter()
+                .all(|attempt| attempt.run_id == run_id),
+            "the router must not reserve a standalone retry before Cook resumes it"
+        );
     });
 }
 
