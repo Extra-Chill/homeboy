@@ -233,7 +233,7 @@ jobs:
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
 
-      - name: Materialize candidate Homeboy binary
+      - name: Binary setup
         uses: ./.homeboy-action
         with:
           commands: __prepare__
@@ -448,7 +448,8 @@ jobs:
           client-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - id: phase
+      - name: Run candidate ${{ matrix.title }}
+        id: phase
         continue-on-error: true
         uses: ./.homeboy-action
         with:
@@ -560,7 +561,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
-      - id: phase
+      - name: Run baseline ${{ matrix.title }}
+        id: phase
         if: matrix.baseline == 'true'
         continue-on-error: true
         uses: ./.homeboy-action
@@ -636,7 +638,7 @@ jobs:
       - name: Install cargo-nextest for Rust shard planning
         if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
         uses: taiki-e/install-action@nextest
-      - name: Materialize canonical candidate Test inventory
+      - name: Configure candidate Test shards
         continue-on-error: true
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
@@ -707,7 +709,8 @@ jobs:
           name: homeboy-test-shard-plan-${{ github.run_attempt }}
       - name: Materialize assigned Test shard
         run: jq --arg id '${{ matrix.shard_id }}' '.shards[] | select(.id == $id)' homeboy-test-shard-plan.json > homeboy-test-shard.json
-      - id: phase
+      - name: Run candidate Test shard ${{ matrix.shard_id }}
+        id: phase
         continue-on-error: true
         env:
           HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json
@@ -862,7 +865,7 @@ jobs:
       - name: Install cargo-nextest for Rust baseline shard planning
         if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
         uses: taiki-e/install-action@nextest
-      - name: Materialize canonical baseline Test inventory
+      - name: Configure baseline Test shards
         continue-on-error: true
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
@@ -933,7 +936,8 @@ jobs:
         with:
           name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
       - run: jq --arg id '${{ matrix.shard_id }}' '.shards[] | select(.id == $id)' homeboy-test-shard-plan.json > homeboy-test-shard.json
-      - id: phase
+      - name: Run baseline Test shard ${{ matrix.shard_id }}
+        id: phase
         continue-on-error: true
         env:
           HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json

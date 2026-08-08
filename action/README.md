@@ -23,8 +23,13 @@ The generic source-mutation interface has been removed: `autofix`, `autofix-mode
 ### PR Quality Checks
 
 Prefer the reusable workflow so Homeboy Action owns the CI DAG and result
-aggregation. The workflow runs all requested quality commands before failing,
-so an audit failure does not hide lint or test feedback.
+aggregation. It projects binary setup, command execution, artifact
+publication, result reconciliation, and enforcement into named GitHub jobs and
+steps. A failed command appears as `Run candidate Audit`, `Run candidate Lint`,
+or `Run candidate Test` in the GitHub UI and `gh run view --log`, rather than
+as an anonymous composite-action step. The workflow runs all requested quality
+commands before failing, so an audit failure does not hide lint or test
+feedback.
 
 For pull requests with `differential-gating: 'true'`, the reusable workflow
 materializes one candidate Homeboy binary, then runs candidate and base phases
@@ -57,6 +62,37 @@ jobs:
       php-version: '8.3'
     secrets: inherit
 ```
+
+### Named-Phase Migration
+
+Existing direct action calls remain supported and preserve the combined
+composite lifecycle:
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v2
+  with:
+    extension: wordpress
+    commands: review lint,review test
+```
+
+Move CI quality gates to the reusable workflow when GitHub-native failure
+attribution is required. Replace the action step with a job-level `uses` call,
+move its `with` values under the job, and add `secrets: inherit` when the
+action needs repository credentials. Keep direct action calls for release,
+operations, and other cases that require the composite action in an existing
+job. The reusable workflow retains structured result artifacts, failure
+digests, phase timings, and final status enforcement.
+
+```yaml
+jobs:
+  quality:
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
+    with:
+      extension: wordpress
+      commands: review lint,review test
+    secrets: inherit
+```
+
 
 When validating Homeboy itself or another project that needs to build a binary
 before running quality checks, keep the build as the hard gate and let the
