@@ -353,6 +353,7 @@ mod tests {
                     serde_json::json!({
                         "exit_code": 1,
                         "error": "boom",
+                        "remote_command": ["node", "review.mjs"],
                         "runner_execution_record": {
                             "schema": "homeboy/runner-execution-record/v1",
                             "execution_id": "job-1",
@@ -484,7 +485,7 @@ mod tests {
                 output.homeboy_provenance.schema,
                 "homeboy/homeboy-provenance/v1"
             );
-            assert_eq!(output.homeboy_provenance.identities.len(), 5);
+            assert_eq!(output.homeboy_provenance.identities.len(), 6);
             assert_eq!(
                 output.homeboy_provenance.identities[0].role,
                 "observation_run_binary"
@@ -532,6 +533,14 @@ mod tests {
             assert_eq!(
                 output.homeboy_provenance.identities[4].evidence_commands[0],
                 "homeboy runner job logs lab-default job-1"
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[5].role,
+                "executed_child_homeboy"
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[5].state,
+                "inapplicable"
             );
             assert!(output.homeboy_provenance.warnings[0].contains(
                 "controller_cli, active_daemon, configured_job_binary, and observation_run_binary"
