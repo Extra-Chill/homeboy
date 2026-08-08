@@ -6837,6 +6837,83 @@ fn adoption_attempt_selector_disambiguates_a_first_run_id_equal_to_its_cook_id()
 }
 
 #[test]
+fn adoption_attempt_selector_resolves_cook_and_child_run_ids_to_the_same_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-adopt-attempt-id-forms";
+        let child_run_id = "cook-adopt-attempt-id-forms-attempt-2";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = "cook-adopt-attempt-id-forms-attempt-1".to_string();
+        super::super::persist_initial_recipe(&options).expect("persist recipe");
+        let mut second_plan = options.initial_plan.clone();
+        second_plan.plan_id = "attempt-two-policy".to_string();
+        super::super::record_recipe_attempt(cook_id, 2, child_run_id, &second_plan)
+            .expect("persist second recipe attempt");
+        agent_task_lifecycle::submit_plan(&second_plan, Some(child_run_id))
+            .expect("persist second lifecycle record");
+
+        let (cook_record, cook_recipe) = resolve_adoption_target_with_attempt(cook_id, Some(2))
+            .expect("Cook id selects attempt two");
+        let (run_record, run_recipe) = resolve_adoption_target_with_attempt(child_run_id, Some(2))
+            .expect("child attempt run id selects the same attempt");
+
+        assert_eq!(cook_recipe.cook_id, cook_id);
+        assert_eq!(run_recipe.cook_id, cook_recipe.cook_id);
+        assert_eq!(cook_record.run_id, child_run_id);
+        assert_eq!(run_record.run_id, cook_record.run_id);
+
+        let cook_error = resolve_adoption_target_with_attempt(cook_id, Some(3))
+            .expect_err("Cook id rejects an undeclared attempt");
+        let run_error = resolve_adoption_target_with_attempt(child_run_id, Some(3))
+            .expect_err("child attempt run id rejects the same undeclared attempt");
+        assert_eq!(run_error.details, cook_error.details);
+        assert_eq!(run_error.message, cook_error.message);
+    });
+}
+
+#[test]
+fn adoption_rejects_an_id_that_is_a_cook_and_another_cooks_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let shared_id = "cook-adoption-ambiguous-id";
+        let mut cook_options =
+            batch_cook_options(shared_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        cook_options.initial_run_id = "cook-adoption-ambiguous-id-attempt-1".to_string();
+        super::super::persist_initial_recipe(&cook_options).expect("persist Cook recipe");
+
+        let foreign_cook_id = "cook-adoption-foreign-owner";
+        let foreign_options =
+            batch_cook_options(foreign_cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        super::super::persist_initial_recipe(&foreign_options)
+            .expect("persist foreign Cook recipe");
+        super::super::record_recipe_attempt(
+            foreign_cook_id,
+            2,
+            shared_id,
+            &foreign_options.initial_plan,
+        )
+        .expect("record foreign attempt with the colliding id");
+        let foreign_recipe =
+            super::super::load_recipe(foreign_cook_id).expect("reload foreign Cook recipe");
+        assert!(foreign_recipe
+            .attempts
+            .iter()
+            .any(|attempt| attempt.run_id == shared_id));
+        assert_eq!(
+            super::super::load_recipe_for_attempt(shared_id)
+                .expect("find foreign recipe by its attempt")
+                .expect("foreign attempt is persisted")
+                .cook_id,
+            foreign_cook_id
+        );
+
+        let error = resolve_adoption_target_with_attempt(shared_id, Some(1))
+            .expect_err("cross-Cook identifier collision fails closed");
+        assert_eq!(error.details["field"], "run_or_cook_id");
+        assert!(error.message.contains(shared_id));
+        assert!(error.message.contains(foreign_cook_id));
+    });
+}
+
+#[test]
 fn adoption_ambiguity_describes_policy_choices_without_sensitive_config() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-adopt-policy-summary";

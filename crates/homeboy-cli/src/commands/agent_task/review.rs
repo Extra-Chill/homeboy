@@ -480,20 +480,40 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
             ExtensionProviderAgentTaskExecutor::discover(),
         )?;
     let exit_code = result.exit_code;
+    let cook_id = result.value.cook_id.clone();
+    let selected_attempt = result.value.attempts.first().ok_or_else(|| {
+        homeboy::core::Error::internal_unexpected(
+            "candidate adoption report is missing its resolved attempt".to_string(),
+        )
+    })?;
+    let selected_attempt_number = selected_attempt.attempt;
+    let selected_run_id = selected_attempt.run_id.clone();
     let mut value = super::status::compact_cook_report(
         serde_json::to_value(result.value).unwrap_or(Value::Null),
         args.full,
     );
-    value["adoption"] = serde_json::json!({
+    value["adoption"] =
+        adoption_envelope(&args, &cook_id, selected_attempt_number, &selected_run_id);
+    Ok((value, exit_code))
+}
+
+fn adoption_envelope(
+    args: &AdoptArgs,
+    cook_id: &str,
+    selected_attempt: u32,
+    selected_run_id: &str,
+) -> Value {
+    serde_json::json!({
         "schema": "homeboy/agent-task-candidate-adoption/v1",
         "source": args.run_or_cook_id,
-        "attempt": args.attempt,
+        "cook_id": cook_id,
+        "attempt": selected_attempt,
+        "run_id": selected_run_id,
         "candidate_ref": args.candidate_ref,
         "ai_model": args.ai_model,
         "replace_interrupted": args.replace_interrupted,
         "controller_owned": true,
-    });
-    Ok((value, exit_code))
+    })
 }
 
 pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
@@ -1805,6 +1825,25 @@ mod tests {
         AgentTaskOutcomeStatus, AgentTaskReconciliationDecision, AGENT_TASK_ARTIFACT_SCHEMA,
     };
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn adoption_envelope_reports_canonical_selection_for_a_child_run_source() {
+        let args = AdoptArgs {
+            run_or_cook_id: "cook-42-attempt-2".to_string(),
+            attempt: None,
+            candidate_ref: "deadbeef".to_string(),
+            ai_model: Some("openai/gpt-5.6-terra".to_string()),
+            replace_interrupted: false,
+            full: false,
+        };
+
+        let envelope = adoption_envelope(&args, "cook-42", 2, "cook-42-attempt-2");
+
+        assert_eq!(envelope["source"], "cook-42-attempt-2");
+        assert_eq!(envelope["cook_id"], "cook-42");
+        assert_eq!(envelope["attempt"], 2);
+        assert_eq!(envelope["run_id"], "cook-42-attempt-2");
+    }
 
     #[test]
     fn compact_provider_bounds_extensions_and_large_diagnostics() {

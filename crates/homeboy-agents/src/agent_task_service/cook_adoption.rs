@@ -336,7 +336,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 status: &result.status,
                 disposition: CookDisposition::Terminal,
                 attempts: vec![AgentTaskCookAttemptReport {
-                    attempt: 1,
+                    attempt: adopted_attempt,
                     run_id: record.run_id.clone(),
                     run_state: format!("{:?}", record.state),
                     aggregate_path: record.aggregate_path.clone(),
@@ -381,7 +381,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             status: &status,
             disposition: CookDisposition::Terminal,
             attempts: vec![AgentTaskCookAttemptReport {
-                attempt: 1,
+                attempt: adopted_attempt,
                 run_id: record.run_id.clone(),
                 run_state: format!("{:?}", record.state),
                 aggregate_path: record.aggregate_path.clone(),
@@ -967,12 +967,26 @@ pub(crate) fn resolve_adoption_target_with_attempt(
     agent_task_lifecycle::AgentTaskRunRecord,
     super::AgentTaskCookRecipe,
 )> {
+    let declared_attempt_recipe = super::load_recipe_for_attempt(cook_or_run_id)?;
     // A durable Cook id names its immutable recipe, not whichever attempt the
     // mutable Cook index most recently observed. Resolve recipes before run
     // records so a later failed attempt cannot steal adoption ownership from
     // the original equivalent source attempt.
     if super::recipe_exists(cook_or_run_id)? {
         let recipe = super::load_recipe(cook_or_run_id)?;
+        if let Some(attempt_recipe) = &declared_attempt_recipe {
+            if attempt_recipe.cook_id != recipe.cook_id {
+                return Err(Error::validation_invalid_argument(
+                    "run_or_cook_id",
+                    format!(
+                        "identifier is both durable Cook id `{}` and declared attempt run id of Cook `{}`; select an unambiguous Cook or attempt id",
+                        recipe.cook_id, attempt_recipe.cook_id
+                    ),
+                    Some(cook_or_run_id.to_string()),
+                    None,
+                ));
+            }
+        }
         let attempt = match selected_attempt {
             Some(attempt_number) => recipe
                 .attempts
@@ -1003,30 +1017,52 @@ pub(crate) fn resolve_adoption_target_with_attempt(
         return materialize_adoption_attempt(recipe, run_id);
     }
 
-    if selected_attempt.is_some() {
-        return Err(Error::validation_invalid_argument(
-            "attempt",
-            "candidate adoption --attempt requires a durable Cook id",
-            selected_attempt.map(|attempt| attempt.to_string()),
-            None,
-        ));
-    }
-
     // Runner-side lifecycle projection can omit the controller's `cook_id`
     // metadata. Resolve an explicit attempt through durable recipe membership
     // before falling back to record metadata, otherwise the actionable exact
     // run ID emitted for an ambiguous Cook is misread as a recipe directory.
-    if let Some(recipe) = super::load_recipe_for_attempt(cook_or_run_id)? {
-        let attempt = recipe
-            .attempts
-            .iter()
-            .find(|attempt| attempt.run_id == cook_or_run_id)
-            .expect("attempt lookup returns a recipe that declares the run id");
+    if let Some(recipe) = declared_attempt_recipe {
+        let attempt = match selected_attempt {
+            Some(attempt_number) => recipe
+                .attempts
+                .iter()
+                .find(|attempt| attempt.attempt == attempt_number)
+                .ok_or_else(|| {
+                    let eligible = recipe
+                        .attempts
+                        .iter()
+                        .map(|attempt| attempt.attempt.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Error::validation_invalid_argument(
+                        "attempt",
+                        format!(
+                            "candidate adoption Cook has no attempt {attempt_number}; eligible attempts: {eligible}"
+                        ),
+                        Some(attempt_number.to_string()),
+                        None,
+                    )
+                })?,
+            None => recipe
+                .attempts
+                .iter()
+                .find(|attempt| attempt.run_id == cook_or_run_id)
+                .expect("attempt lookup returns a recipe that declares the run id"),
+        };
         if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
             return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
         }
         let run_id = attempt.run_id.clone();
         return materialize_adoption_attempt(recipe, run_id);
+    }
+
+    if selected_attempt.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "attempt",
+            "candidate adoption --attempt requires a durable Cook id or its declared attempt run id",
+            selected_attempt.map(|attempt| attempt.to_string()),
+            None,
+        ));
     }
 
     if agent_task_lifecycle::run_record_exists(cook_or_run_id)? {

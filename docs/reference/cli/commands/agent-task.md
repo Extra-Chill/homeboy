@@ -941,11 +941,11 @@ Adopt an immutable commit candidate through a tracked cook's normal gates and fi
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_OR_COOK_ID>` | yes | Existing durable run id or cook id whose recipe owns the candidate lifecycle |
+| `<RUN_OR_COOK_ID>` | yes | Existing durable Cook id or one of its declared attempt run ids whose recipe owns the candidate lifecycle |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--attempt` | `<N>` | Select an exact durable attempt from the Cook recipe. Required when attempts use different policies |
+| `--attempt` | `<N>` | Select an exact durable attempt from the resolved Cook recipe. Required when attempts use different policies |
 | `--candidate-ref` | `<SHA>` | Immutable commit revision in the recorded source worktree |
 | `--ai-model` | `<MODEL>` | Concrete model that prepared the externally supplied candidate |
 | `--replace-interrupted` | flag | Replace a stale interrupted adoption while retaining its lifecycle evidence |

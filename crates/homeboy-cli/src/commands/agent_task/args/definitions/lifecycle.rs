@@ -381,9 +381,10 @@ pub struct PromoteArgs {
 }
 #[derive(Args, Debug)]
 pub struct AdoptArgs {
-    /// Existing durable run id or cook id whose recipe owns the candidate lifecycle.
+    /// Existing durable Cook id or one of its declared attempt run ids whose recipe owns the candidate lifecycle.
+    #[arg(value_name = "RUN_OR_COOK_ID")]
     pub run_or_cook_id: String,
-    /// Select an exact durable attempt from the Cook recipe. Required when attempts use different policies.
+    /// Select an exact durable attempt from the resolved Cook recipe. Required when attempts use different policies.
     #[arg(long, value_name = "N")]
     pub attempt: Option<u32>,
     /// Immutable commit revision in the recorded source worktree.
