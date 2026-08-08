@@ -11,7 +11,7 @@ homeboy self <COMMAND>
 ## Subcommands
 
 - `status` — report the active binary, version, and install/update signals
-- `identity` — report the active binary build identity without external probes
+- `identity` (`inspect` alias) — report the active binary build identity without external probes
 - `doctor` — report one authoritative binary/runtime view, command-surface drift checks, and host resource pressure
 - `cleanup-runtime-tmp` — plan or delete orphaned Homeboy runtime temp entries
 - `docs` — display embedded CLI documentation topics or generate a codebase map
@@ -29,11 +29,12 @@ update signals.
 
 ```sh
 homeboy self identity
+# or: homeboy self inspect
 ```
 
-Returns the current binary build identity directly from the running executable.
-Use this when a runner or daemon freshness check needs a cheap local identity
-without probing surrounding install state.
+Returns the active executable path, version, build commit, and source dirty state
+directly from the running executable. Use this when a runner or daemon freshness
+check needs a cheap local identity without probing surrounding install state.
 
 ### `doctor`
 

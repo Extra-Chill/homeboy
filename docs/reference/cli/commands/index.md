@@ -6,7 +6,7 @@ Hand-written narrative for these commands lives in `docs/commands/`. -->
 
 # Homeboy CLI reference (generated)
 
-`homeboy` exposes 554 visible commands across 41 top-level command families. Every page below is generated from the clap command tree in `crates/homeboy-cli`, so it cannot drift from the binary.
+`homeboy` exposes 556 visible commands across 41 top-level command families. Every page below is generated from the clap command tree in `crates/homeboy-cli`, so it cannot drift from the binary.
 
 Hand-written narrative lives in the [commands index](../../../commands/commands-index.md). Global flags are documented in [the root command reference](../homeboy-root-command.md). Machine-readable safety, docs, output, and Lab metadata come from `homeboy contract manifest`.
 
@@ -49,7 +49,7 @@ Hand-written narrative lives in the [commands index](../../../commands/commands-
 | `homeboy worktree` | [worktree.md](worktree.md) | Manage component-backed task worktrees |
 | `homeboy tunnel` | [tunnel.md](tunnel.md) | Manage private service tunnel declarations |
 | `homeboy runs` | [runs.md](runs.md) | Inspect persisted observation runs and artifacts |
-| `homeboy self` | [self.md](self.md) | Inspect the active Homeboy binary and install signals |
+| `homeboy self` | [self.md](self.md) | Inspect the active Homeboy binary; `self identity` reports its local build identity |
 | `homeboy stack` | [stack.md](stack.md) | Manage stacks (combined-fixes branches built from base + cherry-picked PRs) |
 | `homeboy api` | [api.md](api.md) | Make API requests to a project |
 | `homeboy upgrade` | [upgrade.md](upgrade.md) | Upgrade Homeboy to the latest version |
