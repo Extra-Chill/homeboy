@@ -337,6 +337,17 @@ pub(crate) fn compare_gate_failures_to_verified_base(
             }
             compared += 1;
             checkpoint(compared, unresolved)?;
+            let Some(package_artifacts) = gate.environment.package_artifact_replay_requirements()
+            else {
+                gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                    base_ref: base_sha.to_string(),
+                    exit_code: 124,
+                    failure_fingerprint: String::new(),
+                    matches_candidate_failure: false,
+                    result: AgentTaskGateDifferentialResult::Inconclusive,
+                });
+                continue;
+            };
             let command = gate.command.last().cloned().unwrap_or_default();
             let baseline_run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
             let baseline = (|| {
@@ -353,9 +364,22 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                     &runtime.context().tmp_dir,
                     timeout,
                     &gate.environment.replay_policy(),
-                    &[],
+                    &package_artifacts,
                 )
             })();
+            if let Ok(baseline) = &baseline {
+                if baseline.environment.package_artifacts != gate.environment.package_artifacts {
+                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                        base_ref: base_sha.to_string(),
+                        exit_code: baseline.exit_code,
+                        failure_fingerprint: String::new(),
+                        matches_candidate_failure: false,
+                        result: AgentTaskGateDifferentialResult::Inconclusive,
+                    });
+                    baseline_run_dir.finish(true);
+                    continue;
+                }
+            }
             let result: Result<()> = match baseline {
                 Ok(baseline) if baseline.exit_code == 124 => {
                     gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {

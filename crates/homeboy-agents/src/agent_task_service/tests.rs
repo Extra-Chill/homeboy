@@ -286,6 +286,19 @@ fn cook_retry_intent_adds_configured_rotation_allowance() {
     assert_eq!(resolved.provider_executions, 4);
     assert_eq!(resolved.same_provider_remediations, 1);
     assert_eq!(resolved.provider_rotations, 2);
+    assert_eq!(resolved.truncated_provider_rotations, 0);
+}
+
+#[test]
+fn cook_retry_intent_explicit_execution_cap_truncates_configured_rotations() {
+    let resolved = resolve_cook_budget(1, 2, Some(1), None, None)
+        .expect("an explicit execution cap bounds inherited rotations");
+
+    assert_eq!(resolved.requested_provider_executions, 3);
+    assert_eq!(resolved.provider_executions, 1);
+    assert_eq!(resolved.requested_provider_rotations, 2);
+    assert_eq!(resolved.provider_rotations, 0);
+    assert_eq!(resolved.truncated_provider_rotations, 2);
 }
 
 #[test]
@@ -299,8 +312,8 @@ fn cook_retry_intent_preserves_explicit_zero_rotation_override() {
 }
 
 #[test]
-fn cook_retry_intent_rejects_contradictory_explicit_override_with_correction() {
-    let error = resolve_cook_budget(2, 1, Some(2), Some(1), None)
+fn cook_retry_intent_rejects_contradictory_explicit_rotation_with_correction() {
+    let error = resolve_cook_budget(2, 1, Some(2), Some(1), Some(1))
         .expect_err("rotation requires its own provider execution allowance");
 
     assert_eq!(error.details["field"], "max-provider-executions");
