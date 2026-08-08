@@ -27,6 +27,7 @@ mod planning_policy;
 mod planning_quality;
 mod planning_semver;
 mod planning_worktree;
+mod preflight_identity;
 pub use homeboy_deploy::provider_impl;
 mod types;
 mod utils;
@@ -58,19 +59,23 @@ pub use containment::{
     ContainmentAssessment, ContainmentStatus, ContainsQuery, GapStatus, ReleaseContainsReport,
     ReleaseGapAssessment, ReleaseGapReport,
 };
+pub use context::readiness_provenance;
 pub use executor::artifacts::{
     write_artifact_source_authority_manifest, ArtifactSourceAuthorityManifest,
 };
 pub use package_recovery::{package_existing_tag, ReleasePackageResult};
 pub use pipeline::run;
 pub use planner::plan;
+pub use types::readiness_is_valid;
 pub use types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseArtifact,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary,
     ReleaseExecutionPlan, ReleaseOptions, ReleasePhase, ReleasePipelineOptions, ReleasePlan,
-    ReleaseProjectDeployResult, ReleaseRollbackEvidence, ReleaseRun, ReleaseRunResult,
-    ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation, ReleaseStepResult,
-    ReleaseStepStatus, ReleaseWorkspaceCommandResult, ReleaseWorkspaceOutput,
+    ReleasePreflightPlacement, ReleasePreflightPlacementPolicy, ReleasePreflightSourceIdentity,
+    ReleaseProjectDeployResult, ReleaseReadinessEnvelope, ReleaseReadinessGateResult,
+    ReleaseReadinessLocalOnly, ReleaseReadinessProvenance, ReleaseRollbackEvidence, ReleaseRun,
+    ReleaseRunResult, ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation,
+    ReleaseStepResult, ReleaseStepStatus, ReleaseWorkspaceCommandResult, ReleaseWorkspaceOutput,
 };
 pub use utils::{extract_latest_notes, parse_release_artifacts};
 pub use workflow::{

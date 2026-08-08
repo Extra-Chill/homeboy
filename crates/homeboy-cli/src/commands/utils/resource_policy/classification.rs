@@ -64,6 +64,8 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::RuntimeRecover(_)
         | agent_task::AgentTaskCommand::RuntimeValidate(_)
         | agent_task::AgentTaskCommand::Cancel(_)
+        | agent_task::AgentTaskCommand::Quarantine(_)
+        | agent_task::AgentTaskCommand::Rearm(_)
         | agent_task::AgentTaskCommand::Prompts(_)
         | agent_task::AgentTaskCommand::Contract(_)
         | agent_task::AgentTaskCommand::CompileLoop(_)

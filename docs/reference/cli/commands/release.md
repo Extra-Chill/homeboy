@@ -29,6 +29,8 @@ Plan release workflows
 | `-p`, `--project` | `<PROJECT>` | Release all components in a project that need a release |
 | `--outdated` | flag | Only release components with unreleased code commits (use with --project) |
 | `--path` | `<PATH>` | Override local_path for version file lookup (single component only) |
+| `--preflight-runner` | `<RUNNER_ID>` | Run portable lint and test release gates through the existing Lab review commands before controller-owned release mutation |
+| `--preflight-placement` | `<PREFLIGHT_PLACEMENT>` | Placement policy for portable release preflight gates Values: `local`, `lab`. |
 | `--dry-run` | flag | _no help text_ |
 | `--apply` | flag | Confirm risky release execution modes |
 | `--deploy` | flag | Deploy to all projects using this component after release |
@@ -58,6 +60,7 @@ Plan release workflows
 | `homeboy release artifact-source-authority` | Write a source-authority manifest for assembled release artifacts |
 | `homeboy release contains` | Report which release first contained a commit, and whether the installed build has it |
 | `homeboy release gap` | Report how far the installed build is behind the newest release |
+| `homeboy release readiness` | Inspect retained portable release-readiness evidence |
 
 ## `homeboy release changes`
 
@@ -182,3 +185,40 @@ Report how far the installed build is behind the newest release
 | `--component` | `<COMPONENT_ID>` | Component whose release tag namespace to search (default: the component discovered from the working directory) |
 | `--path` | `<PATH>` | Checkout to inspect directly. Useful for unregistered clones, CI runners, and worktrees |
 | `--installed` | `<VERSION>` | Version to treat as installed instead of the running binary's version |
+
+## `homeboy release readiness`
+
+```sh
+homeboy release readiness <COMMAND>
+```
+
+Inspect retained portable release-readiness evidence
+
+| Subcommand | Summary |
+| --- | --- |
+| `homeboy release readiness show` | Show one retained readiness operation by operation:// reference or ID |
+| `homeboy release readiness list` | List retained readiness operations for a component |
+
+## `homeboy release readiness show`
+
+```sh
+homeboy release readiness show <REFERENCE>
+```
+
+Show one retained readiness operation by operation:// reference or ID
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<REFERENCE>` | yes | _no help text_ |
+
+## `homeboy release readiness list`
+
+```sh
+homeboy release readiness list <COMPONENT_ID>
+```
+
+List retained readiness operations for a component
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<COMPONENT_ID>` | yes | _no help text_ |

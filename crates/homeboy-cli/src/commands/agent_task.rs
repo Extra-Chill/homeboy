@@ -40,10 +40,10 @@ pub use args::{
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
     CompileLoopArgs, ContractArgs, ContractFormat, CookContinueArgs, DiagnoseArgs, EvidenceArgs,
     FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PromoteArgs,
-    PromotionProviderArgs, ProvidersArgs, ReconcileRecordsArgs, RecordReplacementGateProofArgs,
-    ReplayProviderBoundaryArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs,
-    ReviewArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
-    VerifyGateArgs,
+    PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs, ReconcileRecordsArgs,
+    RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
+    RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
+    RuntimeValidateArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -283,6 +283,8 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             status::replay_provider_boundary(replay_args)
         }
         AgentTaskCommand::Cancel(cancel_args) => status::cancel(cancel_args),
+        AgentTaskCommand::Quarantine(args) => status::quarantine(args),
+        AgentTaskCommand::Rearm(args) => status::rearm(args),
         AgentTaskCommand::Resume(status_args) => run::resume(status_args),
         AgentTaskCommand::Retry(retry_args) => run::retry(retry_args),
         AgentTaskCommand::Fanout(fanout_args) => fanout::fanout(fanout_args),

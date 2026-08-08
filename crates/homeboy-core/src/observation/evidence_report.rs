@@ -36,6 +36,42 @@ use crate::observation::disk_budget::DiskBudget;
 
 /// Default retention window (days) surfaced in evidence retention guidance.
 pub const DEFAULT_RETENTION_DAYS: i64 = 30;
+pub const DESCENDANT_RUN_EVIDENCE_REF_SCHEMA: &str = "homeboy/descendant-run-evidence-ref/v1";
+pub const DESCENDANT_RUN_EVIDENCE_SOURCE_TERMINAL_COMMAND_RESULT: &str =
+    "controller.terminal_command_result.refs.runs";
+
+/// A durable, typed edge from an outer orchestration run to a child run. The
+/// child owns its artifacts; this reference deliberately carries no inventory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DescendantRunEvidenceRef {
+    pub schema: String,
+    pub run_id: String,
+    pub kind: String,
+    pub source: String,
+}
+
+impl DescendantRunEvidenceRef {
+    pub fn is_valid(&self) -> bool {
+        self.schema == DESCENDANT_RUN_EVIDENCE_REF_SCHEMA
+            && valid_descendant_run_field(&self.run_id, 256)
+            && valid_descendant_run_field(&self.kind, 128)
+            && self.source == DESCENDANT_RUN_EVIDENCE_SOURCE_TERMINAL_COMMAND_RESULT
+    }
+}
+
+fn valid_descendant_run_field(value: &str, limit: usize) -> bool {
+    !value.is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DescendantRunEvidence {
+    #[serde(rename = "ref")]
+    pub reference: DescendantRunEvidenceRef,
+    pub status: String,
+    pub evidence_command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_diagnostic: Option<EvidenceRef>,
+}
 
 /// Fully shaped `runs evidence` report.
 ///
@@ -58,6 +94,8 @@ pub struct RunEvidenceReport<S: Serialize> {
     pub failure: EvidenceFailureSummary,
     pub disk_budget: DiskBudget,
     pub evidence_links: Vec<EvidenceLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub descendant_evidence: Vec<DescendantRunEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_task_lifecycle_event: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +139,16 @@ pub struct RunEvidenceReportInputs<S: Serialize> {
 /// previous inline command implementation.
 pub fn build_run_evidence_report<S: Serialize>(
     inputs: RunEvidenceReportInputs<S>,
+) -> RunEvidenceReport<S> {
+    build_run_evidence_report_with_descendant_evidence(inputs, Vec::new())
+}
+
+/// Assemble a report with controller-resolved descendant evidence. Kept as an
+/// additive entrypoint so existing users of [`RunEvidenceReportInputs`] retain
+/// their source-compatible construction contract.
+pub fn build_run_evidence_report_with_descendant_evidence<S: Serialize>(
+    inputs: RunEvidenceReportInputs<S>,
+    descendant_evidence: Vec<DescendantRunEvidence>,
 ) -> RunEvidenceReport<S> {
     let RunEvidenceReportInputs {
         command,
@@ -160,6 +208,7 @@ pub fn build_run_evidence_report<S: Serialize>(
         failure,
         disk_budget,
         evidence_links,
+        descendant_evidence,
         agent_task_lifecycle_event,
         matrix_summary,
         evidence_manifest,
@@ -750,7 +799,7 @@ pub fn evidence_failure_summary(run: &RunRecord) -> EvidenceFailureSummary {
     }
 }
 
-fn failure_diagnostic_artifact(artifacts: &[ArtifactRecord]) -> Option<EvidenceRef> {
+pub fn failure_diagnostic_artifact(artifacts: &[ArtifactRecord]) -> Option<EvidenceRef> {
     artifacts
         .iter()
         .filter(|artifact| artifact.metadata_json["failure_diagnostic"] == Value::Bool(true))
@@ -1268,6 +1317,21 @@ mod tests {
     }
 
     #[test]
+    fn original_report_inputs_caller_remains_compatible_without_descendants() {
+        let run = sample_run();
+        let report = build_run_evidence_report(RunEvidenceReportInputs {
+            command: "runs.evidence",
+            run: run.clone(),
+            run_summary: serde_json::json!({ "id": run.id }),
+            artifacts: Vec::new(),
+            artifact_root: PathBuf::from("/tmp/artifacts"),
+            disk_budget: sample_disk_budget(),
+        });
+
+        assert!(report.descendant_evidence.is_empty());
+    }
+
+    #[test]
     fn evidence_links_the_marked_deepest_failure_diagnostic() {
         let mut run = sample_run();
         run.status = "fail".to_string();
@@ -1595,5 +1659,49 @@ mod tests {
         assert!(report.evidence_manifest_errors[0].contains("metadata.evidence_manifest"));
         let manifest = report.evidence_manifest.expect("derived manifest");
         assert_eq!(manifest.source, Some(EvidenceManifestSource::Derived));
+    }
+
+    #[test]
+    fn report_keeps_parent_success_while_rendering_descendant_diagnostic() {
+        let run = sample_run();
+        let diagnostic = EvidenceRef::new(
+            "artifact",
+            "homeboy://run/child-failure/artifact/diagnostic",
+            "Failure diagnostic",
+        );
+        let report = build_run_evidence_report_with_descendant_evidence(
+            RunEvidenceReportInputs {
+                command: "runs.evidence",
+                run: run.clone(),
+                run_summary: serde_json::json!({ "id": run.id }),
+                artifacts: Vec::new(),
+                artifact_root: PathBuf::from("/tmp/artifacts"),
+                disk_budget: sample_disk_budget(),
+            },
+            vec![DescendantRunEvidence {
+                reference: DescendantRunEvidenceRef {
+                    schema: DESCENDANT_RUN_EVIDENCE_REF_SCHEMA.to_string(),
+                    run_id: "child-failure".to_string(),
+                    kind: "bench".to_string(),
+                    source: DESCENDANT_RUN_EVIDENCE_SOURCE_TERMINAL_COMMAND_RESULT.to_string(),
+                },
+                status: "fail".to_string(),
+                evidence_command: "homeboy runs evidence child-failure".to_string(),
+                primary_diagnostic: Some(diagnostic),
+            }],
+        );
+
+        assert_eq!(report.heartbeat.status, "pass");
+        assert!(!report.failure.failed);
+        assert_eq!(report.descendant_evidence.len(), 1);
+        assert_eq!(report.descendant_evidence[0].status, "fail");
+        assert_eq!(
+            report.descendant_evidence[0]
+                .primary_diagnostic
+                .as_ref()
+                .expect("child diagnostic")
+                .target,
+            "homeboy://run/child-failure/artifact/diagnostic"
+        );
     }
 }

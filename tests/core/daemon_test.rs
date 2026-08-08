@@ -311,6 +311,31 @@ impl ControllerJobDriver for FailingCancellationControllerDriver {
     }
 }
 
+/// Wait for a durable condition instead of asserting immediately after a
+/// cancellation request.
+///
+/// `POST /controller/jobs/{id}/cancel` is **asynchronous by contract**:
+/// `request_controller_cancellation` persists the intent and only terminalizes
+/// inline when the job is *claimless*. A running job is transitioned by the
+/// supervisor thread spawned in `daemon::mod`, and
+/// `LocalControllerJobClient::cancel` documents that it "persist[s] a
+/// cancellation request and return[s] the daemon's current job projection"
+/// while "the controller continues provider shutdown asynchronously".
+///
+/// Asserting the terminal state straight after the request is therefore a race
+/// that only passes on an idle machine. These tests lost it consistently on a
+/// loaded host.
+fn wait_for(label: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("timed out waiting for {label}");
+}
+
 #[test]
 fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     let _home = HomeGuard::new();
@@ -399,12 +424,10 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     assert_eq!(inline_secret.status_code, 400);
 
     release_tx.send(()).expect("release blocked driver");
-    for _ in 0..50 {
-        if store.get(job_id).expect("first job").status.is_terminal() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for(
+        "store.get(job_id).expect( first job ).status.is_terminal()",
+        || store.get(job_id).expect("first job").status.is_terminal(),
+    );
 
     let cancelled = route_with_body(
         "POST",
@@ -437,17 +460,16 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
         &store,
     );
     assert_eq!(cancelled.status_code, 200);
-    assert_eq!(cancelled.body["body"]["job"]["status"], "cancelled");
-    assert_eq!(
-        store.get(cancelled_id).expect("cancelled job").status,
-        JobStatus::Cancelled
-    );
-    for _ in 0..50 {
-        if cancellations.load(Ordering::SeqCst) == 1 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    // The response is the projection at request time, not the terminal state.
+    wait_for("cancelled_id to reach Cancelled", || {
+        store
+            .get(cancelled_id)
+            .map(|job| job.status == JobStatus::Cancelled)
+            .unwrap_or(false)
+    });
+    wait_for("cancellations.load(Ordering::SeqCst) == 1", || {
+        cancellations.load(Ordering::SeqCst) == 1
+    });
     assert_eq!(cancellations.load(Ordering::SeqCst), 1);
     let repeated_cancel = route_with_body(
         "POST",
@@ -776,12 +798,16 @@ fn generic_cancel_rejects_running_controller_work_without_touching_its_driver() 
         &store,
     );
     assert_eq!(cancelled.status_code, 200);
-    assert_eq!(
-        store.get(job_id).expect("cancelled job").status,
-        JobStatus::Cancelled
-    );
+    wait_for("controller job to reach Cancelled", || {
+        store
+            .get(job_id)
+            .map(|job| job.status == JobStatus::Cancelled)
+            .unwrap_or(false)
+    });
     assert_eq!(executions.load(Ordering::SeqCst), 1);
-    assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+    wait_for("driver cancel to be observed", || {
+        cancellations.load(Ordering::SeqCst) == 1
+    });
 }
 
 #[test]
@@ -1232,12 +1258,9 @@ fn controller_job_retry_after_compaction_returns_tombstoned_terminal_projection(
     assert!(store
         .get(uuid::Uuid::parse_str(&first_id).expect("valid ID"))
         .is_err());
-    for _ in 0..100 {
-        if controller_job_runtime_count() == 0 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for("controller_job_runtime_count() == 0", || {
+        controller_job_runtime_count() == 0
+    });
     assert_eq!(controller_job_runtime_count(), 0);
     let executions_before_retry = executions.load(Ordering::SeqCst);
     let retry = route_with_body("POST", "/controller/jobs", Some(request), &store);
@@ -1341,6 +1364,14 @@ fn controller_job_errors_use_driver_safe_public_projection() {
         None,
         &store,
     );
+    // The driver's failing `cancel` is projected by the supervisor thread, so
+    // poll for the safe classification rather than racing it.
+    wait_for("safe cancellation failure projection", || {
+        serialized_contains(
+            &route_with_body("GET", &format!("/jobs/{job_id}/events"), None, &store).body,
+            "safe_driver_failure",
+        )
+    });
     let events = route_with_body("GET", &format!("/jobs/{job_id}/events"), None, &store);
     assert!(!serialized_contains(
         &response.body,
@@ -2732,12 +2763,10 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
         uuid::Uuid::parse_str(response.body["body"]["job"]["id"].as_str().expect("job id"))
             .expect("parse job id");
 
-    for _ in 0..50 {
-        if store.get(job_id).expect("job").status == JobStatus::Running {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    wait_for(
+        "store.get(job_id).expect( job ).status == JobStatus::Running",
+        || store.get(job_id).expect("job").status == JobStatus::Running,
+    );
     store
         .cancel(job_id, "test cancellation")
         .expect("cancel job");

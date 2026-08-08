@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::agent_task::{AgentTaskRequest, AgentTaskWorkspaceMode};
@@ -241,7 +243,29 @@ where
     run_prepared_claimed(run_id, plan, executor, harvest_context)
 }
 
-pub fn run_next<E>(executor: E) -> Result<AgentTaskRunResult<Option<AgentTaskAggregate>>>
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskRunNextSkip {
+    pub run_id: String,
+    pub submitted_at: Option<String>,
+    pub age_seconds: Option<i64>,
+    pub dispatcher_kind: Option<String>,
+    pub category: String,
+    pub error_code: String,
+    pub summary: String,
+    pub provider_id: Option<String>,
+    pub required_environment_variables: Vec<String>,
+    pub reason: String,
+    pub remediation: String,
+}
+
+#[derive(Debug)]
+pub struct AgentTaskRunNextResult {
+    pub value: Option<AgentTaskAggregate>,
+    pub exit_code: i32,
+    pub skipped: Vec<AgentTaskRunNextSkip>,
+}
+
+pub fn run_next<E>(executor: E) -> Result<AgentTaskRunNextResult>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
@@ -250,46 +274,159 @@ where
 
 pub fn run_next_with_cook_dispatcher<E>(
     executor: E,
-    dispatcher: impl FnOnce(
+    dispatcher: impl Fn(
         &Value,
     ) -> Result<
         Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
     >,
-) -> Result<AgentTaskRunResult<Option<AgentTaskAggregate>>>
+) -> Result<AgentTaskRunNextResult>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    if let Some(claim) = super::claim_continuation()? {
+    run_next_with_cook_dispatcher_and_queue_preflight(executor, dispatcher, |plan| {
+        preflight_queued_plan_provider_eligibility(plan)
+    })
+}
+
+pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight<E>(
+    executor: E,
+    dispatcher: impl Fn(
+        &Value,
+    ) -> Result<
+        Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
+    >,
+    queue_preflight: impl Fn(&AgentTaskPlan) -> Result<()>,
+) -> Result<AgentTaskRunNextResult>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let mut skipped = Vec::new();
+    while let Some(claim) = super::claim_continuation()? {
         let cook_id = claim.continuation().cook_id.clone();
         let run_id = claim.continuation().run_id.clone();
-        let exit_code = super::consume_claimed_with_dispatcher(claim, dispatcher, |options| {
-            super::run_cook(options, executor.clone()).map(|result| result.exit_code)
-        })?;
+        let recipe = match super::load_recipe(&cook_id) {
+            Ok(recipe) => recipe,
+            Err(error) => {
+                claim.fail(&redacted_continuation_failure(&error))?;
+                skipped.push(continuation_skip(run_id, None, false, error));
+                continue;
+            }
+        };
+        let dispatcher_value = recipe.promotion_transport.pointer("/attempt_dispatch/kind");
+        let dispatcher_kind = dispatcher_value
+            .and_then(Value::as_str)
+            .and_then(agent_task_lifecycle::trusted_dispatcher_kind);
+        let unsupported_dispatcher_kind = dispatcher_value.is_some() && dispatcher_kind.is_none();
+        if let Err(error) = dispatcher(&recipe.promotion_transport["attempt_dispatch"]).and_then(
+            |attempt_dispatcher| {
+                super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher).map(|_| ())
+            },
+        ) {
+            claim.fail(&redacted_continuation_failure(&error))?;
+            skipped.push(continuation_skip(
+                run_id,
+                dispatcher_kind,
+                unsupported_dispatcher_kind,
+                error,
+            ));
+            continue;
+        }
+        let exit_code = super::consume_claimed_with_dispatcher(
+            claim,
+            |recipe| dispatcher(recipe),
+            |options| super::run_cook(options, executor.clone()).map(|result| result.exit_code),
+        )?;
         let latest_run_id = agent_task_lifecycle::cook_index(&cook_id)
             .map(|index| index.latest_run_id)
             .unwrap_or(run_id);
         let aggregate = agent_task_lifecycle::read_aggregate(&latest_run_id).ok();
-        return Ok(AgentTaskRunResult {
+        return Ok(AgentTaskRunNextResult {
             value: aggregate.map(|aggregate| {
                 crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate)
             }),
             exit_code,
+            skipped,
         });
     }
-    let Some(record) = agent_task_lifecycle::claim_next_queued_run()? else {
-        return Ok(AgentTaskRunResult {
+    let claim = agent_task_lifecycle::claim_next_eligible_queued_run_with_preflight(|_, plan| {
+        queue_preflight(plan)
+    })?;
+    skipped.extend(claim.skipped.into_iter().map(|skip| AgentTaskRunNextSkip {
+        run_id: skip.run_id,
+        submitted_at: skip.submitted_at,
+        age_seconds: skip.age_seconds,
+        dispatcher_kind: skip.dispatcher_kind,
+        category: skip.category,
+        error_code: skip.error_code,
+        summary: skip.summary,
+        provider_id: skip.provider_id,
+        required_environment_variables: skip.required_environment_variables,
+        reason: skip.reason,
+        remediation: skip.remediation,
+    }));
+    let Some(record) = claim.record else {
+        return Ok(AgentTaskRunNextResult {
             value: None,
             exit_code: 0,
+            skipped,
         });
     };
 
     let result = run_claimed(record.run_id, executor)?;
-    Ok(AgentTaskRunResult {
+    Ok(AgentTaskRunNextResult {
         value: Some(crate::agent_task_artifacts::reviewer_facing_aggregate(
             &result.value,
         )),
         exit_code: result.exit_code,
+        skipped,
     })
+}
+
+fn redacted_continuation_failure(error: &Error) -> String {
+    format!(
+        "Cook continuation admission failed ({})",
+        error.code.as_str()
+    )
+}
+
+fn continuation_skip(
+    run_id: String,
+    dispatcher_kind: Option<String>,
+    unsupported_dispatcher_kind: bool,
+    error: Error,
+) -> AgentTaskRunNextSkip {
+    let submitted_at = agent_task_lifecycle::exact_record(&run_id)
+        .ok()
+        .map(|record| record.submitted_at);
+    let age_seconds = submitted_at.as_deref().and_then(|submitted_at| {
+        DateTime::parse_from_rfc3339(submitted_at)
+            .ok()
+            .map(|submitted_at| {
+                (Utc::now() - submitted_at.with_timezone(&Utc))
+                    .num_seconds()
+                    .max(0)
+            })
+    });
+    AgentTaskRunNextSkip {
+        remediation: format!(
+            "inspect retained diagnostics with: homeboy agent-task status <run-id> --exact --full"
+        ),
+        run_id,
+        submitted_at,
+        age_seconds,
+        dispatcher_kind,
+        category: if unsupported_dispatcher_kind {
+            "cook_continuation_unsupported_dispatcher"
+        } else {
+            "cook_continuation_preflight_failed"
+        }
+        .to_string(),
+        error_code: error.code.as_str().to_string(),
+        summary: "Cook continuation failed admission preflight".to_string(),
+        provider_id: None,
+        required_environment_variables: Vec::new(),
+        reason: "Cook continuation failed admission preflight".to_string(),
+    }
 }
 
 pub fn resume<E>(run_id: String, executor: E) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
@@ -909,6 +1046,27 @@ fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
             ]),
         )
     })
+}
+
+/// Queue admission validates provider eligibility and credential provenance
+/// before a record is claimed Running. Workspace preparation remains after the
+/// claim because it creates controller-owned filesystem state.
+fn preflight_queued_plan_provider_eligibility(plan: &AgentTaskPlan) -> Result<()> {
+    let mut plan = plan.clone();
+    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+    catalog.validate_explicit_models(&plan)?;
+    catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
+    preflight_plan_secret_env(&plan)?;
+    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
+        &plan,
+        catalog.providers(),
+    )?;
+    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
+        &plan,
+        catalog.providers(),
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    )
 }
 
 fn run_plan_with_scheduler<E>(
