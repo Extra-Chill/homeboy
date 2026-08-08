@@ -251,6 +251,59 @@ fn refresh_preserves_only_its_direct_controller_lease_for_orphan_recovery() {
     );
 }
 
+#[test]
+fn disconnected_refresh_connects_without_rotating_a_missing_daemon() {
+    let operations = std::cell::RefCell::new(Vec::new());
+
+    disconnect_before_reconnect(None, |_| {
+        panic!("a disconnected runner has no daemon to rotate")
+    })
+    .expect("disconnected refresh does not attempt daemon rotation");
+    operations.borrow_mut().push("connect promoted binary");
+
+    assert_eq!(operations.into_inner(), ["connect promoted binary"]);
+}
+
+#[test]
+fn connected_refresh_rotates_before_connecting_the_promoted_binary() {
+    let session = RunnerSession {
+        runner_id: "lab".to_string(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: RunnerSessionRole::Controller,
+        server_id: Some("lab".to_string()),
+        controller_id: None,
+        broker_url: None,
+        remote_daemon_address: Some("127.0.0.1:7421".to_string()),
+        local_port: Some(7421),
+        local_url: Some("http://127.0.0.1:7421".to_string()),
+        tunnel_pid: Some(1),
+        tunnel_process_start_identity: None,
+        proxy_forward: None,
+        remote_daemon_pid: Some(2),
+        remote_daemon_lease_id: Some("lease-refresh".to_string()),
+        homeboy_version: "test".to_string(),
+        homeboy_build_identity: None,
+        connected_at: "2026-01-01T00:00:00Z".to_string(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: None,
+    };
+    let operations = std::cell::RefCell::new(Vec::new());
+
+    disconnect_before_reconnect(Some(&session), |_| {
+        operations.borrow_mut().push("disconnect existing daemon");
+        Ok(())
+    })
+    .expect("connected refresh rotates the existing daemon");
+    operations.borrow_mut().push("connect promoted binary");
+
+    assert_eq!(
+        operations.into_inner(),
+        ["disconnect existing daemon", "connect promoted binary"]
+    );
+}
+
 fn refreshed_daemon_status(connected: bool, identity: Option<&str>) -> RunnerStatusReport {
     RunnerStatusReport {
         runner_id: "lab".to_string(),
@@ -1115,84 +1168,6 @@ fn select_without_materialization_sha_promotes_the_verified_binary() {
                 .homeboy_path
                 .as_deref(),
             Some("/selected/homeboy")
-        );
-    });
-}
-
-#[test]
-fn disconnect_failure_after_selection_restores_the_pre_refresh_binary() {
-    test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
-        let patch =
-            refreshed_runner_patch("lab-local", "/selected/homeboy").expect("selection patch");
-        merge(Some("lab-local"), &patch.to_string(), &[]).expect("select binary");
-
-        let error = rollback_refresh_error_with::<(), _>(
-            Error::validation_invalid_argument(
-                "disconnect",
-                "request lease-bound daemon stop: tunnel unavailable",
-                None,
-                None,
-            ),
-            || {
-                restore_runner_homeboy_path_if_selected(
-                    "lab-local",
-                    "/selected/homeboy",
-                    Some("/stable/homeboy"),
-                )
-                .map(|_| ())
-            },
-        )
-        .expect_err("disconnect failure rolls back selection");
-        assert!(error.message.contains("lease-bound daemon stop"));
-
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/stable/homeboy")
-        );
-    });
-}
-
-#[test]
-fn reconnect_error_after_disconnect_restores_the_pre_refresh_binary() {
-    test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
-        let patch =
-            refreshed_runner_patch("lab-local", "/selected/homeboy").expect("selection patch");
-        merge(Some("lab-local"), &patch.to_string(), &[]).expect("select binary");
-
-        let error = rollback_refresh_error_with::<(), _>(
-            Error::internal_io("reconnect transport failed".to_string(), None),
-            || {
-                restore_runner_homeboy_path_if_selected(
-                    "lab-local",
-                    "/selected/homeboy",
-                    Some("/stable/homeboy"),
-                )
-                .map(|_| ())
-            },
-        )
-        .expect_err("reconnect error rolls back selection");
-        assert_eq!(error.details["error"], "reconnect transport failed");
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/stable/homeboy")
         );
     });
 }

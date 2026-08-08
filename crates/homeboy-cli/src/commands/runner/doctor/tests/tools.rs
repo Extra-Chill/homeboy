@@ -75,7 +75,7 @@ fn local_doctor_honors_required_tool_errors() {
     )
     .expect("local doctor report");
 
-    assert_eq!(exit_code, 0);
+    assert_eq!(exit_code, 1);
     assert_eq!(report.status, RunnerDoctorStatus::Error);
     assert!(report.checks.iter().any(|check| {
         check.id == "tool.required.homeboy-definitely-missing-tool"

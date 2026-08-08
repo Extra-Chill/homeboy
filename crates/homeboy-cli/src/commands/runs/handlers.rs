@@ -26,12 +26,13 @@ use super::bench::run_contains_scenario;
 use super::common::{run_summaries_with_artifact_indexes, RunSummary};
 use super::types::{
     actionable_for_run_detail, actionable_for_run_list, RunDetail, RunsArtifactArgs,
-    RunsArtifactCommand, RunsArtifactCommandHint, RunsArtifactGetArgs, RunsArtifactGetOutput,
-    RunsArtifactPathGuide, RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs,
-    RunsArtifactsOutput, RunsCancelOutput, RunsDirectoryArtifactPublicationGuidance,
-    RunsEnvKeyOutput, RunsEnvOutput, RunsEnvSourceLayerOutput, RunsEnvSummary,
-    RunsFieldSelectionOutput, RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput,
-    RunsSelectedField, RunsShowOutput, RunsStaleRunSummary,
+    RunsArtifactCommand, RunsArtifactCommandHint, RunsArtifactGetArgs, RunsArtifactGetHandleArgs,
+    RunsArtifactGetOutput, RunsArtifactPathGuide, RunsArtifactPreviewHandleArgs,
+    RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs, RunsArtifactsOutput,
+    RunsCancelOutput, RunsDirectoryArtifactPublicationGuidance, RunsEnvKeyOutput, RunsEnvOutput,
+    RunsEnvSourceLayerOutput, RunsEnvSummary, RunsFieldSelectionOutput, RunsListArgs,
+    RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsSelectedField, RunsShowOutput,
+    RunsStaleRunSummary,
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
@@ -1042,7 +1043,9 @@ pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
     match args.command {
         RunsArtifactCommand::Attach(args) => remote_artifact::attach(args),
         RunsArtifactCommand::Get(args) => artifact_get(args),
+        RunsArtifactCommand::GetHandle(args) => artifact_get_handle(args),
         RunsArtifactCommand::Preview(args) => remote_artifact::preview(args),
+        RunsArtifactCommand::PreviewHandle(args) => artifact_preview_handle(args),
         RunsArtifactCommand::Capture(args) => remote_artifact::capture(args),
         RunsArtifactCommand::CleanupDownloads(args) => remote_artifact::cleanup_downloads(args),
         RunsArtifactCommand::CleanupPersisted(args) => remote_artifact::cleanup_persisted(args),
@@ -1051,6 +1054,23 @@ pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
             Ok((RunsOutput::ArtifactPostprocess(output), exit_code))
         }
     }
+}
+
+pub(crate) fn artifact_preview_handle(
+    args: RunsArtifactPreviewHandleArgs,
+) -> CmdResult<RunsOutput> {
+    let store = ObservationStore::open_initialized()?;
+    let artifact = store
+        .get_artifact_for_handle(&args.handle)?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "handle",
+                "artifact handle was not found",
+                Some(args.handle),
+                None,
+            )
+        })?;
+    remote_artifact::preview_artifact(artifact, args.port)
 }
 
 pub(crate) fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
@@ -1069,10 +1089,40 @@ fn artifact_get_inner(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
 
     let store = ObservationStore::open_initialized()?;
     let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
+    artifact_get_resolved(artifact, args.output)
+}
 
+/// Handle lookup is deliberately exact: it has no run-id, name, ordinal, or
+/// fuzzy token fallback. The unique handle index scopes the resolved artifact
+/// to its durable owner before any byte access happens.
+fn artifact_get_handle(args: RunsArtifactGetHandleArgs) -> CmdResult<RunsOutput> {
+    let fields = args.field.clone();
+    let store = ObservationStore::open_initialized()?;
+    let artifact = store
+        .get_artifact_for_handle(&args.handle)?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "handle",
+                "artifact handle was not found",
+                Some(args.handle),
+                None,
+            )
+        })?;
+    let (output, exit_code) = artifact_get_resolved(artifact, args.output)?;
+    if fields.is_empty() {
+        Ok((output, exit_code))
+    } else {
+        apply_field_selection(output, &fields)
+    }
+}
+
+fn artifact_get_resolved(
+    artifact: homeboy::core::observation::ArtifactRecord,
+    output: Option<PathBuf>,
+) -> CmdResult<RunsOutput> {
     match runs_service::classify_artifact_storage(&artifact) {
         runs_service::ArtifactStorage::LocalFile => {
-            let outcome = runs_service::copy_local_file_artifact(artifact, args.output)?;
+            let outcome = runs_service::copy_local_file_artifact(artifact, output)?;
             Ok((
                 RunsOutput::ArtifactGet(RunsArtifactGetOutput {
                     command: "runs.artifact.get",
@@ -1089,13 +1139,13 @@ fn artifact_get_inner(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
                 0,
             ))
         }
-        runs_service::ArtifactStorage::Remote => remote_artifact::get(artifact, args.output),
+        runs_service::ArtifactStorage::Remote => remote_artifact::get(artifact, output),
         runs_service::ArtifactStorage::PublicUrl => {
             let source_content_url = artifact
                 .url
                 .clone()
                 .or_else(|| artifact.public_url.clone());
-            let outcome = runs_service::download_public_artifact(artifact, args.output)?;
+            let outcome = runs_service::download_public_artifact(artifact, output)?;
             Ok((
                 RunsOutput::ArtifactGet(RunsArtifactGetOutput {
                     command: "runs.artifact.get",
@@ -1133,7 +1183,7 @@ fn artifact_get_inner(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
     }
 }
 
-/// Project `--field`/`-q` selectors over a `show` or `artifact get` result,
+/// Project `--field`/`-q` selectors over a `show`, `evidence`, or `artifact get` result,
 /// returning a compact [`RunsOutput::FieldSelection`] carrying only the
 /// requested fields. Show selectors are rooted at the run detail; artifact-get
 /// selectors at the artifact-get result. Unsupported variants are returned
@@ -1174,6 +1224,14 @@ pub(super) fn apply_field_selection(
                 .and_then(Value::as_str)
                 .map(str::to_string);
             (payload.clone(), run_id, artifact_id)
+        }
+        "evidence" | "evidence_summary" => {
+            let run_id = payload
+                .get("run_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            (payload, run_id, None)
         }
         _ => return Ok((output, 0)),
     };

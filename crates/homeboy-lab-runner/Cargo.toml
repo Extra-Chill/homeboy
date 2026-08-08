@@ -39,6 +39,7 @@ sha2 = "0.10.9"
 shlex = "1.3"
 tempfile = "3.14"
 uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
+zip = "0.6"
 
 [dev-dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

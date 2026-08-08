@@ -64,6 +64,7 @@ struct CliEnvelope {
     success: bool,
     data: Option<Value>,
     error: Option<Value>,
+    diagnostics: Option<Value>,
 }
 
 struct RemoteDaemonConnectOptions<'a> {
@@ -617,27 +618,6 @@ fn connect_with_orphan_adoption_and_live_lease(
             }
         }
     }
-    if pending_replacement.is_none()
-        && super::generation_store::replacement_operation_replay(runner_id)?
-            .is_some_and(|(kind, _)| kind == "state-loss")
-    {
-        if let Ok(mut observed) = remote_daemon_status(&client, homeboy) {
-            probe_remote_daemon_endpoint(&client, &mut observed, Some(runner_id));
-            if let Some(reason) = inapplicable_state_loss_replay_reason(
-                &observed,
-                &configured_build_identity,
-                live_lease_expectation,
-            ) {
-                replacement_operation_id = Some(
-                    super::generation_store::retire_inapplicable_replacement_replay(
-                        runner_id,
-                        "state-loss",
-                        reason,
-                    )?,
-                );
-            }
-        }
-    }
     // This write precedes every remote mutation. A retry reuses the same key
     // even when the SSH command completed but its response was lost.
     let replacement_operation_id = match replacement_operation_id {
@@ -695,6 +675,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 REMOTE_LEASELESS_RECOVERY_TIMEOUT,
             );
             if !output.success {
+                if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &output,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
@@ -712,6 +697,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 )
             })?;
             if !envelope.success {
+                if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &output,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
@@ -821,6 +811,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 REMOTE_LEASELESS_RECOVERY_TIMEOUT,
             );
             if !recovery.success {
+                if is_terminal_state_loss_refusal(&recovery) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &recovery,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
@@ -835,6 +830,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 )
             })?;
             if !envelope.success {
+                if is_terminal_state_loss_refusal(&recovery) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &recovery,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
@@ -1182,28 +1182,6 @@ fn remote_daemon_from_recovery(
     }
 }
 
-fn inapplicable_state_loss_replay_reason(
-    status: &RemoteDaemonStatus,
-    configured_build_identity: &str,
-    live_lease_expectation: Option<(&str, u32)>,
-) -> Option<&'static str> {
-    let daemon = status.daemon.as_ref()?;
-    if !status.reachable || status.endpoint_probe_error.is_some() {
-        return None;
-    }
-    if status.fresh
-        && live_lease_expectation == daemon.lease_id.as_deref().zip(daemon.pid)
-        && daemon.build_identity.as_deref().map(str::trim) == Some(configured_build_identity.trim())
-    {
-        return Some("explicit exact live lease/PID adoption supersedes state-loss recovery");
-    }
-    if status.active_jobs == 0 {
-        Some("remote daemon state and reachable idle endpoint disprove state-loss recovery")
-    } else {
-        Some("remote daemon state and reachable endpoint disprove state-loss recovery; active jobs remain protected")
-    }
-}
-
 fn remote_daemon_from_session(session: &RunnerSession) -> Result<RemoteDaemon> {
     let address = session.remote_daemon_address.clone().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -1532,6 +1510,25 @@ fn state_loss_recovery_failure_message(output: &homeboy_core::server::CommandOut
     }
 }
 
+fn is_terminal_state_loss_refusal(output: &homeboy_core::server::CommandOutput) -> bool {
+    if output.timed_out {
+        return false;
+    }
+    let Ok(envelope) = parse_envelope(&output.stdout) else {
+        return false;
+    };
+    if envelope.success {
+        return false;
+    }
+    let code = envelope
+        .diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.get("code"))
+        .or_else(|| envelope.error.as_ref().and_then(|error| error.get("code")))
+        .and_then(Value::as_str);
+    matches!(code, Some(code) if code.starts_with("validation.") || code.starts_with("policy."))
+}
+
 fn remote_state_loss_recovery_command(
     homeboy: &str,
     lease_id: &str,
@@ -1852,9 +1849,12 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
     if report.connected {
         reconcile_session_metadata_with_observed_daemon(&runner, &mut report.session, true)?;
     }
-    // Terminal-job settlement was formerly coupled to status. Keep it under
-    // this explicit lifecycle owner so status remains safe to parallelize.
-    reconcile_terminal_jobs(runner_id)?;
+    // Terminal-job settlement needs a live session transport. Generation
+    // reconciliation below can instead inspect a disconnected SSH runner, so
+    // do not let the terminal-job preflight block its advertised recovery path.
+    if report.connected {
+        reconcile_terminal_jobs(runner_id)?;
+    }
     if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(&runner) {
         super::generation_store::reconcile_with_ssh(runner_id, report.session.as_ref(), &client)?;
     } else {

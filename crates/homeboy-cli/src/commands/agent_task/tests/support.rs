@@ -8,6 +8,7 @@ pub(crate) use std::process::Command;
 pub(in crate::commands::agent_task) use super::super::super::agent_task_dispatch::{
     DispatchArgs, DispatchCoreArgs,
 };
+pub(in crate::commands::agent_task) use super::super::args::CookContinueArgs;
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerDispatchArgs,
     AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
@@ -23,9 +24,10 @@ pub(in crate::commands::agent_task) use super::super::controller::{
     controller_run_from_spec_with_test_executor, controller_run_next_with_executor,
 };
 pub(in crate::commands::agent_task) use super::super::run::{
-    resume, retry, run_cook_with_executor, run_cook_with_executor_and_dispatcher, run_loaded_plan,
-    run_next_with_executor, run_resume_with_executor, run_submitted, run_submitted_with_executor,
-    submit, validate_cook_request,
+    continue_cook_with, resume, retry, run_cook_with_executor,
+    run_cook_with_executor_and_dispatcher, run_loaded_plan, run_next_with_executor,
+    run_resume_with_executor, run_submitted, run_submitted_with_executor, submit,
+    validate_cook_request,
 };
 pub(in crate::commands::agent_task) use super::super::status::{
     cancel, diagnose, evidence, logs, replay_provider_boundary, status,

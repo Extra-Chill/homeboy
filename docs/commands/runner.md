@@ -179,6 +179,8 @@ replace the session, or tear down its tunnel. Use `local`,
 `localhost`, or `self` to inspect this machine without creating a runner record.
 The JSON payload uses `command: "runner.doctor"` and includes `runner_id`,
 `status`, `capabilities`, and warning/error details when a capability probe fails.
+`status: "error"` means the runner is not ready and exits with status `1`; `ok`
+and non-blocking `warn` reports exit `0`. The command has no report-only mode.
 
 Use `doctor` before `connect` when you need to know whether Homeboy, Git, SSH,
 and the configured workspace root are usable on the target machine.

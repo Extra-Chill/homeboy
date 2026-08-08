@@ -124,6 +124,17 @@ pub struct ActivityCounts {
     pub unknown: usize,
 }
 
+/// Records deliberately omitted from the default coordination view.
+///
+/// `activity list --all` retains every collected item and action. The default
+/// view instead keeps current work readable when stale projections accumulate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityTruncation {
+    pub items_omitted: usize,
+    pub stale_items_omitted: usize,
+    pub next_actions_omitted: usize,
+}
+
 /// One runner consulted while federating runner-resident activity.
 ///
 /// A run offloaded to a Lab runner is recorded *on that runner* until it
@@ -195,6 +206,10 @@ pub struct ActivityReport {
     /// provider (null when the agent-task subsystem is absent).
     #[serde(default)]
     pub agent_task_record_health: Value,
+    /// Explicit accounting for default-view compaction. Zero values mean this
+    /// report retained every collected record and next action.
+    #[serde(default)]
+    pub truncation: ActivityTruncation,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<String>,
 }

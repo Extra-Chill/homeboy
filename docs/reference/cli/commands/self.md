@@ -18,7 +18,7 @@ Global flags apply to every command and are documented once in [the root command
 homeboy self <COMMAND>
 ```
 
-Inspect the active Homeboy binary and install signals
+Inspect the active Homeboy binary; `self identity` reports its local build identity
 
 | Subcommand | Summary |
 | --- | --- |

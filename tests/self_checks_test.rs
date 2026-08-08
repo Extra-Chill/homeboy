@@ -38,6 +38,7 @@ fn lint_args(root: &Path) -> LintArgs {
     LintArgs {
         comp: component_args(root),
         extension_override: ExtensionOverrideArgs::default(),
+        release_readiness_source: None,
         summary: false,
         file: None,
         glob: None,
@@ -59,6 +60,7 @@ fn test_args(root: &Path) -> TestArgs {
         comp: component_args(root),
         extension_override: ExtensionOverrideArgs::default(),
         skip_lint: false,
+        release_readiness_source: None,
         coverage: false,
         coverage_min: None,
         baseline_args: BaselineArgs::default(),

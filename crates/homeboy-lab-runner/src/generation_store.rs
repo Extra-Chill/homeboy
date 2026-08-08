@@ -67,6 +67,13 @@ fn replacement_operation_path(runner_id: &str) -> Result<PathBuf> {
         .join("replacement-operation.json"))
 }
 
+fn rejected_replacement_path(runner_id: &str) -> Result<PathBuf> {
+    Ok(paths::runner_sessions_dir()?
+        .join(runner_id)
+        .join("rejected-replacements")
+        .join(format!("{}.json", uuid::Uuid::new_v4())))
+}
+
 fn admission_reservation_path(runner_id: &str) -> Result<PathBuf> {
     Ok(paths::runner_sessions_dir()?
         .join(runner_id)
@@ -92,14 +99,20 @@ struct ReplacementOperation {
     replay_command: Option<String>,
     #[serde(default)]
     kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    retired_replay: Option<RetiredReplacementReplay>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct RetiredReplacementReplay {
-    kind: String,
-    reason: String,
+#[derive(serde::Serialize)]
+struct RejectedReplacementEvidence<'a> {
+    schema: &'static str,
+    runner_id: &'a str,
+    operation_id: &'a str,
+    kind: &'a str,
+    replay_command: Option<&'a str>,
+    rejected_at: String,
+    exit_code: i32,
+    timed_out: bool,
+    stdout: &'a str,
+    stderr: &'a str,
 }
 
 pub(crate) fn write_durable_json<T: serde::Serialize>(
@@ -704,7 +717,6 @@ pub(crate) fn replacement_operation(runner_id: &str) -> Result<String> {
                 operation_id: operation_id.clone(),
                 replay_command: None,
                 kind: None,
-                retired_replay: None,
             },
         )?;
         Ok(operation_id)
@@ -777,29 +789,10 @@ pub(crate) fn record_pending_replacement(runner_id: &str, session: &RunnerSessio
 /// remote lease and proved that these recorded coordinates are no longer a
 /// publishable daemon. A later attempt receives a new operation identity.
 pub(crate) fn retire_pending_replacement(runner_id: &str) -> Result<String> {
-    retire_replacement(runner_id, None)
+    retire_replacement(runner_id)
 }
 
-/// Retire a replay whose remote preconditions have been authoritatively
-/// disproved, preserving the typed reason alongside its successor token.
-pub(crate) fn retire_inapplicable_replacement_replay(
-    runner_id: &str,
-    kind: &str,
-    reason: &str,
-) -> Result<String> {
-    retire_replacement(
-        runner_id,
-        Some(RetiredReplacementReplay {
-            kind: kind.to_string(),
-            reason: reason.to_string(),
-        }),
-    )
-}
-
-fn retire_replacement(
-    runner_id: &str,
-    retired_replay: Option<RetiredReplacementReplay>,
-) -> Result<String> {
+fn retire_replacement(runner_id: &str) -> Result<String> {
     with_registry_lock(runner_id, || {
         let operation_id = uuid::Uuid::new_v4().to_string();
         // Publish the successor receipt before releasing the old coordinates.
@@ -811,7 +804,6 @@ fn retire_replacement(
                 operation_id: operation_id.clone(),
                 replay_command: None,
                 kind: None,
-                retired_replay,
             },
         )?;
         let pending_path = pending_replacement_path(runner_id)?;
@@ -824,6 +816,68 @@ fn retire_replacement(
             })?;
         }
         Ok(operation_id)
+    })
+}
+
+/// Retire a remote policy or validation refusal after preserving the exact
+/// terminal response. Unlike an interrupted mutation, this operation cannot
+/// become publishable by replaying the same authority.
+pub(crate) fn retire_rejected_state_loss_replacement(
+    runner_id: &str,
+    output: &homeboy_core::server::CommandOutput,
+) -> Result<()> {
+    with_registry_lock(runner_id, || {
+        let operation_path = replacement_operation_path(runner_id)?;
+        let operation: ReplacementOperation =
+            serde_json::from_slice(&std::fs::read(&operation_path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read {}", operation_path.display())),
+                )
+            })?)
+            .map_err(|error| {
+                Error::config_invalid_json(operation_path.display().to_string(), error)
+            })?;
+        if operation.runner_id != runner_id || operation.kind.as_deref() != Some("state-loss") {
+            return Err(Error::internal_unexpected(
+                "refusing to retire a replacement operation that is not the rejected state-loss recovery",
+            ));
+        }
+        let evidence_path = rejected_replacement_path(runner_id)?;
+        write_durable_json(
+            &evidence_path,
+            &RejectedReplacementEvidence {
+                schema: "homeboy/runner-rejected-replacement/v1",
+                runner_id,
+                operation_id: &operation.operation_id,
+                kind: "state-loss",
+                replay_command: operation.replay_command.as_deref(),
+                rejected_at: Utc::now().to_rfc3339(),
+                exit_code: output.exit_code,
+                timed_out: output.timed_out,
+                stdout: &output.stdout,
+                stderr: &output.stderr,
+            },
+        )?;
+        write_durable_json(
+            &operation_path,
+            &ReplacementOperation {
+                runner_id: runner_id.to_string(),
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                replay_command: None,
+                kind: None,
+            },
+        )?;
+        let pending_path = pending_replacement_path(runner_id)?;
+        if pending_path.exists() {
+            std::fs::remove_file(&pending_path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("remove {}", pending_path.display())),
+                )
+            })?;
+        }
+        Ok(())
     })
 }
 
