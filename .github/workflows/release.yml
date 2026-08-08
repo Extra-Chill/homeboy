@@ -1250,28 +1250,12 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
+          CONTROL_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          gh release view "${RELEASE_TAG}" --json assets > recovery-release.json
-
-          while IFS= read -r name; do
-            # cargo-dist attaches this during announce, after publication.
-            [ "${name}" != "dist-manifest.json" ] || continue
-
-            path="artifacts/${name}"
-            if [ ! -s "${path}" ]; then
-              echo "::error::Recovery artifact ${path} is missing or empty"
-              exit 1
-            fi
-
-            if jq -e --arg name "${name}" '.assets[]? | select(.name == $name and .state == "uploaded" and .size > 0)' recovery-release.json >/dev/null; then
-              echo "::notice::Preserving existing valid release asset ${name}"
-              continue
-            fi
-
-            gh release upload "${RELEASE_TAG}" "${path}" --clobber
-            echo "::notice::Reconciled release asset ${name}"
-          done < <(jq -r '.[]' <<< "${EXPECTED_ASSETS}")
+          CONTROL_HELPER="${RUNNER_TEMP}/release-asset-completeness.sh"
+          git show "${CONTROL_SHA}:.github/release-asset-completeness.sh" > "${CONTROL_HELPER}"
+          ASSET_DIR=artifacts RECONCILE=true REQUIRE_ANNOUNCE_ASSETS=false bash "${CONTROL_HELPER}"
 
       - name: Create remote draft adoption manifest
         if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true'
@@ -1393,6 +1377,7 @@ jobs:
           EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
           REQUIRE_ANNOUNCE_ASSETS: 'false'
           CONTROL_SHA: ${{ github.sha }}
+          RECOVERY_REBUILD: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true' }}
         run: |
           set -euo pipefail
           if ! git cat-file -e "${CONTROL_SHA}^{commit}" 2>/dev/null; then
@@ -1401,6 +1386,9 @@ jobs:
           CONTROL_HELPER="${RUNNER_TEMP}/release-asset-completeness.sh"
           git show "${CONTROL_SHA}:.github/release-asset-completeness.sh" > "${CONTROL_HELPER}"
           bash "${CONTROL_HELPER}"
+          if [ "${RECOVERY_REBUILD}" = "true" ]; then
+            ASSET_DIR=artifacts REQUIRE_ANNOUNCE_ASSETS=false bash "${CONTROL_HELPER}"
+          fi
 
       - name: Finish Homeboy release pipeline at tag
         uses: Extra-Chill/homeboy-action@v2

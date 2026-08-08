@@ -1092,15 +1092,13 @@ fn release_recovery_skips_the_artifact_rebuild_when_the_draft_is_already_complet
     }
 
     // ...and the adoption phase is not, or the fast path would publish nothing.
-    let adoption = &host[host
-        .find("- name: Create remote draft adoption manifest")
-        .expect("host must build the draft adoption manifest")..];
+    let adoption = release_step_block(host, "name: Create remote draft adoption manifest");
     assert!(
         !adoption.contains("draft-complete != 'true'"),
         "verified draft adoption must run on the fast path — it is the whole point of taking it"
     );
     assert!(
-        adoption.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"),
+        host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"),
         "the fast path must still hand the finalizer the remote-adoption manifest"
     );
 }
@@ -1230,26 +1228,17 @@ fn release_recovery_reconciles_rebuilt_assets_before_the_remote_gate() {
     assert!(reconcile.contains(
         "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
     ));
+    assert!(reconcile.contains("ASSET_DIR=artifacts RECONCILE=true REQUIRE_ANNOUNCE_ASSETS=false"));
+    assert!(reconcile.contains("git show \"${CONTROL_SHA}:.github/release-asset-completeness.sh\""));
+    let helper = include_str!("../.github/release-asset-completeness.sh");
+    assert!(helper.contains("Checksum contract"));
+    assert!(helper.contains("Unexpected or duplicate assets"));
     assert!(
-        reconcile.contains("[ \"${name}\" != \"dist-manifest.json\" ] || continue"),
-        "pre-publication reconciliation must exclude cargo-dist's announce artifact"
+        helper.contains("gh release upload \"${RELEASE_TAG}\" \"${ASSET_DIR}/${asset}\" --clobber")
     );
-    assert!(
-        reconcile.contains("if [ ! -s \"${path}\" ]; then"),
-        "recovery must reject absent or empty local artifact bytes"
-    );
-    assert!(
-        reconcile.contains(".state == \"uploaded\" and .size > 0"),
-        "valid remote assets must be identified by GitHub's uploaded state and non-zero size"
-    );
-    assert!(
-        reconcile.contains("gh release upload \"${RELEASE_TAG}\" \"${path}\" --clobber"),
-        "missing or unusable remote assets must be idempotently replaced from the rebuilt inventory"
-    );
-    assert!(
-        reconcile.contains("Preserving existing valid release asset"),
-        "recovery must retain valid remote bytes instead of replacing the whole draft"
-    );
+    assert!(helper.contains("Could not re-read the asset inventory"));
+    let gate_step = release_step_block(host, "name: Gate publication on the declared asset set");
+    assert!(gate_step.contains("ASSET_DIR=artifacts REQUIRE_ANNOUNCE_ASSETS=false"));
 }
 
 /// Recovery is allowed — required — to run a control binary NEWER than the tag
@@ -2141,6 +2130,28 @@ fn asset_contract_rejects_present_but_unusable_assets() {
         out.contains("homeboy-x86_64-unknown-linux-gnu.tar.xz"),
         "{out}"
     );
+}
+
+#[test]
+fn asset_contract_rejects_unexpected_and_duplicate_inventory() {
+    let expected_assets = serde_json::to_string(HEALTHY_RELEASE_ASSETS).expect("asset contract");
+    let mut names = HEALTHY_RELEASE_ASSETS.to_vec();
+    names.push("unexpected.bin");
+    let (code, out) = asset_contract_with_expected_assets(
+        &release_inventory(&names),
+        Some(&expected_assets),
+        "true",
+    );
+    assert_ne!(code, 0, "unexpected inventory must fail closed: {out}");
+
+    let mut names = HEALTHY_RELEASE_ASSETS.to_vec();
+    names.push(HEALTHY_RELEASE_ASSETS[0]);
+    let (code, out) = asset_contract_with_expected_assets(
+        &release_inventory(&names),
+        Some(&expected_assets),
+        "true",
+    );
+    assert_ne!(code, 0, "duplicate inventory must fail closed: {out}");
 }
 
 /// This gate decides whether a release becomes reachable, so every unknown must
