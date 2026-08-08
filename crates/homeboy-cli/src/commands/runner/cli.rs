@@ -409,6 +409,10 @@ pub(super) enum RunnerCommand {
         #[arg(long = "sync-workspace")]
         sync_workspace: Option<String>,
 
+        /// Hydrate detected dependencies from a matching runner cache or sealed controller package before execution. This offline-safe mode never invokes a runner package manager.
+        #[arg(long)]
+        hydrate_deps: bool,
+
         /// Project ID used for runner trust policy checks
         #[arg(long)]
         project: Option<String>,
