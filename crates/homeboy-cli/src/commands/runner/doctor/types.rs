@@ -9,6 +9,17 @@ pub enum RunnerDoctorStatus {
     Error,
 }
 
+impl RunnerDoctorStatus {
+    /// The process result for a completed doctor report. Warnings remain
+    /// diagnostic-only; error-level checks make the runner not ready.
+    pub const fn operational_exit_code(self) -> i32 {
+        match self {
+            Self::Ok | Self::Warning => 0,
+            Self::Error => 1,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct RunnerDoctorOutput {
     pub variant: &'static str,

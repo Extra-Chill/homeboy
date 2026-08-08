@@ -253,6 +253,28 @@ const MIGRATIONS: &[Migration] = &[
             WHERE kind = 'runner_exec_recovery' AND status = 'running';
         "#,
     },
+    Migration {
+        // A short opaque handle is the only artifact identifier exposed by the
+        // bounded evidence projection. It is derived from immutable ownership
+        // identity and indexed so handle lookup never needs a run-id selector.
+        version: 15,
+        sql: r#"
+        ALTER TABLE artifacts ADD COLUMN artifact_handle TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_handle
+            ON artifacts(artifact_handle);
+        "#,
+    },
+    Migration {
+        // Rust backfill records the full-report rank semantics once, avoiding
+        // SQLite numeric coercion when a bounded projection selects a diagnostic.
+        version: 16,
+        sql: r#"
+        ALTER TABLE artifacts ADD COLUMN failure_diagnostic INTEGER;
+        ALTER TABLE artifacts ADD COLUMN failure_diagnostic_rank TEXT;
+        CREATE INDEX IF NOT EXISTS idx_artifacts_failure_diagnostic
+            ON artifacts(run_id, failure_diagnostic, failure_diagnostic_rank);
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.
@@ -899,6 +921,15 @@ mod tests {
     }
 
     fn seed_owned_and_orphaned_children(connection: &Connection) {
+        // These rows model state written *while FK enforcement was off* -- the
+        // exact scenario migration 13 exists to clean up, and what
+        // `migration_13_reaps_rows_orphaned_while_enforcement_was_off` is named
+        // for. `enforce_foreign_keys` now turns enforcement on at open, so the
+        // seed must turn it off to create the orphans whose reaping is under
+        // test. (It also lets `trace_spans` be inserted before `trace_runs`.)
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("relax foreign keys to seed orphaned children");
         connection
             .execute_batch(
                 r#"
@@ -931,6 +962,9 @@ mod tests {
                 "#,
             )
             .unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .expect("restore foreign key enforcement after seeding");
     }
 
     fn surviving_run_ids(connection: &Connection, table: &str) -> Vec<String> {

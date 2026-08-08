@@ -37,7 +37,7 @@ List active and recent Homeboy work
 | Option | Value | Description |
 | --- | --- | --- |
 | `--limit` | `<LIMIT>` | Maximum activity items to return |
-| `--all` | flag | Include older completed records instead of active + recent |
+| `--all` | flag | Include all collected records and next actions without default compaction |
 | `--no-runners` | flag | Skip connected Lab runners and report only controller-local records |
 
 ## `homeboy activity show`

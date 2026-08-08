@@ -6,6 +6,7 @@ use homeboy::core::engine;
 use homeboy::core::{api_jobs::JobStore, paths};
 use homeboy::runner::runners::{self as runner, Runner, RunnerKind, RunnerStatusReport};
 use homeboy_upgrade::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
+use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -23,6 +24,7 @@ pub enum SelfCommand {
     /// Report active binary, version, and nearby install/update signals
     Status(SelfStatusArgs),
     /// Report the active binary build identity without external probes
+    #[command(alias = "inspect")]
     Identity(SelfIdentityArgs),
     /// Report one authoritative binary/runtime view across the controller and
     /// every configured runner, including version drift signals and host
@@ -47,6 +49,25 @@ pub struct SelfStatusArgs {}
 
 #[derive(Args)]
 pub struct SelfIdentityArgs {}
+
+#[derive(Serialize)]
+struct SelfIdentityReport {
+    active_binary: String,
+    #[serde(flatten)]
+    build_identity: build_identity::BuildIdentity,
+    lab_handoff_capabilities: Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
+}
+
+pub fn identity_report() -> Value {
+    serde_json::to_value(SelfIdentityReport {
+        active_binary: std::env::current_exe()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "unknown".to_string()),
+        build_identity: build_identity::current(),
+        lab_handoff_capabilities: homeboy_lab_runner_contract::required_lab_handoff_capabilities(),
+    })
+    .expect("identity report serializes")
+}
 
 #[derive(Args)]
 pub struct SelfDoctorArgs {}
@@ -105,11 +126,7 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
                 .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
             Ok((json, 0))
         }
-        SelfCommand::Identity(_) => {
-            let json = serde_json::to_value(build_identity::current())
-                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
-            Ok((json, 0))
-        }
+        SelfCommand::Identity(_) => Ok((identity_report(), 0)),
         SelfCommand::Doctor(_) => {
             let view = self_status::build_runtime_view(
                 collect_controller_input(),

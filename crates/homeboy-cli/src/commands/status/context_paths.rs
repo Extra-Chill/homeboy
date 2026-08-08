@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use homeboy::core::{component, git};
 
-use super::types::UnregisteredContextStatusOutput;
+use super::types::{UnregisteredContextStatusOutput, UnregisteredControlPlaneStatus};
 
 pub(super) fn unregistered_cwd_status_output() -> Option<UnregisteredContextStatusOutput> {
     let cwd = std::env::current_dir().ok()?;
@@ -46,7 +46,11 @@ pub(super) fn unregistered_cwd_status_output() -> Option<UnregisteredContextStat
         cwd: cwd.to_string_lossy().to_string(),
         git_root: git_root_string,
         suggestion,
-        action: "Run `homeboy status --all` to inspect every configured component, or attach this checkout to a project/component first.",
+        action: "Run `homeboy status --global` for bounded local runner/control-plane health, `homeboy status --all` to inspect every configured component, or attach this checkout to a project/component first.",
+        control_plane: UnregisteredControlPlaneStatus {
+            status: "not_checked",
+            command: "homeboy status --global",
+        },
     })
 }
 

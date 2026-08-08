@@ -144,8 +144,19 @@ pub(super) enum RunsCommand {
     },
     /// Show a generic resume plan for a validation-progress run
     ResumePlan { run_id: String },
-    /// Show stable evidence registry data for one run; start here for reviewer-facing evidence
-    Evidence { run_id: String },
+    /// Show bounded, actionable evidence for one run; use --full for the complete registry report
+    Evidence {
+        run_id: String,
+        /// Emit the complete lossless evidence report, including every artifact and evidence link.
+        #[arg(long)]
+        full: bool,
+        /// JSONPath selector(s) projected over the evidence result so callers
+        /// extract only specific fields instead of the whole structure. Repeat
+        /// or comma-separate. Rooted at the evidence payload, e.g.
+        /// `-q '$.failure.diagnostic'`, `-q '$.artifact_index.omitted_count'`.
+        #[arg(long = "field", short = 'q', value_delimiter = ',')]
+        field: Vec<String>,
+    },
     /// Explain redacted Lab environment provenance for one run
     Env { run_id: String },
     /// List artifacts recorded for one run
@@ -243,6 +254,7 @@ pub enum RunsOutput {
     Dossier(RunsDossierOutput),
     ResumePlan(RunsResumePlanOutput),
     Evidence(Box<RunsEvidenceOutput>),
+    EvidenceSummary(RunsEvidenceSummaryOutput),
     Env(RunsEnvOutput),
     Artifacts(RunsArtifactsOutput),
     ArtifactAttach(RunsArtifactAttachOutput),
@@ -364,6 +376,54 @@ pub struct RunsFieldSelectionOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_id: Option<String>,
     pub fields: Vec<RunsSelectedField>,
+}
+
+/// Bounded operator projection of a full `runs evidence` report.
+///
+/// The complete report remains available through `runs evidence --full`; this
+/// shape makes the failure and its retrieval path usable for artifact-heavy
+/// runs.
+#[derive(Serialize)]
+pub struct RunsEvidenceSummaryOutput {
+    pub schema: &'static str,
+    pub byte_limit: usize,
+    pub command: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub run: Value,
+    pub failure: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic_retrieval_command: Option<String>,
+    pub artifact_index: RunsEvidenceArtifactIndexSummary,
+    pub evidence_links: RunsEvidenceLinksSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_report_command: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEvidenceArtifactIndexSummary {
+    pub count: usize,
+    pub file_count: usize,
+    pub directory_count: usize,
+    pub url_count: usize,
+    pub missing_count: usize,
+    pub missing_count_known: bool,
+    pub total_size_bytes: u64,
+    pub artifacts: Vec<Value>,
+    pub returned_count: usize,
+    pub omitted_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complete_command: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEvidenceLinksSummary {
+    pub count: usize,
+    pub links: Vec<Value>,
+    pub returned_count: usize,
+    pub omitted_count: usize,
 }
 
 /// One projected `(selector, value)` pair. `value` is the JSON matched at the
@@ -569,8 +629,12 @@ pub(super) enum RunsArtifactCommand {
     Attach(RunsArtifactAttachArgs),
     /// Copy a recorded file artifact to a local path
     Get(RunsArtifactGetArgs),
+    /// Retrieve one artifact using the bounded opaque handle emitted by `runs evidence`.
+    GetHandle(RunsArtifactGetHandleArgs),
     /// Serve a recorded directory artifact with a local static preview URL
     Preview(RunsArtifactPreviewArgs),
+    /// Serve a directory artifact using the opaque handle emitted by `runs evidence`.
+    PreviewHandle(RunsArtifactPreviewHandleArgs),
     /// Capture generated HTML entrypoint screenshots from a recorded directory artifact
     Capture(RunsArtifactCaptureArgs),
     /// Plan or delete locally cached runner artifact downloads
@@ -626,6 +690,18 @@ pub struct RunsArtifactGetArgs {
     pub field: Vec<String>,
 }
 
+#[derive(Args, Clone)]
+pub struct RunsArtifactGetHandleArgs {
+    /// Stable bounded opaque artifact handle emitted by `runs evidence`.
+    pub handle: String,
+    /// Destination file path. Defaults to the recorded artifact filename.
+    #[arg(long, short = 'o')]
+    pub output: Option<PathBuf>,
+    /// JSONPath selector(s) projected over the retrieval result.
+    #[arg(long = "field", short = 'q', value_delimiter = ',')]
+    pub field: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct RunsArtifactGetOutput {
     pub command: &'static str,
@@ -649,6 +725,15 @@ pub struct RunsArtifactPreviewArgs {
     pub run_id: String,
     /// Directory artifact id/path token from `homeboy runs artifacts <run-id>`
     pub artifact_id: String,
+    /// Local loopback port. Defaults to an available ephemeral port.
+    #[arg(long)]
+    pub port: Option<u16>,
+}
+
+#[derive(Args, Clone)]
+pub struct RunsArtifactPreviewHandleArgs {
+    /// Stable bounded opaque directory-artifact handle emitted by `runs evidence`.
+    pub handle: String,
     /// Local loopback port. Defaults to an available ephemeral port.
     #[arg(long)]
     pub port: Option<u16>,

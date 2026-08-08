@@ -374,6 +374,7 @@ Execute a command on a configured runner. Use `homeboy runner exec [HOMEBOY_OPTI
 | --- | --- | --- |
 | `--cwd` | `<CWD>` | Remote/current working directory. SSH runners require this to be inside the runner workspace root unless the runner has a default workspace_root |
 | `--sync-workspace` | `<SYNC_WORKSPACE>` | Snapshot a local worktree to the runner first and execute from the materialized remote path |
+| `--hydrate-deps` | flag | Hydrate detected dependencies from a matching runner cache or sealed controller package before execution. This offline-safe mode never invokes a runner package manager |
 | `--project` | `<PROJECT>` | Project ID used for runner trust policy checks |
 | `--ssh` | flag | Allow diagnostic-only SSH command execution when the daemon is disconnected or non-fresh; it never uses or rotates daemon admission |
 | `--capture-patch` | flag | Capture the file delta produced by the remote command as a patch artifact |
