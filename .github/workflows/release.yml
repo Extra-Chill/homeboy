@@ -1364,8 +1364,15 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
           REQUIRE_ANNOUNCE_ASSETS: 'false'
+          CONTROL_SHA: ${{ github.sha }}
         run: |
-          bash .github/release-asset-completeness.sh
+          set -euo pipefail
+          if ! git cat-file -e "${CONTROL_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${CONTROL_SHA}"
+          fi
+          CONTROL_HELPER="${RUNNER_TEMP}/release-asset-completeness.sh"
+          git show "${CONTROL_SHA}:.github/release-asset-completeness.sh" > "${CONTROL_HELPER}"
+          bash "${CONTROL_HELPER}"
 
       - name: Finish Homeboy release pipeline at tag
         uses: Extra-Chill/homeboy-action@v2
