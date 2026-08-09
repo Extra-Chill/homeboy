@@ -805,8 +805,11 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
     SHARD_TOTAL="$(jq '.selected | length' "$SHARD_DATA")"
     SHARD_PASSED=0
     SHARD_FAILED=0
-    SHARD_SKIPPED="$(jq '[.selected[] | select(.expected_outcome == "skipped")] | length' "$SHARD_DATA")"
+    SHARD_SKIPPED=0
     if [ "$SELECTED_RUNNER" = "nextest" ]; then
+        # Nextest intentionally omits planned ignored tests from its event
+        # stream. Cargo replays and counts each ignored identity directly.
+        SHARD_SKIPPED="$(jq '[.selected[] | select(.expected_outcome == "skipped")] | length' "$SHARD_DATA")"
         if ! NEXTEST_MAX_BYTES="$(rust_nextest_filter_max_bytes)"; then
             SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
             rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
