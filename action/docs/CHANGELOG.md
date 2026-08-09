@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.15] - 2026-08-08
+
+### Fixed
+- make shard replays hermetic [AI: OpenAI gpt-5.6-terra via OpenCode - workflow and contract tests]
+
 ## [2.11.14] - 2026-08-08
 
 ### Fixed
