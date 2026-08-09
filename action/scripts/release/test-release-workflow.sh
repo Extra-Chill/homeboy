@@ -60,10 +60,10 @@ assert_not_contains 'gh release create' "${WORKFLOW}" "release workflow does not
 assert_not_contains 'docs/CHANGELOG.md' "${WORKFLOW}" "release workflow does not parse changelog notes"
 
 # GitHub-hosted workflow dependencies must use Node 24-capable action majors (#321).
-assert_count 'actions/checkout@v6' '18' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v6 for every checkout"
+assert_count 'actions/checkout@v6' '19' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v6 for every checkout"
 assert_count 'actions/cache@v5' '3' "${CI_WORKFLOW}" "reusable CI workflow uses cache v5"
-assert_count 'actions/upload-artifact@v7' '9' "${CI_WORKFLOW}" "reusable CI workflow uses artifact upload v7"
-assert_count 'actions/download-artifact@v7' '8' "${CI_WORKFLOW}" "reusable CI workflow uses artifact download v7"
+assert_count 'actions/upload-artifact@v7' '10' "${CI_WORKFLOW}" "reusable CI workflow uses artifact upload v7"
+assert_count 'actions/download-artifact@v7' '10' "${CI_WORKFLOW}" "reusable CI workflow uses artifact download v7"
 assert_count 'actions/create-github-app-token@v3' '3' "${CI_WORKFLOW}" "reusable CI workflow uses app-token v3"
 assert_not_contains 'actions/checkout@v4' "${CI_WORKFLOW}" "reusable CI workflow has no checkout v4 references"
 assert_not_contains 'actions/cache@v4' "${CI_WORKFLOW}" "reusable CI workflow has no cache v4 references"

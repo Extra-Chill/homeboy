@@ -234,12 +234,15 @@ grep -F 'baseline_result="$(jq -r --arg command "${COMMAND}"' "${WORKFLOW}" >/de
 grep -F 'result_filename="$(command_result_filename "${COMMAND}")"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline lookup does not use the canonical result filename\n'; exit 1; }
 # shellcheck disable=SC2016
 grep -F '[ -f "homeboy-baseline-results/${result_filename}" ] && structured_output=true' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline lookup does not fail closed when its declared result is absent\n'; exit 1; }
-candidate_inventory="$(sed -n '/name: Configure candidate Test shards/,/name: Plan candidate Test shards/p' "${WORKFLOW}")"
-baseline_inventory="$(sed -n '/name: Configure baseline Test shards/,/name: Plan baseline Test shards/p' "${WORKFLOW}")"
-printf '%s\n' "${candidate_inventory}" | grep -F 'scope: ${{ inputs.scope }}' >/dev/null || { printf 'FAIL: candidate Test inventory does not forward caller scope\n'; exit 1; }
-printf '%s\n' "${baseline_inventory}" | grep -F 'scope: full' >/dev/null || { printf 'FAIL: immutable baseline Test inventory is not full scope\n'; exit 1; }
-if [ "$(grep -c 'scope: full' "${WORKFLOW}")" -lt 3 ]; then
-  printf 'FAIL: immutable baseline inventory and shard replays do not use full scope\n'; exit 1
+# shellcheck disable=SC2016
+candidate_inventory_scopes="$(grep -A30 'name: Configure candidate Test shards' "${WORKFLOW}" | grep -F -c 'scope: ${{ inputs.scope }}')"
+[ "${candidate_inventory_scopes}" -eq 1 ] || { printf 'FAIL: candidate inventory planning must preserve caller scope, got %s calls\n' "${candidate_inventory_scopes}"; exit 1; }
+baseline_inventory_scopes="$(grep -A30 'name: Configure baseline Test shards' "${WORKFLOW}" | grep -c 'scope: full')"
+[ "${baseline_inventory_scopes}" -eq 1 ] || { printf 'FAIL: bootstrap baseline inventory must use full scope, got %s calls\n' "${baseline_inventory_scopes}"; exit 1; }
+replay_scopes="$(grep -A30 -E 'name: Run (candidate|baseline) Test shard' "${WORKFLOW}" | grep -c 'scope: full')"
+[ "${replay_scopes}" -eq 2 ] || { printf 'FAIL: candidate and baseline manifest replay must each use full scope, got %s calls\n' "${replay_scopes}"; exit 1; }
+if [ "$(grep -c 'scope: full' "${WORKFLOW}")" -ne 3 ]; then
+  printf 'FAIL: only bootstrap baseline inventory and immutable manifest replay may force full scope\n'; exit 1
 fi
 grep -F 'prepare-test-shard-workspace.sh prepare .homeboy-action' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate binary setup does not isolate the action checkout\n'; exit 1; }
 grep -F "steps.prepare-binary-workspace.outcome == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate binary setup does not always restore its exact Git exclusions\n'; exit 1; }
@@ -254,7 +257,49 @@ grep -F "::error::Test inventory generation failed for" "${WORKFLOW}" >/dev/null
 if grep -A4 'name: Report candidate Test inventory generation failure' "${WORKFLOW}" | grep -F 'homeboy-test-shard-plan-' >/dev/null; then
   printf 'FAIL: inventory failure reporting attempts to read a missing shard plan artifact\n'; exit 1
 fi
+selection_dir="${tmp}/candidate-selection"
+mkdir -p "${selection_dir}"
+printf '%s\n' '{"review test":"pass"}' > "${selection_dir}/results.json"
+printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review","success":true,"status":"succeeded","exit_code":0,"data":{"test_counts":{"passed":1,"failed":0,"skipped":0,"total":1}}}' > "${selection_dir}/review-test.json"
+select_candidate_baseline() {
+  GITHUB_ACTION_PATH="${ROOT}" GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" TEST_SHARD_EVENT="$1" TEST_SHARD_DIFFERENTIAL_GATING="$2" TEST_SHARD_BASELINE_COMMANDS="$3" bash "${ROOT}/scripts/core/select-test-baseline.sh"
+}
+select_candidate_baseline pull_request true auto
+grep -Fx 'baseline-command=' "${selection_dir}/output" >/dev/null || { printf 'FAIL: passing candidate shard result selected a baseline\n'; exit 1; }
+printf '%s\n' '{"review test":"fail"}' > "${selection_dir}/results.json"
+: > "${selection_dir}/output"
+select_candidate_baseline pull_request true auto
+grep -Fx 'baseline-command=review test' "${selection_dir}/output" >/dev/null || { printf 'FAIL: PR differential candidate failure did not select its matching baseline command\n'; exit 1; }
+printf '%s\n' '{"review test":"timeout"}' > "${selection_dir}/results.json"
+: > "${selection_dir}/output"
+select_candidate_baseline pull_request true 'review test'
+grep -Fx 'baseline-command=review test' "${selection_dir}/output" >/dev/null || { printf 'FAIL: timed-out candidate shard result did not select its matching baseline command\n'; exit 1; }
+for policy in 'pr-baseline-none:true:none' 'pr-baseline-lint:true:review lint' 'pr-baseline-test:true:review test' 'pr-baseline-mixed:true:review lint, review test' 'pr-differential-false:false:auto' 'non-pr:true:review test'; do
+  IFS=: read -r policy_name differential baseline_commands <<< "${policy}"
+  : > "${selection_dir}/output"
+  event=pull_request
+  [ "${policy_name}" = non-pr ] && event=push
+  select_candidate_baseline "${event}" "${differential}" "${baseline_commands}"
+  case "${policy_name}" in
+    pr-baseline-test|pr-baseline-mixed) grep -Fx 'baseline-command=review test' "${selection_dir}/output" >/dev/null || { printf 'FAIL: %s did not select review test\n' "${policy_name}"; exit 1; }; continue ;;
+  esac
+  grep -Fx 'baseline-command=' "${selection_dir}/output" >/dev/null || { printf 'FAIL: %s candidate failure selected a baseline\n' "${policy_name}"; exit 1; }
+  if RESULTS="$(cat "${selection_dir}/results.json")" COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ROOT}/scripts/core/enforce-final-status.sh" >/dev/null 2>&1; then
+    printf 'FAIL: %s candidate failure was not directly enforced\n' "${policy_name}"; exit 1
+  fi
+done
+rm "${selection_dir}/review-test.json"
+if select_candidate_baseline pull_request true 'review test' >/dev/null 2>&1; then
+  printf 'FAIL: missing canonical candidate shard result selected a baseline\n'; exit 1
+fi
+grep -F 'needs: [binary, plan, candidate-test-result]' "${WORKFLOW}" >/dev/null || { printf 'FAIL: baseline planning does not wait for canonical candidate selection\n'; exit 1; }
+grep -F "needs.candidate-test-result.outputs.baseline-command != ''" "${WORKFLOW}" >/dev/null || { printf 'FAIL: selected failing command does not enable baseline planning and replay\n'; exit 1; }
+# shellcheck disable=SC2016
+grep -F 'homeboy-candidate-test-results-${{ github.run_attempt }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: final Test does not consume canonical candidate results before reconciliation\n'; exit 1; }
+printf 'PASS: canonical candidate results select matching baseline attribution and fail closed when absent\n'
+# shellcheck disable=SC2016
 grep -F 'bootstrap-baseline-red: ${{ steps.bootstrap-baseline-red.outputs.value }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: baseline inventory failures are not classified for reconciliation\n'; exit 1; }
+# shellcheck disable=SC2016
 grep -F 'name: homeboy-baseline-test-inventory-failure-${{ github.run_attempt }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: classified baseline inventory failures are not retained as artifacts\n'; exit 1; }
 grep -F 'Test bootstrap_baseline_red: immutable baseline inventory failed' "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not publish the baseline bootstrap warning\n'; exit 1; }
 grep -F "needs.baseline-test-plan.outputs.bootstrap-baseline-red == 'true'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not restrict the nonblocking path to classified baseline inventory failures\n'; exit 1; }
