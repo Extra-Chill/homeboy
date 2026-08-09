@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.19] - 2026-08-09
+
+### Fixed
+- partition shards across jq versions [AI: OpenAI gpt-5.6-sol via OpenCode]
+
 ## [2.11.18] - 2026-08-09
 
 ### Fixed
