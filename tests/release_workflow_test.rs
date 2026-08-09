@@ -1209,6 +1209,49 @@ fn release_recovery_runs_publication_gate_from_the_control_revision() {
     );
 }
 
+#[test]
+fn release_recovery_reconciles_rebuilt_assets_before_the_remote_gate() {
+    let host = job_section(release_workflow(), "host");
+    let authority = host
+        .find("- name: Create authoritative recovery manifest")
+        .expect("rebuilt recovery must create an authoritative local manifest");
+    let reconcile_start = host
+        .find("- name: Reconcile rebuilt recovery assets")
+        .expect("rebuilt recovery must reconcile its artifacts into the draft");
+    let gate = host
+        .find("- name: Gate publication on the declared asset set")
+        .expect("the remote publication gate must remain present");
+    let reconcile = release_step_block(host, "name: Reconcile rebuilt recovery assets");
+
+    assert!(
+        authority < reconcile_start && reconcile_start < gate,
+        "recovery must reconcile authoritative local artifacts before checking the remote inventory"
+    );
+    assert!(reconcile.contains(
+        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
+    ));
+    assert!(
+        reconcile.contains("[ \"${name}\" != \"dist-manifest.json\" ] || continue"),
+        "pre-publication reconciliation must exclude cargo-dist's announce artifact"
+    );
+    assert!(
+        reconcile.contains("if [ ! -s \"${path}\" ]; then"),
+        "recovery must reject absent or empty local artifact bytes"
+    );
+    assert!(
+        reconcile.contains(".state == \"uploaded\" and .size > 0"),
+        "valid remote assets must be identified by GitHub's uploaded state and non-zero size"
+    );
+    assert!(
+        reconcile.contains("gh release upload \"${RELEASE_TAG}\" \"${path}\" --clobber"),
+        "missing or unusable remote assets must be idempotently replaced from the rebuilt inventory"
+    );
+    assert!(
+        reconcile.contains("Preserving existing valid release asset"),
+        "recovery must retain valid remote bytes instead of replacing the whole draft"
+    );
+}
+
 /// Recovery is allowed — required — to run a control binary NEWER than the tag
 /// it repairs; that is the bootstrap #10519 asks for, and #10560 built it by
 /// pinning `gate-build` to `github.sha`. The inverse was never bounded: a
