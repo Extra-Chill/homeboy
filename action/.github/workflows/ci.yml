@@ -878,6 +878,7 @@ jobs:
         env:
           TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
           TEST_SHARD_RESULTS_FILE: candidate-test-results/homeboy-ci-results/results.json
+          TEST_SHARD_BASELINE_ENABLED: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && inputs.baseline-commands != 'none' }}
         run: |
           source .homeboy-action/scripts/core/lib.sh
           TEST_SHARD_RESULT_FILE="candidate-test-results/homeboy-ci-results/$(command_result_filename "${TEST_SHARD_COMMAND}")" bash .homeboy-action/scripts/core/select-test-baseline.sh
@@ -969,7 +970,7 @@ jobs:
         run: |
           echo '::error::Candidate Test shard evidence could not be aggregated into a canonical result.'
           exit 1
-      - name: Enforce passing sharded Test result
+      - name: Enforce unreconciled sharded Test result
         if: needs.candidate-test-result.result == 'success' && (needs.candidate-test-result.outputs.baseline-command == '' || github.event_name != 'pull_request')
         env:
           COMMAND: ${{ needs.plan.outputs.test-command }}

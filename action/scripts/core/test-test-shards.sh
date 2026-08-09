@@ -255,18 +255,26 @@ selection_dir="${tmp}/candidate-selection"
 mkdir -p "${selection_dir}"
 printf '%s\n' '{"review test":"pass"}' > "${selection_dir}/results.json"
 printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review","success":true,"status":"succeeded","exit_code":0,"data":{"test_counts":{"passed":1,"failed":0,"skipped":0,"total":1}}}' > "${selection_dir}/review-test.json"
-GITHUB_ACTION_PATH="${ROOT}" GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" bash "${ROOT}/scripts/core/select-test-baseline.sh"
+GITHUB_ACTION_PATH="${ROOT}" GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" TEST_SHARD_BASELINE_ENABLED=true bash "${ROOT}/scripts/core/select-test-baseline.sh"
 grep -Fx 'baseline-command=' "${selection_dir}/output" >/dev/null || { printf 'FAIL: passing candidate shard result selected a baseline\n'; exit 1; }
 printf '%s\n' '{"review test":"fail"}' > "${selection_dir}/results.json"
 : > "${selection_dir}/output"
-GITHUB_ACTION_PATH="${ROOT}" GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" bash "${ROOT}/scripts/core/select-test-baseline.sh"
-grep -Fx 'baseline-command=review test' "${selection_dir}/output" >/dev/null || { printf 'FAIL: failed candidate shard result did not select its matching baseline command\n'; exit 1; }
+GITHUB_ACTION_PATH="${ROOT}" GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" TEST_SHARD_BASELINE_ENABLED=true bash "${ROOT}/scripts/core/select-test-baseline.sh"
+grep -Fx 'baseline-command=review test' "${selection_dir}/output" >/dev/null || { printf 'FAIL: PR differential candidate failure did not select its matching baseline command\n'; exit 1; }
 printf '%s\n' '{"review test":"timeout"}' > "${selection_dir}/results.json"
 : > "${selection_dir}/output"
-GITHUB_ACTION_PATH="${ROOT}" GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" bash "${ROOT}/scripts/core/select-test-baseline.sh"
+GITHUB_ACTION_PATH="${ROOT}" GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" TEST_SHARD_BASELINE_ENABLED=true bash "${ROOT}/scripts/core/select-test-baseline.sh"
 grep -Fx 'baseline-command=review test' "${selection_dir}/output" >/dev/null || { printf 'FAIL: timed-out candidate shard result did not select its matching baseline command\n'; exit 1; }
+for policy in pr-differential-false pr-baseline-none non-pr; do
+  : > "${selection_dir}/output"
+  GITHUB_ACTION_PATH="${ROOT}" GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" TEST_SHARD_BASELINE_ENABLED=false bash "${ROOT}/scripts/core/select-test-baseline.sh"
+  grep -Fx 'baseline-command=' "${selection_dir}/output" >/dev/null || { printf 'FAIL: %s candidate failure selected a baseline\n' "${policy}"; exit 1; }
+  if RESULTS="$(cat "${selection_dir}/results.json")" COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ROOT}/scripts/core/enforce-final-status.sh" >/dev/null 2>&1; then
+    printf 'FAIL: %s candidate failure was not directly enforced\n' "${policy}"; exit 1
+  fi
+done
 rm "${selection_dir}/review-test.json"
-if GITHUB_ACTION_PATH="${ROOT}" GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" bash "${ROOT}/scripts/core/select-test-baseline.sh" >/dev/null 2>&1; then
+if GITHUB_ACTION_PATH="${ROOT}" GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" TEST_SHARD_BASELINE_ENABLED=true bash "${ROOT}/scripts/core/select-test-baseline.sh" >/dev/null 2>&1; then
   printf 'FAIL: missing canonical candidate shard result selected a baseline\n'; exit 1
 fi
 grep -F 'needs: [binary, plan, candidate-test-result]' "${WORKFLOW}" >/dev/null || { printf 'FAIL: baseline planning does not wait for canonical candidate selection\n'; exit 1; }
