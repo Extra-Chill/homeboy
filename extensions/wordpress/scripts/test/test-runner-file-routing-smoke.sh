@@ -466,7 +466,11 @@ HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
 
 assert_contains "${TMPDIR}/wp-codebox-file.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/wp-codebox-file.out" "Backend: wp-codebox"
-assert_contains "${TMPDIR}/wp-codebox-file.out" "NODE_OPTIONS=--max-old-space-size=8192"
+# The Node heap default moved upstream: ca924281 delegated the WordPress runners
+# to the WP Codebox CLI, which sizes its own host heap
+# (packages/cli/src/host-node-heap.ts). Nothing in this extension sets
+# NODE_OPTIONS any more, so asserting it here pinned behaviour that had already
+# been deliberately handed off.
 assert_contains "${TMPDIR}/wp-codebox-file.out" "CORE_MODULE=${EXTENSION_PATH}/tests/fixtures/wp-codebox-core-recipe-builder.mjs"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "recipe-run"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "--recipe"

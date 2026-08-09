@@ -139,7 +139,10 @@ const mounts = recipe.inputs?.mounts || []
 for (const expected of [
   'plugin-slug=example',
   'test-file=tests/OnlyTest.php',
-  'changed-tests-json=["tests/OnlyTest.php"]',
+  // The changed-file scope is sent sandbox-absolute: WP Codebox normalizes it
+  // against the PHPUnit test root, so a component-relative path never matches a
+  // discovered file. See Extra-Chill/homeboy#12023.
+  'changed-tests-json=["/wordpress/wp-content/plugins/example/tests/OnlyTest.php"]',
   'phpunit-args-json=["tests/OnlyTest.php","--filter","OnlyTest"]',
   'env-json={"HOMEBOY_FLAG":"yes"}',
   'wp-config-defines-json={"WP_DEBUG":true,"CUSTOM_NUMBER":7}',

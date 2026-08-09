@@ -109,10 +109,13 @@ try {
   assert.deepEqual(activated, ['data-machine', 'data-machine-socials'], `unexpected activation set: ${JSON.stringify(options.extra_plugins)}`);
   assert.equal(options.extra_plugins.every((plugin) => plugin.activate === true), true, 'every recipe plugin must be activated');
 
-  // The selected changed PHPUnit files must reach the sandbox as a scope.
+  // The selected changed PHPUnit files must reach the sandbox as a scope, in
+  // sandbox-absolute form. WP Codebox normalizes the scope and the discovered
+  // files against the PHPUnit test root, so a component-relative path can never
+  // match a discovered one. See Extra-Chill/homeboy#12023.
   assert.deepEqual(options.changedTestFiles, [
-    'tests/Unit/Abilities/SocialCommentsAbilityTest.php',
-    'tests/Unit/RestApiRecentCommentsTest.php',
+    '/wordpress/wp-content/plugins/data-machine-socials/tests/Unit/Abilities/SocialCommentsAbilityTest.php',
+    '/wordpress/wp-content/plugins/data-machine-socials/tests/Unit/RestApiRecentCommentsTest.php',
   ], `unexpected changed test scope: ${JSON.stringify(options.changedTestFiles)}`);
 
   const publishedFiles = path.join(invocationArtifacts, 'wp-codebox-phpunit', 'files');
@@ -127,7 +130,15 @@ try {
     { role: 'validation-dependency', slug: 'data-machine' },
     { role: 'target', slug: 'data-machine-socials' },
   ]);
-  assert.deepEqual(diagnosis.scope.changed_test_files, options.changedTestFiles);
+  // The two representations are deliberately different. An operator reading the
+  // diagnosis gets repo-relative paths; the sandbox form is recorded alongside
+  // so the requested-vs-matched arithmetic can be checked against it.
+  assert.deepEqual(diagnosis.scope.changed_test_files, [
+    'tests/Unit/Abilities/SocialCommentsAbilityTest.php',
+    'tests/Unit/RestApiRecentCommentsTest.php',
+  ]);
+  assert.deepEqual(diagnosis.scope.changed_test_files_sandbox, options.changedTestFiles);
+  assert.deepEqual(diagnosis.scope.changed_test_files_untranslated, []);
 
   // Raw PHPUnit output stays directly retrievable from the run evidence.
   const manifest = JSON.parse(await readFile(path.join(invocationArtifacts, 'homeboy-artifact-manifest.json'), 'utf8'));

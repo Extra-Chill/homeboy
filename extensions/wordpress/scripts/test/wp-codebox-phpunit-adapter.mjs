@@ -52,7 +52,11 @@ const dependencies = (await dependencyPaths(settings, [componentPath, pluginSour
   return { source, slug: dependencySlug, sandboxDirectory: sandboxPluginDirectory(dependencySlug), composer: 'install' };
 });
 const selectedTestFile = (process.env.HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE || '').trim();
+// Host-relative form is what an operator reads in the diagnosis and provenance
+// artifacts. The sandbox-absolute form is what WP Codebox can actually match.
+// Keep both, deliberately, and hand each consumer the one it can use.
 const changedTestFiles = phpunitChangedTestFiles();
+const changedTestFileScope = resolveChangedTestFileScope(changedTestFiles);
 // Validation dependencies activate before the plugin under review so the
 // target's own activation hooks observe the topology it declares. The target
 // is activated last and never omitted: an inactive target is excluded from WP
@@ -72,7 +76,7 @@ const options = clean({
   extra_plugins: activationPlan.map(({ role, ...plugin }) => clean({ ...plugin, activate: true })),
   dependencyMounts: [...new Set([sandboxPluginDirectory(slug), ...dependencies.map(({ sandboxDirectory }) => sandboxDirectory)])],
   selectedTestFile,
-  changedTestFiles,
+  changedTestFiles: changedTestFileScope.sandbox,
   testRoot: phpunitProfile.testRoot,
   phpunitXml: phpunitProfile.config,
   cwd: phpunitProfile.cwd,
@@ -349,6 +353,61 @@ function phpunitChangedTestFiles() {
 }
 function canonicalMounts(value) {
   return Array.isArray(value) ? value : [];
+}
+// WP Codebox normalizes the changed-file scope and the discovered test files
+// against the SAME root, and that root is the PHPUnit test root — not the
+// plugin root its parameter name suggests. Its relative-path helper strips that
+// root prefix, and its only fallback looks for a literal '/tests/', which a
+// component-relative path such as `tests/Unit/FooTest.php` does not contain
+// because it has no leading slash.
+//
+// So a discovered `/wordpress/wp-content/plugins/<slug>/tests/Unit/FooTest.php`
+// normalizes to `Unit/FooTest.php` while the requested `tests/Unit/FooTest.php`
+// normalizes to itself, and nothing ever matches: `requested=N matched=0` for
+// every plugin, on every changed-scope run.
+//
+// Sending the sandbox-absolute path is the representation that survives, because
+// the root prefix strip applies to it whatever the configured test root is.
+function resolveChangedTestFileScope(hostRelativeFiles) {
+  const mounts = canonicalMounts(settings.wp_codebox_phpunit_mounts)
+    .filter((mount) => isObject(mount) && typeof mount.source === 'string' && typeof mount.target === 'string')
+    // Longest source first: a nested mount must win over the checkout that
+    // contains it.
+    .sort((left, right) => right.source.length - left.source.length);
+
+  const sandbox = [];
+  const untranslated = [];
+  for (const hostRelative of hostRelativeFiles) {
+    const sandboxPath = sandboxTestPath(hostRelative, mounts);
+    if (sandboxPath === null) {
+      // Never drop the entry: an empty scope is WP Codebox's "run everything"
+      // signal, and a partial scope would silently skip a selected test.
+      // Falling back to the original path keeps it visible to the mismatch
+      // diagnosis instead.
+      untranslated.push(hostRelative);
+      sandbox.push(hostRelative);
+      continue;
+    }
+    sandbox.push(sandboxPath);
+  }
+  return { hostRelative: hostRelativeFiles, sandbox, untranslated };
+}
+function sandboxTestPath(hostRelative, mounts) {
+  const hostAbsolute = path.resolve(componentPath, hostRelative);
+  for (const mount of mounts) {
+    const relativeToMount = path.relative(path.resolve(mount.source), hostAbsolute);
+    if (relativeToMount !== '' && !relativeToMount.startsWith('..') && !path.isAbsolute(relativeToMount)) {
+      return `${mount.target.replace(/\/+$/, '')}/${relativeToMount.split(path.sep).join('/')}`;
+    }
+  }
+  // The plugin mount is implicit: wp_codebox_source_subpath means the component
+  // root and the mounted plugin root are not the same directory, so the subpath
+  // prefix must come off before the sandbox root goes on.
+  const relativeToPlugin = path.relative(pluginSourceDirectory, hostAbsolute);
+  if (relativeToPlugin === '' || relativeToPlugin.startsWith('..') || path.isAbsolute(relativeToPlugin)) {
+    return null;
+  }
+  return `${sandboxPluginDirectory(slug)}/${relativeToPlugin.split(path.sep).join('/')}`;
 }
 function resolveDatabaseService(configuration, environment) {
   const value = configuration.wp_codebox_database_service;
@@ -1051,6 +1110,14 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
       };
     }
     if (scoped && Number(scoped[1]) > 0 && Number(scoped[2]) === 0) {
+      const untranslated = changedTestFileScope.untranslated;
+      if (untranslated.length > 0) {
+        return {
+          cause: 'changed_file_sandbox_path_untranslated',
+          detail: `${untranslated.length} selected path(s) could not be mapped into the sandbox, so the filter could not match them: ${untranslated.slice(0, 10).join(', ')}`,
+          remediation: 'Confirm the selected paths sit under the mounted component (wp_codebox_source_root/wp_codebox_source_subpath) or under a configured wp_codebox_phpunit_mounts entry.',
+        };
+      }
       return {
         cause: 'changed_file_filter_mismatch',
         detail: `The changed-file scope requested ${scoped[1]} file(s) and matched 0 discovered test files.`,
@@ -1081,6 +1148,8 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
     scope: {
       selected_test_file: selectedTestFile || null,
       changed_test_files: changedTestFiles,
+      changed_test_files_sandbox: changedTestFileScope.sandbox,
+      changed_test_files_untranslated: changedTestFileScope.untranslated,
       test_root: phpunitProfile.testRoot,
       phpunit_config: phpunitProfile.config || null,
     },
@@ -1306,7 +1375,7 @@ async function persistRecipeEvidence(artifactDirectory, recipeOptions, generated
     copyFile(generatedRecipePath, path.join(artifactDirectory, 'wp-codebox-phpunit-recipe.json')),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-recipe-options.json'), `${JSON.stringify(recipeOptions, null, 2)}\n`),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-profile.json'), `${JSON.stringify({ wordpress: { topology }, phpunit: { config: profile.config, cwd: profile.cwd, test_root: profile.testRoot, environment: profile.environment, bootstrap_mode: recipeOptions.bootstrapMode, project_bootstrap: recipeOptions.projectBootstrap || null, passthrough_args: recipeOptions.phpunitArgs, extra_mounts: recipeOptions.mounts } }, null, 2)}\n`),
-    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, activation: { order: activationPlan.map(({ role, slug: planSlug }) => ({ role, slug: planSlug, activate: true })) }, scope: { selected_test_file: selectedTestFile || null, changed_test_files: changedTestFiles }, wp_codebox: { cli_bin: wpCodeboxCli, resolved_cli_path: wpCodeboxCli, command: wpCodeboxArgv } }, null, 2)}\n`),
+    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, activation: { order: activationPlan.map(({ role, slug: planSlug }) => ({ role, slug: planSlug, activate: true })) }, scope: { selected_test_file: selectedTestFile || null, changed_test_files: changedTestFiles, changed_test_files_sandbox: changedTestFileScope.sandbox }, wp_codebox: { cli_bin: wpCodeboxCli, resolved_cli_path: wpCodeboxCli, command: wpCodeboxArgv } }, null, 2)}\n`),
   ]);
 }
 function runScript(script, args) {
