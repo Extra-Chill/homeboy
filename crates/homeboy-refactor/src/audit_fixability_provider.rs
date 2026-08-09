@@ -77,3 +77,67 @@ impl AuditFixabilityProvider for RefactorFixabilityProvider {
 pub fn register() {
     register_audit_fixability_provider(Box::new(RefactorFixabilityProvider));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::register;
+    use homeboy_code_audit::{
+        report::compute_fixability, AuditFinding, AuditSummary, CodeAuditResult, Finding, Severity,
+    };
+    use std::fs;
+
+    #[test]
+    fn computes_fixability_through_the_registered_audit_provider() {
+        register();
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        fs::write(
+            root.join("todo.rs"),
+            "// TODO: add helper\npub fn run() {}\n",
+        )
+        .expect("write TODO fixture");
+        let result = CodeAuditResult {
+            component_id: "fixability-test".to_string(),
+            source_path: root.to_string_lossy().to_string(),
+            summary: AuditSummary {
+                files_scanned: 1,
+                conventions_detected: 0,
+                outliers_found: 1,
+                alignment_score: None,
+                files_skipped: 0,
+                warnings: vec![],
+            },
+            conventions: vec![],
+            directory_conventions: vec![],
+            findings: vec![Finding {
+                convention: "comment_hygiene".to_string(),
+                severity: Severity::Info,
+                file: "todo.rs".to_string(),
+                description: "Comment marker 'TODO' found on line 1: TODO: add helper".to_string(),
+                suggestion: "Resolve the TODO".to_string(),
+                kind: AuditFinding::TodoMarker,
+                line: None,
+            }],
+            duplicate_groups: vec![],
+        };
+        let fixability = compute_fixability(&result).unwrap_or_else(|| {
+            panic!(
+                "registered fixability provider should produce a plan; audit findings: {:#?}",
+                result.findings
+            )
+        });
+
+        assert_eq!(fixability.fixable_count, 1);
+        assert_eq!(fixability.automated_count, 0);
+        assert_eq!(fixability.manual_only_count, 1);
+        assert_eq!(fixability.by_kind.len(), 1);
+        let todo_marker = fixability
+            .by_kind
+            .get("todo_marker")
+            .expect("fixability summary should include the TODO marker");
+        assert_eq!(todo_marker.total, 1);
+        assert_eq!(todo_marker.automated, 0);
+        assert_eq!(todo_marker.manual_only, 1);
+    }
+}

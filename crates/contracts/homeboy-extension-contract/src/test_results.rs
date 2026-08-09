@@ -34,6 +34,10 @@ pub struct TestCommandOutput {
     pub failure: Option<PhaseFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_counts: Option<TestCounts>,
+    /// Positive evidence emitted by an inventory-only test run. This replaces
+    /// execution counts only for that explicit mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_inventory: Option<TestInventoryOutput>,
     /// Duration facts for this phase. Deliberately separate from `findings`:
     /// those drive failure classification, and a slow test is not a failing
     /// test. `None` when nothing could be measured — never a zeroed block.
@@ -85,6 +89,8 @@ pub struct TestRunWorkflowResult {
     pub runner_exit_code: Option<i32>,
     pub test_counts: Option<TestCounts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_inventory: Option<TestInventoryOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_durations: Option<TestDurations>,
     pub findings: Option<Vec<HomeboyFinding>>,
     #[serde(skip)]
@@ -102,6 +108,17 @@ pub struct TestRunWorkflowResult {
     pub raw_output: Option<RawTestOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
+}
+
+/// Validated inventory-only test evidence from a supervised extension child.
+#[derive(Debug, Clone, Serialize)]
+pub struct TestInventoryOutput {
+    pub schema: String,
+    pub runner: String,
+    pub runner_fingerprint: String,
+    pub workspace_fingerprint: String,
+    pub test_count: usize,
+    pub inventory_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -88,6 +88,7 @@ pub fn from_main_workflow_with_ci_context(
             phase,
             failure,
             test_counts: result.test_counts,
+            test_inventory: result.test_inventory,
             // Carried through untouched. `test_phase_report` and
             // `test_phase_failure` below never read it: a slow suite must not
             // be able to change the phase verdict in either direction. (#10655)
@@ -123,6 +124,7 @@ pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i
             phase: None,
             failure: None,
             test_counts: None,
+            test_inventory: None,
             test_durations: None,
             findings: None,
             coverage: None,
@@ -167,6 +169,7 @@ pub fn from_auto_fix_drift_workflow(
             phase: None,
             failure: None,
             test_counts: None,
+            test_inventory: None,
             test_durations: None,
             findings: None,
             coverage: None,
@@ -312,6 +315,7 @@ mod tests {
             exit_code: 1,
             runner_exit_code: None,
             test_counts: Some(TestCounts::new(3, 1, 2, 0)),
+            test_inventory: None,
             test_durations: None,
             findings,
             failure_analysis_input: None,
@@ -334,6 +338,7 @@ mod tests {
             exit_code,
             runner_exit_code: None,
             test_counts: Some(counts),
+            test_inventory: None,
             test_durations: None,
             findings: None,
             failure_analysis_input: None,
@@ -356,6 +361,7 @@ mod tests {
             exit_code: 0,
             runner_exit_code: None,
             test_counts: Some(TestCounts::new(0, 0, 0, 0)),
+            test_inventory: None,
             test_durations: None,
             findings: None,
             failure_analysis_input: None,
@@ -369,6 +375,35 @@ mod tests {
             raw_output: None,
             extension_phase_timings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn serializes_validated_inventory_mode_success() {
+        let mut workflow = workflow_result(None);
+        workflow.status = "passed".to_string();
+        workflow.exit_code = 0;
+        workflow.runner_exit_code = Some(0);
+        workflow.test_counts = None;
+        workflow.test_inventory = Some(
+            homeboy_extension_contract::test_results::TestInventoryOutput {
+                schema: "homeboy/test-inventory/v1".to_string(),
+                runner: "nextest".to_string(),
+                runner_fingerprint: "a".repeat(64),
+                workspace_fingerprint: "b".repeat(64),
+                test_count: 4,
+                inventory_fingerprint: "c".repeat(64),
+            },
+        );
+
+        let (output, exit_code) = from_main_workflow(workflow);
+        let rendered = serde_json::to_value(output).expect("inventory output serializes");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            rendered["test_inventory"]["schema"],
+            "homeboy/test-inventory/v1"
+        );
+        assert_eq!(rendered["test_inventory"]["test_count"], 4);
     }
 
     #[test]
