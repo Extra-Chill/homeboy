@@ -76,7 +76,15 @@ homeboy_runner_harness_mktemp() {
 homeboy_runner_harness_temp_root() {
     local tmpdir="${HOMEBOY_CACHE_DIR:-${TMPDIR:-/tmp}}"
     [ -d "$tmpdir" ] && [ -w "$tmpdir" ] || return 1
-    (cd "$tmpdir" && pwd -P)
+    local root
+    root="$(cd "$tmpdir" && pwd -P)" || return 1
+    case "$root" in *$'\t'*|*$'\n'*) return 1 ;; esac
+    printf '%s\n' "$root"
+}
+
+homeboy_runner_harness_path_is_serializable() {
+    local path="$1"
+    case "$path" in *$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
 }
 
 homeboy_runner_harness_append_exit_trap() {
@@ -97,7 +105,16 @@ homeboy_runner_harness_register_owned_directory() {
 
 homeboy_runner_harness_directory_identity() {
     local path="$1"
-    stat -f '%d:%i' "$path" 2>/dev/null || stat -c '%d:%i' "$path" 2>/dev/null
+    python3 - "$path" <<'PY'
+import os
+import stat
+import sys
+
+entry = os.lstat(sys.argv[1])
+if not stat.S_ISDIR(entry.st_mode):
+    raise SystemExit(1)
+print(f"{entry.st_dev}:{entry.st_ino}")
+PY
 }
 
 homeboy_runner_harness_is_owned_directory() {
@@ -123,6 +140,10 @@ homeboy_runner_harness_register_cleanup() {
     local path="$1"
     local kind="${2:-file}"
     [ -n "$path" ] || return 0
+    if ! homeboy_runner_harness_path_is_serializable "$path"; then
+        echo "homeboy_runner_harness_register_cleanup: refusing control character in path" >&2
+        return 2
+    fi
     case "$kind" in
         file) ;;
         directory)
@@ -149,9 +170,16 @@ homeboy_runner_harness_temp() {
     local __var_name="$1"
     local template="${2:-homeboy-runner.XXXXXX}"
     local __tmp
+    if ! homeboy_runner_harness_path_is_serializable "$template"; then
+        echo "homeboy_runner_harness_temp: refusing control character in template" >&2
+        return 2
+    fi
     __tmp="$(homeboy_runner_harness_mktemp "$template")"
     printf -v "$__var_name" '%s' "$__tmp"
-    homeboy_runner_harness_register_cleanup "$__tmp"
+    if ! homeboy_runner_harness_register_cleanup "$__tmp"; then
+        rm -f -- "$__tmp"
+        return 1
+    fi
 }
 
 homeboy_runner_harness_temp_dir() {
@@ -160,6 +188,7 @@ homeboy_runner_harness_temp_dir() {
     local __tmp
     local root
     root="$(homeboy_runner_harness_temp_root)" || return 1
+    homeboy_runner_harness_path_is_serializable "$template" || return 2
     case "$template" in homeboy-runner.XXXXXX) ;; *) return 2 ;; esac
     __tmp="$(mktemp -d "${root}/${template}")" || return 1
     printf -v "$__var_name" '%s' "$__tmp"

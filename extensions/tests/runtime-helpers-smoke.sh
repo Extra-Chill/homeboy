@@ -283,6 +283,40 @@ HOMEBOY_CACHE_DIR="$HARNESS_REPLACEMENT_ROOT" bash -c '
     [ -L "$LINKED" ] && [ -d "$2/original-link" ]
 ' _ "$RUNNER_HARNESS_HELPER" "$HARNESS_REPLACEMENT_ROOT"
 
+GNU_STAT_BIN="$TMP_DIR/gnu-stat-bin"
+GNU_STAT_ROOT="$TMP_DIR/gnu-stat-root"
+mkdir -p "$GNU_STAT_BIN" "$GNU_STAT_ROOT"
+cat > "$GNU_STAT_BIN/stat" <<'EOF'
+#!/usr/bin/env bash
+# GNU stat accepts -f but emits filesystem data, not device/inode identity.
+printf 'filesystem-data\n'
+EOF
+chmod +x "$GNU_STAT_BIN/stat"
+PATH="$GNU_STAT_BIN:$PATH" HOMEBOY_CACHE_DIR="$GNU_STAT_ROOT" bash -c '
+    source "$1"
+    homeboy_runner_harness_temp_dir OWNED
+    homeboy_runner_harness_cleanup_path directory "$OWNED"
+    [ ! -e "$OWNED" ]
+' _ "$RUNNER_HARNESS_HELPER"
+
+HARNESS_SERIALIZATION_ROOT="$TMP_DIR/harness-serialization-root"
+HARNESS_UNRELATED_FILE="$TMP_DIR/harness-unrelated-file"
+mkdir -p "$HARNESS_SERIALIZATION_ROOT"
+printf 'retain\n' > "$HARNESS_UNRELATED_FILE"
+HOMEBOY_CACHE_DIR="$HARNESS_SERIALIZATION_ROOT" bash -c '
+    source "$1"
+    unsafe_path="$2/unsafe"$'"'"'\tfile\nfile'"'"'
+    : > "$unsafe_path"
+    ! homeboy_runner_harness_register_cleanup "$unsafe_path"
+    ! homeboy_runner_harness_temp BAD_TEMPLATE $'"'"'homeboy-runner.\tXXXXXX'"'"'
+    homeboy_runner_harness_temp SPACE_TEMPLATE "homeboy runner.XXXXXX"
+    [ -f "$SPACE_TEMPLATE" ]
+    homeboy_runner_harness_cleanup
+    [ ! -e "$SPACE_TEMPLATE" ]
+    [ -e "$unsafe_path" ]
+' _ "$RUNNER_HARNESS_HELPER" "$HARNESS_SERIALIZATION_ROOT"
+[ -e "$HARNESS_UNRELATED_FILE" ] || { echo "Unexpected cleanup removed unrelated file" >&2; exit 1; }
+
 python3 - "$ROOT_DIR" <<'PY'
 import pathlib
 import re
