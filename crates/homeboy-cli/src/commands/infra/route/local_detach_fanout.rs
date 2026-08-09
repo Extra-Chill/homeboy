@@ -339,7 +339,8 @@ fn detached_fanout_child_args(
     fanout_id: &str,
     pin_fanout_id: bool,
 ) -> Vec<String> {
-    let mut args: Vec<String> = normalized_args
+    let owned_args = crate::command_capability::homeboy_owned_args(normalized_args);
+    let mut args: Vec<String> = owned_args
         .iter()
         .skip(1)
         .filter(|arg| {
@@ -351,6 +352,7 @@ fn detached_fanout_child_args(
         args.push("--fanout-id".to_string());
         args.push(fanout_id.to_string());
     }
+    args.extend(normalized_args.iter().skip(owned_args.len()).cloned());
     args
 }
 
@@ -414,6 +416,7 @@ fn materialize_plan_from(
 /// Both spellings clap accepts are covered: a separated `--input -` names the
 /// following element, an attached `--input=-` names itself.
 fn stdin_input_index(args: &[String]) -> Option<usize> {
+    let args = crate::command_capability::homeboy_owned_args(args);
     args.iter().enumerate().find_map(|(index, arg)| {
         if arg == "--input" && args.get(index + 1).is_some_and(|value| value == "-") {
             Some(index + 1)
@@ -868,6 +871,36 @@ mod tests {
         assert_eq!(args[args.len() - 1], "wave-9");
     }
 
+    #[test]
+    fn the_child_argv_preserves_forwarded_detach_named_arguments() {
+        let normalized = [
+            "homeboy",
+            "--detach-after-handoff",
+            "agent-task",
+            "fanout",
+            "run-plan",
+            "--input",
+            "@plan.json",
+            "--",
+            "--detach-after-handoff",
+        ]
+        .map(str::to_string);
+        let args = detached_fanout_child_args(&normalized, "wave-9", false);
+
+        assert_eq!(
+            args,
+            [
+                "agent-task",
+                "fanout",
+                "run-plan",
+                "--input",
+                "@plan.json",
+                "--",
+                "--detach-after-handoff",
+            ]
+        );
+    }
+
     /// An operator who named the wave must not get a second, contradictory id.
     #[test]
     fn an_already_named_wave_is_not_re_pinned() {
@@ -917,6 +950,27 @@ mod tests {
             );
             assert!(!args.iter().any(|arg| arg == "-"), "{args:?}");
         }
+    }
+
+    #[test]
+    fn a_forwarded_input_flag_is_not_materialized() {
+        let session = tempfile::tempdir().expect("temp session root");
+        let mut args = vec![
+            "fanout".to_string(),
+            "--input".to_string(),
+            "@plan.json".to_string(),
+            "--".to_string(),
+            "--input".to_string(),
+            "-".to_string(),
+        ];
+        let mut source = std::io::Cursor::new(br#"{"schema":"x"}"#.to_vec());
+
+        assert_eq!(
+            materialize_plan_from(&mut args, session.path(), &mut source)
+                .expect("forwarded input does not need materialization"),
+            None
+        );
+        assert_eq!(args[4..], ["--input", "-"]);
     }
 
     /// An argv with no stdin plan must be left exactly alone.

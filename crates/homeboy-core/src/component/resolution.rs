@@ -78,6 +78,73 @@ pub struct ResolvedTarget {
     pub synthetic: bool,
 }
 
+/// Classify a filesystem target against persisted component primary checkouts.
+///
+/// This intentionally recognizes only an exact registered primary as a usable
+/// identity. Related checkouts are returned as candidates so callers that need
+/// a primary-owned operation can reject worktrees and adopted clones before
+/// they derive or mutate child resources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegisteredPrimaryPathResolution {
+    Primary(String),
+    Related(Vec<String>),
+    Unknown,
+}
+
+/// Resolve a path to a registered primary component identity.
+///
+/// A path must canonicalize and exactly equal a registered `local_path` to
+/// resolve as [`RegisteredPrimaryPathResolution::Primary`]. A checkout sharing
+/// a git common directory, the conventional component-worktree name, or its
+/// origin URL is related but not a primary.
+pub fn resolve_registered_primary_path(input: &str) -> Result<RegisteredPrimaryPathResolution> {
+    let expanded = shellexpand::tilde(input);
+    let path = Path::new(expanded.as_ref()).canonicalize();
+    let Ok(path) = path else {
+        return Ok(RegisteredPrimaryPathResolution::Unknown);
+    };
+    let components = crate::component::registered()?;
+    let mut primary = Vec::new();
+    let mut related = Vec::new();
+    let input_remote = crate::git::remote_origin_url(&path);
+
+    for component in components {
+        let registered_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
+        let Ok(registered_path) = registered_path.canonicalize() else {
+            continue;
+        };
+        if registered_path == path {
+            primary.push(component.id);
+            continue;
+        }
+
+        let remote_matches = input_remote.is_some()
+            && input_remote == crate::git::remote_origin_url(&registered_path);
+        if same_git_common_dir(&registered_path, &path)
+            || is_named_component_worktree(&component.id, &registered_path, &path)
+            || remote_matches
+        {
+            related.push(component.id);
+        }
+    }
+
+    primary.sort();
+    primary.dedup();
+    if primary.len() == 1 {
+        return Ok(RegisteredPrimaryPathResolution::Primary(primary.remove(0)));
+    }
+    if !primary.is_empty() {
+        return Ok(RegisteredPrimaryPathResolution::Related(primary));
+    }
+    related.sort();
+    related.dedup();
+    if related.is_empty() {
+        Ok(RegisteredPrimaryPathResolution::Unknown)
+    } else {
+        Ok(RegisteredPrimaryPathResolution::Related(related))
+    }
+}
+
 fn resolved_target_from_component(mut component: Component, synthetic: bool) -> ResolvedTarget {
     let source_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
     let git_root = detect_git_root(&source_path);
@@ -1181,6 +1248,67 @@ mod tests {
                 worktree.to_str().expect("worktree path"),
             ],
         );
+    }
+
+    #[test]
+    fn registered_primary_path_resolution_is_exact_and_canonical() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("fixture root");
+            let primary = root.path().join("primary");
+            let link = root.path().join("primary-link");
+            fs::create_dir(&primary).expect("primary directory");
+            write_standalone_registration(home.path(), "fixture", &primary);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&primary, &link).expect("primary symlink");
+
+            let provided = if cfg!(unix) { &link } else { &primary };
+            assert_eq!(
+                resolve_registered_primary_path(provided.to_str().expect("path"))
+                    .expect("resolve primary"),
+                RegisteredPrimaryPathResolution::Primary("fixture".to_string())
+            );
+            assert_eq!(
+                resolve_registered_primary_path(
+                    root.path().join("unknown").to_str().expect("path")
+                )
+                .expect("resolve unknown"),
+                RegisteredPrimaryPathResolution::Unknown
+            );
+        });
+    }
+
+    #[test]
+    fn registered_primary_path_resolution_rejects_related_and_ambiguous_checkouts() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("fixture root");
+            let primary_a = root.path().join("primary-a");
+            let primary_b = root.path().join("primary-b");
+            let adopted = root.path().join("adopted");
+            for path in [&primary_a, &primary_b, &adopted] {
+                fs::create_dir(path).expect("checkout directory");
+                git(path, &["init"]);
+                git(
+                    path,
+                    &[
+                        "remote",
+                        "add",
+                        "origin",
+                        "https://example.test/org/fixture.git",
+                    ],
+                );
+            }
+            write_standalone_registration(home.path(), "fixture-a", &primary_a);
+            write_standalone_registration(home.path(), "fixture-b", &primary_b);
+
+            assert_eq!(
+                resolve_registered_primary_path(adopted.to_str().expect("path"))
+                    .expect("resolve related checkout"),
+                RegisteredPrimaryPathResolution::Related(vec![
+                    "fixture-a".to_string(),
+                    "fixture-b".to_string(),
+                ])
+            );
+        });
     }
 
     #[test]

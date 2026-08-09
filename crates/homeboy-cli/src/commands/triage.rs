@@ -366,12 +366,11 @@ mod tests {
         assert_eq!(default.args.poll_interval, "60s");
     }
 
-    /// The two spellings are one argument, not two: supplying both is a
-    /// duplicate value for the same id, and the last one wins rather than
-    /// silently producing two independent intervals.
+    /// The published alias is one argument: the canonical spelling takes the
+    /// value, while a duplicate spelling is rejected by Clap.
     #[test]
     fn watch_interval_spellings_are_one_argument() {
-        let cli = TestCli::try_parse_from([
+        let result = TestCli::try_parse_from([
             "triage",
             "--watch",
             "Extra-Chill/homeboy#2238",
@@ -379,9 +378,12 @@ mod tests {
             "30s",
             "--interval",
             "45s",
-        ])
-        .expect("both spellings parse");
-        assert_eq!(cli.args.poll_interval, "45s");
+        ]);
+        assert!(result.is_err(), "duplicate spellings must be rejected");
+        assert_eq!(
+            result.err().expect("duplicate spelling error").kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        );
     }
 
     #[test]

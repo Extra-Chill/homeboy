@@ -631,7 +631,7 @@ mod tests {
         let ctx = resolve(&options).expect("resolve should succeed");
 
         assert_eq!(ctx.component_id, "test-comp");
-        assert_eq!(ctx.source_path, root);
+        assert_eq!(ctx.source_path, root.canonicalize().unwrap());
         assert!(ctx.extension_id.is_none());
     }
 

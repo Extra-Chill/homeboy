@@ -61,10 +61,17 @@ pub fn route_after_parse_with_provenance(
     // means on every placement (#11476). This is evaluated before the
     // runner-side bail-out because the request needs a verdict — detach here,
     // or an explicit rejection there — in both contexts.
-    if let Some(exit_code) =
-        local_detach::intercept_local_detached_cook(cli, normalized_args, runner_side)?
-    {
-        return Ok(Some(exit_code));
+    if runner_side || cli.placement == homeboy::cli_surface::Placement::Local {
+        if let Some(exit_code) = local_detach::intercept_local_detached_cook(
+            cli,
+            normalized_args,
+            output_file,
+            runner_side,
+            Some("local"),
+            None,
+        )? {
+            return Ok(Some(exit_code));
+        }
     }
 
     // A locally-placed fanout wave asking to detach gets the same verdict, for
@@ -260,6 +267,27 @@ pub fn route_after_parse_with_provenance(
         lab_readiness.as_ref(),
     ) {
         return Err(error);
+    }
+
+    // Non-local detached Cooks must pass runner selection before the launcher
+    // can acknowledge them. Lab-or-local may fall back here explicitly; auto
+    // without a runner remains subject to Cook's existing rejection below.
+    if inferred_runner_id.is_some() || cli.placement.allows_local_fallback() {
+        let provider_placement = if inferred_runner_id.is_some() {
+            "lab"
+        } else {
+            "local"
+        };
+        if let Some(exit_code) = local_detach::intercept_local_detached_cook(
+            cli,
+            &normalized_args,
+            output_file,
+            false,
+            Some(provider_placement),
+            inferred_runner_id.as_deref(),
+        )? {
+            return Ok(Some(exit_code));
+        }
     }
 
     if let Some(exit_code) = run_split_placement_cook(

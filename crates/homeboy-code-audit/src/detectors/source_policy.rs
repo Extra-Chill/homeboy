@@ -745,6 +745,7 @@ fn dispatch() {
         // pin that, because term additions inherit whichever policy they join.
         let mut rule = rule();
         rule.ignore_line_prefixes = Vec::new();
+        rule.scan_comments = true;
         let fp = rust_fp("src/core/comment.rs", "// florpstack example");
 
         let findings = run(&[&fp], &[rule]);

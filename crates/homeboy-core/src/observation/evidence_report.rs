@@ -227,13 +227,22 @@ pub struct EvidenceHomeboyProvenance {
 #[derive(Serialize)]
 pub struct EvidenceHomeboyIdentity {
     pub role: &'static str,
+    pub state: &'static str,
     pub owner: &'static str,
     pub source: &'static str,
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_commands: Vec<String>,
     pub purpose: &'static str,
 }
 
@@ -437,25 +446,79 @@ pub fn evidence_metadata(metadata: &Value) -> EvidenceMetadata {
 fn evidence_homeboy_provenance(run: &RunRecord) -> EvidenceHomeboyProvenance {
     let mut identities = vec![EvidenceHomeboyIdentity {
         role: "observation_run_binary",
+        state: if run.homeboy_version.is_some() {
+            "observed"
+        } else {
+            "unobserved"
+        },
         owner: "command_process_that_started_this_observation_run",
         source: "run.homeboy_version",
         version: run.homeboy_version.clone(),
+        build_identity: None,
+        binary_path: None,
+        unavailable_reason: run.homeboy_version.is_none().then_some(
+            "the process that created this observation did not record its Homeboy version",
+        ),
         runner_id: None,
         runner_job_id: None,
-        purpose: "Version recorded by the Homeboy process that created this observation run; in runner workflows this is the child command/run binary, not proof of the controller CLI, active daemon, or configured runner job binary.",
+        evidence_commands: Vec::new(),
+        purpose: "Version recorded by the Homeboy process that created this observation run. For generic runner-exec evidence this is the controller-created observation record, not the executed child command.",
     }];
 
+    if let Some(provenance) = runner_execution_provenance(&run.metadata_json) {
+        identities.extend([
+            evidence_binary_identity(
+                "controller_cli",
+                "controller_dispatch",
+                "metadata.runner_execution_record.orchestration_provenance.controller_binary",
+                &provenance.controller_binary,
+                "Homeboy CLI that submitted this runner execution.",
+            ),
+            evidence_binary_identity(
+                "active_daemon",
+                "runner_daemon_session",
+                "metadata.runner_execution_record.orchestration_provenance.runner_daemon_binary",
+                &provenance.runner_daemon_binary,
+                "Active runner daemon observed when this execution was dispatched.",
+            ),
+            evidence_binary_identity(
+                "configured_job_binary",
+                "runner_configuration",
+                "metadata.runner_execution_record.orchestration_provenance.runner_command_binary",
+                &provenance.runner_command_binary,
+                "Configured Homeboy binary for runner job commands; this is distinct from the daemon binary.",
+            ),
+        ]);
+    }
+
     if let Some((runner_id, runner_job_id, source)) = runner_job_context(&run.metadata_json) {
+        let evidence_commands = runner_job_id
+            .as_deref()
+            .map(|job_id| {
+                vec![
+                    format!("homeboy runner job logs {runner_id} {job_id}"),
+                    format!("homeboy runner job logs {runner_id} {job_id} --json"),
+                ]
+            })
+            .unwrap_or_default();
         identities.push(EvidenceHomeboyIdentity {
             role: "runner_job_handoff",
+            state: "unobserved",
             owner: "runner_broker_or_lab_offload",
             source,
             version: None,
+            build_identity: None,
+            binary_path: None,
+            unavailable_reason: Some(
+                "runner handoff identifies a job, not a Homeboy executable; inspect the linked job evidence",
+            ),
             runner_id: Some(runner_id),
             runner_job_id,
+            evidence_commands,
             purpose: "Runner job context associated with this observation run. Use runner status/job logs to compare controller_cli, active_daemon, and configured_job_binary identities for the same runner.",
         });
     }
+    identities.push(executed_child_homeboy_identity(&run.metadata_json));
 
     let warnings = if identities
         .iter()
@@ -473,7 +536,112 @@ fn evidence_homeboy_provenance(run: &RunRecord) -> EvidenceHomeboyProvenance {
     }
 }
 
+fn runner_execution_provenance(
+    metadata: &Value,
+) -> Option<crate::runner_execution_envelope::OrchestrationTargetProvenance> {
+    serde_json::from_value(
+        metadata
+            .get("runner_execution_record")?
+            .get("orchestration_provenance")?
+            .clone(),
+    )
+    .ok()
+}
+
+fn evidence_binary_identity(
+    role: &'static str,
+    owner: &'static str,
+    source: &'static str,
+    binary: &crate::runner_execution_envelope::BinaryProvenance,
+    purpose: &'static str,
+) -> EvidenceHomeboyIdentity {
+    let unavailable_reason = match (&binary.version, &binary.build_identity) {
+        (Some(_), _) | (_, Some(_)) => None,
+        _ if binary.path.is_some() => {
+            Some("the binary path was recorded, but its Homeboy version was not observed")
+        }
+        _ => Some("this execution did not observe an identity for this binary"),
+    };
+    EvidenceHomeboyIdentity {
+        role,
+        state: if unavailable_reason.is_some() {
+            "unobserved"
+        } else {
+            "observed"
+        },
+        owner,
+        source,
+        version: binary.version.clone(),
+        build_identity: binary.build_identity.clone(),
+        binary_path: binary.path.clone(),
+        unavailable_reason,
+        runner_id: None,
+        runner_job_id: None,
+        evidence_commands: Vec::new(),
+        purpose,
+    }
+}
+
+fn executed_child_homeboy_identity(metadata: &Value) -> EvidenceHomeboyIdentity {
+    let Some(command) = metadata.get("remote_command").and_then(Value::as_array) else {
+        return EvidenceHomeboyIdentity {
+            role: "executed_child_homeboy",
+            state: "unobserved",
+            owner: "runner_child_process",
+            source: "metadata.remote_command",
+            version: None,
+            build_identity: None,
+            binary_path: None,
+            unavailable_reason: Some(
+                "the runner command was not recorded, so child applicability is unknown",
+            ),
+            runner_id: None,
+            runner_job_id: None,
+            evidence_commands: Vec::new(),
+            purpose: "Exact Homeboy identity of the command executed by the runner child.",
+        };
+    };
+    let is_homeboy = command
+        .first()
+        .and_then(Value::as_str)
+        .and_then(|command| std::path::Path::new(command).file_name())
+        .and_then(|name| name.to_str())
+        == Some("homeboy");
+    let descendant_command = metadata
+        .get("descendant_run_evidence")
+        .and_then(Value::as_array)
+        .and_then(|references| references.first())
+        .and_then(|reference| reference.get("run_id"))
+        .and_then(Value::as_str)
+        .map(|run_id| format!("homeboy runs evidence {run_id}"));
+    EvidenceHomeboyIdentity {
+        role: "executed_child_homeboy",
+        state: if is_homeboy { "unobserved" } else { "inapplicable" },
+        owner: "runner_child_process",
+        source: "metadata.remote_command",
+        version: None,
+        build_identity: None,
+        binary_path: None,
+        unavailable_reason: if is_homeboy {
+            Some("the runner did not attest the executed child Homeboy identity")
+        } else {
+            Some("the recorded runner command is not a Homeboy executable")
+        },
+        runner_id: None,
+        runner_job_id: None,
+        evidence_commands: descendant_command.into_iter().collect(),
+        purpose: "Exact Homeboy identity of the command executed by the runner child. Nested Homeboy runs link to their durable child evidence when available.",
+    }
+}
+
 fn runner_job_context(metadata: &Value) -> Option<(String, Option<String>, &'static str)> {
+    if let Some(runner_id) = string_field(metadata, "runner_id") {
+        return Some((
+            runner_id,
+            string_field(metadata, "runner_job_id"),
+            "metadata.runner_id",
+        ));
+    }
     if let Some(lab_offload) = metadata.get("lab_offload") {
         if let Some(runner_id) = string_field(lab_offload, "runner_id") {
             return Some((
@@ -1251,6 +1419,86 @@ mod tests {
             command: Some("homeboy trace".to_string()),
             homeboy_version: Some("test-version".to_string()),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn runner_exec_provenance_distinguishes_job_linkage_and_child_applicability() {
+        let cases = [
+            (
+                "generic daemon",
+                serde_json::json!({
+                    "runner_id": "lab", "runner_job_id": "job-1",
+                    "remote_command": ["cargo", "test"]
+                }),
+                Some("homeboy runner job logs lab job-1"),
+                "inapplicable",
+            ),
+            (
+                "failed before spawn",
+                serde_json::json!({
+                    "runner_id": "lab", "remote_command": ["homeboy", "bench"]
+                }),
+                None,
+                "unobserved",
+            ),
+            (
+                "diagnostic ssh",
+                serde_json::json!({ "remote_command": ["node", "fuzz.mjs"] }),
+                None,
+                "inapplicable",
+            ),
+            (
+                "local",
+                serde_json::json!({ "remote_command": ["cargo", "test"] }),
+                None,
+                "inapplicable",
+            ),
+            (
+                "nested homeboy",
+                serde_json::json!({
+                    "remote_command": ["/opt/homeboy", "runs", "list"],
+                    "descendant_run_evidence": [{ "run_id": "nested-run" }]
+                }),
+                None,
+                "unobserved",
+            ),
+        ];
+
+        for (name, metadata_json, expected_job_command, expected_child_state) in cases {
+            let mut run = sample_run();
+            run.metadata_json = metadata_json;
+            let provenance = evidence_homeboy_provenance(&run);
+            let observation = provenance
+                .identities
+                .iter()
+                .find(|identity| identity.role == "observation_run_binary")
+                .expect("observation identity");
+            assert_eq!(observation.state, "observed", "{name}");
+            assert!(observation.purpose.contains("controller-created"), "{name}");
+            let child = provenance
+                .identities
+                .iter()
+                .find(|identity| identity.role == "executed_child_homeboy")
+                .expect("child identity");
+            assert_eq!(child.state, expected_child_state, "{name}");
+            let handoff = provenance
+                .identities
+                .iter()
+                .find(|identity| identity.role == "runner_job_handoff");
+            assert_eq!(
+                handoff
+                    .and_then(|identity| identity.evidence_commands.first())
+                    .map(String::as_str),
+                expected_job_command,
+                "{name}"
+            );
+            if name == "nested homeboy" {
+                assert_eq!(
+                    child.evidence_commands,
+                    ["homeboy runs evidence nested-run"]
+                );
+            }
         }
     }
 

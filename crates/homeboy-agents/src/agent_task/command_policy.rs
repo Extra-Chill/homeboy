@@ -301,19 +301,56 @@ fn bounded_command(command: &str) -> String {
     format!("{}…", &trimmed[..end])
 }
 
-/// Split a command line into comparison tokens. Shell control characters are
-/// treated as separators so an operator's `cargo build` pattern is not defeated
-/// by `make deps && cargo build`.
-pub(crate) fn tokenize_command(command: &str) -> Vec<&str> {
-    command
-        .split(|ch: char| {
-            ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '(' | ')' | '{' | '}')
-        })
-        .filter(|token| !token.is_empty())
-        .collect()
+/// Split a command line into normalized comparison tokens. Shell control
+/// characters are separators outside quotes, while quoted whitespace remains
+/// part of its assignment or argument token.
+pub(crate) fn tokenize_command(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for character in command.chars() {
+        if escaped {
+            token.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+                continue;
+            }
+            if quote.is_none() {
+                quote = Some(character);
+                continue;
+            }
+        }
+        if quote.is_none()
+            && (character.is_whitespace()
+                || matches!(character, ';' | '|' | '&' | '(' | ')' | '{' | '}'))
+        {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+            continue;
+        }
+        token.push(character);
+    }
+    if escaped {
+        token.push('\\');
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
 }
 
-fn rule_matches(pattern: &str, tokens: &[&str]) -> bool {
+fn rule_matches(pattern: &str, tokens: &[String]) -> bool {
     let pattern_tokens = tokenize_command(pattern);
     if pattern_tokens.is_empty() {
         return false;
@@ -321,10 +358,10 @@ fn rule_matches(pattern: &str, tokens: &[&str]) -> bool {
     (0..tokens.len()).any(|start| match_at(&pattern_tokens, &tokens[start..]))
 }
 
-fn match_at(pattern: &[&str], tokens: &[&str]) -> bool {
+fn match_at(pattern: &[String], tokens: &[String]) -> bool {
     match pattern.split_first() {
         None => true,
-        Some((first, rest)) if *first == "**" => {
+        Some((first, rest)) if first == "**" => {
             (0..=tokens.len()).any(|skip| match_at(rest, &tokens[skip..]))
         }
         Some((first, rest)) => match tokens.split_first() {
@@ -610,6 +647,14 @@ mod tests {
         assert_eq!(
             tokenize_command("a && b | c;d (e)"),
             vec!["a", "b", "c", "d", "e"]
+        );
+    }
+
+    #[test]
+    fn tokenizer_preserves_quoted_assignment_values() {
+        assert_eq!(
+            tokenize_command(r#"RUSTFLAGS="-D warnings" cargo test"#),
+            vec!["RUSTFLAGS=-D warnings", "cargo", "test"]
         );
     }
 }

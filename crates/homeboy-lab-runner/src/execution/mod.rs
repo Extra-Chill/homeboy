@@ -131,6 +131,7 @@ pub use recovery::{
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
     run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
     schedule_terminal_runner_exec_recovery, RunnerExecRecoveryChildSchedule,
+    RunnerExecRecoveryDiagnostic,
 };
 
 /// Retire a completed direct daemon generation only after controller-owned
@@ -195,9 +196,29 @@ pub(crate) fn resolve_provider_env_with_execution_context(
     execution_context: &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
     provider_ids: &[String],
     cwd: &std::path::Path,
-    env: &[(String, String)],
+    env: &HashMap<String, String>,
+    explicit_run_id: Option<&str>,
 ) -> Result<Vec<homeboy_extension::EnvProviderContribution>> {
-    homeboy_extension::resolve_installed_env_providers(execution_context, provider_ids, cwd, env)
+    let env = provider_resolution_env(env, explicit_run_id);
+    homeboy_extension::resolve_installed_env_providers(execution_context, provider_ids, cwd, &env)
+}
+
+/// Environment visible to extension providers before they contribute their
+/// values. An explicit `runner exec --run-id` owns these names, so providers may
+/// report them without conflicting with a request value; the runner reapplies
+/// its authoritative values after every contribution is merged.
+fn provider_resolution_env(
+    env: &HashMap<String, String>,
+    explicit_run_id: Option<&str>,
+) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|(name, _)| {
+            explicit_run_id.is_none()
+                || (!RUNNER_EXEC_RUN_ID_ENV_NAMES.contains(&name.as_str())
+                    && !RUNNER_EXEC_SCRUBBED_RUN_ID_ENV_NAMES.contains(&name.as_str()))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 impl Default for RunnerExecOptions {
@@ -507,6 +528,21 @@ fn orchestration_target_provenance(
         )
         .with_source_snapshot_identity(source_snapshot.map(source_snapshot_identity))
         .with_extensions(extension_provenance(required_extensions)),
+    )
+}
+
+/// Snapshot the identities available to the controller before runner dispatch.
+/// A later child failure must not erase this submission-time provenance.
+pub fn runner_exec_orchestration_provenance(
+    runner_id: &str,
+) -> Result<OrchestrationTargetProvenance> {
+    let runner = super::load(runner_id)?;
+    let session = super::status(runner_id)
+        .ok()
+        .and_then(|report| report.session);
+    Ok(
+        orchestration_target_provenance(&runner, session.as_ref(), None, &[])
+            .expect("runner execution provenance is always present"),
     )
 }
 
@@ -830,11 +866,12 @@ pub(crate) fn exec_with_status_snapshot(
         require_paths: options.require_paths.clone(),
         validate_require_paths_on_host: false,
     })?;
-    let run_id_hint =
+    let mut run_id_hint =
         apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref());
     let runner = plan.runner.clone();
     let cwd = plan.cwd.clone();
-    let request_env = plan.env.clone();
+    let mut request_env = plan.env.clone();
+    let controller_proxy_projection = process::controller_proxy_projection_names(&request_env)?;
     super::workload::validate_lab_runner_workload_dispatch(
         options.lab_runner_workload.as_ref(),
         runner_id,
@@ -884,20 +921,24 @@ pub(crate) fn exec_with_status_snapshot(
             require_paths: options.require_paths.clone(),
             validate_require_paths_on_host: false,
         })?;
-        let contributions = homeboy_extension::resolve_installed_env_providers(
+        let contributions = resolve_provider_env_with_execution_context(
             &options.execution_context,
             &options.extension_env_providers,
             std::path::Path::new(&plan.cwd),
-            &plan
-                .env
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<Vec<_>>(),
+            &plan.env,
+            options.run_id.as_deref(),
         )?;
         for contribution in contributions {
             for (key, value) in contribution.public_env {
                 plan.env.insert(key, value);
             }
+        }
+        // Provider contributions are merged after the initial request plan. An
+        // explicit runner run ID remains authoritative over both sources.
+        if let Some(hint) =
+            apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref())
+        {
+            run_id_hint = Some(hint);
         }
         let (mut output, exit_code) = exec_local(plan)?;
         append_runner_exec_binary_diagnostics(&mut output, &runner, None);
@@ -964,6 +1005,10 @@ pub(crate) fn exec_with_status_snapshot(
     };
 
     if should_force_diagnostic_ssh(&runner, &options) {
+        reject_controller_proxy_projection_for_diagnostic_ssh(
+            runner_id,
+            &controller_proxy_projection,
+        )?;
         if !diagnostic_ssh_allowed(&connected) {
             return Err(Error::validation_invalid_argument(
                 "ssh",
@@ -1039,6 +1084,10 @@ pub(crate) fn exec_with_status_snapshot(
     let result = match select_runner_transport(&runner, Some(&connected), false) {
         RunnerTransport::DirectDaemon(handle) => {
             run_capability_preflight(&runner)?;
+            if !controller_proxy_projection.is_empty() {
+                let runner_url = crate::connection::controller_proxy_forward_for_job(runner_id)?;
+                process::apply_controller_proxy_projection(&mut request_env, &runner_url)?;
+            }
             let endpoint = handle.endpoint_url().to_string();
             exec_via_daemon(
                 &runner,
@@ -1067,6 +1116,14 @@ pub(crate) fn exec_with_status_snapshot(
             )
         }
         RunnerTransport::ReverseBroker(handle) => {
+            if !controller_proxy_projection.is_empty() {
+                return Err(Error::validation_invalid_argument(
+                    "controller_proxy",
+                    "controller proxy projection requires a direct SSH runner session",
+                    Some(runner_id.to_string()),
+                    None,
+                ));
+            }
             run_capability_preflight(&runner)?;
             exec_via_reverse_broker(
                 &runner,
@@ -1108,6 +1165,24 @@ pub(crate) fn exec_with_status_snapshot(
         append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
         (output, exit_code)
     })
+}
+
+fn reject_controller_proxy_projection_for_diagnostic_ssh(
+    runner_id: &str,
+    projection_names: &[String],
+) -> Result<()> {
+    if projection_names.is_empty() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "controller_proxy",
+        "controller proxy projection requires daemon-backed direct SSH execution",
+        Some(runner_id.to_string()),
+        Some(vec![
+            "Drop --ssh and reconnect the runner so Homeboy can own the reverse forward."
+                .to_string(),
+        ]),
+    ))
 }
 
 fn unavailable_daemon_admission_error(runner_id: &str) -> Error {
@@ -1257,7 +1332,7 @@ fn validate_generic_exec_mirror_run_id(
     ))
 }
 
-fn apply_explicit_runner_exec_run_id_env(
+pub(super) fn apply_explicit_runner_exec_run_id_env(
     env: &mut HashMap<String, String>,
     run_id: Option<&str>,
 ) -> Option<String> {
@@ -1325,7 +1400,9 @@ fn append_runner_exec_diagnostic_hint(output: &mut RunnerExecOutput, hint: Optio
             homeboy_binaries: None,
             hints: Vec::new(),
         });
-    diagnostics.hints.push(hint);
+    if !diagnostics.hints.contains(&hint) {
+        diagnostics.hints.push(hint);
+    }
 }
 
 fn append_runner_exec_binary_diagnostics(

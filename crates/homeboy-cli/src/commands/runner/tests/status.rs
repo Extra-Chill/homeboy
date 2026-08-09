@@ -336,6 +336,55 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
 }
 
 #[test]
+fn unknown_owner_has_reconcile_guidance_but_no_logs_or_cancel_command() {
+    let mut report = disconnected_report();
+    report.connected = true;
+    report.state = runner::RunnerSessionState::Connected;
+    let mut session = runner_session_fixture();
+    session.runner_id = report.runner_id.clone();
+    report.session = Some(session);
+    let unknown = homeboy_core::api_jobs::ActiveRunnerJobSummary {
+        runner_id: "homeboy-lab".to_string(),
+        job_id: "unknown-daemon-owner-lease-1-1".to_string(),
+        operation: "daemon.unknown_owner".to_string(),
+        source: "daemon".to_string(),
+        kind: "unknown".to_string(),
+        status: homeboy_core::api_jobs::JobStatus::Running,
+        command: "unprojected daemon child".to_string(),
+        cwd: None,
+        started_at_ms: 0,
+        updated_at_ms: 0,
+        elapsed_ms: 0,
+        heartbeat_age_ms: 0,
+        claim: Default::default(),
+        claim_expires_in_ms: None,
+        lifecycle: None,
+        durable_run_id: None,
+        stale_reason: Some("daemon_freshness_count_exceeds_typed_jobs".to_string()),
+        lifecycle_state: Some("unknown_owner".to_string()),
+        retryable: Some(false),
+        active_child_count: None,
+        active_cell_count: None,
+    };
+    let mut second_unknown = unknown.clone();
+    second_unknown.job_id = "unknown-daemon-owner-lease-1-2".to_string();
+    report.active_runner_jobs = vec![(&unknown).into(), (&second_unknown).into()];
+    report.active_jobs = vec![unknown, second_unknown];
+    report.active_job_count = 2;
+
+    let commands = runner_status_operator_commands(&report);
+
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command.scope == "unknown_owner_reconcile")
+            .count(),
+        1
+    );
+    assert!(commands.iter().all(|command| command.job_id.is_none()));
+}
+
+#[test]
 fn runner_followups_include_workspace_prune_for_disk_pressure_recovery() {
     let followups = runner_followups(Some("homeboy-lab"), None);
     let serialized = serde_json::to_string(&followups).expect("serialize followups");

@@ -3,6 +3,9 @@ use homeboy_core::engine::shell::quote_path;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::stream_capture::StreamCaptureMetadata;
+use homeboy_engine_primitives::command::{
+    terminate_process_tree_and_reap, terminate_remaining_process_group, ControllerChildGuard,
+};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -21,6 +24,7 @@ use super::types::InstallMethod;
 /// `agent_task_promotion` / runner exec captures (#5297).
 const UPGRADE_CAPTURE_LIMIT_BYTES: usize = 65_536;
 const SOURCE_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const CLEANUP_ERROR_CONTEXT_LIMIT_CHARS: usize = 1_024;
 
 /// Environment variable set in the shell child's environment and checked at the
 /// start of `execute_upgrade` to prevent nested / re-entrant source upgrades.
@@ -375,55 +379,87 @@ fn run_source_upgrade_command(
         .current_dir(workspace_root)
         .env(REENTRANCY_GUARD_ENV, "1")
         .stdin(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        child_command.process_group(0);
-    }
+    let guard = ControllerChildGuard::prepare(&mut child_command).map_err(|error| {
+        Error::internal_io(error.to_string(), Some("run source upgrade".to_string()))
+    })?;
     let mut child = child_command
         .spawn()
         .map_err(|e| Error::internal_io(e.to_string(), Some("run source upgrade".to_string())))?;
+    if let Err(error) = guard.attach(&child) {
+        let primary = Error::internal_io(
+            format!("failed to attach source-upgrade process guard: {error}"),
+            Some("run source upgrade".to_string()),
+        );
+        return Err(append_cleanup_failure_context(
+            primary,
+            terminate_process_tree_and_reap(&mut child).err(),
+        ));
+    }
     let start = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
-                return Err(upgrade_failure_error(
-                    InstallMethod::Source,
-                    &format!("source upgrade command exited with {}", status),
-                    None,
+                let cleanup = terminate_remaining_process_group(child.id());
+                if status.success() {
+                    return cleanup.map_err(|error| {
+                        Error::internal_io(
+                            error.to_string(),
+                            Some("run source upgrade".to_string()),
+                        )
+                    });
+                }
+                return Err(append_cleanup_failure_context(
+                    upgrade_failure_error(
+                        InstallMethod::Source,
+                        &format!("source upgrade command exited with {}", status),
+                        None,
+                    ),
+                    cleanup.err(),
                 ));
             }
             Ok(None) if start.elapsed() >= timeout => {
-                terminate_upgrade_child(&mut child);
-                return Err(Error::internal_io(
-                    format!(
-                        "source upgrade timed out after {}s; child process group was terminated",
-                        timeout.as_secs()
-                    ),
+                let primary = Error::internal_io(
+                    format!("source upgrade timed out after {}s", timeout.as_secs()),
                     Some("run source upgrade".to_string()),
+                );
+                return Err(append_cleanup_failure_context(
+                    primary,
+                    terminate_process_tree_and_reap(&mut child).err(),
                 ));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(e) => {
-                terminate_upgrade_child(&mut child);
-                return Err(Error::internal_io(
-                    e.to_string(),
-                    Some("wait for source upgrade".to_string()),
+                let primary =
+                    Error::internal_io(e.to_string(), Some("wait for source upgrade".to_string()));
+                return Err(append_cleanup_failure_context(
+                    primary,
+                    terminate_process_tree_and_reap(&mut child).err(),
                 ));
             }
         }
     }
 }
 
-fn terminate_upgrade_child(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
+/// Keep the command failure actionable while retaining bounded cleanup evidence.
+fn append_cleanup_failure_context(
+    mut primary: Error,
+    cleanup_error: Option<std::io::Error>,
+) -> Error {
+    let Some(cleanup_error) = cleanup_error else {
+        return primary;
+    };
+    let cleanup_message = cleanup_error.to_string();
+    let mut bounded = cleanup_message
+        .chars()
+        .take(CLEANUP_ERROR_CONTEXT_LIMIT_CHARS)
+        .collect::<String>();
+    if cleanup_message.chars().count() > CLEANUP_ERROR_CONTEXT_LIMIT_CHARS {
+        bounded.push_str("... [truncated]");
     }
-    #[cfg(not(unix))]
-    let _ = child.kill();
-    let _ = child.wait();
+    primary.message.push_str(&format!(
+        "; source-upgrade process cleanup also failed: {bounded}"
+    ));
+    primary
 }
 
 /// Detect a source upgrade whose command exited successfully but left the

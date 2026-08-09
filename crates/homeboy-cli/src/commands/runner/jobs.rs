@@ -113,22 +113,32 @@ fn project_job_list(
     let mut jobs: Vec<_> = active
         .iter()
         .chain(terminal)
-        .map(|job| RunnerJobListEntry {
-            job_id: job.job_id.clone(),
-            source: "live_daemon",
-            daemon_source: Some(job.source.clone()),
-            state: Some(job.status),
-            command: Some(job.command.clone()),
-            owner: job.claim.claimed_by_runner_id.clone(),
-            correlation: job.durable_run_id.clone(),
-            generation: generation_for(&job.job_id),
-            started_at_ms: job.started_at_ms,
-            logs_command: Some(format!(
-                "homeboy runner job logs {runner_id} {} --follow",
-                job.job_id
-            )),
-            cancel_command: (!job.status.is_terminal())
-                .then(|| format!("homeboy runner job cancel {runner_id} {}", job.job_id)),
+        .map(|job| {
+            let unknown_owner = job.lifecycle_state.as_deref() == Some("unknown_owner")
+                && job.job_id.starts_with("unknown-daemon-owner-");
+            RunnerJobListEntry {
+                job_id: job.job_id.clone(),
+                source: if unknown_owner {
+                    "unknown_daemon_owner"
+                } else {
+                    "live_daemon"
+                },
+                daemon_source: Some(job.source.clone()),
+                state: Some(job.status),
+                command: Some(job.command.clone()),
+                owner: job.claim.claimed_by_runner_id.clone(),
+                correlation: job.durable_run_id.clone(),
+                generation: generation_for(&job.job_id),
+                started_at_ms: job.started_at_ms,
+                logs_command: (!unknown_owner).then(|| {
+                    format!(
+                        "homeboy runner job logs {runner_id} {} --follow",
+                        job.job_id
+                    )
+                }),
+                cancel_command: (!unknown_owner && !job.status.is_terminal())
+                    .then(|| format!("homeboy runner job cancel {runner_id} {}", job.job_id)),
+            }
         })
         .collect();
     for owner in owners {
@@ -201,6 +211,7 @@ fn job_artifacts(
     job_id: &str,
     artifact_id: &str,
 ) -> CmdResult<RunnerJobCommandOutput> {
+    reject_unknown_daemon_owner(job_id)?;
     Ok((
         RunnerJobCommandOutput::Broker(RunnerBrokerJobOutput {
             variant: "job_artifacts",
@@ -215,6 +226,7 @@ fn job_artifacts(
 }
 
 fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
+    reject_unknown_daemon_owner(job_id)?;
     let (job, events) = match runner::runner_job_cancel(runner_id, job_id) {
         Ok(result) => result,
         Err(_) => {
@@ -264,6 +276,7 @@ fn job_logs(
     compact: bool,
     tail_kb: Option<usize>,
 ) -> CmdResult<RunnerJobOutput> {
+    reject_unknown_daemon_owner(job_id)?;
     let poll_interval = Duration::from_millis(poll_ms.max(100));
     let mut emitted_sequence = cursor.unwrap_or(0);
     const MAX_RECONNECTS: u8 = 3;
@@ -415,6 +428,18 @@ fn job_logs(
         },
         0,
     ))
+}
+
+fn reject_unknown_daemon_owner(job_id: &str) -> homeboy::core::Result<()> {
+    if job_id.starts_with("unknown-daemon-owner-") {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "job_id",
+            "the daemon counted active work but has not provided a typed job owner; logs, artifacts, and cancellation are unavailable until reconciliation",
+            Some(job_id.to_string()),
+            Some(vec!["homeboy runner reconcile <runner-id>".to_string()]),
+        ));
+    }
+    Ok(())
 }
 
 fn emit_new_job_events(events: &[JobEvent], emitted_sequence: &mut u64) {
@@ -632,6 +657,29 @@ mod tests {
         );
         assert_eq!(correlated.len(), 2);
         assert!(correlated.iter().all(|job| job.source == "live_daemon"));
+    }
+
+    #[test]
+    fn unknown_daemon_owner_is_inspect_only() {
+        let mut unknown = runner_job(
+            "unknown-daemon-owner-lease-live-1",
+            JobStatus::Running,
+            "unprojected daemon child",
+        );
+        unknown.lifecycle_state = Some("unknown_owner".to_string());
+
+        let jobs = project_job_list(
+            "homeboy-lab",
+            &[unknown],
+            &[],
+            &[],
+            &JobListFilter::default(),
+        );
+
+        assert_eq!(jobs[0].source, "unknown_daemon_owner");
+        assert_eq!(jobs[0].logs_command, None);
+        assert_eq!(jobs[0].cancel_command, None);
+        assert!(reject_unknown_daemon_owner(&jobs[0].job_id).is_err());
     }
 
     fn job(status: JobStatus, event_count: usize) -> homeboy::core::api_jobs::Job {

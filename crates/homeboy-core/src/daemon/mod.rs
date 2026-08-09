@@ -2784,6 +2784,17 @@ fn enqueue_exec_job(
             request.capture_patch,
         )
     })?;
+    // Resolve this before runner-specific preparation so the opaque process plan
+    // can retain the same authority the daemon uses for durable lifecycle state.
+    let canonical_durable_run_id = resolve_exec_idempotency_key(
+        request.idempotency_key.as_deref(),
+        exec_request_run_ref_metadata(
+            request.lifecycle.as_ref(),
+            request.lab_runner_workload.as_ref(),
+            request.metadata.as_ref(),
+        )
+        .as_ref(),
+    );
     let plan = runner_exec_driver::prepare_exec(runner_exec_driver::RunnerExecPrepareRequest {
         runner_id: request.runner_id,
         runner: request.runner,
@@ -2800,6 +2811,7 @@ fn enqueue_exec_job(
         source_snapshot: request.source_snapshot,
         require_paths: request.require_paths,
         extension_env_providers: request.extension_env_providers,
+        authoritative_run_id: canonical_durable_run_id.clone(),
         validate_require_paths_on_host: true,
     })?;
     let source_snapshot = Some(plan.source_snapshot.clone());
@@ -2811,15 +2823,6 @@ fn enqueue_exec_job(
     // controllers that predate the explicit field. Either way the resolved key
     // is folded into the lifecycle's `durable_run_id` below, which is what the
     // job-store dedup guard keys on.
-    let canonical_durable_run_id = resolve_exec_idempotency_key(
-        request.idempotency_key.as_deref(),
-        exec_request_run_ref_metadata(
-            lifecycle.as_ref(),
-            request.lab_runner_workload.as_ref(),
-            request.metadata.as_ref(),
-        )
-        .as_ref(),
-    );
     if let Some(durable_run_id) = canonical_durable_run_id {
         lifecycle
             .get_or_insert_with(RunnerJobLifecycleMetadata::default)
@@ -3110,6 +3113,7 @@ fn enqueue_exec_job(
                 let metrics = process_output.metrics.clone();
                 let capture = process_output.capture.clone();
                 let extension_env_provenance = process_output.extension_env_provenance.clone();
+                let diagnostic_hints = process_output.diagnostic_hints.clone();
                 if cancellation_requested.load(Ordering::SeqCst) {
                     let evidence = stall_evidence
                         .lock()
@@ -3169,7 +3173,7 @@ fn enqueue_exec_job(
                 } else {
                     None
                 };
-                let result = json!({
+                let mut result = json!({
                     "runner_id": plan.runner_id,
                     "cwd": plan.cwd,
                     "command": plan.command,
@@ -3183,6 +3187,9 @@ fn enqueue_exec_job(
                     "capture": capture,
                     "extension_env_providers": extension_env_provenance,
                 });
+                if !diagnostic_hints.is_empty() {
+                    result["diagnostic_hints"] = json!(diagnostic_hints);
+                }
                 if exit_code != 0 {
                     job.result(result.clone())?;
                     return Err(Error::remote_command_failed(RemoteCommandFailedDetails {

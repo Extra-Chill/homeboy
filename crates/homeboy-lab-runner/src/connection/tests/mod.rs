@@ -20,6 +20,14 @@ use super::connection_daemon::{
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
 use homeboy_core::test_support;
 
+#[test]
+fn controller_proxy_url_rejects_userinfo_before_opening_a_forward() {
+    let error = controller_proxy_from_url("socks5://user:token@127.0.0.1:8080")
+        .expect_err("proxy credentials cannot cross the controller boundary");
+    assert!(error.message.contains("must not include proxy credentials"));
+    assert!(error.details.to_string().contains("credential-free"));
+}
+
 pub(super) fn command_output(
     success: bool,
     stdout: impl Into<String>,

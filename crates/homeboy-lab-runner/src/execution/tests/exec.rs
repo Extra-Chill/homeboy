@@ -1174,11 +1174,32 @@ fn test_exec_preserves_explicit_request_env() {
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
     homeboy_core::test_support::with_isolated_home(|_| {
         super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
             .expect("create local runner");
+        let extension = tempfile::tempdir().expect("extension fixture");
+        std::fs::write(
+            extension.path().join("fixture.json"),
+            r#"{"id":"fixture","name":"Fixture","version":"1.0.0","env_provider":{"script":"env.sh"}}"#,
+        )
+        .expect("provider manifest");
+        let provider = extension.path().join("env.sh");
+        std::fs::write(
+            &provider,
+            "#!/bin/sh\nprintf '%s\\n' '{\"HOMEBOY_ACTIVE_RUN_ID\":\"provider-active\",\"HOMEBOY_RUN_ID\":\"provider-homeboy\",\"HOMEBOY_BENCH_RUN_ID\":\"provider-bench\",\"WORKFLOW_BENCH_RUN_ID\":\"provider-workflow\"}'\n",
+        )
+        .expect("provider script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
+                .expect("provider executable");
+        }
+        homeboy_extension::install(&extension.path().display().to_string(), Some("fixture"))
+            .expect("install provider fixture");
 
         let (output, exit_code) = exec(
             "lab-local",
@@ -1217,7 +1238,7 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
             path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
-                extension_env_providers: Vec::new(),
+                extension_env_providers: vec!["fixture".to_string()],
                 accepted_extension_settings: Vec::new(),
                 require_paths: Vec::new(),
                 lab_runner_workload: None,
@@ -1501,4 +1522,13 @@ fn diagnostic_ssh_is_available_for_stale_sessions_but_not_fresh_admission() {
         ..authoritative_drained_freshness()
     });
     assert!(!diagnostic_ssh_allowed(&fresh));
+}
+
+#[test]
+fn diagnostic_ssh_refuses_controller_proxy_projection_before_remote_execution() {
+    let error =
+        reject_controller_proxy_projection_for_diagnostic_ssh("lab", &["ALL_PROXY".to_string()])
+            .expect_err("diagnostic SSH cannot safely project a controller proxy");
+    assert!(error.message.contains("daemon-backed direct SSH"));
+    assert!(error.details.to_string().contains("Drop --ssh"));
 }

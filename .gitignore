@@ -19,8 +19,14 @@ dist-manifest.json
 .DS_Store
 
 # CI artifacts
+.homeboy-action/
+/homeboy-ci-results/
 .release-last-failed
 /homeboy-observations/
+/homeboy-test-shard.json
+/homeboy-test-shard-plan.json
+/homeboy-test-shard-inventory.json
+/differential-phase/
 
 # Keep Cargo.lock for reproducible builds
 .phpunit.result.cache

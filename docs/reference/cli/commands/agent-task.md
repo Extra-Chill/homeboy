@@ -727,7 +727,7 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--repo` | `<REPO>` | _no help text_ |
+| `--repo` | `<REPO_SLUG_OR_PRIMARY_PATH>` | Registered repository slug or exact registered primary checkout path |
 | `--from` | `<REF>` | _no help text_ |
 | `--base` | `<BRANCH>` | _no help text_ |
 | `--branch-prefix` | `<PREFIX>` | _no help text_ |

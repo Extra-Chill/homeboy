@@ -2933,7 +2933,7 @@ fn dev_sync_next_actions(runner_id: &str, options: &RunnerDevSyncOptions) -> Vec
     actions
 }
 
-fn controller_refresh_ref() -> String {
+pub(crate) fn controller_refresh_ref() -> String {
     homeboy_product_identity::build_identity()
         .git_commit
         .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))

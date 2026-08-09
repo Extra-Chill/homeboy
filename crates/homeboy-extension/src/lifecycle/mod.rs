@@ -370,7 +370,8 @@ pub fn uninstall(extension_id: &str) -> Result<PathBuf> {
 mod tests {
     use super::{
         install, install_for_component, install_with_revision, is_extension_update_workdir_clean,
-        load_extension, refresh, shared_assets_for_extension_source, source_metadata, update,
+        load_extension, refresh, register_component_install_runner,
+        shared_assets_for_extension_source, source_metadata, update,
     };
     use crate::update_all;
     use homeboy_core::component;
@@ -708,6 +709,40 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/extensions/beta/beta.json")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn component_setup_installs_configured_extensions_from_source() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source");
+            write_extension_fixture(&source, "alpha");
+            write_extension_fixture(&source, "beta");
+
+            let component_dir = home.join("component");
+            fs::create_dir_all(&component_dir).expect("component dir");
+            write_component_fixture(&component_dir, &["alpha", "beta"]);
+
+            register_component_install_runner();
+            let result = homeboy_core::setup::component_setup(
+                None,
+                Some(&component_dir.to_string_lossy()),
+                &homeboy_core::setup::ComponentSetupOptions {
+                    extension_source: Some(&source.to_string_lossy()),
+                    skip_dependencies: true,
+                },
+            )
+            .expect("setup should succeed");
+
+            let extensions = result.extensions.expect("extensions installed");
+            let installed_ids: Vec<&str> = extensions
+                .installed
+                .iter()
+                .map(|entry| entry.extension_id.as_str())
+                .collect();
+            assert_eq!(installed_ids, vec!["alpha", "beta"]);
+            assert!(result.dependencies.is_none(), "deps were skipped");
         });
     }
 

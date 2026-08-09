@@ -176,7 +176,7 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
     .expect("manifest");
     std::fs::write(
         extension.path().join("env.sh"),
-        "#!/bin/sh\ntest -n \"$HOMEBOY_ENV_PROVIDER_COMMAND_PAYLOAD\" || exit 23\nprintf '%s\\n' '{\"FIXTURE_RUNTIME\":\"runner-local\"}'\n",
+            "#!/bin/sh\ntest -n \"$HOMEBOY_ENV_PROVIDER_COMMAND_PAYLOAD\" || exit 23\nprintf '%s\\n' '{\"FIXTURE_RUNTIME\":\"runner-local\",\"HOMEBOY_ACTIVE_RUN_ID\":\"provider-active\",\"HOMEBOY_RUN_ID\":\"provider-homeboy\",\"HOMEBOY_BENCH_RUN_ID\":\"provider-bench\",\"WORKFLOW_BENCH_RUN_ID\":\"provider-workflow\"}'\n",
     )
     .expect("provider");
     #[cfg(unix)]
@@ -202,8 +202,9 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
                 "secret_env": { "FIXTURE_SECRET": { "file": secret } }
             },
             "cwd": std::env::current_dir().expect("cwd"),
-            "command": ["sh", "-c", "test \"$FIXTURE_RUNTIME\" = runner-local && test -n \"$FIXTURE_SECRET\" && printf '%s' \"$FIXTURE_SECRET\""],
-            "extension_env_providers": ["fixture"]
+            "command": ["sh", "-c", "test \"$FIXTURE_RUNTIME\" = runner-local && test -n \"$FIXTURE_SECRET\" && printf '%s|%s|%s|%s' \"$HOMEBOY_ACTIVE_RUN_ID\" \"$HOMEBOY_RUN_ID\" \"$HOMEBOY_BENCH_RUN_ID\" \"${WORKFLOW_BENCH_RUN_ID-unset}\""],
+            "extension_env_providers": ["fixture"],
+            "idempotency_key": "daemon-explicit-run"
         })),
         &store,
     );
@@ -229,6 +230,27 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
         .and_then(|event| event.data)
         .expect("result");
     assert!(!result.to_string().contains("runner-secret"));
+    assert_eq!(
+        result["stdout"],
+        "daemon-explicit-run|daemon-explicit-run|daemon-explicit-run|unset"
+    );
+    let hints = result["diagnostic_hints"]
+        .as_array()
+        .expect("daemon result carries precedence diagnostics");
+    let hint = hints
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .find(|hint| hint.contains("runner exec --run-id took precedence"))
+        .expect("precedence hint");
+    for name in [
+        "HOMEBOY_ACTIVE_RUN_ID",
+        "HOMEBOY_RUN_ID",
+        "HOMEBOY_BENCH_RUN_ID",
+        "WORKFLOW_BENCH_RUN_ID",
+    ] {
+        assert!(hint.contains(name), "{hint}");
+    }
+    assert!(!hint.contains("provider-active"), "{hint}");
     assert_eq!(
         result["extension_env_providers"][0]["extension_id"],
         "fixture"

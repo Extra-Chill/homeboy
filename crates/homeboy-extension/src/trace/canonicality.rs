@@ -4,12 +4,10 @@ use std::process::Command;
 use crate::manifest_config::TraceToolchainProvenanceConfig;
 use crate::ExtensionExecutionContext;
 use homeboy_core::component::Component;
-use homeboy_core::error::{ErrorCode, Result};
+use homeboy_core::error::Result;
 use homeboy_core::lab_workspace_provenance::{
     with_lab_workspace_provenance, LabWorkspaceProvenanceInfo,
 };
-#[cfg(test)]
-use homeboy_core::source_snapshot::SourceSnapshot;
 
 use super::parsing::{
     TraceAssertion, TraceAssertionStatus, TraceCanonicalCheck, TraceEvidenceMetadata, TraceResults,
@@ -213,11 +211,13 @@ pub(crate) fn trace_toolchain_provenance_requirements(
     let Some(context) = execution_context else {
         return Ok(Vec::new());
     };
-    let manifest = match crate::load_extension(&context.extension_id) {
-        Ok(manifest) => manifest,
-        Err(error) if error.code == ErrorCode::ExtensionNotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
+    let manifest_path = context
+        .extension_path
+        .join(format!("{}.json", context.extension_id));
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+    let manifest = crate::env_provider::load_manifest_from_dir(&context.extension_path)?;
     Ok(manifest.trace_toolchain_provenance().to_vec())
 }
 
@@ -413,21 +413,6 @@ fn check_managed_lab_snapshot(
     let expected_remote_component_path = expected_remote_component_path?;
     let provenance = with_lab_workspace_provenance(|provider| {
         provider.verify_lab_workspace_from_env(expected_remote_component_path, path)
-    });
-    verified_lab_snapshot_check(target, path, provenance, reasons)
-}
-
-#[cfg(test)]
-fn validate_managed_lab_snapshot(
-    target: &str,
-    path: &Path,
-    expected_remote_component_path: &str,
-    snapshot: SourceSnapshot,
-    lab: serde_json::Value,
-    reasons: &mut Vec<String>,
-) -> Option<TraceCanonicalCheck> {
-    let provenance = with_lab_workspace_provenance(|provider| {
-        provider.verify_lab_workspace(expected_remote_component_path, path, snapshot, lab, false)
     });
     verified_lab_snapshot_check(target, path, provenance, reasons)
 }
@@ -923,15 +908,19 @@ mod tests {
 
     #[test]
     fn canonical_trace_accepts_verified_lab_snapshot_without_git_metadata() {
-        let (_source, remote, snapshot, lab) = lab_snapshot_fixture();
+        let remote = tempfile::tempdir().unwrap();
         let mut reasons = Vec::new();
 
-        let check = validate_managed_lab_snapshot(
+        let check = verified_lab_snapshot_check(
             "component",
             remote.path(),
-            &remote.path().display().to_string(),
-            snapshot,
-            lab,
+            Ok(LabWorkspaceProvenanceInfo {
+                source_revision: "0123456789abcdef".to_string(),
+                materialization_mode: "snapshot".to_string(),
+                runner_id: "homeboy-lab".to_string(),
+                workspace_identity: "workspace:verified".to_string(),
+                snapshot_hash: "sha256:verified".to_string(),
+            }),
             &mut reasons,
         );
 
@@ -943,17 +932,14 @@ mod tests {
     }
 
     #[test]
-    fn canonical_trace_refuses_forged_lab_snapshot_evidence() {
-        let (_source, remote, mut snapshot, lab) = lab_snapshot_fixture();
-        snapshot.git_sha = Some("forged".to_string());
+    fn canonical_trace_surfaces_lab_snapshot_verification_failure() {
+        let remote = tempfile::tempdir().unwrap();
         let mut reasons = Vec::new();
 
-        let check = validate_managed_lab_snapshot(
+        let check = verified_lab_snapshot_check(
             "component",
             remote.path(),
-            &remote.path().display().to_string(),
-            snapshot,
-            lab,
+            Err("has an invalid source revision".to_string()),
             &mut reasons,
         );
 
@@ -964,119 +950,12 @@ mod tests {
     }
 
     #[test]
-    fn canonical_trace_refuses_arbitrary_non_git_materialization_evidence() {
-        let (_source, remote, mut snapshot, mut lab) = lab_snapshot_fixture();
-        snapshot.sync_mode = "snapshot".to_string();
-        lab["source_snapshot"] = serde_json::to_value(&snapshot).unwrap();
-        let snapshot = serde_json::from_value(lab["source_snapshot"].clone()).unwrap();
-        let mut reasons = Vec::new();
-
-        let check = validate_managed_lab_snapshot(
-            "component",
-            remote.path(),
-            &remote.path().display().to_string(),
-            snapshot,
-            lab,
-            &mut reasons,
-        );
-
-        assert!(check.is_none());
-        assert!(reasons
-            .iter()
-            .any(|reason| reason.contains("untrusted source mode `snapshot`")));
-    }
-
-    #[test]
-    fn canonical_trace_refuses_nonmatching_lab_snapshot_workspace() {
-        let (_source, remote, mut snapshot, lab) = lab_snapshot_fixture();
-        snapshot.remote_path = Some("/not/the/materialized/workspace".to_string());
-        let mut reasons = Vec::new();
-
-        let check = validate_managed_lab_snapshot(
-            "component",
-            remote.path(),
-            &remote.path().display().to_string(),
-            snapshot,
-            lab,
-            &mut reasons,
-        );
-
-        assert!(check.is_none());
-        assert!(reasons
-            .iter()
-            .any(|reason| reason.contains("remote workspace does not match")));
-    }
-
-    #[test]
-    fn canonical_trace_refuses_self_consistent_forged_lab_env_with_changed_bytes() {
-        let (_source, remote, snapshot, lab) = lab_snapshot_fixture();
-        std::fs::write(remote.path().join("README.md"), "forged contents\n").unwrap();
-        let mut reasons = Vec::new();
-
-        let check = validate_managed_lab_snapshot(
-            "component",
-            remote.path(),
-            &remote.path().display().to_string(),
-            snapshot,
-            lab,
-            &mut reasons,
-        );
-
-        assert!(check.is_none());
-        assert!(reasons
-            .iter()
-            .any(|reason| reason.contains("content hash does not match")));
-    }
-
-    #[test]
-    fn canonical_trace_fails_closed_for_snapshot_lab_metadata_without_workspace_verification() {
-        let (_source, remote, snapshot, mut lab) = lab_snapshot_fixture();
-        lab.as_object_mut()
-            .unwrap()
-            .remove("workspace_verification");
-        let mut reasons = Vec::new();
-
-        let check = validate_managed_lab_snapshot(
-            "component",
-            remote.path(),
-            &remote.path().display().to_string(),
-            snapshot,
-            lab,
-            &mut reasons,
-        );
-
-        assert!(check.is_none());
-        assert!(reasons
-            .iter()
-            .any(|reason| reason.contains("missing workspace verification metadata")));
-    }
-
-    #[test]
-    fn canonical_trace_refuses_dirty_lab_snapshot_evidence() {
-        let (_source, remote, mut snapshot, lab) = lab_snapshot_fixture();
-        snapshot.dirty = true;
-        let mut reasons = Vec::new();
-
-        let check = validate_managed_lab_snapshot(
-            "component",
-            remote.path(),
-            &remote.path().display().to_string(),
-            snapshot,
-            lab,
-            &mut reasons,
-        );
-
-        assert!(check.is_none());
-        assert!(reasons
-            .iter()
-            .any(|reason| reason.contains("records a dirty source checkout")));
-    }
-
-    #[test]
     fn canonical_trace_accepts_installed_extension_manifest_directory() {
         let component_dir = tempfile::tempdir().unwrap();
         let component_remote = tempfile::tempdir().unwrap();
-        let extension_dir = tempfile::tempdir().unwrap();
+        let extension_root = tempfile::tempdir().unwrap();
+        let extension_dir = extension_root.path().join("fixture-extension");
+        std::fs::create_dir_all(&extension_dir).unwrap();
         init_git_repo(component_dir.path());
         init_bare_repo(component_remote.path());
         git(
@@ -1089,14 +968,18 @@ mod tests {
             ],
         );
         git(component_dir.path(), &["push", "-u", "origin", "main"]);
-        std::fs::write(extension_dir.path().join("fixture-extension.json"), "{}\n").unwrap();
+        std::fs::write(
+            extension_dir.join("fixture-extension.json"),
+            r#"{"name":"Fixture Extension","version":"0.0.0"}"#,
+        )
+        .unwrap();
         let component = test_component(component_dir.path());
         let args = test_run_args(component_dir.path());
         let context = ExtensionExecutionContext {
             component: component.clone(),
             capability: ExtensionCapability::Trace,
             extension_id: "fixture-extension".to_string(),
-            extension_path: extension_dir.path().to_path_buf(),
+            extension_path: extension_dir,
             script_path: "trace.js".to_string(),
             settings: Vec::new(),
             accepted_setting_keys: Vec::new(),
@@ -1210,72 +1093,6 @@ mod tests {
         std::fs::write(path.join("README.md"), "test\n").unwrap();
         git(path, &["add", "."]);
         git(path, &["commit", "-m", "initial"]);
-    }
-
-    fn lab_snapshot_fixture() -> (
-        tempfile::TempDir,
-        tempfile::TempDir,
-        SourceSnapshot,
-        serde_json::Value,
-    ) {
-        let source = tempfile::tempdir().unwrap();
-        let remote = tempfile::tempdir().unwrap();
-        init_git_repo(source.path());
-        std::fs::copy(
-            source.path().join("README.md"),
-            remote.path().join("README.md"),
-        )
-        .unwrap();
-        let snapshot = SourceSnapshot {
-            runner_id: "homeboy-lab".to_string(),
-            local_path: Some(source.path().display().to_string()),
-            remote_path: Some(remote.path().display().to_string()),
-            workspace_root: Some(source.path().display().to_string()),
-            git_branch: Some("main".to_string()),
-            git_sha: Some(git_stdout(source.path(), &["rev-parse", "HEAD"]).unwrap()),
-            dirty: false,
-            sync_mode: "lab_offload".to_string(),
-            workspace_snapshot_identity: Some("workspace:verified".to_string()),
-            prepared_workspace_original_snapshot_identity: None,
-            prepared_workspace_update_lineage: Vec::new(),
-            synthetic_checkout_commit: None,
-            synthetic_checkout_ref: None,
-            synthetic_checkout_tree: None,
-            snapshot_hash: "sha256:verified".to_string(),
-            synced_at: "2026-01-01T00:00:00Z".to_string(),
-            sync_excludes: vec![".git".to_string(), ".git/**".to_string()],
-        };
-        // The real content hash is computed by the runner's workspace-snapshot
-        // machinery (tested in the homeboy-runner crate). These canonicality
-        // tests verify the trace-canonical identity/mode/runner-id matching
-        // logic, not the hash computation, so a fixed fixture hash is sufficient
-        // and keeps this test in core (which cannot depend on the runner crate).
-        let workspace_content_hash = "0".repeat(64);
-        let content_hash_algorithm = "homeboy-workspace-content-v2+portable-content-only";
-        let lab = serde_json::json!({
-            "runner_id": "homeboy-lab",
-            "remote_workspace": remote.path().display().to_string(),
-            "sync_mode": "snapshot",
-            "status": "offloaded",
-            "source_snapshot": snapshot,
-            "workspace_content_hash": workspace_content_hash,
-            "workspace_materialization_plan": { "identity": "workspace:verified" },
-            "workspace_verification": {
-                "schema": "homeboy/lab-workspace-verification/v2",
-                "identity": "workspace:verified",
-                "content_hash_algorithm": content_hash_algorithm,
-                "permission_policy": "unix-owner-executable",
-                "content_hash": workspace_content_hash,
-                "sync_excludes": [".git", ".git/**"],
-                "source_snapshot": snapshot,
-                "primary_workspace": {
-                    "identity": "workspace:verified",
-                    "remote_path": remote.path().display().to_string(),
-                },
-            },
-        });
-        let snapshot = serde_json::from_value(lab["source_snapshot"].clone()).unwrap();
-        (source, remote, snapshot, lab)
     }
 
     fn init_bare_repo(path: &std::path::Path) {

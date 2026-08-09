@@ -394,10 +394,14 @@ impl CliRuntime {
         if let Some(child_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_CHILD_ENV) {
             let child_token =
                 std::env::var_os("HOMEBOY_RUNNER_EXEC_RECOVERY_CHILD_TOKEN").unwrap_or_default();
-            let _ = crate::runner::run_scheduled_terminal_runner_exec_recovery_child(
-                &child_id.to_string_lossy(),
-                &child_token.to_string_lossy(),
-            );
+            if let Ok(Some(diagnostic)) =
+                crate::runner::run_scheduled_terminal_runner_exec_recovery_child(
+                    &child_id.to_string_lossy(),
+                    &child_token.to_string_lossy(),
+                )
+            {
+                eprintln!("{}", format_runner_exec_recovery_diagnostic(&diagnostic));
+            }
             return std::process::ExitCode::SUCCESS;
         }
         if let Some(owner_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_OWNER_ENV) {
@@ -775,13 +779,13 @@ fn schedule_runner_exec_recovery() {
     let Ok(Some(schedule)) = crate::runner::schedule_terminal_runner_exec_recovery() else {
         return;
     };
-    eprintln!(
-        "runner-exec recovery accepted: owner_id={} deferred_count={} budget_ms={} inspect=`{}`",
-        schedule.owner_id, schedule.deferred_count, schedule.budget_ms, schedule.inspection_action
-    );
     if !schedule.is_new_owner {
         return;
     }
+    eprintln!(
+        "runner-exec recovery scheduled: owner_id={} deferred_count={} inspect=`{}`",
+        schedule.owner_id, schedule.deferred_count, schedule.inspection_action
+    );
     let executable = match std::env::current_exe() {
         Ok(executable) => executable,
         Err(error) => {
@@ -802,7 +806,8 @@ fn schedule_runner_exec_recovery() {
         )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        // Child recovery emits only terminal or action-required diagnostics.
+        .stderr(std::process::Stdio::inherit());
     crate::core::process::detach_from_caller_session(&mut command);
     if let Err(error) = command.spawn() {
         let _ = crate::runner::record_scheduled_terminal_runner_exec_recovery_spawn_failure(
@@ -811,6 +816,15 @@ fn schedule_runner_exec_recovery() {
             &error,
         );
     }
+}
+
+fn format_runner_exec_recovery_diagnostic(
+    diagnostic: &crate::runner::RunnerExecRecoveryDiagnostic,
+) -> String {
+    format!(
+        "runner-exec recovery action required: source_run_id={} reason={} inspect=`{}`",
+        diagnostic.source_run_id, diagnostic.reason, diagnostic.inspection_action
+    )
 }
 
 fn spawn_runner_exec_recovery_child(
@@ -826,7 +840,7 @@ fn spawn_runner_exec_recovery_child(
         )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::inherit());
     crate::core::process::detach_from_caller_session(&mut command);
     command.spawn().map(|_| ())
 }
@@ -3529,5 +3543,19 @@ mod tests {
                 None => std::env::remove_var(name),
             }
         }
+    }
+
+    #[test]
+    fn recovery_action_diagnostic_names_the_source_reason_and_resolution() {
+        let output =
+            format_runner_exec_recovery_diagnostic(&crate::runner::RunnerExecRecoveryDiagnostic {
+                source_run_id: "runner-exec-source-42".to_string(),
+                reason: "runner has no persisted daemon session for recovery".to_string(),
+                inspection_action: "homeboy runs show runner-exec-source-42".to_string(),
+            });
+        assert_eq!(
+            output,
+            "runner-exec recovery action required: source_run_id=runner-exec-source-42 reason=runner has no persisted daemon session for recovery inspect=`homeboy runs show runner-exec-source-42`"
+        );
     }
 }

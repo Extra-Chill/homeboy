@@ -13,6 +13,58 @@ thread_local! {
 }
 
 #[test]
+fn managed_immutable_runner_slots_route_to_refresh_and_reconciliation() {
+    let runner = ssh_runner(
+        "homeboy-lab",
+        Some("/home/user/workspace/_homeboy_binaries/homeboy-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/homeboy"),
+    );
+
+    assert!(is_managed_immutable_homeboy_path(
+        &runner,
+        runner
+            .settings
+            .homeboy_path
+            .as_deref()
+            .expect("configured path")
+    ));
+    assert!(is_managed_immutable_homeboy_path(
+        &runner,
+        "/home/user/workspace/_homeboy_binaries/homeboy-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/target/release/homeboy"
+    ));
+    assert!(!is_managed_immutable_homeboy_path(
+        &runner,
+        "/home/user/workspace/_homeboy_binaries/homeboy-main/target/release/homeboy"
+    ));
+
+    let commands = managed_immutable_runner_recovery_commands("homeboy-lab");
+    assert_eq!(commands.len(), 2);
+    assert!(commands[0].starts_with("homeboy runner refresh-homeboy homeboy-lab --ref "));
+    assert!(commands[0].ends_with(" --reconnect"));
+    assert_eq!(commands[1], "homeboy runner reconcile homeboy-lab");
+}
+
+#[test]
+fn managed_immutable_runner_uses_reconciled_admission_postcondition() {
+    let mut before_reconcile = stale_runner_status("homeboy-lab").expect("runner status");
+    before_reconcile.active_job_state = RunnerActiveJobState::Available;
+    assert!(!managed_immutable_admission_ready(&before_reconcile));
+
+    let mut reconciled = runner_status("homeboy-lab").expect("runner status");
+    reconciled.connected = true;
+    reconciled.state = RunnerSessionState::Connected;
+    reconciled.active_job_state = RunnerActiveJobState::Available;
+    assert!(managed_immutable_admission_ready(&reconciled));
+}
+
+#[test]
+fn managed_immutable_runner_reconciles_a_rotated_but_draining_daemon() {
+    assert!(managed_refresh_can_reconcile(1, true, false));
+    assert!(!managed_refresh_can_reconcile(1, false, false));
+    assert!(!managed_refresh_can_reconcile(1, true, true));
+    assert!(!managed_refresh_can_reconcile(0, true, true));
+}
+
+#[test]
 fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
     let _local_version = pin_local_version_for_fixtures();
     let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));

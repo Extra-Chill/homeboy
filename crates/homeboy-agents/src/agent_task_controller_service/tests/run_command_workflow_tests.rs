@@ -3,7 +3,7 @@ use super::*;
 
 #[test]
 fn run_command_workflow_executes_deterministic_artifact_action() {
-    with_isolated_home(|home| {
+    with_isolated_home(|_| {
         let spec = AgentTaskRepoLoopSpec {
             schema: None,
             loop_id: "repo-loop-command".to_string(),
@@ -80,9 +80,9 @@ fn run_command_workflow_executes_deterministic_artifact_action() {
                 ["artifact_url"],
             "artifact://validation-result"
         );
-        let persisted_artifact = home
-                .path()
-                .join(".local/share/homeboy/artifacts/agent-task-loop-controller/repo-loop-command/action-1/validation_result.json");
+        let persisted_artifact = homeboy_core::artifact_root()
+            .expect("controller artifact root")
+            .join("agent-task-loop-controller/repo-loop-command/action-1/validation_result.json");
         let persisted: Value = serde_json::from_str(
             &std::fs::read_to_string(&persisted_artifact).expect("persisted controller artifact"),
         )

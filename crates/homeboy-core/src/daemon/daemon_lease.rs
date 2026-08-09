@@ -250,9 +250,17 @@ pub(crate) fn freshness_report_from_validation(
     // reconciliation the evidence authorizes; anything else would be prose. The
     // last case is deliberately empty here: a local report that authorizes no
     // mutation is completed by the dispatcher, which owns the diagnostic step.
+    //
+    // The stop names the exact lease whenever the report carries one: a bare
+    // `homeboy daemon stop` would refuse to stop the stale recorded lease and
+    // leave an operator worse than before (#11220).
     let repair_plan = if restartable {
+        let stop_action = lease_id
+            .as_deref()
+            .map(recovery_actions::stop_for_lease)
+            .unwrap_or_else(recovery_actions::stop);
         vec![
-            DaemonRepairStep::executable(recovery_actions::DAEMON_STOP, recovery_actions::stop()),
+            DaemonRepairStep::executable(recovery_actions::DAEMON_STOP, stop_action),
             DaemonRepairStep::executable(recovery_actions::DAEMON_START, recovery_actions::start()),
         ]
     } else if proven_dead {
@@ -313,5 +321,100 @@ pub(crate) fn runtime_snapshot_stale_reason(snapshot: &DaemonRuntimeSnapshot) ->
             "daemon runtime path fingerprints changed: {}",
             stale.join(", ")
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A restartable validation: nothing durable at risk, and a stale reason
+    /// code outside the `LeaseCorrupt` / `TransportUnreachable` exclusions.
+    fn restartable_validation(lease_id: Option<String>) -> DaemonLeaseValidation {
+        let state = lease_id.map(|lease_id| DaemonState {
+            schema: DAEMON_LEASE_SCHEMA.to_string(),
+            lease_id,
+            startup_token: "test-token".to_string(),
+            address: "127.0.0.1:0".to_string(),
+            pid: 0,
+            state_path: "/tmp/state.json".to_string(),
+            started_at: String::new(),
+            last_seen_at: String::new(),
+            build_identity: build_identity::current(),
+            binary_sha256: None,
+            runtime_paths: DaemonRuntimeSnapshot {
+                loaded_at: String::new(),
+                paths: Vec::new(),
+            },
+        });
+        DaemonLeaseValidation {
+            state,
+            running: false,
+            fresh: false,
+            reachable: false,
+            stale_reason: Some("test stale reason".to_string()),
+            stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+            invalid_pid: None,
+        }
+    }
+
+    fn repair_plan_commands(report: &DaemonFreshnessReport) -> Vec<(String, String)> {
+        report
+            .repair_plan
+            .iter()
+            .map(|step| (step.code.clone(), step.command.clone()))
+            .collect()
+    }
+
+    /// #11220: a restartable report carries its lease, so the advertised stop
+    /// must name it. A bare `homeboy daemon stop` refuses to stop the stale
+    /// recorded lease, so an operator copy-pasting the plan would land worse
+    /// than before.
+    #[test]
+    fn a_restartable_report_binds_the_advertised_stop_to_its_lease() {
+        let report = freshness_report_from_validation(
+            &restartable_validation(Some("lease-restartable".to_string())),
+            0,
+        );
+
+        assert!(report.restartable);
+        assert_eq!(report.lease_id.as_deref(), Some("lease-restartable"));
+        assert_eq!(
+            repair_plan_commands(&report),
+            vec![
+                (
+                    recovery_actions::DAEMON_STOP.to_string(),
+                    "homeboy daemon stop --lease-id lease-restartable".to_string(),
+                ),
+                (
+                    recovery_actions::DAEMON_START.to_string(),
+                    "homeboy daemon start".to_string(),
+                ),
+            ]
+        );
+    }
+
+    /// A restartable report with no lease (a missing lease, nothing durable at
+    /// risk) has nothing to bind, so the bare stop remains the correct
+    /// rendering — `--lease-id` would be a lie.
+    #[test]
+    fn a_restartable_report_without_a_lease_keeps_the_bare_stop() {
+        let report = freshness_report_from_validation(&restartable_validation(None), 0);
+
+        assert!(report.restartable);
+        assert_eq!(report.lease_id, None);
+        assert_eq!(
+            repair_plan_commands(&report),
+            vec![
+                (
+                    recovery_actions::DAEMON_STOP.to_string(),
+                    "homeboy daemon stop".to_string(),
+                ),
+                (
+                    recovery_actions::DAEMON_START.to_string(),
+                    "homeboy daemon start".to_string(),
+                ),
+            ]
+        );
     }
 }

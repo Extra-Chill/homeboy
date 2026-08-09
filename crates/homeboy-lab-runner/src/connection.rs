@@ -91,6 +91,10 @@ fn controller_proxy_from_env() -> Result<Option<ControllerProxy>> {
     else {
         return Ok(None);
     };
+    controller_proxy_from_url(&value)
+}
+
+fn controller_proxy_from_url(value: &str) -> Result<Option<ControllerProxy>> {
     let (scheme, authority_and_path) = value.split_once("://").ok_or_else(|| {
         Error::validation_invalid_argument(
             CONTROLLER_PROXY_ENV,
@@ -108,9 +112,17 @@ fn controller_proxy_from_env() -> Result<Option<ControllerProxy>> {
         ));
     }
     let authority = authority_and_path.split('/').next().unwrap_or_default();
-    let endpoint = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, endpoint)| endpoint);
+    if authority.contains('@') {
+        return Err(Error::validation_invalid_argument(
+            CONTROLLER_PROXY_ENV,
+            "must not include proxy credentials",
+            None,
+            Some(vec![format!(
+                "Configure a credential-free controller-local proxy endpoint in {CONTROLLER_PROXY_ENV}; Homeboy never projects proxy userinfo to a runner."
+            )]),
+        ));
+    }
+    let endpoint = authority;
     let (host, port) = endpoint.rsplit_once(':').ok_or_else(|| {
         Error::validation_invalid_argument(CONTROLLER_PROXY_ENV, "must include a port", None, None)
     })?;
@@ -161,6 +173,87 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
         tunnel_pid,
         tunnel_process_start_identity: capture_tunnel_process_start_identity(Some(tunnel_pid))?,
     }))
+}
+
+/// Return the runner-loopback proxy URL for an explicitly requesting direct SSH
+/// job. The controller endpoint is read only here and never enters job data.
+pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String> {
+    super::generation_store::with_runner_registry_lock(runner_id, || {
+        let session = recorded_session(runner_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_proxy",
+                "controller proxy access requires a connected direct SSH runner session",
+                Some(runner_id.to_string()),
+                Some(vec![format!(
+                    "Run `homeboy runner connect {runner_id}` and retry."
+                )]),
+            )
+        })?;
+        if session.mode != RunnerTunnelMode::DirectSsh {
+            return Err(Error::validation_invalid_argument(
+                "controller_proxy",
+                "controller proxy access is available only to direct SSH runner jobs",
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+        if let Some(forward) = session.proxy_forward.as_ref() {
+            if homeboy_core::process::pid_is_running(forward.tunnel_pid) {
+                return Ok(forward.runner_url.clone());
+            }
+        }
+        let server_id = session.server_id.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_proxy",
+                "direct SSH runner session has no server identity",
+                Some(runner_id.to_string()),
+                None,
+            )
+        })?;
+        let server = server::load(server_id)?;
+        let forward = open_controller_proxy_forward(&server)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                CONTROLLER_PROXY_ENV,
+                "is required when a runner job requests controller proxy access",
+                None,
+                Some(vec![format!(
+                    "Set {CONTROLLER_PROXY_ENV} on the controller and retry."
+                )]),
+            )
+        })?;
+        let mut replacement = session.clone();
+        replacement.proxy_forward = Some(forward.clone());
+        match replace_session_if_matches(&session, &replacement) {
+            Ok(true) => {}
+            Ok(false) => {
+                terminate_tunnel_with_identity(
+                    forward.tunnel_pid,
+                    forward.tunnel_process_start_identity.as_ref(),
+                    homeboy_core::process::process_start_identity,
+                    terminate_pid,
+                );
+                return Err(Error::validation_invalid_argument(
+                    "controller_proxy",
+                    "runner session changed while proxy projection was being established",
+                    Some(runner_id.to_string()),
+                    Some(vec![
+                        "Retry the runner job; Homeboy discarded the stale proxy forward."
+                            .to_string(),
+                    ]),
+                ));
+            }
+            Err(error) => {
+                terminate_tunnel_with_identity(
+                    forward.tunnel_pid,
+                    forward.tunnel_process_start_identity.as_ref(),
+                    homeboy_core::process::process_start_identity,
+                    terminate_pid,
+                );
+                return Err(error);
+            }
+        }
+        Ok(forward.runner_url)
+    })
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
@@ -1048,25 +1141,9 @@ fn connect_with_orphan_adoption_and_live_lease(
             return Ok((report, exit_code));
         }
     };
-    let proxy_forward = match open_controller_proxy_forward(&server) {
-        Ok(proxy_forward) => proxy_forward,
-        Err(error) => {
-            if let Some(pid) = tunnel_pid {
-                terminate_pid(pid);
-            }
-            let (mut report, exit_code) = failed_connect(
-                runner_id,
-                session_path,
-                RunnerFailureKind::TunnelFailure,
-                error.message,
-            );
-            if let Some(evidence) = &mut report.failure_evidence {
-                evidence.classification = "proxy_forward".to_string();
-                evidence.tunnel_state = Some("proxy_forward_not_established".to_string());
-            }
-            return Ok((report, exit_code));
-        }
-    };
+    // Proxy exposure belongs to explicitly requesting jobs. Connecting a runner
+    // must not capture an ambient controller endpoint or create an idle tunnel.
+    let proxy_forward = None;
 
     let remote_daemon_lease_id = daemon.lease_id.clone();
     if let Err(error) = verify_live_lease_adoption(
@@ -1749,6 +1826,12 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
                             &active_jobs,
                         ));
                     }
+                    let active_jobs = project_unknown_daemon_owners(
+                        runner_id,
+                        session,
+                        active_jobs,
+                        direct_daemon_active_jobs,
+                    );
                     (
                         active_jobs,
                         stale_jobs,
@@ -2429,6 +2512,67 @@ fn should_infer_child_run_orphans(
     direct_daemon_active_jobs.is_none_or(|count| typed_active_jobs >= count)
 }
 
+/// Preserve the daemon's authoritative count when its typed `/jobs` projection
+/// is incomplete. These records deliberately have no cancellable job identity:
+/// reconciliation may settle stale store state, but live daemon work stays
+/// protected until the daemon itself supplies a typed owner.
+fn project_unknown_daemon_owners(
+    runner_id: &str,
+    session: &RunnerSession,
+    mut active_jobs: Vec<ActiveRunnerJobSummary>,
+    direct_daemon_active_jobs: Option<usize>,
+) -> Vec<ActiveRunnerJobSummary> {
+    let Some(authoritative_count) = direct_daemon_active_jobs else {
+        return active_jobs;
+    };
+    let missing_count = authoritative_count.saturating_sub(active_jobs.len());
+    let lease_id = session
+        .remote_daemon_lease_id
+        .as_deref()
+        .unwrap_or("unrecorded-lease");
+    let daemon_pid = session
+        .remote_daemon_pid
+        .map(|pid| pid.to_string())
+        .unwrap_or_else(|| "unrecorded-pid".to_string());
+    let typed_job_count = active_jobs.len();
+    active_jobs.extend((0..missing_count).map(|index| ActiveRunnerJobSummary {
+        runner_id: runner_id.to_string(),
+        job_id: format!("unknown-daemon-owner-{lease_id}-{}", index + 1),
+        operation: "daemon.unknown_owner".to_string(),
+        source: RunnerJobSource::Daemon.label().to_string(),
+        kind: "unknown".to_string(),
+        status: JobStatus::Running,
+        command: format!(
+            "unprojected daemon child: lease_id={lease_id}; daemon_pid={daemon_pid}; daemon_active_count={authoritative_count}; typed_jobs_count={typed_job_count}; store=/jobs"
+        ),
+        cwd: None,
+        started_at_ms: 0,
+        updated_at_ms: 0,
+        elapsed_ms: 0,
+        heartbeat_age_ms: 0,
+        claim: JobClaimMetadata {
+            claim_id: None,
+            claimed_by_runner_id: Some(runner_id.to_string()),
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+        },
+        claim_expires_in_ms: None,
+        lifecycle: None,
+        durable_run_id: None,
+        stale_reason: Some("daemon_freshness_count_exceeds_typed_jobs".to_string()),
+        lifecycle_state: Some("unknown_owner".to_string()),
+        retryable: Some(false),
+        active_child_count: None,
+        active_cell_count: None,
+    }));
+    active_jobs
+}
+
+pub(crate) fn is_unknown_daemon_owner(job: &ActiveRunnerJobSummary) -> bool {
+    job.lifecycle_state.as_deref() == Some("unknown_owner")
+        && job.job_id.starts_with("unknown-daemon-owner-")
+}
+
 /// Query the daemon job store before an operation replaces its process.
 /// Controller observation may classify child runs as recoverable orphans, but
 /// those inferred records are not authoritative enough to interrupt a daemon.
@@ -2463,6 +2607,19 @@ pub(super) fn active_jobs_before_daemon_replacement(
             ),
             Some(runner_id.to_string()),
             Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
+        ));
+    }
+    if report.active_jobs.iter().any(is_unknown_daemon_owner) {
+        return Err(Error::validation_invalid_argument(
+            "reconnect",
+            format!(
+                "runner `{runner_id}` has active daemon work without a typed /jobs owner; refusing to replace the daemon until its lease and store projection are reconciled"
+            ),
+            Some(runner_id.to_string()),
+            Some(vec![format!(
+                "homeboy runner reconcile {}",
+                shell::quote_arg(runner_id)
+            )]),
         ));
     }
     Ok(report.active_jobs)
@@ -3538,7 +3695,29 @@ pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
         let (active_jobs, active_job_state, active_job_error) = if connected {
             match session.as_ref() {
                 Some(session) => match runner_jobs(&runner.id, session) {
-                    Ok((active, _stale)) => (active, RunnerActiveJobState::Available, None),
+                    Ok((active, _stale)) => {
+                        let direct_daemon_active_jobs =
+                            session.local_url.as_deref().and_then(|url| {
+                                daemon_http_freshness(
+                                    &runner.id,
+                                    url,
+                                    &session.homeboy_version,
+                                    session.homeboy_build_identity.as_deref().unwrap_or(""),
+                                )
+                                .ok()
+                                .map(|freshness| freshness.active_jobs)
+                            });
+                        (
+                            project_unknown_daemon_owners(
+                                &runner.id,
+                                session,
+                                active,
+                                direct_daemon_active_jobs,
+                            ),
+                            RunnerActiveJobState::Available,
+                            None,
+                        )
+                    }
                     Err(error) => (
                         Vec::new(),
                         RunnerActiveJobState::Unavailable,

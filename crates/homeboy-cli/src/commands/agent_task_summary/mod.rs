@@ -1186,6 +1186,52 @@ mod tests {
     }
 
     #[test]
+    fn review_summary_keeps_the_default_compact_apply_candidate() {
+        // #11982: default review must preserve the same substantive candidate
+        // selected for promotion even though full artifact inventories are omitted.
+        let payload = json!({
+            "run_id": "agent-task-11982",
+            "state": "succeeded",
+            "aggregate_review": { "summary": { "apply_candidates": 1, "failed": 0 } },
+            "canonical_candidate": {
+                "schema": "homeboy/agent-task-candidate/v1",
+                "state": "patch_available",
+                "diff_bytes": 17394,
+                "counts": { "patch_available": 1 },
+                "scan": { "degraded": false }
+            },
+            "selected_candidate": {
+                "status": "available",
+                "task_id": "task-a",
+                "artifact": {
+                    "artifact_id": "patch-a",
+                    "kind": "patch",
+                    "path": "/tmp/patch-a.diff",
+                    "metadata": { "changed_files": ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"] }
+                },
+                "size_bytes": 17394,
+                "changed_files": ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"]
+            },
+            "promotion_candidates": [{
+                "artifact_id": "patch-a",
+                "command": null,
+                "destination_required": true
+            }],
+            "next_actions": ["rerun review with `homeboy agent-task review agent-task-11982 --to-worktree <managed-worktree>` to generate executable promotion commands for apply candidates"]
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
+
+        assert!(summary.contains("Outcome: patch produced, not promoted\n"));
+        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
+        assert!(summary.contains("Candidate state: patch_available\n"));
+        assert!(summary.contains("Changed files: 6\n"));
+        assert!(summary.contains("Diff bytes: 17394\n"));
+        assert!(summary.contains("Next: rerun review with `homeboy agent-task review agent-task-11982 --to-worktree <managed-worktree>` to generate executable promotion commands for apply candidates\n"));
+        assert!(!summary.contains("Next: homeboy agent-task promote"));
+    }
+
+    #[test]
     fn review_summary_does_not_treat_stale_promotion_candidates_as_patches() {
         let payload = json!({
             "run_id": "homeboy-4345",
