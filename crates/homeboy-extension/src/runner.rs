@@ -1277,10 +1277,9 @@ mod tests {
         normalize_declared_test_failures(run_dir.path(), &[declaration("test.failures")])
             .expect("normalize failures");
 
-        let payload: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&failures).expect("normalized failures"),
-        )
-        .expect("failure array");
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&failures).expect("normalized failures"))
+                .expect("failure array");
         assert_eq!(payload, json!([]));
         homeboy_core::structured_sidecar::validate_payload("test.failures", &payload)
             .expect("schema-valid failure array");
