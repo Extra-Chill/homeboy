@@ -794,15 +794,68 @@ homeboy_wordpress_is_phpunit_test_file() {
     esac
 }
 
+# Standalone PHP smoke scripts are host smokes with their own runners, matching
+# the shape --host-smoke-file already accepts. They are not PHPUnit classes, so
+# the PHPUnit matcher above rejects them; without this matcher they reach the
+# changed-scope router's terminal `else` and are counted but never executed.
+homeboy_wordpress_is_php_smoke_file() {
+    case "$1" in
+        tests/*-smoke.php|tests/*/*-smoke.php|tests/*/*/*-smoke.php|tests/*/*/*/*-smoke.php|wordpress/tests/*-smoke.php|wordpress/tests/*/*-smoke.php|wordpress/tests/*/*/*-smoke.php|wordpress/tests/*/*/*/*-smoke.php)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Dispatch host PHP smokes exactly the way the exclusive_env scope above does:
+# the manifest decides which need a booted WordPress and which are standalone.
+homeboy_wordpress_run_php_smoke_files() {
+    local smoke_files_raw="$1"
+    local smoke_rel smoke_environment
+    local standalone_php_smoke_files=""
+    local wordpress_smoke_files=""
+    local status=0
+
+    while IFS= read -r smoke_rel; do
+        [ -n "$smoke_rel" ] || continue
+        smoke_environment="$(homeboy_wordpress_test_environment "$smoke_rel")" || return $?
+        if [ "$smoke_environment" = "standalone-php" ]; then
+            standalone_php_smoke_files+="${standalone_php_smoke_files:+$'\n'}${smoke_rel}"
+        else
+            wordpress_smoke_files+="${wordpress_smoke_files:+$'\n'}${smoke_rel}"
+        fi
+    done <<< "$smoke_files_raw"
+
+    if [ -n "$standalone_php_smoke_files" ]; then
+        homeboy_wordpress_run_standalone_php_smoke_files "$standalone_php_smoke_files" || status=$?
+    fi
+    if [ -n "$wordpress_smoke_files" ]; then
+        HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$wordpress_smoke_files" bash "$SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}" || status=$?
+    fi
+    return "$status"
+}
+
 if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     changed_js_smoke_files=""
     changed_shell_smoke_files=""
     changed_node_test_files=""
+    changed_php_smoke_files=""
     changed_phpunit_files=""
     changed_non_host_smoke_files=0
+    changed_selected_count=0
+    changed_routed_count=0
+    changed_excluded_count=0
     while IFS= read -r changed_test_file; do
         [ -n "$changed_test_file" ] || continue
+        changed_selected_count=$((changed_selected_count + 1))
         if ! changed_test_rel="$(homeboy_wordpress_rel_test_file "$changed_test_file")"; then
+            # Every selected path must be accounted for. A path that cannot be
+            # resolved inside the component is a real exclusion, not a silent
+            # drop, so name it and its reason.
+            echo "CHANGED_SCOPE_EXCLUDED:${changed_test_file}:reason=unresolved_outside_component"
+            changed_excluded_count=$((changed_excluded_count + 1))
             changed_non_host_smoke_files=1
             continue
         fi
@@ -811,26 +864,50 @@ if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
                 changed_js_smoke_files+=$'\n'
             fi
             changed_js_smoke_files+="$changed_test_rel"
+            echo "CHANGED_SCOPE_ROUTE:${changed_test_rel}:runner=host-js-smoke"
+            changed_routed_count=$((changed_routed_count + 1))
         elif homeboy_wordpress_is_shell_smoke_file "$changed_test_rel"; then
             if [ -n "$changed_shell_smoke_files" ]; then
                 changed_shell_smoke_files+=$'\n'
             fi
             changed_shell_smoke_files+="$changed_test_rel"
+            echo "CHANGED_SCOPE_ROUTE:${changed_test_rel}:runner=host-shell-smoke"
+            changed_routed_count=$((changed_routed_count + 1))
         elif homeboy_wordpress_is_node_test_file "$changed_test_rel"; then
             if [ -n "$changed_node_test_files" ]; then
                 changed_node_test_files+=$'\n'
             fi
             changed_node_test_files+="$changed_test_rel"
+            echo "CHANGED_SCOPE_ROUTE:${changed_test_rel}:runner=node-test"
+            changed_routed_count=$((changed_routed_count + 1))
+        elif homeboy_wordpress_is_php_smoke_file "$changed_test_rel"; then
+            if [ -n "$changed_php_smoke_files" ]; then
+                changed_php_smoke_files+=$'\n'
+            fi
+            changed_php_smoke_files+="$changed_test_rel"
+            echo "CHANGED_SCOPE_ROUTE:${changed_test_rel}:runner=host-php-smoke"
+            changed_routed_count=$((changed_routed_count + 1))
         elif homeboy_wordpress_is_phpunit_test_file "$changed_test_rel"; then
             if [ -n "$changed_phpunit_files" ]; then
                 changed_phpunit_files+=$'\n'
             fi
             changed_phpunit_files+="$changed_test_rel"
             changed_non_host_smoke_files=1
+            echo "CHANGED_SCOPE_ROUTE:${changed_test_rel}:runner=phpunit"
+            changed_routed_count=$((changed_routed_count + 1))
         else
+            # Support files (fixtures, test doubles) are legitimately not
+            # executable tests. That is a correct exclusion, but it must be a
+            # recorded classification rather than a path that just disappears.
+            echo "CHANGED_SCOPE_EXCLUDED:${changed_test_rel}:reason=unsupported_test_shape"
+            changed_excluded_count=$((changed_excluded_count + 1))
             changed_non_host_smoke_files=1
         fi
     done <<< "$HOMEBOY_CHANGED_TEST_FILES"
+
+    # Executed counts must reconcile with selected files. This summary is the
+    # ledger a reviewer reads when a changed scope reports zero tests.
+    echo "CHANGED_SCOPE_SUMMARY:selected=${changed_selected_count} routed=${changed_routed_count} excluded=${changed_excluded_count}"
 
     # Selected PHPUnit files must reach the WordPress runtime backend as an
     # explicit scope. Without it a changed-file review silently widens to the
@@ -839,23 +916,39 @@ if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
         export HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES="$changed_phpunit_files"
     fi
 
+    # Host PHP smokes run regardless of what else is in scope, and their status
+    # is carried into whichever exit path this branch takes. A failing smoke
+    # must not be erased by a passing PHPUnit run that follows it.
+    changed_scope_status=0
+    if [ -n "$changed_php_smoke_files" ]; then
+        homeboy_wordpress_run_php_smoke_files "$changed_php_smoke_files" || changed_scope_status=$?
+    fi
+
     if [ -n "$changed_js_smoke_files" ] && [ -z "$changed_shell_smoke_files" ] && [ -z "$changed_node_test_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
         homeboy_wordpress_run_js_smoke_files "$changed_js_smoke_files"
-        exit 0
+        exit "$changed_scope_status"
     fi
 
     if [ -z "$changed_js_smoke_files" ] && [ -n "$changed_shell_smoke_files" ] && [ -z "$changed_node_test_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
         homeboy_wordpress_run_shell_smoke_files "$changed_shell_smoke_files"
-        exit 0
+        exit "$changed_scope_status"
     fi
 
     if [ -z "$changed_js_smoke_files" ] && [ -z "$changed_shell_smoke_files" ] && [ -n "$changed_node_test_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
-        homeboy_wordpress_run_js_unit_test_files "$changed_node_test_files"
-        exit $?
+        homeboy_wordpress_run_js_unit_test_files "$changed_node_test_files" || changed_scope_status=$?
+        exit "$changed_scope_status"
     fi
 
     if [ -n "$changed_node_test_files" ]; then
         homeboy_wordpress_run_js_unit_test_files "$changed_node_test_files" || exit $?
+    fi
+
+    # PHP smokes with nothing requiring the PHPUnit backend are a complete
+    # scope on their own. Falling through here would hand WP Codebox an empty
+    # changed-test list, which it reads as "run everything" — silently widening
+    # a changed-file review to the full suite.
+    if [ -n "$changed_php_smoke_files" ] && [ -z "$changed_js_smoke_files" ] && [ -z "$changed_shell_smoke_files" ] && [ -z "$changed_node_test_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
+        exit "$changed_scope_status"
     fi
 fi
 
@@ -907,7 +1000,12 @@ if [ -n "$TARGET_FILE" ]; then
                 *-smoke.php)
                     target_environment="$(homeboy_wordpress_test_environment "$target_rel")" || exit $?
                     if [ "$target_environment" = "standalone-php" ]; then
+                        # The sibling branch execs, so it terminates here. This
+                        # one returns, and without an explicit exit the request
+                        # for one file falls through into the full-suite PHPUnit
+                        # run below.
                         homeboy_wordpress_run_standalone_php_smoke_files "$target_rel"
+                        exit $?
                     else
                         HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="$target_rel" exec bash "$SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
                     fi
@@ -947,4 +1045,15 @@ if [ -n "$full_suite_phpunit_root" ]; then
     fi
 fi
 WORDPRESS_RUNTIME_RUNNER="$(homeboy_wordpress_runtime_runner)" || exit $?
+# A host PHP smoke in this changed scope already failed. `exec` would replace
+# this process and report only the PHPUnit backend's status, erasing that
+# failure. Run the backend for its evidence, then report the worst status.
+if [ "${changed_scope_status:-0}" -ne 0 ]; then
+    wordpress_runtime_status=0
+    bash "$WORDPRESS_RUNTIME_RUNNER" "${PASSTHROUGH_ARGS[@]}" || wordpress_runtime_status=$?
+    if [ "$wordpress_runtime_status" -ne 0 ]; then
+        exit "$wordpress_runtime_status"
+    fi
+    exit "$changed_scope_status"
+fi
 exec bash "$WORDPRESS_RUNTIME_RUNNER" "${PASSTHROUGH_ARGS[@]}"

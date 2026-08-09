@@ -297,7 +297,15 @@ try {
       wp_codebox_database_service: { ...configured.wp_codebox_database_service, provider },
     }, /provider must be external or native/, secretValues);
     assert.deepEqual(await observations(rejectedProvider.observed), [], 'unsupported providers fail before recipe build');
-    assert.equal(rejectedProvider.result.stderr.includes(String(provider)), false, 'provider diagnostics omit rejected values');
+    // Check the diagnostic text, not the stack frames. Frames carry source line
+    // numbers, and a numeric provider such as 42 is a substring of a line number
+    // like 428 — that is a false positive about line numbering, not a leak of
+    // the rejected value.
+    const rejectedDiagnostics = rejectedProvider.result.stderr
+      .split('\n')
+      .filter((line) => !/^\s*at\s/.test(line) && !/^\s*(file:)?\/\S*:\d+$/.test(line))
+      .join('\n');
+    assert.equal(rejectedDiagnostics.includes(String(provider)), false, 'provider diagnostics omit rejected values');
   }
 
   expectPreflightFailure({
