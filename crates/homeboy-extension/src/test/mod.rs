@@ -204,7 +204,25 @@ pub fn build_test_runner(
 
         if let Some(routing) = test_changed_file_routing(&extension_id)? {
             for (name, value) in build_changed_test_routing_env(component, files, &routing) {
-                runner = runner.env(&name, &value);
+                if name == "HOMEBOY_RUST_CHANGED_TEST_SELECTION_JSON" {
+                    let selection_path = run_dir.step_file("rust-changed-test-selection.json");
+                    if value.len() > 1024 * 1024 || std::fs::write(&selection_path, value).is_err()
+                    {
+                        runner = runner
+                            .env("HOMEBOY_TEST_SCOPE_KIND", "full")
+                            .env(
+                                "HOMEBOY_TEST_SCOPE_MESSAGE",
+                                "Rust changed-test selection could not be materialized; running the full test command.",
+                            );
+                    } else {
+                        runner = runner.env(
+                            "HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE",
+                            selection_path.to_string_lossy().as_ref(),
+                        );
+                    }
+                } else {
+                    runner = runner.env(&name, &value);
+                }
             }
         }
     }
@@ -468,6 +486,7 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
                     "test".to_string(),
                     rest.trim_end_matches(".rs").to_string(),
                     None,
+                    test_file.clone(),
                 ));
                 continue;
             }
@@ -541,7 +560,13 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
                 );
                 continue;
             };
-            candidates.insert((package, "lib".to_string(), target, Some(mounted)));
+            candidates.insert((
+                package,
+                "lib".to_string(),
+                target,
+                Some(mounted),
+                test_file.clone(),
+            ));
             continue;
         }
 
@@ -554,7 +579,13 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
                 );
                 continue;
             };
-            candidates.insert((package, "lib".to_string(), target, Some(module_path)));
+            candidates.insert((
+                package,
+                "lib".to_string(),
+                target,
+                Some(module_path),
+                test_file.clone(),
+            ));
         }
     }
 
@@ -571,12 +602,13 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
 
     let candidates = candidates
         .into_iter()
-        .map(|(package, target_kind, target, module)| {
+        .map(|(package, target_kind, target, module, path)| {
             serde_json::json!({
                 "package": package,
                 "target_kind": target_kind,
                 "target": target,
                 "module": module,
+                "path": path,
             })
         })
         .collect::<Vec<_>>();
@@ -590,7 +622,7 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
             "rust_changed_union".to_string(),
         ),
         (
-            "HOMEBOY_RUST_CHANGED_TEST_SELECTION".to_string(),
+            "HOMEBOY_RUST_CHANGED_TEST_SELECTION_JSON".to_string(),
             selection.to_string(),
         ),
         (
@@ -1209,7 +1241,7 @@ mod tests {
         )));
         let selection = env
             .iter()
-            .find(|(key, _)| key == "HOMEBOY_RUST_CHANGED_TEST_SELECTION")
+            .find(|(key, _)| key == "HOMEBOY_RUST_CHANGED_TEST_SELECTION_JSON")
             .map(|(_, value)| value)
             .expect("changed Rust selection");
         let candidates = serde_json::from_str::<serde_json::Value>(selection)
