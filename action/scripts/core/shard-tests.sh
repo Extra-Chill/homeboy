@@ -28,7 +28,7 @@ plan() {
   ' "${inventory}" >/dev/null || fail "Test inventory must satisfy homeboy/test-inventory/v1."
   [ "${count}" -le "$(jq '.tests | length' "${inventory}")" ] || fail "Test shard count exceeds the test inventory; empty shards are not allowed."
 
-  local canonical inventory_digest plan_digest
+  local canonical inventory_digest plan_digest shard_id shard_canonical shard_fingerprint
   canonical="$(jq -cS '{schema,runner,runner_fingerprint,workspace_fingerprint,inventory_fingerprint,tests:(.tests | sort_by(.id))}' "${inventory}")"
   inventory_digest="$(digest "${canonical}")"
   printf '%s' "${canonical}" | jq -cn --slurpfile inventory /dev/stdin --arg inventory_digest "${inventory_digest}" --argjson count "${count}" --argjson unknown "${unknown}" '
@@ -40,6 +40,17 @@ plan() {
          runner_fingerprint:$inventory[0].runner_fingerprint, workspace_fingerprint:$inventory[0].workspace_fingerprint,
          inventory_fingerprint:$inventory[0].inventory_fingerprint, tests:.tests, estimated_duration_ms:.duration_ms}))}
   ' > "${output}.tmp"
+  while IFS= read -r shard_id; do
+    shard_canonical="$(jq -cS --arg id "${shard_id}" --slurpfile plan "${output}.tmp" '
+      ($plan[0].shards[] | select(.id == $id).tests | reduce .[] as $test_id ({}; .[$test_id] = true)) as $selected
+      | {schema,runner,runner_fingerprint,workspace_fingerprint,tests:(.tests | map(select($selected[.id])) | sort_by(.id))}
+    ' "${inventory}")"
+    shard_fingerprint="$(digest "${shard_canonical}")"
+    jq --arg id "${shard_id}" --arg fingerprint "${shard_fingerprint}" '
+      (.shards[] | select(.id == $id).inventory_fingerprint) = $fingerprint
+    ' "${output}.tmp" > "${output}.next"
+    mv "${output}.next" "${output}.tmp"
+  done < <(jq -r '.shards[].id' "${output}.tmp")
   plan_digest="$(digest "$(jq -cS . "${output}.tmp")")"
   jq --arg digest "${plan_digest}" '. + {plan_digest:$digest}' "${output}.tmp" > "${output}"
   rm -f "${output}.tmp"

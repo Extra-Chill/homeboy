@@ -45,6 +45,21 @@ for output in one two; do
 done
 cmp "${tmp}/one.json" "${tmp}/two.json" || { printf 'FAIL: identical inventories must produce byte-identical plans\n'; exit 1; }
 jq -e '[.shards[].tests[]] | sort == ["fast","medium","slow","unknown"]' "${tmp}/one.json" >/dev/null || { printf 'FAIL: plan membership is not exact\n'; exit 1; }
+jq -e '.inventory_fingerprint == "inventory-a" and all(.shards[]; .inventory_fingerprint != "inventory-a")' "${tmp}/one.json" >/dev/null || { printf 'FAIL: plan must retain the parent fingerprint while shards fingerprint their projections\n'; exit 1; }
+while IFS= read -r shard; do
+  shard_id="$(jq -r .id <<< "${shard}")"
+  projected="$(jq -cS --arg id "${shard_id}" --slurpfile plan "${tmp}/one.json" '
+    ($plan[0].shards[] | select(.id == $id).tests | reduce .[] as $test_id ({}; .[$test_id] = true)) as $selected
+    | {schema,runner,runner_fingerprint,workspace_fingerprint,tests:(.tests | map(select($selected[.id])) | sort_by(.id))}
+  ' "${tmp}/captured-inventory.json")"
+  expected_fingerprint="$(printf '%s' "${projected}" | shasum -a 256 | awk '{print $1}')"
+  [ "$(jq -r .inventory_fingerprint <<< "${shard}")" = "${expected_fingerprint}" ] || { printf 'FAIL: %s fingerprint does not bind its selected inventory projection\n' "${shard_id}"; exit 1; }
+done < <(jq -c '.shards[]' "${tmp}/one.json")
+tampered_fingerprint="$(jq -cS --slurpfile plan "${tmp}/one.json" '
+  ($plan[0].shards[0].tests + [$plan[0].shards[1].tests[0]] | reduce .[] as $test_id ({}; .[$test_id] = true)) as $selected
+  | {schema,runner,runner_fingerprint,workspace_fingerprint,tests:(.tests | map(select($selected[.id])) | sort_by(.id))}
+' "${tmp}/captured-inventory.json" | shasum -a 256 | awk '{print $1}')"
+[ "${tampered_fingerprint}" != "$(jq -r '.shards[0].inventory_fingerprint' "${tmp}/one.json")" ] || { printf 'FAIL: changed shard membership must change its projected fingerprint\n'; exit 1; }
 if TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/too-many.json" TEST_SHARD_COUNT=5 bash "${ROOT}/scripts/core/shard-tests.sh" plan >/dev/null 2>&1; then
   printf 'FAIL: empty shard plans must be rejected\n'; exit 1
 fi
