@@ -2249,7 +2249,7 @@ mod tests {
     }
 
     #[test]
-    fn home_guard_owns_and_restores_xdg_and_temp_roots() {
+    fn home_guard_owns_xdg_and_preserves_process_temp_roots() {
         let names = [
             "HOME",
             "XDG_CONFIG_HOME",
@@ -2281,14 +2281,24 @@ mod tests {
                 ("XDG_DATA_HOME", root.join(".local/share")),
                 ("XDG_STATE_HOME", root.join(".local/state")),
                 ("XDG_RUNTIME_DIR", guard.context.runtime_dir().to_path_buf()),
-                ("TMPDIR", guard.context.temp_dir()),
-                ("TEMP", guard.context.temp_dir()),
-                ("TMP", guard.context.temp_dir()),
             ] {
                 assert_eq!(
                     std::env::var_os(name),
                     Some(path.into_os_string()),
                     "{name}"
+                );
+            }
+            let command = guard.context.command(TestBinary::CurrentTest);
+            for name in ["TMPDIR", "TEMP", "TMP"] {
+                assert_eq!(
+                    std::env::var(name).expect("ambient temp root"),
+                    format!("/ambient/{name}"),
+                    "{name} must remain process-global"
+                );
+                assert_eq!(
+                    command_env(&command, name),
+                    Some(Some(guard.context.temp_dir().into_os_string())),
+                    "{name} must be isolated for subprocesses"
                 );
             }
             assert!(std::env::var_os(crate::paths::HOMEBOY_DATA_DIR_ENV).is_none());
