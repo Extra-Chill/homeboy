@@ -33,22 +33,30 @@ printf '#[cfg(test)]\nmod tests { #[test] fn member_works() {} }\n' > "$PROJECT_
 
 cat > "$BIN_DIR/test-lib" <<'EOF'
 #!/usr/bin/env bash
+if [[ " $* " == *' --ignored '* ]]; then
+  printf '%s\n' 'unit::ignored: test'
+  exit 0
+fi
 printf '%s\n' 'unit::alpha: test' 'unit::beta: test' 'unit::ignored: test'
 EOF
 cat > "$BIN_DIR/test-api" <<'EOF'
 #!/usr/bin/env bash
+[[ " $* " == *' --ignored '* ]] && exit 0
 printf '%s\n' 'api::works: test'
 EOF
 cat > "$BIN_DIR/test-member" <<'EOF'
 #!/usr/bin/env bash
+[[ " $* " == *' --ignored '* ]] && exit 0
 printf '%s\n' 'member::member_works: test'
 EOF
 cat > "$BIN_DIR/test-proc-macro" <<'EOF'
 #!/usr/bin/env bash
+[[ " $* " == *' --ignored '* ]] && exit 0
 printf '%s\n' 'macros::expands: test'
 EOF
 cat > "$BIN_DIR/test-rlib" <<'EOF'
 #!/usr/bin/env bash
+[[ " $* " == *' --ignored '* ]] && exit 0
 printf '%s\n' 'rlib::works: test'
 EOF
 cat > "$BIN_DIR/bench-audit-self" <<'EOF'
@@ -285,7 +293,7 @@ assert first == second, "inventory must be deterministic"
 assert set(first) == {"schema", "runner", "runner_fingerprint", "workspace_fingerprint", "inventory_fingerprint", "tests"}, first
 assert first["schema"] == "homeboy/test-inventory/v1", first
 assert nextest["schema"] == "homeboy/test-inventory/v1", nextest
-assert all(set(test) == {"id", "package", "target", "target_kind", "name"} for test in first["tests"]), first
+assert all(set(test) == {"id", "package", "target", "target_kind", "name", "expected_outcome"} for test in first["tests"]), first
 assert [test["id"] for test in first["tests"]] == [
     "member-smoke::lib::member_smoke::member::member_works",
     "shard-smoke::lib::shard_smoke::unit::alpha",
@@ -294,6 +302,9 @@ assert [test["id"] for test in first["tests"]] == [
     "shard-smoke::proc-macro::macros::macros::expands",
     "shard-smoke::rlib::rlib_fixture::rlib::works",
     "shard-smoke::test::api::api::works",
+], first
+assert [test["expected_outcome"] for test in first["tests"]] == [
+    "executed", "executed", "executed", "skipped", "executed", "executed", "executed",
 ], first
 assert nextest["runner"] == "nextest", nextest
 assert nextest["runner_fingerprint"] != first["runner_fingerprint"], nextest

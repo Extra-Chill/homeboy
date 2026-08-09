@@ -71,7 +71,7 @@ def cargo_metadata_roots(project, context):
 
 
 def cargo_inventory(workspace_root, packages):
-    tests = []
+    tests = {}
     command = ["cargo", "test", "--workspace", "--no-run", "--message-format=json"]
     result = run(command, workspace_root)
     if result.returncode:
@@ -88,17 +88,31 @@ def cargo_inventory(workspace_root, packages):
         target = message.get("target", {})
         kinds = target.get("kind", [])
         listed = run([message["executable"], "--list"], workspace_root)
-        if listed.returncode:
+        ignored = run([message["executable"], "--list", "--ignored"], workspace_root)
+        if listed.returncode or ignored.returncode:
             fail(f"could not list tests for {target.get('name', 'unknown target')}: {listed.stderr.strip()}")
         package = packages.get(message.get("package_id"))
         if not package:
             fail("cargo emitted a test executable without a resolvable package")
         target_kind = kinds[0] if kinds else "unknown"
+        ignored_names = {
+            line.partition(": ")[0]
+            for line in ignored.stdout.splitlines()
+            if line.partition(": ")[1] and line.partition(": ")[0]
+        }
         for test_line in listed.stdout.splitlines():
             name, separator, _kind = test_line.partition(": ")
             if separator and name:
-                tests.append({"id": f"{package}::{target_kind}::{target['name']}::{name}", "package": package, "target": target["name"], "target_kind": target_kind, "name": name})
-    return tests
+                test_id = f"{package}::{target_kind}::{target['name']}::{name}"
+                tests[test_id] = {
+                    "id": test_id,
+                    "package": package,
+                    "target": target["name"],
+                    "target_kind": target_kind,
+                    "name": name,
+                    "expected_outcome": "skipped" if name in ignored_names else "executed",
+                }
+    return list(tests.values())
 
 
 def nextest_inventory(workspace_root):
@@ -163,6 +177,7 @@ def inventory(project, runner):
                 "target": "doc",
                 "target_kind": "doc",
                 "name": name,
+                "expected_outcome": "executed",
             })
     tests.sort(key=lambda item: item["id"])
     if len({item["id"] for item in tests}) != len(tests):
