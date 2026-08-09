@@ -72,7 +72,12 @@ pub(super) fn effective_lint_exit_code(
     exit_code: i32,
     baseline_exit_override: Option<i32>,
     hard_error: bool,
+    current_findings_empty: bool,
 ) -> i32 {
+    if exit_code == 0 && current_findings_empty && !hard_error {
+        return 0;
+    }
+
     match baseline_exit_override {
         Some(0) if hard_error => exit_code.max(1),
         Some(override_code) => override_code,

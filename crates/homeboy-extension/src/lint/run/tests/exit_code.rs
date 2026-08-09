@@ -66,8 +66,35 @@ fn crashed_zero_finding_producer_remains_failure() {
 
 #[test]
 fn baseline_clean_override_honors_known_findings_but_not_infrastructure_errors() {
-    assert_eq!(effective_lint_exit_code(1, Some(0), false), 0);
-    assert_eq!(effective_lint_exit_code(2, Some(0), true), 2);
-    assert_eq!(effective_lint_exit_code(1, Some(0), true), 1);
-    assert_eq!(effective_lint_exit_code(0, Some(0), true), 1);
+    assert_eq!(effective_lint_exit_code(1, Some(0), false, false), 0);
+    assert_eq!(effective_lint_exit_code(2, Some(0), true, true), 2);
+    assert_eq!(effective_lint_exit_code(1, Some(0), true, true), 1);
+    assert_eq!(effective_lint_exit_code(0, Some(0), true, false), 1);
+}
+
+#[test]
+fn unrelated_baseline_context_cannot_fail_clean_current_scope() {
+    let unrelated_baseline_delta = 250;
+    let baseline_exit_override = (unrelated_baseline_delta > 0).then_some(1);
+    let all_current_producers_clean_exit_code = 0;
+
+    assert_eq!(
+        effective_lint_exit_code(
+            all_current_producers_clean_exit_code,
+            baseline_exit_override,
+            false,
+            true,
+        ),
+        0
+    );
+    assert_eq!(
+        effective_lint_exit_code(0, baseline_exit_override, false, false),
+        1,
+        "introduced current findings must remain blocking"
+    );
+    assert_eq!(
+        effective_lint_exit_code(0, baseline_exit_override, true, true),
+        1,
+        "infrastructure failures must remain blocking"
+    );
 }
