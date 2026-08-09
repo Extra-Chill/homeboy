@@ -152,7 +152,7 @@ if [[ "$OUTPUT" != *"1 passed"* ]]; then
 fi
 
 cat > "$WORKDIR/changed-selection.json" <<'EOF'
-{"schema":"homeboy/rust-changed-test-selection/v1","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"lib","target":"rust_changed_scope_smoke","module":"core::daemon::daemon_test"},{"package":"rust-changed-scope-smoke","target_kind":"test","target":"integration_scope","module":null}]}
+{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"lib","target":"rust_changed_scope_smoke","module":"core::daemon::daemon_test"},{"package":"rust-changed-scope-smoke","target_kind":"test","target":"integration_scope","module":null}]}
 EOF
 OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
@@ -193,7 +193,7 @@ fi
 # Renames and deletions can leave a candidate absent from the current inventory.
 # They must widen safely instead of returning a green zero-test result.
 cat > "$WORKDIR/changed-selection.json" <<'EOF'
-{"schema":"homeboy/rust-changed-test-selection/v1","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"test","target":"renamed_or_deleted","module":null}]}
+{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"test","target":"renamed_or_deleted","module":null}]}
 EOF
 OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \

@@ -9,7 +9,7 @@ from pathlib import Path
 
 SCHEMA = "homeboy/test-inventory/v1"
 MANIFEST_SCHEMA = "homeboy/test-shard-manifest/v1"
-CHANGED_SELECTION_SCHEMA = "homeboy/rust-changed-test-selection/v1"
+CHANGED_SELECTION_SCHEMA = "homeboy/rust-changed-test-selection/v2"
 
 
 def fail(message):
