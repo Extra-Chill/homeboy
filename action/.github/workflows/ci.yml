@@ -673,7 +673,7 @@ jobs:
           commands: ${{ needs.plan.outputs.test-command }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
-          scope: full
+          scope: ${{ inputs.scope }}
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}
@@ -860,6 +860,12 @@ jobs:
         with:
           name: homeboy-test-inventory-failure-${{ github.run_attempt }}
           path: test-inventory-failure
+      - name: Download baseline Test inventory failure provenance
+        if: needs.candidate-test-plan.result == 'success' && needs.baseline-test-plan.outputs.bootstrap-baseline-red == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: homeboy-baseline-test-inventory-failure-${{ github.run_attempt }}
+          path: baseline-test-inventory-failure
       - name: Report candidate Test inventory generation failure
         if: needs.candidate-test-plan.result != 'success'
         run: |
@@ -869,10 +875,33 @@ jobs:
           echo "::error::Test inventory generation failed for '${command}' (inventory=${{ needs.candidate-test-plan.result }}; results=${results}). Inspect Plan candidate Test shards for the underlying command failure."
           find test-inventory-failure/homeboy-ci-results -type f -maxdepth 1 -print -exec cat {} \; 2>/dev/null || true
           exit 1
-      - name: Report baseline Test inventory generation failure
-        if: needs.candidate-test-plan.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result != 'success'
+      - name: Reconcile baseline Test bootstrap failure
+        if: needs.candidate-test-plan.result == 'success' && needs.baseline-test-plan.outputs.bootstrap-baseline-red == 'true'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          COMMAND: ${{ needs.plan.outputs.test-command }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          echo '::error::Baseline Test inventory generation failed; baseline shard artifacts were not downloaded. Inspect Plan baseline Test shards for the underlying command failure.'
+          provenance=baseline-test-inventory-failure/provenance.json
+          jq -e --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg command "${COMMAND}" --argjson run_attempt "${RUN_ATTEMPT}" '
+            .schema == "homeboy/test-inventory-provenance/v1"
+            and .phase == "baseline"
+            and .repository == $repository
+            and .candidate_sha == $candidate_sha
+            and .base_sha == $base_sha
+            and .command == $command
+            and .inventory_outcome == "failure"
+            and .planner_outcome == "skipped"
+            and (.run_attempt | type == "number" and . > 0 and . <= $run_attempt)
+            and (.results | type == "object")
+          ' "${provenance}" >/dev/null
+          echo "::warning::Test bootstrap_baseline_red: immutable baseline inventory failed before baseline shards could be planned. Candidate shards remain mandatory; inspect Plan baseline Test shards and the retained baseline inventory provenance."
+      - name: Fail unresolved baseline Test planning failure
+        if: needs.candidate-test-plan.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result != 'success' && needs.baseline-test-plan.outputs.bootstrap-baseline-red != 'true'
+        run: |
+          echo '::error::Baseline Test planning failed outside the classified inventory-bootstrap path; no differential verdict can be produced.'
           exit 1
       - uses: actions/download-artifact@v7
         if: needs.candidate-test-plan.result == 'success'
@@ -934,6 +963,11 @@ jobs:
         env:
           COMMAND: ${{ needs.plan.outputs.test-command }}
         run: RESULTS="$(cat homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
+      - name: Enforce candidate Test result after bootstrap baseline red
+        if: needs.candidate-test-plan.result == 'success' && needs.baseline-test-plan.outputs.bootstrap-baseline-red == 'true'
+        env:
+          COMMAND: ${{ needs.plan.outputs.test-command }}
+        run: RESULTS="$(cat homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
 
   baseline-test-plan:
     name: Plan baseline Test shards
@@ -942,6 +976,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       test-matrix: ${{ steps.plan.outputs.matrix }}
+      bootstrap-baseline-red: ${{ steps.bootstrap-baseline-red.outputs.value }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -1006,6 +1041,35 @@ jobs:
           bash .homeboy-action/scripts/core/shard-tests.sh plan
           jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}' >> /dev/null
           echo "matrix=$(jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}')" >> "${GITHUB_OUTPUT}"
+      - name: Classify baseline inventory bootstrap failure
+        id: bootstrap-baseline-red
+        if: always() && steps.inventory.outcome == 'failure' && steps.plan.outcome == 'skipped'
+        run: echo 'value=true' >> "${GITHUB_OUTPUT}"
+      - name: Write baseline Test inventory failure provenance
+        if: always() && steps.bootstrap-baseline-red.outputs.value == 'true'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          COMMAND: ${{ needs.plan.outputs.test-command }}
+          INVENTORY_OUTCOME: ${{ steps.inventory.outcome }}
+          PLANNER_OUTCOME: ${{ steps.plan.outcome }}
+          RESULTS: ${{ steps.inventory.outputs.results }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          mkdir -p homeboy-baseline-test-inventory-failure
+          inventory_payload="${RESULTS-}"
+          [ -n "${inventory_payload}" ] || inventory_payload='{}'
+          jq -cn --arg schema 'homeboy/test-inventory-provenance/v1' --arg phase baseline --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg command "${COMMAND}" --arg inventory_outcome "${INVENTORY_OUTCOME}" --arg planner_outcome "${PLANNER_OUTCOME}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${inventory_payload}" \
+            '{schema:$schema,phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,command:$command,inventory_outcome:$inventory_outcome,planner_outcome:$planner_outcome,run_attempt:$run_attempt,results:$results}' > homeboy-baseline-test-inventory-failure/provenance.json
+          cp -R homeboy-ci-results homeboy-baseline-test-inventory-failure/homeboy-ci-results 2>/dev/null || true
+      - name: Upload baseline Test inventory failure provenance
+        if: always() && steps.bootstrap-baseline-red.outputs.value == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-baseline-test-inventory-failure-${{ github.run_attempt }}
+          path: homeboy-baseline-test-inventory-failure
+          if-no-files-found: error
       - name: Fail baseline Test inventory generation
         if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
         run: |
