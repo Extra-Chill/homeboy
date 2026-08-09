@@ -34,7 +34,7 @@ plan() {
   printf '%s' "${canonical}" | jq -cn --slurpfile inventory /dev/stdin --arg inventory_digest "${inventory_digest}" --argjson count "${count}" --argjson unknown "${unknown}" '
     [range(0; $count) | {index:., duration_ms:0, tests:[]}] as $empty
     | reduce ($inventory[0].tests | map(. + {weight:(.duration_ms // $unknown)}) | sort_by(-.weight, .id))[] as $test
-        ($empty; (min_by(.duration_ms, .index).index) as $index | .[$index].duration_ms += $test.weight | .[$index].tests += [$test.id])
+        ($empty; (min_by([.duration_ms, .index]).index) as $index | .[$index].duration_ms += $test.weight | .[$index].tests += [$test.id])
     | {schema:"homeboy/test-shard-plan/v1", inventory_digest:$inventory_digest, inventory_fingerprint:$inventory[0].inventory_fingerprint,
        shards:(map({schema:"homeboy/test-shard-manifest/v1", id:("shard-" + ((.index + 1)|tostring)), runner:$inventory[0].runner,
          runner_fingerprint:$inventory[0].runner_fingerprint, workspace_fingerprint:$inventory[0].workspace_fingerprint,

@@ -45,6 +45,7 @@ for output in one two; do
 done
 cmp "${tmp}/one.json" "${tmp}/two.json" || { printf 'FAIL: identical inventories must produce byte-identical plans\n'; exit 1; }
 jq -e '[.shards[].tests[]] | sort == ["fast","medium","slow","unknown"]' "${tmp}/one.json" >/dev/null || { printf 'FAIL: plan membership is not exact\n'; exit 1; }
+jq -e '[.shards[].tests[]] | length == (unique | length)' "${tmp}/one.json" >/dev/null || { printf 'FAIL: plan assigns a test to more than one shard\n'; exit 1; }
 if TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/too-many.json" TEST_SHARD_COUNT=5 bash "${ROOT}/scripts/core/shard-tests.sh" plan >/dev/null 2>&1; then
   printf 'FAIL: empty shard plans must be rejected\n'; exit 1
 fi
