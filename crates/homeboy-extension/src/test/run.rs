@@ -28,7 +28,7 @@ use homeboy_refactor_contract::AppliedRefactor;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::path::{Component as PathComponent, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -61,6 +61,7 @@ const NO_TESTS_APPLICABLE_STEP: &str = "test";
 const TEST_INVENTORY_ONLY_ENV: &str = "HOMEBOY_TEST_INVENTORY_ONLY";
 const TEST_INVENTORY_FILE_ENV: &str = "HOMEBOY_TEST_INVENTORY_FILE";
 const TEST_INVENTORY_SCHEMA: &str = "homeboy/test-inventory/v1";
+const TEST_INVENTORY_FILE: &str = "test-inventory.json";
 const MAX_TEST_INVENTORY_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 25 * 60;
 
@@ -111,41 +112,86 @@ fn test_inventory_mode(ci_env: &[(String, String)]) -> bool {
         .any(|(key, value)| key == TEST_INVENTORY_ONLY_ENV && value == "1")
 }
 
-fn requested_test_inventory_file(
-    ci_env: &[(String, String)],
-    source_path: &Path,
-) -> Option<PathBuf> {
-    if !test_inventory_mode(ci_env) {
-        return None;
-    }
+#[derive(Clone, Debug)]
+struct TestInventoryBinding {
+    run_dir: PathBuf,
+    path: PathBuf,
+    runner_fingerprint: String,
+    workspace_fingerprint: String,
+}
 
-    let requested = ci_env
-        .iter()
-        .find(|(key, value)| key == TEST_INVENTORY_FILE_ENV && !value.is_empty())
-        .map(|(_, value)| PathBuf::from(value))?;
-    let source_root = source_path.canonicalize().ok()?;
-    let requested = if requested.is_absolute() {
-        requested
-    } else {
-        source_root.join(requested)
-    };
-    let name = requested.file_name()?.to_owned();
-    if !Path::new(&name)
-        .components()
-        .all(|component| matches!(component, PathComponent::Normal(_)))
-    {
+fn test_inventory_binding(
+    context: &crate::ExtensionExecutionContext,
+    source_path: &Path,
+    run_dir: &RunDir,
+) -> Option<TestInventoryBinding> {
+    let run_dir_metadata = std::fs::symlink_metadata(run_dir.path()).ok()?;
+    if !run_dir_metadata.file_type().is_dir() || run_dir_metadata.file_type().is_symlink() {
         return None;
     }
-    let parent = requested.parent()?.canonicalize().ok()?;
-    parent.starts_with(&source_root).then(|| parent.join(name))
+    let run_dir = run_dir.path().canonicalize().ok()?;
+    let extension_path = context.extension_path.canonicalize().ok()?;
+    let script_path = extension_path
+        .join(&context.script_path)
+        .canonicalize()
+        .ok()?;
+    if !script_path.starts_with(&extension_path) || !script_path.is_file() {
+        return None;
+    }
+    let runner_fingerprint =
+        homeboy_engine_primitives::content_hash::sha256_file(&script_path).ok()?;
+    let snapshot = homeboy_core::source_snapshot::collect_local(
+        "homeboy-test-inventory",
+        source_path,
+        None,
+        "local",
+    );
+    if snapshot.git_sha.is_none() {
+        return None;
+    }
+    let workspace_fingerprint = snapshot.snapshot_hash.strip_prefix("sha256:")?.to_string();
+    homeboy_engine_primitives::content_hash::is_sha256_hex(&workspace_fingerprint).then(|| {
+        TestInventoryBinding {
+            path: run_dir.join(TEST_INVENTORY_FILE),
+            run_dir,
+            runner_fingerprint,
+            workspace_fingerprint,
+        }
+    })
+}
+
+fn revalidate_test_inventory_binding(
+    binding: &TestInventoryBinding,
+    context: &crate::ExtensionExecutionContext,
+    source_path: &Path,
+) -> bool {
+    let Ok(run_dir) = RunDir::from_existing(binding.run_dir.clone()) else {
+        return false;
+    };
+    let Some(current) = test_inventory_binding(context, source_path, &run_dir) else {
+        return false;
+    };
+    current.path == binding.path
+        && current.runner_fingerprint == binding.runner_fingerprint
+        && current.workspace_fingerprint == binding.workspace_fingerprint
 }
 
 /// Delete stale evidence before the child starts. The child may only write a
-/// regular file below its source tree, so a prior run cannot satisfy this run.
-fn prepare_test_inventory(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
+/// regular file directly below its trusted run directory, so a prior run cannot
+/// satisfy this run.
+fn prepare_test_inventory(binding: &TestInventoryBinding) -> bool {
+    let Some(path_parent) = binding.path.parent() else {
+        return false;
+    };
+    let Ok(parent) = path_parent.canonicalize() else {
+        return false;
+    };
+    if parent != binding.run_dir || binding.path.file_name() != Some(TEST_INVENTORY_FILE.as_ref()) {
+        return false;
+    }
+    match std::fs::symlink_metadata(&binding.path) {
         Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
-            std::fs::remove_file(path).is_ok()
+            std::fs::remove_file(&binding.path).is_ok()
         }
         Ok(_) => false,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
@@ -156,14 +202,18 @@ fn prepare_test_inventory(path: &Path) -> bool {
 /// Inventory planning currently runs on Unix CI. Other platforms lack an
 /// equivalent no-follow open here, so this optional evidence stays closed.
 #[cfg(not(unix))]
-fn valid_test_inventory(path: &Path) -> Option<TestInventoryOutput> {
-    let _ = path;
+fn valid_test_inventory(binding: &TestInventoryBinding) -> Option<TestInventoryOutput> {
+    let _ = binding;
     None
 }
 
 #[cfg(unix)]
-fn valid_test_inventory(path: &Path) -> Option<TestInventoryOutput> {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+fn valid_test_inventory(binding: &TestInventoryBinding) -> Option<TestInventoryOutput> {
+    let parent = binding.path.parent()?.canonicalize().ok()?;
+    if parent != binding.run_dir || binding.path.file_name() != Some(TEST_INVENTORY_FILE.as_ref()) {
+        return None;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(&binding.path) else {
         return None;
     };
     if !metadata.file_type().is_file() || metadata.len() > MAX_TEST_INVENTORY_BYTES {
@@ -176,7 +226,7 @@ fn valid_test_inventory(path: &Path) -> Option<TestInventoryOutput> {
         std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
+            .open(&binding.path)
     };
     let Ok(mut file) = file else {
         return None;
@@ -194,10 +244,13 @@ fn valid_test_inventory(path: &Path) -> Option<TestInventoryOutput> {
     let Ok(inventory) = serde_json::from_slice::<TestInventoryEvidence>(&bytes) else {
         return None;
     };
-    valid_test_inventory_payload(&inventory)
+    valid_test_inventory_payload(&inventory, binding)
 }
 
-fn valid_test_inventory_payload(inventory: &TestInventoryEvidence) -> Option<TestInventoryOutput> {
+fn valid_test_inventory_payload(
+    inventory: &TestInventoryEvidence,
+    binding: &TestInventoryBinding,
+) -> Option<TestInventoryOutput> {
     if inventory.schema != TEST_INVENTORY_SCHEMA
         || !matches!(inventory.runner.as_str(), "cargo" | "nextest")
         || !homeboy_engine_primitives::content_hash::is_sha256_hex(&inventory.runner_fingerprint)
@@ -205,6 +258,12 @@ fn valid_test_inventory_payload(inventory: &TestInventoryEvidence) -> Option<Tes
         || !homeboy_engine_primitives::content_hash::is_sha256_hex(&inventory.inventory_fingerprint)
         || inventory.inventory_fingerprint != inventory.inventory_fingerprint.to_ascii_lowercase()
         || inventory.tests.is_empty()
+        || inventory
+            .tests
+            .iter()
+            .all(|test| test.expected_outcome.as_deref() == Some("skipped"))
+        || inventory.runner_fingerprint != binding.runner_fingerprint
+        || inventory.workspace_fingerprint != binding.workspace_fingerprint
     {
         return None;
     }
@@ -234,8 +293,14 @@ fn valid_test_inventory_payload(inventory: &TestInventoryEvidence) -> Option<Tes
         return None;
     }
 
-    (homeboy_engine_primitives::content_hash::sha256_hex(&canonical_inventory_json(inventory))
-        == inventory.inventory_fingerprint)
+    // Rebuild the signed shape from parent-bound provenance rather than accepting
+    // the child fields as the material that defines the schema fingerprint.
+    let mut bound_inventory = inventory.clone();
+    bound_inventory.runner_fingerprint = binding.runner_fingerprint.clone();
+    bound_inventory.workspace_fingerprint = binding.workspace_fingerprint.clone();
+    (homeboy_engine_primitives::content_hash::sha256_hex(&canonical_inventory_json(
+        &bound_inventory,
+    )) == inventory.inventory_fingerprint)
         .then(|| TestInventoryOutput {
             schema: inventory.schema.clone(),
             runner: inventory.runner.clone(),
@@ -632,8 +697,14 @@ fn run_main_test_workflow_inner(
     let write_results_helper = write_test_results_helper(run_dir)?;
 
     let inventory_mode = test_inventory_mode(&args.ci_env);
-    let inventory_file = requested_test_inventory_file(&args.ci_env, source_path)
-        .filter(|path| prepare_test_inventory(path));
+    let inventory_binding = inventory_mode
+        .then(|| {
+            test_context
+                .as_ref()
+                .and_then(|context| test_inventory_binding(context, source_path, run_dir))
+        })
+        .flatten()
+        .filter(prepare_test_inventory);
 
     let runner = build_test_runner(
         component,
@@ -675,6 +746,16 @@ fn run_main_test_workflow_inner(
             test_context
                 .as_ref()
                 .map(|context| context.extension_id.as_str())
+                .unwrap_or_default(),
+        )
+        // The child receives a fixed run-dir output path; CI input cannot select it.
+        .env_if(
+            inventory_mode,
+            TEST_INVENTORY_FILE_ENV,
+            inventory_binding
+                .as_ref()
+                .map(|binding| binding.path.to_string_lossy())
+                .as_deref()
                 .unwrap_or_default(),
         );
     // In summary mode, capture the child's stdout/stderr into run evidence
@@ -757,7 +838,11 @@ fn run_main_test_workflow_inner(
     // Autofix is owned by `refactor --from test --write`; the test command is read-only.
     let test_autofix: Option<AppliedRefactor> = None;
 
-    let test_inventory = inventory_file.and_then(|path| valid_test_inventory(&path));
+    let test_inventory = inventory_binding.as_ref().and_then(|binding| {
+        revalidate_test_inventory_binding(binding, test_context.as_ref()?, source_path)
+            .then(|| valid_test_inventory(binding))
+            .flatten()
+    });
     let status = test_run_status_with_inventory(
         output.success,
         test_counts.as_ref(),
@@ -2373,36 +2458,27 @@ mod tests {
     #[test]
     fn inventory_mode_requires_explicit_valid_inventory_evidence() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let inventory = temp.path().join("inventory.json");
-        let ci_env = vec![
-            (TEST_INVENTORY_ONLY_ENV.to_string(), "1".to_string()),
-            (
-                TEST_INVENTORY_FILE_ENV.to_string(),
-                inventory.to_string_lossy().into_owned(),
-            ),
-        ];
+        let binding = test_inventory_binding_for_test(temp.path());
 
-        assert!(prepare_test_inventory(&inventory));
+        assert!(prepare_test_inventory(&binding));
         assert_eq!(
             test_run_status_with_inventory(true, None, false, true, None),
             "failed",
             "requesting inventory mode without evidence must remain unmeasured"
         );
-        assert!(
-            !requested_test_inventory_file(&ci_env, temp.path())
-                .is_some_and(|path| valid_test_inventory(&path).is_some()),
-            "a missing inventory must remain fail-closed"
-        );
 
-        std::fs::write(&inventory, "not json").expect("write malformed inventory");
+        std::fs::write(&binding.path, "not json").expect("write malformed inventory");
         assert!(
-            valid_test_inventory(&inventory).is_none(),
+            valid_test_inventory(&binding).is_none(),
             "a malformed inventory must remain fail-closed"
         );
 
-        std::fs::write(&inventory, valid_inventory_document()).expect("write inventory");
-        let measured = requested_test_inventory_file(&ci_env, temp.path())
-            .and_then(|path| valid_test_inventory(&path));
+        std::fs::write(
+            &binding.path,
+            valid_inventory_document(&binding, "test", "executed"),
+        )
+        .expect("write inventory");
+        let measured = valid_test_inventory(&binding);
         let evidence = measured.as_ref().expect("validated inventory");
         assert_eq!(evidence.schema, TEST_INVENTORY_SCHEMA);
         assert_eq!(evidence.test_count, 1);
@@ -2441,38 +2517,59 @@ mod tests {
         for (case, document) in [
             (
                 "wrong schema",
-                valid_inventory_document().replacen(TEST_INVENTORY_SCHEMA, "other/schema/v1", 1),
+                valid_inventory_document(&binding, "test", "executed").replacen(
+                    TEST_INVENTORY_SCHEMA,
+                    "other/schema/v1",
+                    1,
+                ),
             ),
-            ("incomplete document", "{\"schema\":\"homeboy/test-inventory/v1\"}".to_string()),
             (
-                "invalid provenance",
-                valid_inventory_document().replacen("\"runner\":\"nextest\"", "\"runner\":\"unknown\"", 1),
+                "incomplete document",
+                "{\"schema\":\"homeboy/test-inventory/v1\"}".to_string(),
             ),
             (
-                "empty inventory",
-                r#"{"schema":"homeboy/test-inventory/v1","runner":"nextest","runner_fingerprint":"4bc8f808e3961a908e60dd93cf7d81885e52135e1f44a411fbfb18ef5ce63541","workspace_fingerprint":"4bc8f808e3961a908e60dd93cf7d81885e52135e1f44a411fbfb18ef5ce63541","tests":[],"inventory_fingerprint":"4bc8f808e3961a908e60dd93cf7d81885e52135e1f44a411fbfb18ef5ce63541"}"#.to_string(),
+                "arbitrary provenance",
+                valid_inventory_document(&binding, "test", "executed").replacen(
+                    &binding.runner_fingerprint,
+                    &"c".repeat(64),
+                    1,
+                ),
+            ),
+            (
+                "stale workspace provenance",
+                valid_inventory_document(&binding, "test", "executed").replacen(
+                    &binding.workspace_fingerprint,
+                    &"d".repeat(64),
+                    1,
+                ),
+            ),
+            ("empty inventory", inventory_document(&binding, Vec::new())),
+            (
+                "all skipped inventory",
+                valid_inventory_document(&binding, "test", "skipped"),
             ),
         ] {
-            std::fs::write(&inventory, document).expect("write invalid inventory");
+            std::fs::write(&binding.path, document).expect("write invalid inventory");
             assert!(
-                valid_test_inventory(&inventory).is_none(),
+                valid_test_inventory(&binding).is_none(),
                 "{case} must remain fail-closed"
             );
         }
 
         let mut duplicate: TestInventoryEvidence =
-            serde_json::from_str(&valid_inventory_document()).expect("parse valid inventory");
+            serde_json::from_str(&valid_inventory_document(&binding, "test", "executed"))
+                .expect("parse valid inventory");
         duplicate.tests.push(duplicate.tests[0].clone());
         duplicate.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
             &canonical_inventory_json(&duplicate),
         );
         std::fs::write(
-            &inventory,
+            &binding.path,
             serde_json::to_vec(&duplicate).expect("serialize duplicate inventory"),
         )
         .expect("write duplicate inventory");
         assert!(
-            valid_test_inventory(&inventory).is_none(),
+            valid_test_inventory(&binding).is_none(),
             "duplicate identities must remain fail-closed even with a matching fingerprint"
         );
     }
@@ -2480,45 +2577,42 @@ mod tests {
     #[test]
     fn inventory_evidence_is_fresh_confined_and_fingerprint_bound() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let inventory = temp.path().join("inventory.json");
-        let outside = tempfile::NamedTempFile::new().expect("outside file");
-        let ci_env = vec![
-            (TEST_INVENTORY_ONLY_ENV.to_string(), "1".to_string()),
-            (
-                TEST_INVENTORY_FILE_ENV.to_string(),
-                inventory.to_string_lossy().into_owned(),
-            ),
-        ];
+        let binding = test_inventory_binding_for_test(temp.path());
 
-        std::fs::write(&inventory, valid_inventory_document()).expect("write stale inventory");
-        assert!(prepare_test_inventory(&inventory));
+        std::fs::write(
+            &binding.path,
+            valid_inventory_document(&binding, "test", "executed"),
+        )
+        .expect("write stale inventory");
+        assert!(prepare_test_inventory(&binding));
         assert!(
-            !inventory.exists(),
+            !binding.path.exists(),
             "pre-existing evidence must not satisfy a new invocation"
         );
-        assert!(requested_test_inventory_file(&ci_env, temp.path()).is_some());
 
-        let escaped_env = vec![
-            (TEST_INVENTORY_ONLY_ENV.to_string(), "1".to_string()),
-            (
-                TEST_INVENTORY_FILE_ENV.to_string(),
-                outside.path().to_string_lossy().into_owned(),
-            ),
-        ];
-        assert!(requested_test_inventory_file(&escaped_env, temp.path()).is_none());
-
-        std::fs::write(&inventory, valid_inventory_document()).expect("write inventory");
-        assert!(valid_test_inventory(&inventory).is_some());
-        std::fs::write(&inventory, valid_inventory_document_with_unicode_name())
-            .expect("write unicode inventory");
+        std::fs::write(
+            &binding.path,
+            valid_inventory_document(&binding, "test", "executed"),
+        )
+        .expect("write inventory");
+        assert!(valid_test_inventory(&binding).is_some());
+        std::fs::write(
+            &binding.path,
+            valid_inventory_document(&binding, "tést", "executed"),
+        )
+        .expect("write unicode inventory");
         assert!(
-            valid_test_inventory(&inventory).is_some(),
+            valid_test_inventory(&binding).is_some(),
             "Python's ASCII-escaped fingerprint must accept Unicode test names"
         );
-        let tampered = valid_inventory_document().replacen("suite::test", "suite::other", 1);
-        std::fs::write(&inventory, tampered).expect("write tampered inventory");
+        let tampered = valid_inventory_document(&binding, "test", "executed").replacen(
+            "suite::test",
+            "suite::other",
+            1,
+        );
+        std::fs::write(&binding.path, tampered).expect("write tampered inventory");
         assert!(
-            valid_test_inventory(&inventory).is_none(),
+            valid_test_inventory(&binding).is_none(),
             "the inventory fingerprint must bind the listed tests"
         );
     }
@@ -2530,54 +2624,74 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("temp dir");
         let target = temp.path().join("target.json");
-        let inventory = temp.path().join("inventory.json");
-        std::fs::write(&target, valid_inventory_document()).expect("write target");
-        symlink(&target, &inventory).expect("link inventory");
+        let binding = test_inventory_binding_for_test(temp.path());
+        std::fs::write(
+            &target,
+            valid_inventory_document(&binding, "test", "executed"),
+        )
+        .expect("write target");
+        symlink(&target, &binding.path).expect("link inventory");
 
-        assert!(valid_test_inventory(&inventory).is_none());
-        assert!(prepare_test_inventory(&inventory));
+        assert!(valid_test_inventory(&binding).is_none());
+        assert!(prepare_test_inventory(&binding));
         assert!(target.exists(), "cleanup must remove only the link");
     }
 
-    fn valid_inventory_document() -> String {
-        inventory_document("test")
+    #[cfg(unix)]
+    #[test]
+    fn inventory_evidence_rejects_intermediate_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut binding = test_inventory_binding_for_test(temp.path());
+        let outside = tempfile::tempdir().expect("outside dir");
+        let nested = temp.path().join("child-controlled");
+        symlink(outside.path(), &nested).expect("link intermediate directory");
+        binding.path = nested.join(TEST_INVENTORY_FILE);
+
+        assert!(!prepare_test_inventory(&binding));
+        assert!(valid_test_inventory(&binding).is_none());
     }
 
-    fn valid_inventory_document_with_unicode_name() -> String {
-        inventory_document("tést")
+    fn test_inventory_binding_for_test(run_dir: &Path) -> TestInventoryBinding {
+        let run_dir = run_dir.canonicalize().expect("canonical run dir");
+        TestInventoryBinding {
+            path: run_dir.join(TEST_INVENTORY_FILE),
+            run_dir,
+            runner_fingerprint: "a".repeat(64),
+            workspace_fingerprint: "b".repeat(64),
+        }
     }
 
-    fn inventory_document(name: &str) -> String {
+    fn valid_inventory_document(
+        binding: &TestInventoryBinding,
+        name: &str,
+        outcome: &str,
+    ) -> String {
         let test = TestInventoryTest {
             id: format!("suite::{name}"),
             package: "suite".to_string(),
             target: "suite-tests".to_string(),
             target_kind: "test".to_string(),
             name: name.to_string(),
-            expected_outcome: Some("executed".to_string()),
+            expected_outcome: Some(outcome.to_string()),
         };
+        inventory_document(binding, vec![test])
+    }
+
+    fn inventory_document(binding: &TestInventoryBinding, tests: Vec<TestInventoryTest>) -> String {
         let mut inventory = TestInventoryEvidence {
             schema: TEST_INVENTORY_SCHEMA.to_string(),
             runner: "nextest".to_string(),
-            runner_fingerprint: "4bc8f808e3961a908e60dd93cf7d81885e52135e1f44a411fbfb18ef5ce63541"
-                .to_string(),
-            workspace_fingerprint:
-                "4bc8f808e3961a908e60dd93cf7d81885e52135e1f44a411fbfb18ef5ce63541".to_string(),
-            tests: vec![test],
+            runner_fingerprint: binding.runner_fingerprint.clone(),
+            workspace_fingerprint: binding.workspace_fingerprint.clone(),
+            tests,
             inventory_fingerprint: String::new(),
         };
         inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
             &canonical_inventory_json(&inventory),
         );
-        serde_json::json!({
-            "schema": TEST_INVENTORY_SCHEMA,
-            "runner": "nextest",
-            "runner_fingerprint": "4bc8f808e3961a908e60dd93cf7d81885e52135e1f44a411fbfb18ef5ce63541",
-            "workspace_fingerprint": "4bc8f808e3961a908e60dd93cf7d81885e52135e1f44a411fbfb18ef5ce63541",
-            "tests": inventory.tests,
-            "inventory_fingerprint": inventory.inventory_fingerprint,
-        })
-        .to_string()
+        serde_json::to_string(&inventory).expect("serialize inventory")
     }
 
     #[test]
