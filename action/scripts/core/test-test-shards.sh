@@ -286,6 +286,9 @@ printf '%s\n' '{"review test":"fail"}' > "${selection_dir}/results.json"
 : > "${selection_dir}/output"
 select_candidate_baseline pull_request true auto
 grep -Fx 'baseline-command=review test' "${selection_dir}/output" >/dev/null || { printf 'FAIL: PR differential candidate failure did not select its matching baseline command\n'; exit 1; }
+: > "${selection_dir}/output"
+env -u GITHUB_ACTION_PATH GITHUB_OUTPUT="${selection_dir}/output" TEST_SHARD_COMMAND='review test' TEST_SHARD_RESULTS_FILE="${selection_dir}/results.json" TEST_SHARD_RESULT_FILE="${selection_dir}/review-test.json" TEST_SHARD_EVENT=pull_request TEST_SHARD_DIFFERENTIAL_GATING=true TEST_SHARD_BASELINE_COMMANDS=auto bash "${ROOT}/scripts/core/select-test-baseline.sh"
+grep -Fx 'baseline-command=review test' "${selection_dir}/output" >/dev/null || { printf 'FAIL: direct baseline selection without GITHUB_ACTION_PATH did not resolve core lib\n'; exit 1; }
 printf '%s\n' '{"review test":"timeout"}' > "${selection_dir}/results.json"
 : > "${selection_dir}/output"
 select_candidate_baseline pull_request true 'review test'

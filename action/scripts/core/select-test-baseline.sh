@@ -2,8 +2,13 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
-source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
+if [ -n "${GITHUB_ACTION_PATH:-}" ]; then
+  source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
+else
+  source "${SCRIPT_DIR}/lib.sh"
+fi
 
 command="${TEST_SHARD_COMMAND:?TEST_SHARD_COMMAND is required}"
 results_file="${TEST_SHARD_RESULTS_FILE:?TEST_SHARD_RESULTS_FILE is required}"
