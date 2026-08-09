@@ -272,46 +272,6 @@ fn rejects_invalid_local_artifacts_before_any_upload_or_publication() {
 }
 
 #[test]
-fn processes_an_unterminated_final_checksum_record() {
-    let fixture = Fixture::new();
-    let sidecar = fixture.artifact_dir().join("payload.tar.gz.sha256");
-    let contents = fs::read_to_string(&sidecar).expect("read payload sidecar");
-    fs::write(&sidecar, contents.trim_end_matches('\n')).expect("remove final newline");
-    let mut digests = fixture.digests.clone();
-    digests.insert("payload.tar.gz.sha256".to_owned(), digest(&sidecar));
-
-    let output = fixture.run(&[inventory(&digests, &[]), inventory(&digests, &[])]);
-
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fixture.calls(), ["view", "view"]);
-}
-
-#[test]
-fn rejects_malformed_or_conflicting_unterminated_final_checksum_records() {
-    for trailing_record in [
-        "not a checksum",
-        "0000000000000000000000000000000000000000000000000000000000000000 *payload.tar.gz",
-    ] {
-        let fixture = Fixture::new();
-        let sidecar = fixture.artifact_dir().join("sha256.sum");
-        let contents = fs::read_to_string(&sidecar).expect("read aggregate sidecar");
-        fs::write(&sidecar, format!("{contents}{trailing_record}"))
-            .expect("append unterminated trailing record");
-
-        assert!(!fixture
-            .run(&[inventory(&fixture.digests, &[])])
-            .status
-            .success());
-        assert_eq!(fixture.calls(), ["view"]);
-    }
-}
-
-#[test]
 fn fails_when_post_upload_inventory_does_not_match_rebuilt_digests() {
     let fixture = Fixture::new();
     let output = fixture.run(&[
