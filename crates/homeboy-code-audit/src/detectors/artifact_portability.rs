@@ -621,6 +621,7 @@ mod tests {
                 )
                 .expect("finish");
 
+            register_store_artifact_provider();
             let findings = super::run_with_config(
                 "demo",
                 &ArtifactPortabilityConfig {
@@ -661,6 +662,7 @@ mod tests {
                 )
                 .expect("finish");
 
+            register_store_artifact_provider();
             let findings = super::run_with_config(
                 "demo",
                 &ArtifactPortabilityConfig {
@@ -716,6 +718,7 @@ mod tests {
                     .expect("finish");
             }
 
+            register_store_artifact_provider();
             let report = super::run_report("demo");
 
             assert_eq!(report.run_window, DEFAULT_OBSERVATION_RUN_WINDOW);

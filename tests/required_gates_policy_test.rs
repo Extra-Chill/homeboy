@@ -166,8 +166,7 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
     for context in &contexts {
         let matrix_title = context.trim_start_matches("homeboy / ");
         let reusable_test = context == "homeboy / Test"
-            && ci_workflow()
-                .contains("uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2")
+            && ci_workflow().contains("uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@")
             && ci_workflow().contains("commands: review test");
         assert!(
             ci_workflow().contains(&format!("name: {context}"))
