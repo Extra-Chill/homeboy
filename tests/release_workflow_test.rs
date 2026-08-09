@@ -1185,30 +1185,30 @@ fn release_fast_path_keeps_every_publication_verification() {
 }
 
 #[test]
-fn release_recovery_runs_publication_gate_from_the_control_revision() {
+fn release_recovery_runs_reconciliation_from_the_control_revision() {
     let workflow = release_workflow();
     let host = job_section(workflow, "host");
-    let gate = release_step_block(host, "name: Gate publication on the declared asset set");
+    let reconcile = release_step_block(host, "name: Reconcile rebuilt recovery assets");
 
     assert!(
-        gate.contains("CONTROL_SHA: ${{ github.sha }}"),
-        "the publication helper must be pinned to the workflow control revision"
+        reconcile.contains("CONTROL_SHA: ${{ github.sha }}"),
+        "the reconciliation helper must be pinned to the workflow control revision"
     );
     assert!(
-        gate.contains(
+        reconcile.contains(
             "git show \"${CONTROL_SHA}:.github/release-asset-completeness.sh\" > \"${CONTROL_HELPER}\""
         ),
         "a stranded target tag may predate the helper, so recovery must materialize it from the control revision"
     );
-    assert!(gate.contains("bash \"${CONTROL_HELPER}\""));
+    assert!(reconcile.contains("bash \"${CONTROL_HELPER}\""));
     assert!(
-        !gate.contains("bash .github/release-asset-completeness.sh"),
+        !reconcile.contains("bash .github/release-asset-completeness.sh"),
         "the target-tag checkout must not own recovery control helpers"
     );
 }
 
 #[test]
-fn release_recovery_reconciles_rebuilt_assets_before_the_remote_gate() {
+fn release_recovery_reconciles_rebuilt_assets_before_the_finalizer() {
     let host = job_section(release_workflow(), "host");
     let authority = host
         .find("- name: Create authoritative recovery manifest")
@@ -1216,14 +1216,14 @@ fn release_recovery_reconciles_rebuilt_assets_before_the_remote_gate() {
     let reconcile_start = host
         .find("- name: Reconcile rebuilt recovery assets")
         .expect("rebuilt recovery must reconcile its artifacts into the draft");
-    let gate = host
-        .find("- name: Gate publication on the declared asset set")
-        .expect("the remote publication gate must remain present");
+    let finalizer = host
+        .find("- name: Finish Homeboy release pipeline at tag")
+        .expect("the release finalizer must remain present");
     let reconcile = release_step_block(host, "name: Reconcile rebuilt recovery assets");
 
     assert!(
-        authority < reconcile_start && reconcile_start < gate,
-        "recovery must reconcile authoritative local artifacts before checking the remote inventory"
+        authority < reconcile_start && reconcile_start < finalizer,
+        "recovery must reconcile authoritative local artifacts before finalization"
     );
     assert!(reconcile.contains(
         "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
@@ -1237,8 +1237,6 @@ fn release_recovery_reconciles_rebuilt_assets_before_the_remote_gate() {
         helper.contains("gh release upload \"${RELEASE_TAG}\" \"${ASSET_DIR}/${asset}\" --clobber")
     );
     assert!(helper.contains("Could not re-read the asset inventory"));
-    let gate_step = release_step_block(host, "name: Gate publication on the declared asset set");
-    assert!(gate_step.contains("ASSET_DIR=artifacts REQUIRE_ANNOUNCE_ASSETS=false"));
 }
 
 /// Recovery is allowed — required — to run a control binary NEWER than the tag
