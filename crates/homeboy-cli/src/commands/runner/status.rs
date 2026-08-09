@@ -1330,10 +1330,13 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
         ));
     }
     if report.stale_daemon.is_some() {
-        hints.extend(
-            RuntimeMaterializationStatus::for_homeboy_runner(&report.runner_id, "homeboy", report)
-                .stale_daemon_hint(),
-        );
+        let mut materialization =
+            RuntimeMaterializationStatus::for_homeboy_runner(&report.runner_id, "homeboy", report);
+        materialization.stale_daemon_refresh_command =
+            lab_runner_homeboy_refresh_commands(&report.runner_id, report)
+                .into_iter()
+                .next();
+        hints.extend(materialization.stale_daemon_hint());
     }
     match session.mode {
         RunnerTunnelMode::DirectSsh => {
@@ -1510,11 +1513,15 @@ pub(super) fn runner_status_operator_commands(
     }
 
     if let Some(warning) = report.stale_daemon.as_ref() {
+        let refresh_command = lab_runner_homeboy_refresh_commands(&report.runner_id, report)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| warning.refresh_command.clone());
         commands.push(RunnerOperatorCommand {
             scope: "daemon_refresh",
             runner_id: report.runner_id.clone(),
             job_id: None,
-            command: warning.refresh_command.clone(),
+            command: refresh_command,
             description: "Restart the active runner daemon so the control plane uses the configured job command binary.".to_string(),
         });
     }
