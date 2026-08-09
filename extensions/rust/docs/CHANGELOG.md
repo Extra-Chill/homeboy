@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.33.3] - 2026-08-09
+
+### Fixed
+- classify Cargo inventory outcomes
+
 ## [1.33.2] - 2026-08-09
 
 ### Fixed
