@@ -1866,6 +1866,7 @@ mod tests {
             candidate_ref: "deadbeef".to_string(),
             ai_model: Some("openai/gpt-5.6-terra".to_string()),
             replace_interrupted: false,
+            accept_inherited_failures: false,
             full: false,
         };
 
