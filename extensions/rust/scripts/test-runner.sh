@@ -758,6 +758,10 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
         echo "Remove arguments after -- and encode selection in HOMEBOY_TEST_SHARD_MANIFEST." >&2
         exit 2
     fi
+    if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ] && [ -n "${HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE:-}" ]; then
+        echo "Error: HOMEBOY_TEST_SHARD_MANIFEST and HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE are mutually exclusive." >&2
+        exit 2
+    fi
     SHARD_TOOL="${EXTENSION_PATH}/scripts/test-shard-inventory.py"
     SHARD_DATA="$(mktemp)"
     SHARD_ARGS=(--project "$PROJECT_PATH" --runner "$SELECTED_RUNNER" --output "$SHARD_DATA")
@@ -771,6 +775,9 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
             exec bash "$0" "$@"
         fi
         SHARD_ARGS+=(--changed-selection-file "$HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE")
+    fi
+    if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = "1" ]; then
+        SHARD_ARGS+=(--inventory-only)
     fi
     if ! python3 "$SHARD_TOOL" "${SHARD_ARGS[@]}"; then
         rm -f "$SHARD_DATA"

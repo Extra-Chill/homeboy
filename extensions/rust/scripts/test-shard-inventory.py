@@ -20,6 +20,19 @@ def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def set_inventory_fingerprint(record):
+    record = dict(record)
+    record.pop("inventory_fingerprint", None)
+    record["inventory_fingerprint"] = digest(json.dumps(record, sort_keys=True, separators=(",", ":")))
+    return record
+
+
+def project_inventory(current, tests):
+    projected = {key: value for key, value in current.items() if key != "inventory_fingerprint"}
+    projected["tests"] = tests
+    return set_inventory_fingerprint(projected)
+
+
 def run(command, cwd):
     return subprocess.run(command, cwd=cwd, text=True, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, check=False)
@@ -161,8 +174,7 @@ def inventory(project, runner):
         "workspace_fingerprint": workspace_fingerprint(workspace_root),
         "tests": tests,
     }
-    record["inventory_fingerprint"] = digest(json.dumps(record, sort_keys=True, separators=(",", ":")))
-    return record
+    return set_inventory_fingerprint(record)
 
 
 def legacy_inventory_fingerprint(current):
@@ -205,10 +217,14 @@ def validate(manifest_path, current):
     missing = [identity for identity in selected if identity not in known]
     if missing:
         fail(f"shard manifest contains unresolvable test identity: {missing[0]}")
-    if manifest.get("inventory_fingerprint") != current.get("inventory_fingerprint"):
+    manifest_fingerprint = manifest.get("inventory_fingerprint")
+    selected_ids = set(selected)
+    selected_current = [test for test in current["tests"] if test["id"] in selected_ids]
+    scoped_fingerprint = project_inventory(current, selected_current)["inventory_fingerprint"]
+    if manifest_fingerprint not in {current.get("inventory_fingerprint"), scoped_fingerprint}:
         legacy_fingerprint, legacy_ids = legacy_inventory_fingerprint(current)
-        if manifest.get("inventory_fingerprint") != legacy_fingerprint:
-            fail("stale shard manifest: inventory_fingerprint does not match the current or compatible legacy inventory")
+        if manifest_fingerprint != legacy_fingerprint:
+            fail("stale shard manifest: inventory_fingerprint does not match the current, scoped, or compatible legacy inventory")
         legacy_missing = [identity for identity in selected if identity not in legacy_ids]
         if legacy_missing:
             fail(f"legacy shard manifest selects tests outside the legacy inventory: {legacy_missing[0]}")
@@ -289,14 +305,22 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--manifest")
     parser.add_argument("--changed-selection-file")
+    parser.add_argument("--inventory-only", action="store_true")
     args = parser.parse_args()
+    if args.manifest and args.changed_selection_file:
+        fail("shard manifest and changed test selection are mutually exclusive")
+    if args.inventory_only and args.manifest:
+        fail("inventory-only mode does not accept a shard manifest")
     current = inventory(args.project, args.runner)
     output = current
     if args.manifest:
         output = {"inventory": current, "selected": validate(args.manifest, current)}
     if args.changed_selection_file:
         resolved = resolve_changed_selection(args.changed_selection_file, current, args.project)
-        output = {"inventory": current, **resolved}
+        if args.inventory_only:
+            output = current if "fallback_reason" in resolved else project_inventory(current, resolved["selected"])
+        else:
+            output = {"inventory": current, **resolved}
     Path(args.output).write_text(json.dumps(output, indent=2) + "\n")
 
 
