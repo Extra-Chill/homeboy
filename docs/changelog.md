@@ -4,6 +4,164 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.335.0] - 2026-08-09
+
+### Added
+- make binary identity discoverable
+- hydrate cold runners from sealed dependency packages
+- build dev snapshots natively over SSH [AI: OpenAI gpt-5.6-sol via OpenCode]
+- type portable readiness handoff
+- retain lab readiness evidence
+- offload portable preflight gates
+- bind readiness evidence to source
+- federate runner-resident records and delete the prose apology
+- project cook status onto the canonical lifecycle vocabulary, and keep failures structured
+- add GET /agent-task/runs/:id as a pure read
+- let extensions resolve routes
+- drive the notification outbox, reconciliation and controller waits from a tick
+- make the detached local fanout a daemon-owned controller job
+- make the detached local cook a daemon-owned controller job
+
+### Changed
+- Revert "fix(release): reconcile stranded draft assets"
+- Revert "fix(release): fail closed recovery asset reconciliation [AI: OpenAI gpt-5.6-terra via OpenCode; hardened rebuilt draft asset digest reconciliation and validation]"
+- Revert "test(release): exercise recovery asset reconciliation [AI: OpenAI gpt-5.6-terra via OpenCode; added mocked-gh executable coverage and fixed checksum sidecar EOF validation]"
+- Revert "fix(release): parse final checksum sidecar record"
+- cover recovery asset reconciliation
+- cover bounded selection artifact fallback
+- assert process-local temp isolation [AI: OpenAI gpt-5.6-sol via OpenCode]
+- Cache Rust inputs without weakening gate isolation
+- centralize argument fixtures [AI: OpenAI gpt-5.6-terra via OpenCode]
+- Resolve runner-owned runtime pins before local validation
+- Make Cook continuation authoritative and exactly once
+- use real paths for finalization fixtures
+- assert controller-local placement stamp [AI: OpenAI gpt-5.6-sol via OpenCode]
+- cover connected refresh blockers
+- Preflight provider runtime readiness
+- Derive Cook budgets from retry intent
+- Support draft PR finalization in Cook
+- Refresh build identity after linked-worktree commits
+- Diagnose provider failures behind malformed evidence
+
+### Fixed
+- prioritize current main
+- keep publication finalizer-owned
+- fail closed asset reconciliation
+- bind the advertised repair-plan stop to its reported lease
+- integrate recovery validation
+- integrate remaining handoff repairs
+- integrate recovery and provenance repairs
+- preserve process-local isolation boundaries
+- restore exact shard isolation
+- preserve candidate gate evidence
+- close integration review gaps [AI: OpenAI gpt-5.6-sol via OpenCode]
+- version Rust selection artifact contract
+- materialize bounded Rust selection
+- union changed Rust test identities
+- reject Cargo gates selecting zero tests [AI: OpenAI gpt-5.6-sol via OpenCode]
+- route review timeouts to continuation [AI: OpenAI gpt-5.6-sol via OpenCode]
+- bound review-form continuations [AI: OpenAI gpt-5.6-sol via OpenCode]
+- restore deterministic CLI contracts [AI: OpenAI gpt-5.6-sol via OpenCode]
+- resolve registered primary paths [AI: OpenAI gpt-5.6-sol via OpenCode]
+- prune moved promotion fingerprint [AI: OpenAI gpt-5.6-sol via OpenCode]
+- register reverse Cook repository [AI: OpenAI gpt-5.6-sol via OpenCode]
+- prune stale source fingerprints [AI: OpenAI gpt-5.6-sol via OpenCode]
+- keep temp isolation process-local [AI: OpenAI gpt-5.6-sol via OpenCode]
+- contain source process trees [AI: OpenAI gpt-5.6-sol via OpenCode]
+- make controller contracts deterministic [AI: OpenAI gpt-5.6-sol via OpenCode]
+- isolate shard runtime state [AI: OpenAI gpt-5.6-sol via OpenCode]
+- preserve compact review candidates [AI: OpenAI gpt-5.6-sol via OpenCode]
+- parse final checksum sidecar record
+- fail closed recovery asset reconciliation [AI: OpenAI gpt-5.6-terra via OpenCode; hardened rebuilt draft asset digest reconciliation and validation]
+- complete AdoptArgs fixture [AI: OpenAI gpt-5.6-sol via OpenCode]
+- resolve adoption attempt run IDs
+- prove inherited adoption failures
+- recover manual finalization preflights
+- infer explicit workspace repository
+- clamp implicit provider rotations
+- fail closed without nofollow inventory reads
+- harden inventory measurement evidence
+- accept validated inventory evidence
+- reconcile stranded draft assets
+- run recovery helper from control revision
+- Fix terminal provider supervision cleanup
+- Fix Cook gate-feedback declaration and recovery budgets
+- Fix Lab capability handshake admission
+- bound artifact inventory
+- keep terminal Lab artifact reads local
+- preserve Cook child retry lifecycle
+- isolate fanout liveness attribution
+- require durable local handoff ownership
+- unify cook-batch batch identity
+- verify Linux consumers resolve published release
+- retire stale state-loss replays
+- admit test shards within capacity budget
+- prioritize current work over stale projections
+- bound evidence output
+- guide disconnected status recovery
+- surface global health from unattached contexts
+- skip ineligible queued work
+- retain nested run evidence
+- route artifact queries to runners
+- align doctor exit with readiness
+- reconcile disconnected generation state
+- prove local cancellation reaps owned tree
+- keep fixture name out of executor tests
+- retain service startup evidence
+- unbreak the observation store suite and main's test build
+- validate package-only before dispatch
+- prevalidate package-only readiness
+- preflight recovery before mutation
+- guard recovery and package-only readiness
+- retain local package preflight requirement
+- reject vacuous readiness evidence
+- preserve validated readiness disposition
+- certify portable readiness evidence
+- wait for durable state instead of racing the daemon supervisor
+- bind readiness to child provenance
+- retain failed portable readiness outcomes
+- continue blocked promotions directly
+- repair 8 tests failing on main from one stale path assumption
+- retire typed fresh state-loss refusals
+- retain failed portable gate evidence
+- retain blocked refresh promotions
+- retire terminal legacy replacement replays
+- retire rejected state-loss replacement
+- budget invocation temp bases
+- connect disconnected refreshes
+- retain failed provider artifacts
+- canonicalize scenario paths
+- expose provider runtime evidence refs
+- enforce liveness on monotonic deadline
+- add deterministic development build
+- keep hermetic invocation roots socket-safe
+- admit unverified reverse runners
+- align required gate shard contract
+- resolve explicit relative path overrides
+- isolate Cook release gate fixtures
+- separate query and subject status
+- make detached handoff cancellation durable
+- route absolute finding paths through fixers
+- prioritize actionable diagnosis evidence
+- bind provider workspace permission root
+- require complete platform asset set
+- stop candidate work after PR closure
+- route extension setup through daemon
+- Fix runtime tool readiness command prefixes
+- enforce --runner/--placement exclusivity regardless of position
+- cap batch concurrency and add a wall-clock deadline
+- config-drive admission timing and back off the queue poll
+- propagate the notification route to child processes
+- type the fanout portfolio wire format and surface truncation
+- bound the staging observation loops and fix a poll livelock
+- summarize selected review candidates
+- retain nested failure artifacts
+- persist canonical argv provenance
+- finalize applied recoverable candidates
+- report live descendant heartbeats
+- Fix candidate daemon freshness verification
+- scope baseline drift comparison
+
 ## [0.334.0] - 2026-08-07
 
 ### Added
