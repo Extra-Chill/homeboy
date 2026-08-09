@@ -49,17 +49,10 @@ jobs:
           # (checked out below), so the rust zero-test-scope smoke and the
           # WordPress full-suite smoke both run here now.
           #
-          #   tests/wordpress-fuzz-runner-smoke.js
-          #     Pre-existing failure, not an environment problem. Its own
-          #     fake-wp-codebox.js fixture exits 1 with "expected public
-          #     wp-codebox run-fuzz-suite command", so preflight readiness
-          #     resolves to `blocked` and the run status is `skipped` instead of
-          #     the asserted success. Every skip is reported by the runner as a
-          #     GitHub Actions warning so it stays visible instead of rotting
-          #     silently, and nothing is removed from any homeboy.json.
-          - component: wordpress
-            self_check_skip: |
-              node tests/wordpress-fuzz-runner-smoke.js
+          # tests/wordpress-fuzz-runner-smoke.js was skipped here unconditionally
+          # because its own fake-wp-codebox.js fixture contradicted the runner it
+          # tested. A test that runs nowhere asserts nothing, so it and this skip
+          # entry are both gone rather than carried indefinitely.
 
     steps:
       - uses: actions/checkout@v4

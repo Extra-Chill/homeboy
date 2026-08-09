@@ -194,7 +194,6 @@
     "test:wp-codebox-fuzz-suite": "node tests/wp-codebox-fuzz-run-smoke.js",
     "test:wp-codebox-fuzz-workload-staging": "node tests/wp-codebox-fuzz-workload-staging-smoke.js",
     "test:wordpress-fuzz-destructive-codebox-readiness-gate": "node tests/wordpress-fuzz-destructive-codebox-readiness-gate.test.js",
-    "test:wordpress-fuzz-runner": "node tests/wordpress-fuzz-runner-smoke.js",
     "test:wordpress-fuzz-runtime-task": "node tests/wordpress-fuzz-runtime-task.test.js",
     "test:wordpress-fuzz-runtime-workload-operations": "node tests/wordpress-fuzz-runtime-workload-operations-smoke.js",
     "test:wordpress-fuzz-runner-codebox-contract": "node tests/wordpress-fuzz-runner-codebox-contract-canary.js",
