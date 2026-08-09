@@ -114,7 +114,7 @@ def inventory(project, runner):
     if metadata_result.returncode:
         fail(f"cargo metadata failed: {metadata_result.stderr.strip()}")
     metadata = json.loads(metadata_result.stdout)
-    workspace_root = Path(metadata["workspace_root"]).resolve()
+    component_root = Path(project).resolve()
     packages = {package["id"]: package["name"] for package in metadata["packages"]}
     tests = nextest_inventory(workspace_root) if runner == "nextest" else cargo_inventory(workspace_root, packages)
     # cargo-nextest does not execute doctests, so its inventory contains only
@@ -237,7 +237,7 @@ def resolve_changed_selection(selection_path, current, project):
         if module is not None and (not isinstance(module, str) or not module):
             fail("changed test selection candidate has an invalid module")
         if isinstance(path, str) and path:
-            source = (workspace_root / path).resolve()
+            source = (component_root / path).resolve()
             for metadata_package in metadata["packages"]:
                 manifest_parent = Path(metadata_package["manifest_path"]).resolve().parent
                 if source == manifest_parent or manifest_parent in source.parents:

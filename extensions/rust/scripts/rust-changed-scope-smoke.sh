@@ -17,6 +17,14 @@ cat > "$PROJECT_DIR/Cargo.toml" <<'EOF'
 name = "rust-changed-scope-smoke"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+name = "renamed_lib"
+path = "src/lib.rs"
+
+[[test]]
+name = "renamed_integration"
+path = "tests/integration_scope.rs"
 EOF
 
 cat > "$PROJECT_DIR/src/lib.rs" <<'EOF'
@@ -45,7 +53,7 @@ EOF
 cat > "$PROJECT_DIR/tests/integration_scope.rs" <<'EOF'
 #[test]
 fn integration_scope_runs() {
-    assert_eq!(rust_changed_scope_smoke::value(), 1);
+    assert_eq!(renamed_lib::value(), 1);
 }
 EOF
 
@@ -152,7 +160,7 @@ if [[ "$OUTPUT" != *"1 passed"* ]]; then
 fi
 
 cat > "$WORKDIR/changed-selection.json" <<'EOF'
-{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"lib","target":"rust_changed_scope_smoke","module":"core::daemon::daemon_test"},{"package":"rust-changed-scope-smoke","target_kind":"test","target":"integration_scope","module":null}]}
+{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"stale-producer-name","target_kind":"lib","target":"rust_changed_scope_smoke","module":"core::daemon::daemon_test","path":"src/core/daemon.rs"},{"package":"stale-producer-name","target_kind":"test","target":"integration_scope","module":null,"path":"tests/integration_scope.rs"}]}
 EOF
 OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
@@ -193,7 +201,7 @@ fi
 # Renames and deletions can leave a candidate absent from the current inventory.
 # They must widen safely instead of returning a green zero-test result.
 cat > "$WORKDIR/changed-selection.json" <<'EOF'
-{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"test","target":"renamed_or_deleted","module":null}]}
+{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"test","target":"renamed_or_deleted","module":null,"path":"tests/deleted.rs"}]}
 EOF
 OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
