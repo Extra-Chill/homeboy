@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.18] - 2026-08-09
+
+### Fixed
+- fingerprint each test shard projection
+
 ## [2.11.17] - 2026-08-08
 
 ### Fixed
