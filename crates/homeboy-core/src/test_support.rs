@@ -455,6 +455,9 @@ pub struct HomeGuard {
     prior_controller_runtime_executable: Option<String>,
     prior_controller_runtime_source: Option<String>,
     prior_controller_runtime_identity: Option<String>,
+    prior_tmpdir: Option<String>,
+    prior_temp: Option<String>,
+    prior_tmp: Option<String>,
     context: HermeticTestContext,
     _guard: Option<MutexGuard<'static, ()>>,
 }
@@ -570,6 +573,9 @@ impl HomeGuard {
             std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV).ok();
         let prior_controller_runtime_identity =
             std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV).ok();
+        let prior_tmpdir = std::env::var("TMPDIR").ok();
+        let prior_temp = std::env::var("TEMP").ok();
+        let prior_tmp = std::env::var("TMP").ok();
         // The isolated HOME hosts `~/.config/homeboy/extensions/**/*.sh`
         // capability scripts that tests execute. On `noexec`-`/tmp` hosts a
         // plain `TempDir::new()` lands the whole HOME on a `noexec` mount,
@@ -602,6 +608,9 @@ impl HomeGuard {
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
+        std::env::set_var("TMPDIR", context.temp_dir());
+        std::env::set_var("TEMP", context.temp_dir());
+        std::env::set_var("TMP", context.temp_dir());
         crate::set_artifact_root_override(None);
         // Pin invocation runtime to a SHORT tempdir, isolated from `$TMPDIR`
         // and from the home tempdir (which itself can already live on a long
@@ -651,6 +660,9 @@ impl HomeGuard {
             prior_controller_runtime_executable,
             prior_controller_runtime_source,
             prior_controller_runtime_identity,
+            prior_tmpdir,
+            prior_temp,
+            prior_tmp,
             context,
             _guard: guard,
         }
@@ -1101,6 +1113,18 @@ impl Drop for HomeGuard {
             None => std::env::remove_var(
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
             ),
+        }
+        match &self.prior_tmpdir {
+            Some(value) => std::env::set_var("TMPDIR", value),
+            None => std::env::remove_var("TMPDIR"),
+        }
+        match &self.prior_temp {
+            Some(value) => std::env::set_var("TEMP", value),
+            None => std::env::remove_var("TEMP"),
+        }
+        match &self.prior_tmp {
+            Some(value) => std::env::set_var("TMP", value),
+            None => std::env::remove_var("TMP"),
         }
         reset_cached_test_state();
     }
@@ -2249,7 +2273,7 @@ mod tests {
     }
 
     #[test]
-    fn home_guard_owns_xdg_and_preserves_process_temp_roots() {
+    fn home_guard_owns_and_restores_xdg_and_temp_roots() {
         let names = [
             "HOME",
             "XDG_CONFIG_HOME",
@@ -2281,24 +2305,14 @@ mod tests {
                 ("XDG_DATA_HOME", root.join(".local/share")),
                 ("XDG_STATE_HOME", root.join(".local/state")),
                 ("XDG_RUNTIME_DIR", guard.context.runtime_dir().to_path_buf()),
+                ("TMPDIR", guard.context.temp_dir()),
+                ("TEMP", guard.context.temp_dir()),
+                ("TMP", guard.context.temp_dir()),
             ] {
                 assert_eq!(
                     std::env::var_os(name),
                     Some(path.into_os_string()),
                     "{name}"
-                );
-            }
-            let command = guard.context.command(TestBinary::CurrentTest);
-            for name in ["TMPDIR", "TEMP", "TMP"] {
-                assert_eq!(
-                    std::env::var(name).expect("ambient temp root"),
-                    format!("/ambient/{name}"),
-                    "{name} must remain process-global"
-                );
-                assert_eq!(
-                    command_env(&command, name),
-                    Some(Some(guard.context.temp_dir().into_os_string())),
-                    "{name} must be isolated for subprocesses"
                 );
             }
             assert!(std::env::var_os(crate::paths::HOMEBOY_DATA_DIR_ENV).is_none());
