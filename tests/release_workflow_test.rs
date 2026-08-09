@@ -1613,30 +1613,18 @@ fn release_check_never_reports_nothing_to_release_without_measuring() {
         out.contains("should-release=true") && out.contains("release-version=0.322.0"),
         "a measured version must release: {out}"
     );
+}
 
-    // Paths where the dry run legitimately never ran (stranded recovery, hold)
-    // must not be caught by the measurement check — the dry-run step is
-    // `skipped` there and earlier branches own the decision.
-    let (code, out) = run_decide_step(&[
-        ("steps.release-check.outcome", "skipped"),
-        ("steps.stranded.outputs['stranded-tag']", "v0.322.0"),
-        ("steps.stranded.outputs['stranded-version']", "0.322.0"),
-    ]);
-    assert_eq!(code, 0, "stranded recovery must still work: {out}");
-    assert!(
-        out.contains("recovery-release=true"),
-        "stranded recovery must still publish the prepared tag: {out}"
-    );
+#[test]
+fn push_releases_current_main_without_automatic_stranded_recovery() {
+    let workflow = release_workflow();
+    let check = job_section(workflow, "check");
 
-    let (code, out) = run_decide_step(&[
-        ("steps.release-check.outcome", "skipped"),
-        ("steps.stranded.outputs['hold-reason']", "in-flight release"),
-    ]);
-    assert_eq!(code, 0, "an in-flight hold must not fail the job: {out}");
-    assert!(
-        out.contains("should-release=false"),
-        "an in-flight hold must not release: {out}"
-    );
+    assert!(!workflow.contains("detect-stranded-release.sh"));
+    assert!(!workflow.contains("release-recovery-attempts"));
+    assert!(!check.contains("steps.stranded"));
+    assert!(check.contains("if: inputs.release_tag == '' && steps.attach.outputs.superseded != 'true' && steps.failed-release.outputs.blocked != 'true'"));
+    assert!(check.contains("if: inputs.release_tag != ''"));
 }
 
 /// The branch guard must be satisfied by establishing the branch, NOT by
