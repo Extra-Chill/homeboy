@@ -235,12 +235,14 @@ grep -F 'result_filename="$(command_result_filename "${COMMAND}")"' "${WORKFLOW}
 # shellcheck disable=SC2016
 grep -F '[ -f "homeboy-baseline-results/${result_filename}" ] && structured_output=true' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline lookup does not fail closed when its declared result is absent\n'; exit 1; }
 # shellcheck disable=SC2016
-planning_scopes="$(grep -A30 -E 'name: Configure (candidate|baseline) Test shards' "${WORKFLOW}" | grep -F -c 'scope: ${{ inputs.scope }}')"
-[ "${planning_scopes}" -eq 2 ] || { printf 'FAIL: candidate and baseline inventory planning must each preserve caller scope, got %s calls\n' "${planning_scopes}"; exit 1; }
+candidate_inventory_scopes="$(grep -A30 'name: Configure candidate Test shards' "${WORKFLOW}" | grep -F -c 'scope: ${{ inputs.scope }}')"
+[ "${candidate_inventory_scopes}" -eq 1 ] || { printf 'FAIL: candidate inventory planning must preserve caller scope, got %s calls\n' "${candidate_inventory_scopes}"; exit 1; }
+baseline_inventory_scopes="$(grep -A30 'name: Configure baseline Test shards' "${WORKFLOW}" | grep -c 'scope: full')"
+[ "${baseline_inventory_scopes}" -eq 1 ] || { printf 'FAIL: bootstrap baseline inventory must use full scope, got %s calls\n' "${baseline_inventory_scopes}"; exit 1; }
 replay_scopes="$(grep -A30 -E 'name: Run (candidate|baseline) Test shard' "${WORKFLOW}" | grep -c 'scope: full')"
 [ "${replay_scopes}" -eq 2 ] || { printf 'FAIL: candidate and baseline manifest replay must each use full scope, got %s calls\n' "${replay_scopes}"; exit 1; }
-if [ "$(grep -c 'scope: full' "${WORKFLOW}")" -ne 2 ]; then
-  printf 'FAIL: only the two immutable-manifest replay calls may force full scope\n'; exit 1
+if [ "$(grep -c 'scope: full' "${WORKFLOW}")" -ne 3 ]; then
+  printf 'FAIL: only bootstrap baseline inventory and immutable manifest replay may force full scope\n'; exit 1
 fi
 grep -F 'prepare-test-shard-workspace.sh prepare .homeboy-action' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate binary setup does not isolate the action checkout\n'; exit 1; }
 grep -F "steps.prepare-binary-workspace.outcome == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate binary setup does not always restore its exact Git exclusions\n'; exit 1; }
@@ -255,7 +257,6 @@ grep -F "::error::Test inventory generation failed for" "${WORKFLOW}" >/dev/null
 if grep -A4 'name: Report candidate Test inventory generation failure' "${WORKFLOW}" | grep -F 'homeboy-test-shard-plan-' >/dev/null; then
   printf 'FAIL: inventory failure reporting attempts to read a missing shard plan artifact\n'; exit 1
 fi
-
 selection_dir="${tmp}/candidate-selection"
 mkdir -p "${selection_dir}"
 printf '%s\n' '{"review test":"pass"}' > "${selection_dir}/results.json"
@@ -296,4 +297,12 @@ grep -F "needs.candidate-test-result.outputs.baseline-command != ''" "${WORKFLOW
 # shellcheck disable=SC2016
 grep -F 'homeboy-candidate-test-results-${{ github.run_attempt }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: final Test does not consume canonical candidate results before reconciliation\n'; exit 1; }
 printf 'PASS: canonical candidate results select matching baseline attribution and fail closed when absent\n'
+# shellcheck disable=SC2016
+grep -F 'bootstrap-baseline-red: ${{ steps.bootstrap-baseline-red.outputs.value }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: baseline inventory failures are not classified for reconciliation\n'; exit 1; }
+# shellcheck disable=SC2016
+grep -F 'name: homeboy-baseline-test-inventory-failure-${{ github.run_attempt }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: classified baseline inventory failures are not retained as artifacts\n'; exit 1; }
+grep -F 'Test bootstrap_baseline_red: immutable baseline inventory failed' "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not publish the baseline bootstrap warning\n'; exit 1; }
+grep -F "needs.baseline-test-plan.outputs.bootstrap-baseline-red == 'true'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not restrict the nonblocking path to classified baseline inventory failures\n'; exit 1; }
+grep -F 'name: Enforce candidate Test result after bootstrap baseline red' "${WORKFLOW}" >/dev/null || { printf 'FAIL: bootstrap baseline warning can bypass candidate Test enforcement\n'; exit 1; }
+grep -F "needs.baseline-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: baseline shards can run without a successful baseline inventory plan\n'; exit 1; }
 printf 'PASS: policy waits for sharded Test reconciliation while preserving unsharded behavior\n'

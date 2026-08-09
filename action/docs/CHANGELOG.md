@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.16] - 2026-08-09
+
+### Fixed
+- retain baseline inventory bootstrap failures [AI: openai/gpt-5.6-sol via OpenCode - workflow and contract tests]
+
 ## [2.11.15] - 2026-08-08
 
 ### Fixed
