@@ -328,6 +328,11 @@ impl ExtensionRunner {
             !secret_env.is_empty(),
         )?;
         let output = redact_runner_output(output, &secret_env);
+        if self.execution_context.capability == ExtensionCapability::Test {
+            if let Some(run_dir_path) = &self.run_dir_path {
+                normalize_declared_test_failures(run_dir_path, &declared_sidecars)?;
+            }
+        }
         if !output.success {
             if let Some(run_dir_path) = &self.run_dir_path {
                 let command = self.command_string(&prepared.execution.extension_path);
@@ -704,6 +709,38 @@ fn initialize_structured_sidecars(
         write_json_sidecar(&path, &empty)?;
     }
     Ok(())
+}
+
+/// Canonicalize the legacy test producer envelope to the registry's array-only
+/// failure contract. Counts and runner diagnoses belong to `test.results` and
+/// captured output; this sidecar contains only individual failure records.
+fn normalize_declared_test_failures(
+    run_dir_path: &Path,
+    declared: &[crate::StructuredSidecarDeclaration],
+) -> Result<()> {
+    let Some(declaration) = declared
+        .iter()
+        .find(|declaration| declaration.name == "test.failures")
+    else {
+        return Ok(());
+    };
+    let Some(path) = run_dir_relative_sidecar_path(run_dir_path, &declaration.path) else {
+        return Ok(());
+    };
+
+    let failures = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|payload| match payload {
+            serde_json::Value::Array(items) => Some(items),
+            serde_json::Value::Object(mut object) => object
+                .remove("failures")
+                .and_then(|value| value.as_array().cloned()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    write_json_sidecar(&path, &serde_json::Value::Array(failures))
 }
 
 /// Check every structured sidecar *this extension declares* against core's
@@ -1210,6 +1247,55 @@ mod tests {
         assert!(!run_dir.step_file(run_dir::files::TEST_FAILURES).exists());
         assert!(!run_dir.step_file(run_dir::files::BENCH_RESULTS).exists());
         assert!(!run_dir.step_file(run_dir::files::TRACE_RESULTS).exists());
+
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn normalizes_test_failure_envelopes_without_losing_runner_diagnosis() {
+        let run_dir = RunDir::create().expect("run dir");
+        let failures = run_dir.step_file(run_dir::files::TEST_FAILURES);
+        let output = CommandOutput {
+            stdout: "PHPUNIT_ZERO_TESTS cause=changed_file_filter_mismatch".to_string(),
+            stderr: String::new(),
+            success: true,
+            exit_code: 0,
+            timed_out: false,
+            child_resource: None,
+        };
+        std::fs::write(
+            &failures,
+            serde_json::to_string(&json!({
+                "failures": [],
+                "total": 0,
+                "passed": 0,
+            }))
+            .expect("serialize fixture"),
+        )
+        .expect("write legacy failure envelope");
+
+        normalize_declared_test_failures(run_dir.path(), &[declaration("test.failures")])
+            .expect("normalize failures");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&failures).expect("normalized failures"))
+                .expect("failure array");
+        assert_eq!(payload, json!([]));
+        homeboy_core::structured_sidecar::validate_payload("test.failures", &payload)
+            .expect("schema-valid failure array");
+        assert!(output
+            .stdout
+            .contains("PHPUNIT_ZERO_TESTS cause=changed_file_filter_mismatch"));
+
+        std::fs::remove_file(&failures).expect("remove sidecar");
+        normalize_declared_test_failures(run_dir.path(), &[declaration("test.failures")])
+            .expect("normalize absent infrastructure sidecar");
+        assert_eq!(
+            std::fs::read_to_string(&failures)
+                .expect("seeded failure array")
+                .trim(),
+            "[]"
+        );
 
         run_dir.cleanup();
     }
