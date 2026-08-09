@@ -17,6 +17,14 @@ cat > "$PROJECT_DIR/Cargo.toml" <<'EOF'
 name = "rust-changed-scope-smoke"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+name = "renamed_lib"
+path = "src/lib.rs"
+
+[[test]]
+name = "renamed_integration"
+path = "tests/integration_scope.rs"
 EOF
 
 cat > "$PROJECT_DIR/src/lib.rs" <<'EOF'
@@ -45,7 +53,7 @@ EOF
 cat > "$PROJECT_DIR/tests/integration_scope.rs" <<'EOF'
 #[test]
 fn integration_scope_runs() {
-    assert_eq!(rust_changed_scope_smoke::value(), 1);
+    assert_eq!(renamed_lib::value(), 1);
 }
 EOF
 
@@ -148,6 +156,104 @@ fi
 
 if [[ "$OUTPUT" != *"1 passed"* ]]; then
     printf 'Expected scoped inline test to run. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+cat > "$WORKDIR/changed-selection.json" <<'EOF'
+{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"stale-producer-name","target_kind":"lib","target":"rust_changed_scope_smoke","module":"core::daemon::daemon_test","path":"src/core/daemon.rs"},{"package":"stale-producer-name","target_kind":"test","target":"integration_scope","module":null,"path":"tests/integration_scope.rs"}]}
+EOF
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_TEST_SCOPE_KIND='rust_changed_union' \
+    HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORKDIR/changed-selection.json" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"inline_scope_runs ... ok"* || "$OUTPUT" != *"integration_scope_runs ... ok"* || "$OUTPUT" == *"second_inline_scope_runs ... ok"* ]]; then
+    printf 'Expected exact mixed changed-scope union membership. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_RUST_TEST_RUNNER=nextest \
+    HOMEBOY_RUST_NEXTEST_FILTER_MAX_BYTES=180 \
+    HOMEBOY_TEST_SCOPE_KIND='rust_changed_union' \
+    HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORKDIR/changed-selection.json" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"Replaying Rust nextest shard: 2 runnable identities"* || "$OUTPUT" != *"inline_scope_runs"* || "$OUTPUT" != *"integration_scope_runs"* ]]; then
+    printf 'Expected ARG_MAX-safe nextest batches for the exact union. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+# Renames and deletions can leave a candidate absent from the current inventory.
+# They must widen safely instead of returning a green zero-test result.
+cat > "$WORKDIR/changed-selection.json" <<'EOF'
+{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"lib","target":"renamed_or_deleted","module":"core::deleted_test","path":"src/core/deleted_test.rs"}]}
+EOF
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_TEST_SCOPE_KIND='rust_changed_union' \
+    HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORKDIR/changed-selection.json" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"second_inline_scope_runs ... ok"* || "$OUTPUT" != *"integration_scope_runs ... ok"* ]]; then
+    printf 'Expected unmatched changed selection to run the full suite. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+# New producers pass only the additive selection-file variable. An older
+# consumer ignores it and retains its normal full-suite behavior.
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_TEST_SCOPE_KIND='rust_changed_union' \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"second_inline_scope_runs ... ok"* || "$OUTPUT" != *"integration_scope_runs ... ok"* ]]; then
+    printf 'Expected missing selection file to preserve old-consumer full suite behavior. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+# Old producers do not set the additive selection-file variable. A new
+# consumer must preserve the ordinary full-suite command rather than treating
+# an absent selection as zero selected tests.
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_TEST_SCOPE_KIND='workspace' \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"second_inline_scope_runs ... ok"* || "$OUTPUT" != *"integration_scope_runs ... ok"* ]]; then
+    printf 'Expected absent old-producer selection to preserve the full suite. Output:\n%s\n' "$OUTPUT" >&2
     exit 1
 fi
 

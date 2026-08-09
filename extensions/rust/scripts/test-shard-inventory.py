@@ -9,6 +9,7 @@ from pathlib import Path
 
 SCHEMA = "homeboy/test-inventory/v1"
 MANIFEST_SCHEMA = "homeboy/test-shard-manifest/v1"
+CHANGED_SELECTION_SCHEMA = "homeboy/rust-changed-test-selection/v2"
 
 
 def fail(message):
@@ -42,6 +43,18 @@ def runner_fingerprint(cwd, runner):
     if result.returncode:
         fail(f"could not fingerprint {runner} runner: {result.stderr.strip()}")
     return digest(f"{runner}\0{result.stdout.strip()}")
+
+
+def cargo_metadata_roots(project, context):
+    component_root = Path(project).resolve()
+    result = run(["cargo", "metadata", "--no-deps", "--format-version=1"], component_root)
+    if result.returncode:
+        fail(f"cargo metadata failed {context}: {result.stderr.strip()}")
+    metadata = json.loads(result.stdout)
+    workspace_root = Path(metadata["workspace_root"]).resolve()
+    if component_root != workspace_root and workspace_root not in component_root.parents:
+        fail(f"component root is outside Cargo workspace {context}")
+    return metadata, workspace_root, component_root
 
 
 def cargo_inventory(workspace_root, packages):
@@ -109,11 +122,7 @@ def nextest_inventory(workspace_root):
 
 
 def inventory(project, runner):
-    metadata_result = run(["cargo", "metadata", "--no-deps", "--format-version=1"], project)
-    if metadata_result.returncode:
-        fail(f"cargo metadata failed: {metadata_result.stderr.strip()}")
-    metadata = json.loads(metadata_result.stdout)
-    workspace_root = Path(metadata["workspace_root"]).resolve()
+    metadata, workspace_root, _component_root = cargo_metadata_roots(project, "while building inventory")
     packages = {package["id"]: package["name"] for package in metadata["packages"]}
     tests = nextest_inventory(workspace_root) if runner == "nextest" else cargo_inventory(workspace_root, packages)
     # cargo-nextest does not execute doctests, so its inventory contains only
@@ -206,17 +215,88 @@ def validate(manifest_path, current):
     return [known[identity] for identity in selected]
 
 
+def resolve_changed_selection(selection_path, current, project):
+    try:
+        selection = json.loads(Path(selection_path).read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"invalid changed test selection: {error}")
+    if selection.get("schema") != CHANGED_SELECTION_SCHEMA:
+        fail("unsupported changed test selection schema")
+    candidates = selection.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        fail("changed test selection must contain a non-empty candidates array")
+
+    selected = {}
+    metadata, _workspace_root, component_root = cargo_metadata_roots(
+        project, "while resolving changed test selection"
+    )
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            fail("changed test selection candidates must be objects")
+        package = candidate.get("package")
+        target_kind = candidate.get("target_kind")
+        target = candidate.get("target")
+        module = candidate.get("module")
+        path = candidate.get("path")
+        if not all(isinstance(value, str) and value for value in (package, target_kind, target)):
+            fail("changed test selection candidate has an invalid package or target identity")
+        if module is not None and (not isinstance(module, str) or not module):
+            fail("changed test selection candidate has an invalid module")
+        if isinstance(path, str) and path:
+            source = (component_root / path).resolve()
+            for metadata_package in metadata["packages"]:
+                manifest_parent = Path(metadata_package["manifest_path"]).resolve().parent
+                if source == manifest_parent or manifest_parent in source.parents:
+                    package = metadata_package["name"]
+                    break
+        matches = [
+            test for test in current["tests"]
+            if test["package"] == package
+            and test["target_kind"] == target_kind
+            and test["target"] == target
+            and (module is None or test["name"] == module or test["name"].startswith(f"{module}::"))
+        ]
+        # A renamed explicit integration target can retain the same source path
+        # while its target name changes. Resolve that current target through
+        # Cargo metadata before deciding that the candidate is stale.
+        if not matches and isinstance(path, str) and path:
+            for metadata_package in metadata["packages"]:
+                if metadata_package["name"] != package:
+                    continue
+                for metadata_target in metadata_package["targets"]:
+                    if target_kind in metadata_target["kind"] and (
+                        target_kind == "lib" or Path(metadata_target["src_path"]).resolve() == source
+                    ):
+                        target = metadata_target["name"]
+                        matches = [
+                            test for test in current["tests"]
+                            if test["package"] == package
+                            and test["target_kind"] == target_kind
+                            and test["target"] == target
+                            and (module is None or test["name"] == module or test["name"].startswith(f"{module}::"))
+                        ]
+                        break
+        if not matches:
+            return {"fallback_reason": f"Changed test selection no longer matches {package}::{target_kind}::{target}."}
+        selected.update({test["id"]: test for test in matches})
+    return {"selected": [selected[key] for key in sorted(selected)]}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
     parser.add_argument("--runner", choices=("cargo", "nextest"), required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--manifest")
+    parser.add_argument("--changed-selection-file")
     args = parser.parse_args()
     current = inventory(args.project, args.runner)
     output = current
     if args.manifest:
         output = {"inventory": current, "selected": validate(args.manifest, current)}
+    if args.changed_selection_file:
+        resolved = resolve_changed_selection(args.changed_selection_file, current, args.project)
+        output = {"inventory": current, **resolved}
     Path(args.output).write_text(json.dumps(output, indent=2) + "\n")
 
 
