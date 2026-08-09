@@ -673,7 +673,7 @@ jobs:
           commands: ${{ needs.plan.outputs.test-command }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
-          scope: full
+          scope: ${{ inputs.scope }}
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}
@@ -1025,7 +1025,7 @@ jobs:
           commands: ${{ needs.candidate-test-result.outputs.baseline-command }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
-          scope: full
+          scope: ${{ inputs.scope }}
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}

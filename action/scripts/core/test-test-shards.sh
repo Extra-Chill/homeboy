@@ -234,8 +234,13 @@ grep -F 'baseline_result="$(jq -r --arg command "${COMMAND}"' "${WORKFLOW}" >/de
 grep -F 'result_filename="$(command_result_filename "${COMMAND}")"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline lookup does not use the canonical result filename\n'; exit 1; }
 # shellcheck disable=SC2016
 grep -F '[ -f "homeboy-baseline-results/${result_filename}" ] && structured_output=true' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline lookup does not fail closed when its declared result is absent\n'; exit 1; }
-if [ "$(grep -c 'scope: full' "${WORKFLOW}")" -lt 4 ]; then
-  printf 'FAIL: candidate and baseline shard planning and replay do not use their manifests as the sole test selector\n'; exit 1
+# shellcheck disable=SC2016
+planning_scopes="$(grep -A30 -E 'name: Configure (candidate|baseline) Test shards' "${WORKFLOW}" | grep -F -c 'scope: ${{ inputs.scope }}')"
+[ "${planning_scopes}" -eq 2 ] || { printf 'FAIL: candidate and baseline inventory planning must each preserve caller scope, got %s calls\n' "${planning_scopes}"; exit 1; }
+replay_scopes="$(grep -A30 -E 'name: Run (candidate|baseline) Test shard' "${WORKFLOW}" | grep -c 'scope: full')"
+[ "${replay_scopes}" -eq 2 ] || { printf 'FAIL: candidate and baseline manifest replay must each use full scope, got %s calls\n' "${replay_scopes}"; exit 1; }
+if [ "$(grep -c 'scope: full' "${WORKFLOW}")" -ne 2 ]; then
+  printf 'FAIL: only the two immutable-manifest replay calls may force full scope\n'; exit 1
 fi
 grep -F 'prepare-test-shard-workspace.sh prepare .homeboy-action' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate binary setup does not isolate the action checkout\n'; exit 1; }
 grep -F "steps.prepare-binary-workspace.outcome == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate binary setup does not always restore its exact Git exclusions\n'; exit 1; }
