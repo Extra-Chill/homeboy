@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.20] - 2026-08-09
+
+### Fixed
+- resolve shard baseline script root
+
 ## [2.11.19] - 2026-08-09
 
 ### Fixed
