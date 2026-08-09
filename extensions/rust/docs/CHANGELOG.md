@@ -2,6 +2,18 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.33.0] - 2026-08-09
+
+### Added
+- resolve changed test identity unions
+
+### Fixed
+- separate Cargo workspace and component roots
+- resolve selection paths from component root
+- derive changed package from Cargo metadata
+- version changed selection artifact contract
+- replay changed selection without shard manifest
+
 ## [1.32.11] - 2026-08-06
 
 ### Fixed
