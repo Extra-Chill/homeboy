@@ -198,11 +198,113 @@ if [[ "$OUTPUT" != *"Replaying Rust nextest shard: 2 runnable identities"* || "$
     exit 1
 fi
 
+SCOPED_INVENTORY="$WORKDIR/scoped-inventory.json"
+HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_TEST_SCOPE_KIND='rust_changed_union' \
+HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORKDIR/changed-selection.json" \
+HOMEBOY_TEST_INVENTORY_ONLY=1 \
+HOMEBOY_TEST_INVENTORY_FILE="$SCOPED_INVENTORY" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+bash "$SCRIPT_DIR/test-runner.sh" >/dev/null
+python3 - "$SCOPED_INVENTORY" "$WORKDIR/scoped-manifest.json" <<'PY'
+import hashlib
+import json
+import sys
+
+inventory = json.load(open(sys.argv[1]))
+assert inventory["schema"] == "homeboy/test-inventory/v1", inventory
+assert {test["name"] for test in inventory["tests"]} == {
+    "core::daemon::daemon_test::inline_scope_runs",
+    "integration_scope_runs",
+}, inventory
+fingerprint_record = {key: value for key, value in inventory.items() if key != "inventory_fingerprint"}
+expected = hashlib.sha256(json.dumps(fingerprint_record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+assert inventory["inventory_fingerprint"] == expected, inventory
+selected_tests = inventory["tests"][:1]
+shard_record = dict(fingerprint_record, tests=selected_tests)
+shard_fingerprint = hashlib.sha256(json.dumps(shard_record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+manifest = {key: inventory[key] for key in ("runner", "runner_fingerprint", "workspace_fingerprint")}
+manifest["schema"] = "homeboy/test-shard-manifest/v1"
+manifest["inventory_fingerprint"] = shard_fingerprint
+manifest["tests"] = [test["id"] for test in selected_tests]
+json.dump(manifest, open(sys.argv[2], "w"))
+PY
+
+# A manifest planned from a scoped inventory remains authoritative during
+# replay even though replay enumerates the complete current inventory.
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_RUST_TEST_RUNNER=nextest \
+    HOMEBOY_TEST_SHARD_MANIFEST="$WORKDIR/scoped-manifest.json" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"inline_scope_runs"* || "$OUTPUT" == *"integration_scope_runs"* || "$OUTPUT" == *"second_inline_scope_runs"* ]]; then
+    printf 'Expected scoped inventory shard manifest to replay its exact subset. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
 # Renames and deletions can leave a candidate absent from the current inventory.
 # They must widen safely instead of returning a green zero-test result.
 cat > "$WORKDIR/changed-selection.json" <<'EOF'
 {"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"lib","target":"renamed_or_deleted","module":"core::deleted_test","path":"src/core/deleted_test.rs"}]}
 EOF
+
+FULL_FALLBACK_INVENTORY="$WORKDIR/full-fallback-inventory.json"
+HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_TEST_SCOPE_KIND='rust_changed_union' \
+HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORKDIR/changed-selection.json" \
+HOMEBOY_TEST_INVENTORY_ONLY=1 \
+HOMEBOY_TEST_INVENTORY_FILE="$FULL_FALLBACK_INVENTORY" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+bash "$SCRIPT_DIR/test-runner.sh" >/dev/null
+python3 - "$FULL_FALLBACK_INVENTORY" <<'PY'
+import json
+import sys
+
+inventory = json.load(open(sys.argv[1]))
+assert inventory["schema"] == "homeboy/test-inventory/v1", inventory
+assert {test["name"] for test in inventory["tests"]} == {
+    "core::daemon::daemon_test::inline_scope_runs",
+    "core::service::service_test::second_inline_scope_runs",
+    "integration_scope_runs",
+}, inventory
+PY
+
+set +e
+HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORKDIR/scoped-manifest.json" \
+HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORKDIR/changed-selection.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+bash "$SCRIPT_DIR/test-runner.sh" >"$WORKDIR/conflicting-selection.out" 2>&1
+CONFLICTING_SELECTION_EXIT=$?
+set -e
+if [ "$CONFLICTING_SELECTION_EXIT" -eq 0 ] || ! grep -q 'are mutually exclusive' "$WORKDIR/conflicting-selection.out"; then
+    printf 'Expected shard manifest and changed selection to fail as conflicting configuration\n' >&2
+    exit 1
+fi
 OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
