@@ -404,11 +404,12 @@ rust_capture_stdout() {
 }
 
 rust_nextest_counts() {
-    python3 - "$1" "$2" <<'PY'
+    python3 - "$1" "$2" "$3" <<'PY'
 import json
 import sys
 
 expected = json.load(open(sys.argv[2], encoding="utf-8"))["selected"]
+failed_names_file = sys.argv[3]
 
 def planned_identity(item):
     values = (item.get("package"), item.get("target_kind"), item.get("target"), item.get("name"))
@@ -449,8 +450,24 @@ for item in expected:
     if emitted in planned_by_emitted:
         raise SystemExit(f"Rust test shard error: nextest output identity is ambiguous: {package}::{target}${test}")
     planned_by_emitted[emitted] = planned
-passed = failed = skipped = 0
-actual = set()
+
+# nextest's retry count is u32 and its attempt number is retry_count + 1.
+# Its TestInstanceId appends the decimal attempt only when it exceeds one.
+MAX_RETRY_ATTEMPT = 2**32
+
+def retry_base_identity(emitted):
+    package, target, test = emitted
+    base, marker, attempt_text = test.rpartition("#")
+    if not marker:
+        return None
+    if not base or not attempt_text.isdecimal():
+        return "invalid"
+    attempt = int(attempt_text)
+    if attempt < 2 or attempt > MAX_RETRY_ATTEMPT or attempt_text != str(attempt):
+        return "invalid"
+    return package, target, base
+
+outcomes = {}
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     try:
         event = json.loads(line)
@@ -460,32 +477,92 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         continue
     if event.get("type") != "test":
         continue
-    status = event.get("event")
-    if status not in {"ok", "passed", "failed", "fail", "ignored", "skipped"}:
-        continue
     try:
         emitted = emitted_identity(event.get("name"))
     except SystemExit:
         # Child processes inherit libtest JSON. Scheduler preflight, not their
         # diagnostics, is the authority for shard membership.
         continue
-    if emitted not in planned_by_emitted:
+    exact = planned_by_emitted.get(emitted)
+    retry_base = retry_base_identity(emitted)
+    if exact:
+        normalized = planned_by_emitted.get(retry_base) if retry_base != "invalid" and retry_base else None
+        if normalized:
+            raise SystemExit(f"Rust test shard error: nextest retry suffix is ambiguous between planned identities: {event.get('name')}")
+        planned = exact
+    elif retry_base == "invalid":
+        base = emitted[0], emitted[1], emitted[2].rpartition("#")[0]
+        if base in planned_by_emitted:
+            raise SystemExit(f"Rust test shard error: nextest emitted a malformed retry suffix: {event.get('name')}")
         continue
-    if planned_by_emitted[emitted] in actual:
+    else:
+        planned = planned_by_emitted.get(retry_base) if retry_base else None
+    if not planned:
+        continue
+    status = event.get("event")
+    if status not in {"ok", "passed", "failed", "fail", "ignored", "skipped"}:
+        continue
+    if planned in outcomes:
         raise SystemExit(f"Rust test shard error: nextest emitted an unexpected or duplicate test identity: {event.get('name')}")
-    actual.add(planned_by_emitted[emitted])
-    if status in {"ok", "passed"}: passed += 1
-    elif status in {"failed", "fail"}: failed += 1
-    else: skipped += 1
-missing = expected_identities - actual
+    outcomes[planned] = status
+missing = expected_identities - outcomes.keys()
 unexpected_missing = missing - expected_skipped
 if unexpected_missing:
     raise SystemExit(f"Rust test shard error: nextest executed membership does not match the shard manifest (missing={sorted(unexpected_missing)[:1]})")
 # Nextest intentionally omits ignored tests from its default event stream.
 # Their listed disposition is canonical execution policy, not a relaxed match.
-skipped += len(missing)
+passed = sum(status in {"ok", "passed"} for status in outcomes.values())
+failed_names = sorted(
+    f"{package}::{target}${test}"
+    for (package, _target_kind, target, test), status in outcomes.items()
+    if status in {"failed", "fail"}
+)
+failed = len(failed_names)
+skipped = sum(status in {"ignored", "skipped"} for status in outcomes.values()) + len(missing)
+with open(failed_names_file, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(failed_names))
+    if failed_names:
+        handle.write("\n")
 print(f"{passed}\t{failed}\t{skipped}")
 PY
+}
+
+rust_nextest_merge_failure_evidence() {
+    local failed_names_file="$1" records_file failures_file name record
+    homeboy_test_failures_enabled || return 0
+    [ -s "$failed_names_file" ] || return 0
+
+    records_file="$(mktemp)" || return 1
+    failures_file="$(mktemp)" || {
+        rm -f "$records_file"
+        return 1
+    }
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        record="$(homeboy_test_failure_record_json "rust-nextest" "$name" "${name%%\$*}" "" "" "nextest reported failed test: ${name}" "test_failure")"
+        printf '%s\n' "$record" >> "$records_file"
+    done < "$failed_names_file"
+    if ! jq -s '.' "$records_file" > "$failures_file"; then
+        rm -f "$records_file" "$failures_file"
+        return 1
+    fi
+    if homeboy_test_failures_merge_file "$failures_file"; then
+        :
+    else
+        local merge_exit=$?
+        rm -f "$records_file" "$failures_file"
+        return "$merge_exit"
+    fi
+    rm -f "$records_file" "$failures_file"
+}
+
+rust_nextest_cleanup() {
+    local status="${1:-$?}" path
+    for path in "${NEXTEST_BATCH_FAILED_NAMES:-}" "${NEXTEST_FAILED_NAMES:-}" "${NEXTEST_EXECUTION_DATA:-}" "${SHARD_OUTPUT:-}" "${NEXTEST_LIST_JSON:-}" "${NEXTEST_LIST_OUTPUT:-}" "${SHARD_DATA:-}"; do
+        [ -z "$path" ] || homeboy_runner_harness_cleanup_path file "$path" || true
+    done
+    [ -z "${NEXTEST_BATCH_DIR:-}" ] || homeboy_runner_harness_cleanup_path directory "$NEXTEST_BATCH_DIR" || true
+    return "$status"
 }
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -729,16 +806,42 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
             rm -f "$SHARD_DATA"
             exit 1
         fi
-        NEXTEST_EXECUTION_DATA="$(mktemp)"
-        rust_nextest_execution_data "$SHARD_DATA" "$NEXTEST_EXECUTION_DATA"
-        NEXTEST_RUNNABLE_TOTAL="$(jq '.selected | length' "$NEXTEST_EXECUTION_DATA")"
-        NEXTEST_BATCH_DIR="$(mktemp -d)"
+        NEXTEST_EXECUTION_DATA=""
+        NEXTEST_BATCH_DIR=""
+        NEXTEST_FAILED_NAMES=""
+        NEXTEST_BATCH_FAILED_NAMES=""
+        SHARD_OUTPUT=""
+        NEXTEST_LIST_JSON=""
+        NEXTEST_LIST_OUTPUT=""
+        if ! NEXTEST_EXECUTION_DATA="$(mktemp)"; then
+            SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+            rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+            rust_nextest_cleanup 1
+            exit 1
+        fi
+        homeboy_runner_harness_register_cleanup "$NEXTEST_EXECUTION_DATA"
+        if ! rust_nextest_execution_data "$SHARD_DATA" "$NEXTEST_EXECUTION_DATA"; then
+            SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+            rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+            rust_nextest_cleanup 1
+            exit 1
+        fi
+        if ! NEXTEST_RUNNABLE_TOTAL="$(jq '.selected | length' "$NEXTEST_EXECUTION_DATA")"; then
+            SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+            rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+            rust_nextest_cleanup 1
+            exit 1
+        fi
+        if ! homeboy_runner_harness_temp_dir NEXTEST_BATCH_DIR; then
+            SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+            rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+            rust_nextest_cleanup 1
+            exit 1
+        fi
         if [ "$NEXTEST_RUNNABLE_TOTAL" -gt 0 ] && { ! rust_nextest_batches "$NEXTEST_EXECUTION_DATA" "$NEXTEST_MAX_BYTES" "$NEXTEST_BATCH_DIR" || ! rust_validate_nextest_batches "$NEXTEST_EXECUTION_DATA" "$NEXTEST_BATCH_DIR"; }; then
             SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
             rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
-            rm -rf "$NEXTEST_BATCH_DIR"
-            rm -f "$NEXTEST_EXECUTION_DATA"
-            rm -f "$SHARD_DATA"
+            rust_nextest_cleanup 1
             exit 1
         fi
         # Capture filter argv values once. Preflight and execution consume the
@@ -749,16 +852,20 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
             NEXTEST_FILTER="$(rust_nextest_filter "$NEXTEST_BATCH")"
             NEXTEST_FILTERS["$NEXTEST_BATCH"]="$NEXTEST_FILTER"
             NEXTEST_FILTER_DIGESTS["$NEXTEST_BATCH"]="$(printf '%s' "$NEXTEST_FILTER" | shasum -a 256 | cut -d ' ' -f 1)"
-            NEXTEST_LIST_JSON="$(mktemp)"
+            if ! NEXTEST_LIST_JSON="$(mktemp)"; then
+                SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+                rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+                rust_nextest_cleanup 1
+                exit 1
+            fi
+            homeboy_runner_harness_register_cleanup "$NEXTEST_LIST_JSON"
             homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- rust_capture_stdout "$NEXTEST_LIST_JSON" cargo nextest list --workspace --message-format json -E "$NEXTEST_FILTER" || true
             if [ "$NEXTEST_LIST_EXIT" -ne 0 ] || ! rust_validate_nextest_membership "$NEXTEST_LIST_JSON" "$NEXTEST_BATCH"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
                 homeboy_cleanup_step_capture "$NEXTEST_LIST_OUTPUT"
                 homeboy_cleanup_step_capture "$NEXTEST_LIST_JSON"
-                rm -rf "$NEXTEST_BATCH_DIR"
-                rm -f "$NEXTEST_EXECUTION_DATA"
-                rm -f "$SHARD_DATA"
+                rust_nextest_cleanup 1
                 exit 1
             fi
             homeboy_cleanup_step_capture "$NEXTEST_LIST_OUTPUT"
@@ -766,31 +873,57 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
         done
         echo "Replaying Rust nextest shard: ${NEXTEST_RUNNABLE_TOTAL} runnable identities and ${SHARD_SKIPPED} planned skipped identities"
         SHARD_EXIT=0
+        if ! NEXTEST_FAILED_NAMES="$(mktemp)"; then
+            SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+            rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+            rust_nextest_cleanup 1
+            exit 1
+        fi
+        homeboy_runner_harness_register_cleanup "$NEXTEST_FAILED_NAMES"
         for NEXTEST_BATCH in "$NEXTEST_BATCH_DIR"/*.json; do
             [ -f "$NEXTEST_BATCH" ] || continue
             NEXTEST_FILTER="${NEXTEST_FILTERS[$NEXTEST_BATCH]}"
             if [ "$(printf '%s' "$NEXTEST_FILTER" | shasum -a 256 | cut -d ' ' -f 1)" != "${NEXTEST_FILTER_DIGESTS[$NEXTEST_BATCH]}" ]; then
                 echo "Rust test shard error: nextest filter changed after preflight." >&2
+                SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+                rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+                rust_nextest_cleanup 1
                 exit 1
             fi
             homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --manifest-path "${PROJECT_PATH}/Cargo.toml" --workspace --test-threads 1 --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
-            if ! NEXTEST_COUNTS="$(rust_nextest_counts "$SHARD_OUTPUT" "$NEXTEST_BATCH")"; then
+            if ! NEXTEST_BATCH_FAILED_NAMES="$(mktemp)"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
-                rm -f "$SHARD_OUTPUT"
-                rm -rf "$NEXTEST_BATCH_DIR"
-                rm -f "$SHARD_DATA"
+                rust_nextest_cleanup 1
+                exit 1
+            fi
+            homeboy_runner_harness_register_cleanup "$NEXTEST_BATCH_FAILED_NAMES"
+            if ! NEXTEST_COUNTS="$(rust_nextest_counts "$SHARD_OUTPUT" "$NEXTEST_BATCH" "$NEXTEST_BATCH_FAILED_NAMES")"; then
+                SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+                rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+                rust_nextest_cleanup 1
                 exit 1
             fi
             IFS=$'\t' read -r PASSED FAILED SKIPPED <<< "$NEXTEST_COUNTS"
+            cat "$NEXTEST_BATCH_FAILED_NAMES" >> "$NEXTEST_FAILED_NAMES"
+            rm -f "$NEXTEST_BATCH_FAILED_NAMES"
             SHARD_PASSED=$((SHARD_PASSED + PASSED))
             SHARD_FAILED=$((SHARD_FAILED + FAILED))
             SHARD_SKIPPED=$((SHARD_SKIPPED + SKIPPED))
             [ "$NEXTEST_BATCH_EXIT" -eq 0 ] || SHARD_EXIT="$NEXTEST_BATCH_EXIT"
             rm -f "$SHARD_OUTPUT"
         done
-        rm -rf "$NEXTEST_BATCH_DIR"
-        rm -f "$NEXTEST_EXECUTION_DATA"
+        if rust_nextest_merge_failure_evidence "$NEXTEST_FAILED_NAMES"; then
+            :
+        else
+            NEXTEST_MERGE_EXIT=$?
+            SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+            SHARD_EXECUTED=$((SHARD_PASSED + SHARD_FAILED + SHARD_SKIPPED))
+            rust_emit_shard_result failed "$SHARD_TOTAL" "$SHARD_EXECUTED" "$SHARD_PASSED" "$SHARD_FAILED" "$SHARD_SKIPPED" "$((SHARD_ELAPSED*1000))"
+            rust_nextest_cleanup "$NEXTEST_MERGE_EXIT"
+            exit "$NEXTEST_MERGE_EXIT"
+        fi
+        rust_nextest_cleanup 0
     else
         while IFS=$'\t' read -r package target target_kind name; do
             case "$target_kind" in

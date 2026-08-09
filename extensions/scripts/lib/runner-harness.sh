@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Shared shell-runner harness helpers for extension wrappers.
+#
+# Install custom EXIT traps before the first harness temporary registration.
+# The harness captures and composes those traps. A later replacement must be
+# followed by another registration to be composed.
 
 # Runtime helpers live in Homeboy's source tree. There is exactly one place that
 # knows how to find them: runtime-helper-resolver.sh, which honours an explicit
@@ -69,13 +73,96 @@ homeboy_runner_harness_mktemp() {
     mktemp 2>/dev/null
 }
 
+homeboy_runner_harness_temp_root() {
+    local tmpdir="${HOMEBOY_CACHE_DIR:-${TMPDIR:-/tmp}}"
+    [ -d "$tmpdir" ] && [ -w "$tmpdir" ] || return 1
+    local root
+    root="$(cd "$tmpdir" && pwd -P)" || return 1
+    case "$root" in *$'\t'*|*$'\n'*) return 1 ;; esac
+    printf '%s\n' "$root"
+}
+
+homeboy_runner_harness_path_is_serializable() {
+    local path="$1"
+    case "$path" in *$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+}
+
+homeboy_runner_harness_append_exit_trap() {
+    local declaration="$1"
+    [ -n "$declaration" ] || return 0
+    case $'\n'"${HOMEBOY_RUNNER_HARNESS_EXIT_TRAPS:-}"$'\n' in
+        *$'\n'"$declaration"$'\n'*) return 0 ;;
+    esac
+    HOMEBOY_RUNNER_HARNESS_EXIT_TRAPS="${HOMEBOY_RUNNER_HARNESS_EXIT_TRAPS:-}${HOMEBOY_RUNNER_HARNESS_EXIT_TRAPS:+$'\n'}${declaration}"
+}
+
+homeboy_runner_harness_register_owned_directory() {
+    local path="$1" identity marker
+    identity="$(homeboy_runner_harness_directory_identity "$path")" || return 1
+    marker="$(mktemp "${path}/.homeboy-owned.XXXXXX")" || return 1
+    HOMEBOY_RUNNER_HARNESS_OWNED_DIRS="${HOMEBOY_RUNNER_HARNESS_OWNED_DIRS:-}${HOMEBOY_RUNNER_HARNESS_OWNED_DIRS:+$'\n'}${path}"$'\t'"${identity}"$'\t'"${marker}"
+}
+
+homeboy_runner_harness_directory_identity() {
+    local path="$1"
+    python3 - "$path" <<'PY'
+import os
+import stat
+import sys
+
+entry = os.lstat(sys.argv[1])
+if not stat.S_ISDIR(entry.st_mode):
+    raise SystemExit(1)
+print(f"{entry.st_dev}:{entry.st_ino}")
+PY
+}
+
+homeboy_runner_harness_is_owned_directory() {
+    local path="$1" root parent base owned identity marker
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    root="$(homeboy_runner_harness_temp_root)" || return 1
+    parent="$(cd "$(dirname "$path")" && pwd -P)" || return 1
+    base="$(basename "$path")"
+    [ "$parent" = "$root" ] || return 1
+    case "$base" in homeboy-runner.*) ;; *) return 1 ;; esac
+    while IFS=$'\t' read -r owned identity marker; do
+        [ "$owned" = "$path" ] || continue
+        [ "$(homeboy_runner_harness_directory_identity "$path")" = "$identity" ] || return 1
+        [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+        return 0
+    done <<EOF
+${HOMEBOY_RUNNER_HARNESS_OWNED_DIRS:-}
+EOF
+    return 1
+}
+
 homeboy_runner_harness_register_cleanup() {
     local path="$1"
+    local kind="${2:-file}"
     [ -n "$path" ] || return 0
-    HOMEBOY_RUNNER_HARNESS_CLEANUP="${HOMEBOY_RUNNER_HARNESS_CLEANUP:-}${HOMEBOY_RUNNER_HARNESS_CLEANUP:+$'\n'}$path"
-    if [ "${HOMEBOY_RUNNER_HARNESS_TRAP_SET:-0}" != "1" ]; then
-        trap 'homeboy_runner_harness_cleanup' EXIT
-        HOMEBOY_RUNNER_HARNESS_TRAP_SET=1
+    if ! homeboy_runner_harness_path_is_serializable "$path"; then
+        echo "homeboy_runner_harness_register_cleanup: refusing control character in path" >&2
+        return 2
+    fi
+    case "$kind" in
+        file) ;;
+        directory)
+            if ! homeboy_runner_harness_is_owned_directory "$path"; then
+                echo "homeboy_runner_harness_register_cleanup: refusing unowned directory: $path" >&2
+                return 2
+            fi
+            ;;
+        *)
+            echo "homeboy_runner_harness_register_cleanup: unsupported cleanup kind: $kind" >&2
+            return 2
+            ;;
+    esac
+    HOMEBOY_RUNNER_HARNESS_CLEANUP="${HOMEBOY_RUNNER_HARNESS_CLEANUP:-}${HOMEBOY_RUNNER_HARNESS_CLEANUP:+$'\n'}${kind}"$'\t'"${path}"
+    local current_trap
+    current_trap="$(trap -p EXIT)"
+    if [ "$current_trap" != "trap -- 'homeboy_runner_harness_exit' EXIT" ]; then
+        homeboy_runner_harness_append_exit_trap "$current_trap"
+        trap 'homeboy_runner_harness_exit' EXIT
     fi
 }
 
@@ -83,18 +170,91 @@ homeboy_runner_harness_temp() {
     local __var_name="$1"
     local template="${2:-homeboy-runner.XXXXXX}"
     local __tmp
+    if ! homeboy_runner_harness_path_is_serializable "$template"; then
+        echo "homeboy_runner_harness_temp: refusing control character in template" >&2
+        return 2
+    fi
     __tmp="$(homeboy_runner_harness_mktemp "$template")"
     printf -v "$__var_name" '%s' "$__tmp"
-    homeboy_runner_harness_register_cleanup "$__tmp"
+    if ! homeboy_runner_harness_register_cleanup "$__tmp"; then
+        rm -f -- "$__tmp"
+        return 1
+    fi
 }
 
-homeboy_runner_harness_cleanup() {
-    local path
-    while IFS= read -r path; do
-        [ -n "$path" ] && rm -f "$path"
+homeboy_runner_harness_temp_dir() {
+    local __var_name="$1"
+    local template="${2:-homeboy-runner.XXXXXX}"
+    local __tmp
+    local root
+    root="$(homeboy_runner_harness_temp_root)" || return 1
+    homeboy_runner_harness_path_is_serializable "$template" || return 2
+    case "$template" in homeboy-runner.XXXXXX) ;; *) return 2 ;; esac
+    __tmp="$(mktemp -d "${root}/${template}")" || return 1
+    printf -v "$__var_name" '%s' "$__tmp"
+    if ! homeboy_runner_harness_register_owned_directory "$__tmp" || ! homeboy_runner_harness_register_cleanup "$__tmp" directory; then
+        rm -rf -- "$__tmp"
+        return 1
+    fi
+}
+
+homeboy_runner_harness_forget_cleanup() {
+    local forgotten_kind="$1" forgotten_path="$2" kind path retained=""
+    while IFS=$'\t' read -r kind path; do
+        [ "$kind" = "$forgotten_kind" ] && [ "$path" = "$forgotten_path" ] && continue
+        retained="${retained}${retained:+$'\n'}${kind}"$'\t'"${path}"
     done <<EOF
 ${HOMEBOY_RUNNER_HARNESS_CLEANUP:-}
 EOF
+    HOMEBOY_RUNNER_HARNESS_CLEANUP="$retained"
+}
+
+homeboy_runner_harness_cleanup_path() {
+    local kind="$1" path="$2"
+    [ -n "$path" ] || return 0
+    case "$kind" in
+        directory)
+            if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+                homeboy_runner_harness_forget_cleanup "$kind" "$path"
+            elif homeboy_runner_harness_is_owned_directory "$path"; then
+                rm -rf -- "$path"
+                homeboy_runner_harness_forget_cleanup "$kind" "$path"
+            else
+                echo "homeboy_runner_harness_cleanup: refusing changed owned directory: $path" >&2
+                return 1
+            fi
+            ;;
+        file)
+            rm -f -- "$path"
+            homeboy_runner_harness_forget_cleanup "$kind" "$path"
+            ;;
+        *) return 2 ;;
+    esac
+}
+
+homeboy_runner_harness_cleanup() {
+    local kind path
+    while IFS=$'\t' read -r kind path; do
+        [ -n "$path" ] || continue
+        homeboy_runner_harness_cleanup_path "$kind" "$path" || true
+    done <<EOF
+${HOMEBOY_RUNNER_HARNESS_CLEANUP:-}
+EOF
+}
+
+homeboy_runner_harness_exit() {
+    local status=$?
+    local declaration
+    trap - EXIT
+    set +e
+    homeboy_runner_harness_cleanup
+    while IFS= read -r declaration; do
+        [ -n "$declaration" ] || continue
+        (eval "$declaration"; exit "$status")
+    done <<EOF
+${HOMEBOY_RUNNER_HARNESS_EXIT_TRAPS:-}
+EOF
+    exit "$status"
 }
 
 homeboy_runner_harness_note_failure() {

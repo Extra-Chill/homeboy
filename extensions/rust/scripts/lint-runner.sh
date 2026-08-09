@@ -56,6 +56,9 @@ write_fix_results_sidecar() {
     fi
 }
 
+# Register before any harness temporary so the harness composes this sidecar.
+trap write_fix_results_sidecar EXIT
+
 clippy_all_enabled() {
     if [ "${HOMEBOY_CLIPPY_ALL:-}" = "1" ]; then
         return 0
@@ -182,8 +185,6 @@ with open(target, "w", encoding="utf-8") as handle:
 PY
     homeboy_lint_findings_merge_file "$findings_file"
 }
-
-trap write_fix_results_sidecar EXIT
 
 # Verify this is a Rust project
 if [ ! -f "${PROJECT_PATH}/Cargo.toml" ]; then

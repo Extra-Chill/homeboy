@@ -89,6 +89,10 @@ import sys
 
 count = int(os.environ.get("HOMEBOY_NEXTEST_TEST_COUNT", "5"))
 names = ["unit::alpha", "unit::beta", "unit::ignored", "api::works", "member::member_works"] if count == 5 else [f"unit::long_test_{index:04d}_{'x' * 100}" for index in range(count)]
+if os.environ.get("HOMEBOY_NEXTEST_LIST_MODE") == "retry-suffix-exact":
+    names = ["unit::exact#1", "unit::exact#2"]
+if os.environ.get("HOMEBOY_NEXTEST_LIST_MODE") == "retry-suffix-ambiguous":
+    names = ["unit::alpha", "unit::alpha#2"]
 if os.environ.get("HOMEBOY_NEXTEST_LIST_MODE") == "filter-escape":
     names.append("unit::closing)")
 if os.environ.get("HOMEBOY_NEXTEST_LIST_MODE") == "filter-control":
@@ -146,9 +150,19 @@ for name in names:
     if mode == "missing-terminal" and name == "unit::beta":
         continue
     package, binary = ("shard-smoke", "api") if name == "api::works" else ("member-smoke", "member_smoke") if name == "member::member_works" else ("shard-smoke", "shard_smoke")
-    event = "failed" if mode == "failure" and name == "unit::beta" else "ignored" if name == "unit::ignored" else "ok"
-    # This is the libtest-json-plus terminal event shape emitted by nextest.
+    event = "failed" if (mode == "failure" and name == "unit::beta") or (mode in {"leaky-failure", "retry-failure"} and name == "unit::alpha") else "ignored" if name == "unit::ignored" else "ok"
     runtime_name = "malformed" if mode == "malformed" else f"{package}::{binary}${name}"
+    if mode in {"retry-success", "retry-failure"} and name == "unit::alpha":
+        # libtest-json-plus v0.1 records the final retry attempt by suffixing
+        # the emitted test name; it emits one terminal test event.
+        runtime_name = f"{runtime_name}#2"
+    if mode == "retry-suffix-malformed" and name == "unit::alpha":
+        runtime_name = f"{runtime_name}#oops"
+    if mode == "retry-suffix-maximum" and name == "unit::alpha":
+        runtime_name = f"{runtime_name}#4294967296"
+    if mode == "retry-suffix-out-of-range" and name == "unit::alpha":
+        runtime_name = f"{runtime_name}#4294967297"
+    # This is the libtest-json-plus terminal event shape emitted by nextest.
     print(json.dumps({"type": "test", "name": runtime_name, "event": event, "exec_time": 0.001}))
     if mode == "string-event" and name == "unit::alpha":
         # Released nextest output can interleave a JSON string with terminal events.
@@ -158,7 +172,7 @@ for name in names:
 if mode in {"terminal-outside-ok", "terminal-outside-failed", "terminal-outside-ignored"}:
     event = {"terminal-outside-ok": "ok", "terminal-outside-failed": "failed", "terminal-outside-ignored": "ignored"}[mode]
     print(json.dumps({"type": "test", "name": "outside::suite$terminal", "event": event, "exec_time": 0.001}))
-raise SystemExit(1 if mode == "failure" and "unit::beta" in names else 0)
+raise SystemExit(1 if mode in {"failure", "leaky-failure", "retry-failure"} and ({"unit::beta", "unit::alpha"} & set(names)) else 0)
 PY
   exit $?
 fi
@@ -212,6 +226,19 @@ PY
 EOF
 cat > "$WORK_DIR/sidecar-writer.sh" <<'EOF'
 homeboy_merge_annotations() { cp "$2" "${HOMEBOY_ANNOTATIONS_DIR}/$1.json"; }
+homeboy_merge_test_failures() {
+  [ "${HOMEBOY_SIDECAR_MERGE_FAIL:-}" != 1 ] || return 42
+  python3 - "$HOMEBOY_TEST_FAILURES_FILE" "$1" <<'PY'
+import json
+import os
+import sys
+
+target, incoming = sys.argv[1:]
+existing = json.load(open(target)) if os.path.exists(target) else []
+records = json.load(open(incoming))
+json.dump(existing + records, open(target, "w"))
+PY
+}
 EOF
 
 INVENTORY_A="$WORK_DIR/inventory-a.json"
@@ -403,6 +430,27 @@ import sys
 assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}
 PY
 
+# Nextest reports a leaky test's final disposition with an ordinary terminal
+# event. A leaky pass therefore contributes exactly one passed identity.
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_MODE=leaky-pass \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/leaky-pass-results.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/leaky-pass.out"
+python3 - "$WORK_DIR/leaky-pass-results.json" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}
+PY
+
 # A real libtest-json-plus identity omits `target_kind`; the released replay
 # path must reconcile it to the inventory's package/kind/target/test record.
 if ! grep -q 'Rust shard result: total=5 passed=4 failed=0 skipped=1' "$WORK_DIR/nextest-runner.out"; then
@@ -458,6 +506,7 @@ PY
 
 # A nonzero batch exit remains aggregate evidence: every prevalidated batch
 # runs exactly once, and the final shard fails only after all outcomes exist.
+printf '%s\n' '[{"test_name":"pre-existing failure"}]' > "$WORK_DIR/batched-failure-evidence.json"
 set +e
 HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
 HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
@@ -470,6 +519,7 @@ HOMEBOY_FAKE_NEXTEST_RUN_LOG="$WORK_DIR/batched-failure.log" \
 HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
 HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
 HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/batched-failure-results.json" \
+HOMEBOY_TEST_FAILURES_FILE="$WORK_DIR/batched-failure-evidence.json" \
 HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
 HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
 HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
@@ -477,17 +527,19 @@ PATH="$BIN_DIR:$PATH" \
 bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/batched-failure.out" 2>&1
 BATCH_FAILURE_EXIT=$?
 set -e
-python3 - "$WORK_DIR/batched-failure.log" "$WORK_DIR/batched-failure-results.json" "$BATCH_FAILURE_EXIT" <<'PY'
+python3 - "$WORK_DIR/batched-failure.log" "$WORK_DIR/batched-failure-results.json" "$WORK_DIR/batched-failure-evidence.json" "$BATCH_FAILURE_EXIT" <<'PY'
 import json
 import re
 import sys
 
 lines = open(sys.argv[1]).read().splitlines()
 selected = [name for line in lines for name in re.findall(r"test\(=([^)]+)\)", line)]
-assert int(sys.argv[3]) != 0, sys.argv[3]
+assert int(sys.argv[4]) != 0, sys.argv[4]
 assert selected == ["member::member_works", "unit::alpha", "unit::beta", "api::works"], selected
 assert len(selected) == len(set(selected)), selected
 assert json.load(open(sys.argv[2])) == {"total": 5, "passed": 3, "failed": 1, "skipped": 1, "partial": "rust-shard"}
+evidence = json.load(open(sys.argv[3]))
+assert [record["test_name"] for record in evidence] == ["pre-existing failure", "shard-smoke::shard_smoke$unit::beta"], evidence
 PY
 
 # A list validation failure is preflight-only: no batch run may have started.
@@ -720,6 +772,113 @@ assert_nextest_event_rejected() {
 assert_nextest_event_rejected duplicate-terminal 'nextest emitted an unexpected or duplicate test identity'
 assert_nextest_event_rejected missing-terminal 'nextest executed membership does not match the shard manifest'
 
+# libtest-json-plus v0.1 emits one final terminal retry event, naming the
+# attempt with #<attempt>. The suffix normalizes at the identity boundary.
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_RUST_NEXTEST_FILTER_MAX_BYTES=150 \
+HOMEBOY_NEXTEST_MODE=retry-success \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/retry-success-results.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/retry-success.out"
+python3 - "$WORK_DIR/retry-success-results.json" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}
+PY
+
+# A final retry failure preserves the normalized test identity in evidence.
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_MODE=retry-failure \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/retry-failure-results.json" \
+HOMEBOY_TEST_FAILURES_FILE="$WORK_DIR/retry-failure-evidence.json" \
+HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/retry-failure.out" 2>&1
+RETRY_FAILURE_EXIT=$?
+set -e
+python3 - "$WORK_DIR/retry-failure-results.json" "$WORK_DIR/retry-failure-evidence.json" "$RETRY_FAILURE_EXIT" <<'PY'
+import json
+import sys
+
+assert int(sys.argv[3]) != 0, sys.argv[3]
+assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 3, "failed": 1, "skipped": 1, "partial": "rust-shard"}
+assert [record["test_name"] for record in json.load(open(sys.argv[2]))] == ["shard-smoke::shard_smoke$unit::alpha"]
+PY
+
+# A sidecar merge failure remains the runner's failure status while retaining
+# the shard-result contract produced from the completed terminal stream.
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_MODE=failure \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/merge-failure-results.json" \
+HOMEBOY_TEST_FAILURES_FILE="$WORK_DIR/merge-failure-evidence.json" \
+HOMEBOY_SIDECAR_MERGE_FAIL=1 \
+HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/merge-failure.out" 2>&1
+MERGE_FAILURE_EXIT=$?
+set -e
+python3 - "$WORK_DIR/merge-failure-results.json" "$MERGE_FAILURE_EXIT" <<'PY'
+import json
+import sys
+
+assert int(sys.argv[2]) == 42, sys.argv[2]
+assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 3, "failed": 1, "skipped": 1, "partial": "rust-shard"}
+PY
+
+# A leaky failure is likewise a final failed event, with durable evidence.
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_MODE=leaky-failure \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/leaky-failure-results.json" \
+HOMEBOY_TEST_FAILURES_FILE="$WORK_DIR/leaky-failure-evidence.json" \
+HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/leaky-failure.out" 2>&1
+LEAKY_FAILURE_EXIT=$?
+set -e
+python3 - "$WORK_DIR/leaky-failure-results.json" "$WORK_DIR/leaky-failure-evidence.json" "$LEAKY_FAILURE_EXIT" <<'PY'
+import json
+import sys
+
+assert int(sys.argv[3]) != 0, sys.argv[3]
+assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 3, "failed": 1, "skipped": 1, "partial": "rust-shard"}
+assert [record["test_name"] for record in json.load(open(sys.argv[2]))] == ["shard-smoke::shard_smoke$unit::alpha"]
+PY
+
 # A non-object JSON record is diagnostic-only. Planned terminal IDs remain the
 # authority for membership and counts.
 HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
@@ -806,6 +965,77 @@ manifest["tests"] = [test["id"] for test in inventory["tests"]]
 json.dump(manifest, open(sys.argv[2], "w"))
 PY
 }
+
+assert_nextest_terminal_rejected_with_manifest() {
+  local mode="$1" list_mode="$2" manifest="$3" expected="$4" output
+  output="$WORK_DIR/nextest-${mode}.out"
+  set +e
+  HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+  HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+  HOMEBOY_SKIP_LINT=1 \
+  HOMEBOY_RUST_TEST_RUNNER=nextest \
+  HOMEBOY_NEXTEST_MODE="$mode" \
+  HOMEBOY_NEXTEST_LIST_MODE="$list_mode" \
+  HOMEBOY_TEST_SHARD_MANIFEST="$manifest" \
+  HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+  HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+  PATH="$BIN_DIR:$PATH" \
+  bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$output" 2>&1
+  local result=$?
+  set -e
+  if [ "$result" -eq 0 ] || ! grep -q "$expected" "$output"; then
+    printf 'Expected %s nextest terminal rejection\n' "$mode" >&2
+    exit 1
+  fi
+}
+
+EXACT_SUFFIX_INVENTORY="$WORK_DIR/exact-suffix-inventory.json"
+EXACT_SUFFIX_MANIFEST="$WORK_DIR/exact-suffix-manifest.json"
+make_nextest_manifest retry-suffix-exact "$EXACT_SUFFIX_INVENTORY" "$EXACT_SUFFIX_MANIFEST"
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_LIST_MODE=retry-suffix-exact \
+HOMEBOY_TEST_SHARD_MANIFEST="$EXACT_SUFFIX_MANIFEST" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/exact-suffix-results.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/exact-suffix.out"
+python3 - "$WORK_DIR/exact-suffix-results.json" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1])) == {"total": 2, "passed": 2, "failed": 0, "skipped": 0, "partial": "rust-shard"}
+PY
+
+AMBIGUOUS_SUFFIX_INVENTORY="$WORK_DIR/ambiguous-suffix-inventory.json"
+AMBIGUOUS_SUFFIX_MANIFEST="$WORK_DIR/ambiguous-suffix-manifest.json"
+make_nextest_manifest retry-suffix-ambiguous "$AMBIGUOUS_SUFFIX_INVENTORY" "$AMBIGUOUS_SUFFIX_MANIFEST"
+assert_nextest_terminal_rejected_with_manifest pass retry-suffix-ambiguous "$AMBIGUOUS_SUFFIX_MANIFEST" 'nextest retry suffix is ambiguous between planned identities'
+assert_nextest_terminal_rejected_with_manifest retry-suffix-malformed pass "$WORK_DIR/nextest-manifest.json" 'nextest emitted a malformed retry suffix'
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_MODE=retry-suffix-maximum \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/retry-suffix-maximum-results.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/retry-suffix-maximum.out"
+python3 - "$WORK_DIR/retry-suffix-maximum-results.json" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}
+PY
+assert_nextest_terminal_rejected_with_manifest retry-suffix-out-of-range pass "$WORK_DIR/nextest-manifest.json" 'nextest emitted a malformed retry suffix'
 
 ESCAPED_INVENTORY="$WORK_DIR/escaped-inventory.json"
 ESCAPED_MANIFEST="$WORK_DIR/escaped-manifest.json"
