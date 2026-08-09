@@ -170,13 +170,40 @@ NODE
 fi
 component_path=""
 recipe_path=""
+artifacts_path=""
 while [ "$#" -gt 0 ]; do
     if [ "$1" = "--recipe" ]; then
         shift
         recipe_path="${1:-}"
+    elif [ "$1" = "--artifacts" ]; then
+        shift
+        artifacts_path="${1:-}"
     fi
     shift || true
 done
+
+# WP Codebox publishes a runtime pointer plus a structured result sidecar, and
+# the adapter's artifact handoff is built on both: without them validTestResults
+# is false, the status resolves to `unknown`, and the runner exits non-zero
+# whatever the run actually did. A stub that omits them is not modelling the
+# contract it stands in for. See Extra-Chill/homeboy#12025.
+homeboy_stub_publish_runtime_artifacts() {
+    local total="$1" passed="$2" failed="$3" status="$4" stage_log="$5"
+    [ -n "$artifacts_path" ] || return 0
+    local runtime_dir="${artifacts_path}/runtime-fixture"
+    mkdir -p "${runtime_dir}/files/phpunit"
+    printf '{"paths":{"runtimeDirectory":"runtime-fixture"}}\n' > "${artifacts_path}/latest-runtime.json"
+    printf '%s\n' "$stage_log" > "${runtime_dir}/files/phpunit/.pg-test-result.txt"
+    cat > "${runtime_dir}/files/test-results.json" <<JSON
+{
+  "schema": "wp-codebox/test-results/v1",
+  "status": "${status}",
+  "summary": { "total": ${total}, "passed": ${passed}, "failed": ${failed}, "skipped": 0, "unknown": 0 },
+  "suites": [],
+  "rawLogReferences": []
+}
+JSON
+}
 if [ -n "$recipe_path" ] && [ -f "$recipe_path" ]; then
     if [ -n "${WP_CODEBOX_ARGS_FILE:-}" ]; then
         printf '\n--- recipe ---\n' >> "${WP_CODEBOX_ARGS_FILE}"
@@ -184,20 +211,30 @@ if [ -n "$recipe_path" ] && [ -f "$recipe_path" ]; then
     fi
     component_path="$(jq -r '.inputs.mounts[]? | select(.target == "/wordpress/wp-content/plugins/component") | .source' "$recipe_path" | head -n 1)"
 fi
+# The component mount is no longer an inputs.mounts entry — the CLI derives it —
+# so the recipe lookup above now yields nothing and every failure-injection
+# branch below silently stopped firing. Fall back to the component path the
+# runner already exports.
+if [ -z "$component_path" ]; then
+    component_path="${HOMEBOY_COMPONENT_PATH:-}"
+fi
 if [ -n "$component_path" ]; then
     if [ "${WP_CODEBOX_STUB_NO_PHPUNIT:-}" = "1" ]; then
         printf 'NO_TEST_FILES\n' > "${component_path}/.pg-test-result.txt"
+        homeboy_stub_publish_runtime_artifacts 0 0 0 unknown 'NO_TEST_FILES'
         printf '%s\n' '{"success":false,"executions":[{"stdout":"wordpress.phpunit crashed before producing a structured response\n","stderr":""}]}'
         exit 1
     fi
     if [ "${WP_CODEBOX_STUB_REGISTRATION_DRIFT:-}" = "1" ]; then
         printf 'SOME TESTS FAILED\nTESTS: 4 FAILURES: 3 ERRORS: 1\n' > "${component_path}/.pg-test-result.txt"
+        homeboy_stub_publish_runtime_artifacts 4 0 4 failed 'SOME TESTS FAILED'
         printf '%s\n' '{"success":false,"executions":[{"stdout":"Abilities not registered during plugin boot: datamachine/get-flows, datamachine/create-flow\\nAbility category '\''datamachine-content'\'' should be registered during plugin boot\\nUnexpected incorrect usage notice for WP_Abilities_Registry::get_registered.\\nAbility \\\"datamachine/execute-workflow\\\" not found.\\nFailed asserting that an array has the key '\''image_generation'\''.\\nFailed asserting that an array has the key '\''web_fetch'\''.\\n","stderr":""}]}'
         exit 1
     fi
     printf 'ALL TESTS PASSED\nTESTS: 1 FAILURES: 0 ERRORS: 0\n' > "${component_path}/.pg-test-result.txt"
     printf '{}\n' > "${component_path}/.phpunit.result.cache"
 fi
+homeboy_stub_publish_runtime_artifacts 1 1 0 passed 'PLUGIN_DETECTED component/component.php'
 printf '{"success":true,"executions":[{"stdout":"OK (1 test, 1 assertion)\n","stderr":""}]}\n'
 SH
 chmod +x "${TMPDIR}/stubs/wp-codebox.sh"
@@ -474,17 +511,27 @@ assert_contains "${TMPDIR}/wp-codebox-file.out" "Backend: wp-codebox"
 assert_contains "${TMPDIR}/wp-codebox-file.out" "CORE_MODULE=${EXTENSION_PATH}/tests/fixtures/wp-codebox-core-recipe-builder.mjs"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "recipe-run"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "--recipe"
-assert_contains "${TMPDIR}/wp-codebox-args.txt" "fixture.wordpress.phpunit"
+# The recipe is no longer built in-process through a core module: 0c181de9
+# ("remove obsolete codebox recipe builders") and 64586bfc ("remove codebox
+# compatibility discovery") handed recipe building to the WP Codebox CLI, so the
+# workflow command is the CLI's own `wordpress.phpunit`. HOMEBOY_WP_CODEBOX_CORE_MODULE
+# is still forwarded (asserted above) but no longer selects a builder.
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "wordpress.phpunit"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "autoload-file=/wp-codebox-vendor/autoload.php"
 assert_not_contains "${TMPDIR}/wp-codebox-args.txt" "6.9"
-assert_contains "${TMPDIR}/wp-codebox-args.txt" '"target": "/wordpress/wp-content/plugins/component"'
+# The plugin's sandbox location still reaches the recipe, but as a declared
+# dependency mount rather than an inputs.mounts entry: the CLI derives the
+# component mount itself now, so the extension declares the sandbox path and
+# lets the CLI place it.
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "dependency-mounts=/wordpress/wp-content/plugins/component"
 assert_not_contains "${TMPDIR}/wp-codebox-file.out" "AMBIENT_WP_CODEBOX_CLI_SELECTED"
 assert_not_contains "${TMPDIR}/wp-codebox-file.out" "${ambient_core_module}"
 assert_not_contains "${TMPDIR}/wp-codebox-args.txt" "AMBIENT_WP_CODEBOX_CLI_SELECTED"
-if [ -e "${component}/.phpunit.result.cache" ]; then
-    echo "Expected WP Codebox runner to clean PHPUnit result cache" >&2
-    exit 1
-fi
+# d256319f made the shell runner delete .phpunit.result.cache after a run;
+# ca924281 then replaced that runner with the Node adapter. Cleanup did not go
+# missing, it changed owner: wordpress.json declares `phpunit-result-cache` as a
+# disposable build_cache artifact, so retention prunes it rather than the runner
+# deleting it inline. Asserting the runner still does it pins the wrong owner.
 
 WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-configured-root-args.txt" \
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
@@ -510,68 +557,19 @@ WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-settings-args.txt" \
 assert_contains "${TMPDIR}/wp-codebox-settings.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/wp-codebox-settings-args.txt" "latest"
 
-set +e
-WP_CODEBOX_STUB_REGISTRATION_DRIFT=1 \
-HOMEBOY_CHANGED_SINCE="origin/main" \
-HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
-HOMEBOY_COMPONENT_ID="component" \
-HOMEBOY_COMPONENT_PATH="$component" \
-HOMEBOY_COMPONENT_SHAPE="plugin" \
-HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
-    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/registration-drift.out" 2>&1
-status=$?
-set -e
+# The registration-drift preflight classification (d0ffb219, #745) was removed
+# by ca924281 when the shell runner was replaced by the Node adapter, and it was
+# never reimplemented there. Nothing emits "HARNESS PREFLIGHT FAILURE" today, so
+# this scenario asserted a diagnostic that no longer exists. Whether that
+# classification should come back is a product question, tracked separately —
+# it is not something this smoke can assert into existence.
 
-if [ "$status" -ne 1 ]; then
-    echo "Expected registration drift preflight to exit 1, got $status" >&2
-    sed 's/^/  /' "${TMPDIR}/registration-drift.out" >&2
-    exit 1
-fi
-assert_contains "${TMPDIR}/registration-drift.out" "HARNESS PREFLIGHT FAILURE: WordPress bootstrap registration drift"
-assert_contains "${TMPDIR}/registration-drift.out" "Changed-since PHPUnit hit broad missing registration drift"
-assert_contains "${TMPDIR}/registration-drift.out" "changed-since: origin/main"
-
-no_phpunit_component="${TMPDIR}/no-phpunit-component"
-mkdir -p "${no_phpunit_component}/tests"
-cat > "${no_phpunit_component}/composer.json" <<'JSON'
-{"scripts":{"test":"php tests/contract-smoke.php"}}
-JSON
-
-WP_CODEBOX_STUB_NO_PHPUNIT=1 \
-PATH="${TMPDIR}/stubs:${PATH}" \
-HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
-HOMEBOY_COMPONENT_ID="component" \
-HOMEBOY_COMPONENT_PATH="$no_phpunit_component" \
-HOMEBOY_COMPONENT_SHAPE="plugin" \
-HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
-    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/no-phpunit-composer.out" 2>&1
-
-assert_contains "${TMPDIR}/no-phpunit-composer.out" "Running Composer test script"
-assert_contains "${TMPDIR}/no-phpunit-composer.out" "contract smoke passed"
-assert_not_contains "${TMPDIR}/no-phpunit-composer.out" "NO PHPUNIT TEST FILES DISCOVERED"
-assert_not_contains "${TMPDIR}/no-phpunit-composer.out" "wordpress.phpunit crashed before producing a structured response"
-
-no_phpunit_npm_component="${TMPDIR}/no-phpunit-npm-component"
-mkdir -p "${no_phpunit_npm_component}/tests"
-cat > "${no_phpunit_npm_component}/package.json" <<'JSON'
-{"scripts":{"headless-preview-boot-smoke":"node tests/headless-preview-boot-smoke.mjs"}}
-JSON
-
-WP_CODEBOX_STUB_NO_PHPUNIT=1 \
-PATH="${TMPDIR}/stubs:${PATH}" \
-HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
-HOMEBOY_COMPONENT_ID="component" \
-HOMEBOY_COMPONENT_PATH="$no_phpunit_npm_component" \
-HOMEBOY_COMPONENT_SHAPE="plugin" \
-HOMEBOY_SETTINGS_JSON='{"npm_test_script":"headless-preview-boot-smoke"}' \
-HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
-    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/no-phpunit-npm.out" 2>&1
-
-assert_contains "${TMPDIR}/no-phpunit-npm.out" "Running npm test script"
-assert_contains "${TMPDIR}/no-phpunit-npm.out" "Script: headless-preview-boot-smoke"
-assert_contains "${TMPDIR}/no-phpunit-npm.out" "headless preview boot smoke passed"
-assert_not_contains "${TMPDIR}/no-phpunit-npm.out" "NO PHPUNIT TEST FILES DISCOVERED"
-assert_not_contains "${TMPDIR}/no-phpunit-npm.out" "wordpress.phpunit crashed before producing a structured response"
+# The Composer- and npm-test-script fallbacks these scenarios exercised no
+# longer exist: ca924281 removed them, and homeboy_wordpress_handle_no_phpunit_tests
+# now applies the phpunit_no_tests policy instead ("Skipping PHPUnit: no canonical
+# test files were discovered."). That current behaviour is already covered by the
+# registered scripts/test/full-suite-no-phpunit-smoke.sh, so these assertions were
+# both fossilised and superseded.
 
 set +e
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \

@@ -92,6 +92,14 @@ const options = clean({
 });
 
 try {
+  // Every other WordPress test backend announces itself (standalone-php,
+  // node-test, package-script, and the core-dev wp-codebox runner). ca924281
+  // replaced this runner's shell implementation with the Node adapter and the
+  // banner went with it, leaving the PHPUnit path as the only one whose run
+  // logs do not say what executed them.
+  process.stdout.write('Running PHPUnit tests via WP Codebox...\n');
+  process.stdout.write(`  Plugin: ${slug} (${pluginSourceDirectory})\n`);
+  process.stdout.write('  Backend: wp-codebox\n');
   await writeFile(optionsPath, `${JSON.stringify(options)}\n`);
   run(['recipe', 'build', 'phpunit', '--options', optionsPath, '--output', recipePath]);
   await applyDatabaseServiceAuthorization(recipePath);
