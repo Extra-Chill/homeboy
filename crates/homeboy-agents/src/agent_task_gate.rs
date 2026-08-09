@@ -598,6 +598,8 @@ pub struct AgentTaskGateReport {
     pub capture: AgentTaskGateCapture,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_evidence: Option<AgentTaskGateFailureEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_result: Option<AgentTaskGateTestResult>,
     /// Why this declared gate was not invoked. This remains durable evidence so
     /// downstream consumers do not have to infer skipped work from a missing row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -867,12 +869,23 @@ pub struct AgentTaskGateFailureEvidence {
     pub diagnostics: Vec<AgentTaskGateDiagnosticRecord>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateTestResult {
+    pub runner: String,
+    pub total: u64,
+    pub passed: u64,
+    pub failed: u64,
+    pub filtered: u64,
+    pub runner_exit_code: i32,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskGateFailureClassification {
     #[default]
     CandidateCode,
     GateDeclaration,
+    ZeroTestsSelected,
 }
 
 pub const AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA: &str = "homeboy/gate-diagnostic-record/v1";
@@ -1084,6 +1097,7 @@ impl AgentTaskGateReport {
             stderr: stderr.into(),
             capture: AgentTaskGateCapture::default(),
             failure_evidence,
+            test_result: None,
             skip_reason: None,
             baseline_comparison: None,
             candidate_checkout: None,
@@ -1135,6 +1149,7 @@ impl AgentTaskGateReport {
             stderr: String::new(),
             capture: AgentTaskGateCapture::default(),
             failure_evidence: None,
+            test_result: None,
             skip_reason: Some(skip_reason),
             baseline_comparison: None,
             candidate_checkout: None,
@@ -1524,15 +1539,17 @@ pub(crate) fn run_gate_command_with_supervision(
             AgentTaskGateTermination::NoProgress
         }
     };
-    let exit_code = match termination {
+    let runner_exit_code = match termination {
         AgentTaskGateTermination::TimedOut => 124,
         AgentTaskGateTermination::NoProgress => 125,
         _ => output.status.code().unwrap_or(1),
     };
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let failure_evidence =
-        (exit_code != 0).then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr));
+    let test_result = cargo_test_result(command, runner_exit_code, &stdout, &stderr);
+    let exit_code = effective_gate_exit_code(runner_exit_code, test_result.as_ref());
+    let failure_evidence = (exit_code != 0)
+        .then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr, test_result.as_ref()));
 
     let mut report = AgentTaskGateReport::new(
         format!("gate-{index}"),
@@ -1545,6 +1562,7 @@ pub(crate) fn run_gate_command_with_supervision(
         reveal_policy,
         selected_environment.report,
     );
+    report.test_result = test_result;
     report.termination = termination;
     report.capture = AgentTaskGateCapture {
         stdout: output.capture.stdout,
@@ -1610,7 +1628,7 @@ pub(crate) fn run_gate_command_with_timeout(
     })?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = if timed_out {
+    let runner_exit_code = if timed_out {
         stderr.push_str(&format!(
             "\nbaseline gate exceeded {} ms and was cancelled",
             timeout.as_millis()
@@ -1619,8 +1637,10 @@ pub(crate) fn run_gate_command_with_timeout(
     } else {
         output.status.code().unwrap_or(1)
     };
-    let failure_evidence =
-        (exit_code != 0).then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr));
+    let test_result = cargo_test_result(command, runner_exit_code, &stdout, &stderr);
+    let exit_code = effective_gate_exit_code(runner_exit_code, test_result.as_ref());
+    let failure_evidence = (exit_code != 0)
+        .then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr, test_result.as_ref()));
     let mut report = AgentTaskGateReport::new(
         format!("gate-{index}"),
         command_vec,
@@ -1632,6 +1652,7 @@ pub(crate) fn run_gate_command_with_timeout(
         reveal_policy,
         selected_environment.report,
     );
+    report.test_result = test_result;
     report.termination = if timed_out {
         AgentTaskGateTermination::TimedOut
     } else {
@@ -2612,6 +2633,7 @@ fn gate_failure_evidence(
     exit_code: i32,
     stdout: &str,
     stderr: &str,
+    test_result: Option<&AgentTaskGateTestResult>,
 ) -> AgentTaskGateFailureEvidence {
     let stdout_tail = text_tail(stdout, 20);
     let stderr_tail = text_tail(stderr, 20);
@@ -2619,21 +2641,40 @@ fn gate_failure_evidence(
         stderr.contains(&format!("Missing script: \"{script}\""))
             || stderr.contains(&format!("Missing script: {script}"))
     });
-    let classification = missing_script
-        .is_some()
-        .then_some(AgentTaskGateFailureClassification::GateDeclaration)
+    let zero_tests_selected =
+        test_result.is_some_and(|result| result.runner_exit_code == 0 && result.total == 0);
+    let classification = zero_tests_selected
+        .then_some(AgentTaskGateFailureClassification::ZeroTestsSelected)
+        .or_else(|| {
+            missing_script
+                .is_some()
+                .then_some(AgentTaskGateFailureClassification::GateDeclaration)
+        })
         .unwrap_or(AgentTaskGateFailureClassification::CandidateCode);
-    let summary = match missing_script {
-        Some(script) => format!("declared npm gate is missing script `{script}`: {command}"),
-        None => format!("deterministic gate failed with exit code {exit_code}: {command}"),
+    let summary = if let Some(result) = test_result.filter(|_| zero_tests_selected) {
+        format!(
+            "zero_tests_selected: cargo test selected 0 tests (0 passed, 0 failed, {} filtered): {command}",
+            result.filtered
+        )
+    } else {
+        match missing_script {
+            Some(script) => format!("declared npm gate is missing script `{script}`: {command}"),
+            None => format!("deterministic gate failed with exit code {exit_code}: {command}"),
+        }
     };
-    let agent_feedback = match missing_script {
-        Some(script) => format!(
-            "The declared gate is invalid, not candidate-code feedback. Add `scripts.{script}` to the relevant package.json or change/remove `{command}` before rerunning Cook."
-        ),
-        None => format!(
-            "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes, using the captured stdout/stderr tails as the primary failure evidence."
-        ),
+    let agent_feedback = if zero_tests_selected {
+        format!(
+            "The Cargo test gate selected zero tests. Correct the test filter in `{command}` so it executes the intended test before rerunning Cook."
+        )
+    } else {
+        match missing_script {
+            Some(script) => format!(
+                "The declared gate is invalid, not candidate-code feedback. Add `scripts.{script}` to the relevant package.json or change/remove `{command}` before rerunning Cook."
+            ),
+            None => format!(
+                "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes, using the captured stdout/stderr tails as the primary failure evidence."
+            ),
+        }
     };
 
     AgentTaskGateFailureEvidence {
@@ -2646,6 +2687,141 @@ fn gate_failure_evidence(
         agent_feedback,
         diagnostics: Vec::new(),
     }
+}
+
+fn effective_gate_exit_code(
+    runner_exit_code: i32,
+    test_result: Option<&AgentTaskGateTestResult>,
+) -> i32 {
+    if test_result.is_some_and(|result| result.runner_exit_code == 0 && result.total == 0) {
+        1
+    } else {
+        runner_exit_code
+    }
+}
+
+fn cargo_test_result(
+    command: &str,
+    runner_exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> Option<AgentTaskGateTestResult> {
+    if !is_cargo_test_declaration(command) {
+        return None;
+    }
+
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut filtered = 0;
+    let mut found_summary = false;
+    for line in stdout.lines().chain(stderr.lines()) {
+        let Some((line_passed, line_failed, line_filtered)) = cargo_test_summary(line) else {
+            continue;
+        };
+        found_summary = true;
+        passed += line_passed;
+        failed += line_failed;
+        filtered += line_filtered;
+    }
+    found_summary.then_some(AgentTaskGateTestResult {
+        runner: "cargo".to_string(),
+        total: passed + failed,
+        passed,
+        failed,
+        filtered,
+        runner_exit_code,
+    })
+}
+
+fn is_cargo_test_declaration(command: &str) -> bool {
+    let tokens = crate::agent_task::tokenize_command(command);
+    let mut index = 0;
+    while tokens
+        .get(index)
+        .is_some_and(|token| is_environment_assignment(token))
+    {
+        index += 1;
+    }
+    let Some(first_command) = tokens.get(index) else {
+        return false;
+    };
+    let cargo_index = if first_command == "cargo" {
+        index
+    } else if first_command == "timeout" {
+        let Some(cargo_index) = timeout_cargo_index(&tokens, index + 1) else {
+            return false;
+        };
+        cargo_index
+    } else {
+        return false;
+    };
+    is_cargo_test_subcommand(&tokens[cargo_index + 1..])
+}
+
+fn timeout_cargo_index(tokens: &[String], mut index: usize) -> Option<usize> {
+    while tokens
+        .get(index)
+        .is_some_and(|token| token.starts_with('-'))
+    {
+        let takes_value = matches!(
+            tokens[index].as_str(),
+            "-k" | "--kill-after" | "-s" | "--signal"
+        );
+        index += 1 + usize::from(takes_value);
+    }
+    // `timeout` requires a duration immediately before the wrapped program.
+    index += 1;
+    tokens
+        .get(index)
+        .is_some_and(|token| token == "cargo")
+        .then_some(index)
+}
+
+fn is_environment_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn is_cargo_test_subcommand(tokens: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(token) = tokens.get(index) {
+        if token == "test" {
+            return true;
+        }
+        if token.starts_with('+') || token.starts_with('-') {
+            let takes_value = matches!(token.as_str(), "--color" | "-C" | "--config" | "-Z");
+            index += 1 + usize::from(takes_value);
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+fn cargo_test_summary(line: &str) -> Option<(u64, u64, u64)> {
+    let line = line.trim();
+    let rest = line.strip_prefix("test result: ok. ")?;
+    let (passed, rest) = cargo_summary_count(rest, " passed; ")?;
+    let (failed, rest) = cargo_summary_count(rest, " failed; ")?;
+    let (_, rest) = cargo_summary_count(rest, " ignored; ")?;
+    let (_, rest) = cargo_summary_count(rest, " measured; ")?;
+    let (filtered, duration) = cargo_summary_count(rest, " filtered out; finished in ")?;
+    let duration = duration.strip_suffix('s')?;
+    (!duration.is_empty()
+        && duration
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.'))
+    .then_some((passed, failed, filtered))
+}
+
+fn cargo_summary_count<'a>(text: &'a str, suffix: &str) -> Option<(u64, &'a str)> {
+    let (count, rest) = text.split_once(suffix)?;
+    Some((count.parse().ok()?, rest))
 }
 
 pub(crate) fn text_tail(text: &str, max_lines: usize) -> String {
@@ -2782,6 +2958,7 @@ fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
         "stderr": report.stderr,
         "capture": report.capture,
         "failure_evidence": report.failure_evidence,
+        "test_result": report.test_result,
         "environment": report.environment,
     })
 }
@@ -2800,6 +2977,128 @@ mod tests {
     /// same environment. That is how a `HOME` mutation here went unnoticed.
     fn env_mutex() -> std::sync::MutexGuard<'static, ()> {
         homeboy_core::test_support::env_lock()
+    }
+
+    #[test]
+    fn cargo_test_results_preserve_selected_counts_and_reject_zero_test_output() {
+        let summary = "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1675 filtered out; finished in 0.00s\n";
+        let zero = cargo_test_result(
+            "RUSTFLAGS=-Dwarnings timeout 30 cargo --quiet test selected_test -- --exact",
+            0,
+            summary,
+            "",
+        )
+        .expect("Cargo summary is parsed");
+        assert_eq!(zero.total, 0);
+        assert_eq!(zero.filtered, 1675);
+        assert_eq!(effective_gate_exit_code(0, Some(&zero)), 1);
+
+        let empty = cargo_test_result(
+            "cargo test --locked -p empty-crate",
+            0,
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+            "",
+        )
+        .expect("empty Cargo summary is parsed");
+        assert_eq!(empty.total, 0);
+        assert_eq!(empty.filtered, 0);
+        assert_eq!(effective_gate_exit_code(0, Some(&empty)), 1);
+
+        let selected = cargo_test_result(
+            "cargo test --locked selected_test",
+            0,
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.00s\n",
+            "",
+        )
+        .expect("Cargo summary is parsed");
+        assert_eq!(selected.total, 1);
+        assert_eq!(selected.passed, 1);
+        assert_eq!(effective_gate_exit_code(0, Some(&selected)), 0);
+
+        assert!(cargo_test_result("echo cargo test", 0, summary, "").is_none());
+        assert!(cargo_test_result("timeout 30 echo cargo test", 0, summary, "").is_none());
+        assert!(cargo_test_result(
+            "cargo test",
+            0,
+            "test result: ok. 0 passed; 0 failed; arbitrary output",
+            "",
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_gate_rejects_zero_match_and_accepts_one_match_through_supported_declarations() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temporary Cargo fixture");
+        std::fs::create_dir(temp.path().join("src")).expect("fixture source directory");
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"gate-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("fixture manifest");
+        std::fs::write(
+            temp.path().join("src/lib.rs"),
+            "#[cfg(test)]\nmod tests { #[test] fn selected_test() {} }\n",
+        )
+        .expect("fixture test");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).expect("wrapper directory");
+        let timeout = bin.join("timeout");
+        std::fs::write(
+            &timeout,
+            "#!/bin/sh\nwhile [ \"$1\" = -s ] || [ \"$1\" = --signal ]; do shift; shift; done\nshift\nshift\nPATH=\"$HOMEBOY_ORIGINAL_PATH\"\nexport PATH\nexec cargo \"$@\"\n",
+        )
+        .expect("timeout wrapper");
+        let mut permissions = std::fs::metadata(&timeout)
+            .expect("timeout wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&timeout, permissions).expect("make timeout wrapper executable");
+        let target = temp.path().join("target");
+        let command = |timeout_options: &str, filter: &str| {
+            format!(
+                "RUSTFLAGS=\"-D warnings\" HOMEBOY_ORIGINAL_PATH='{}' CARGO_TARGET_DIR='{}' PATH='{}' timeout {timeout_options} 30 cargo --quiet test {filter} -- --exact",
+                std::env::var("PATH").expect("host PATH"),
+                target.display(),
+                bin.display(),
+            )
+        };
+
+        let zero = run_gate_command(temp.path(), 1, &command("-s TERM", "tests::missing_test"))
+            .expect("zero-match Cargo gate report");
+        assert_eq!(zero.status, AgentTaskGateStatus::Failed);
+        assert_eq!(
+            zero.failure_evidence
+                .as_ref()
+                .expect("zero-match failure evidence")
+                .classification,
+            AgentTaskGateFailureClassification::ZeroTestsSelected
+        );
+        let zero_counts = zero.test_result.as_ref().expect("zero-match test counts");
+        assert_eq!(zero_counts.total, 0);
+        assert_eq!(zero_counts.passed, 0);
+        assert_eq!(zero_counts.failed, 0);
+        assert!(
+            zero_counts.filtered > 0,
+            "zero match retained filter evidence"
+        );
+
+        let selected = run_gate_command(
+            temp.path(),
+            2,
+            &command("--signal TERM", "tests::selected_test"),
+        )
+        .expect("one-match Cargo gate report");
+        assert_eq!(selected.status, AgentTaskGateStatus::Succeeded);
+        let selected_counts = selected
+            .test_result
+            .as_ref()
+            .expect("one-match test counts");
+        assert_eq!(selected_counts.total, 1);
+        assert_eq!(selected_counts.passed, 1);
+        assert_eq!(selected_counts.failed, 0);
     }
 
     /// Restores process-global environment variables when dropped.

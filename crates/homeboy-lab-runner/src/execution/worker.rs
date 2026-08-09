@@ -88,7 +88,7 @@ pub(super) fn exec_worker_local_with_process_output(
         require_paths: options.require_paths.clone(),
         validate_require_paths_on_host: true,
     })?;
-    let run_id_hint =
+    let mut run_id_hint =
         apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref());
     // The final pre-provider boundary consumes a remote receipt exactly once.
     before_provider()?;
@@ -96,16 +96,18 @@ pub(super) fn exec_worker_local_with_process_output(
         &options.execution_context,
         &options.extension_env_providers,
         std::path::Path::new(&plan.cwd),
-        &plan
-            .env
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect::<Vec<_>>(),
+        &plan.env,
+        options.run_id.as_deref(),
     )?;
     for contribution in &contributions {
         for (key, value) in &contribution.public_env {
             plan.env.insert(key.clone(), value.clone());
         }
+    }
+    if let Some(hint) =
+        apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref())
+    {
+        run_id_hint = Some(hint);
     }
     super::super::workload::validate_lab_runner_workload_dispatch(
         options.lab_runner_workload.as_ref(),

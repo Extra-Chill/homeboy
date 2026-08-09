@@ -95,6 +95,80 @@ fn source_upgrade_command_returns_after_same_binary_success() {
     .expect("source command completes");
 }
 
+#[test]
+fn cleanup_context_preserves_the_primary_upgrade_error_contract() {
+    let primary = upgrade_failure_error(
+        InstallMethod::Binary,
+        "curl: (22) The requested URL returned error: 404",
+        None,
+    );
+    let expected = primary.clone();
+    let error = append_cleanup_failure_context(
+        primary,
+        Some(std::io::Error::other("cleanup process group failed")),
+    );
+
+    assert_eq!(error.code, expected.code);
+    assert_eq!(error.details, expected.details);
+    assert_eq!(
+        error
+            .hints
+            .iter()
+            .map(|hint| hint.message.as_str())
+            .collect::<Vec<_>>(),
+        expected
+            .hints
+            .iter()
+            .map(|hint| hint.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(error.message.starts_with(&expected.message));
+    assert!(error.message.contains("cleanup process group failed"));
+}
+
+#[test]
+fn cleanup_context_is_bounded() {
+    let error = append_cleanup_failure_context(
+        Error::internal_io("primary failure", Some("source upgrade".to_string())),
+        Some(std::io::Error::other("x".repeat(2_000))),
+    );
+
+    assert!(error.message.len() < 1_200);
+    assert!(error.message.ends_with("... [truncated]"));
+}
+
+#[cfg(unix)]
+#[test]
+fn source_upgrade_completion_reaps_background_process_group() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let pid_file = workspace.path().join("child.pid");
+    let command = format!(
+        "sleep 30 & echo $! > {}; printf built",
+        quote_path(&pid_file.display().to_string())
+    );
+
+    run_source_upgrade_command(&command, workspace.path(), Duration::from_secs(1))
+        .expect("source command completes");
+
+    let child_pid = std::fs::read_to_string(&pid_file)
+        .expect("background child pid")
+        .trim()
+        .parse::<libc::pid_t>()
+        .expect("numeric pid");
+    let state = Command::new("ps")
+        .args(["-o", "stat=", "-p", &child_pid.to_string()])
+        .output()
+        .expect("inspect background child state");
+    assert!(
+        state.stdout.is_empty()
+            || String::from_utf8_lossy(&state.stdout)
+                .trim_start()
+                .starts_with('Z'),
+        "background child {child_pid} remained runnable: {}",
+        String::from_utf8_lossy(&state.stdout)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn source_upgrade_timeout_terminates_the_entire_child_process_group() {

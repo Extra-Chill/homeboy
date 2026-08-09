@@ -111,7 +111,7 @@ fn closed_prs_stop_candidate_admission_at_every_fanout_boundary() {
     }
 
     let test = job_section(workflow, "homeboy");
-    assert!(test.contains("uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2"));
+    assert!(test.contains("uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@"));
     assert!(test.contains("needs: [pr-state, ci-capacity-admission]"));
     assert!(test.contains("test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}"));
 }

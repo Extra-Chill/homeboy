@@ -490,38 +490,45 @@ pub(super) fn exec_via_daemon(
         Some(&runner_result),
     );
     persist_runner_execution_transition(&execution_record, &cwd, &command)?;
-    Ok((
-        RunnerExecOutput {
-            variant: "exec",
-            command: "runner.exec",
-            runner_id: runner.id.clone(),
-            dry_run: false,
-            mode: RunnerExecMode::Daemon,
-            argv: redact_argv(&command),
-            remote_cwd: cwd,
-            exit_code,
-            stdout,
-            stderr,
-            source_snapshot: Some(source_snapshot.clone()),
-            job_id: Some(job.id.to_string()),
-            job: Some(job),
-            runner_job: Some(runner_job),
-            job_events: Some(events),
-            mirror_run_id: mirror_run_id.clone(),
-            patch,
-            mutation_artifacts,
-            artifacts,
-            promoted_outputs: Vec::new(),
-            structured_summaries: Vec::new(),
-            metrics,
-            capture,
-            execution_record: Some(execution_record),
-            runner_result: Some(runner_result),
-            handoff: Some(handoff),
-            diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
-        },
+    let mut output = RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: runner.id.clone(),
+        dry_run: false,
+        mode: RunnerExecMode::Daemon,
+        argv: redact_argv(&command),
+        remote_cwd: cwd,
         exit_code,
-    ))
+        stdout,
+        stderr,
+        source_snapshot: Some(source_snapshot.clone()),
+        job_id: Some(job.id.to_string()),
+        job: Some(job),
+        runner_job: Some(runner_job),
+        job_events: Some(events),
+        mirror_run_id: mirror_run_id.clone(),
+        patch,
+        mutation_artifacts,
+        artifacts,
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
+        metrics,
+        capture,
+        execution_record: Some(execution_record),
+        runner_result: Some(runner_result),
+        handoff: Some(handoff),
+        diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
+    };
+    for hint in result
+        .get("diagnostic_hints")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+    {
+        append_runner_exec_diagnostic_hint(&mut output, Some(hint.to_string()));
+    }
+    Ok((output, exit_code))
 }
 
 pub(super) fn runner_exec_source_claim_error(

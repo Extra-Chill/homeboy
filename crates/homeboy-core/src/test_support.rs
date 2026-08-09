@@ -19,6 +19,8 @@ const TEST_DAEMON_NAMESPACE_ENV: &str = "HOMEBOY_TEST_DAEMON_NAMESPACE";
 static SHARED_EMPTY_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
+#[cfg(unix)]
+static SHARED_CONTROLLER_RUNTIME_VERSION_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
 static SHARED_HOMEBOY_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_CONTROLLER_RUNTIME_STORE: OnceLock<TempDir> = OnceLock::new();
 /// Destinations whose controller fixture bytes this process has already
@@ -146,6 +148,8 @@ impl HermeticTestContext {
             .env("HOMEBOY_ARTIFACT_ROOT", self.artifact_dir())
             .env("HOMEBOY_RUNTIME_TMPDIR", self.runtime_dir())
             .env("TMPDIR", self.temp_dir())
+            .env("TEMP", self.temp_dir())
+            .env("TMP", self.temp_dir())
             .env(
                 crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
                 self.invocation_runtime.path(),
@@ -176,7 +180,7 @@ impl HermeticTestContext {
             )
             .env(
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV,
-                test_binary_path(binary),
+                test_controller_fixture_source(binary),
             )
             .env(
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
@@ -435,7 +439,11 @@ fn process_tree_snapshot(_root: u32) -> String {
 /// delete.
 pub struct HomeGuard {
     prior: Option<String>,
+    prior_xdg_config_home: Option<String>,
+    prior_xdg_cache_home: Option<String>,
     prior_xdg_data_home: Option<String>,
+    prior_xdg_state_home: Option<String>,
+    prior_xdg_runtime_dir: Option<String>,
     prior_data_dir: Option<String>,
     prior_daemon_state_dir: Option<String>,
     prior_daemon_namespace: Option<String>,
@@ -448,7 +456,7 @@ pub struct HomeGuard {
     prior_controller_runtime_source: Option<String>,
     prior_controller_runtime_identity: Option<String>,
     context: HermeticTestContext,
-    _guard: MutexGuard<'static, ()>,
+    _guard: Option<MutexGuard<'static, ()>>,
 }
 
 /// A fixed, well-formed (64-hex) SHA the daemon uses in place of hashing the
@@ -520,10 +528,32 @@ impl Default for AuditHomeGuard {
 
 impl HomeGuard {
     pub fn new() -> Self {
+        Self::with_controller_runtime(TestBinary::CurrentTest)
+    }
+
+    /// Isolate in-process Homeboy state while selecting the controller runtime
+    /// fixture that the test will pin or re-exec.
+    ///
+    /// Integration tests that exercise controller subprocesses must select
+    /// [`TestBinary::HomeboyFixture`]. Their libtest executable is not the CLI
+    /// and therefore cannot satisfy the production `--version` identity check.
+    pub fn with_controller_runtime(binary: TestBinary) -> Self {
         let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        Self::new_with_guard(binary, Some(guard))
+    }
+
+    fn new_while_locked() -> Self {
+        Self::new_with_guard(TestBinary::CurrentTest, None)
+    }
+
+    fn new_with_guard(binary: TestBinary, guard: Option<MutexGuard<'static, ()>>) -> Self {
         reset_cached_test_state();
         let prior = std::env::var("HOME").ok();
+        let prior_xdg_config_home = std::env::var("XDG_CONFIG_HOME").ok();
+        let prior_xdg_cache_home = std::env::var("XDG_CACHE_HOME").ok();
         let prior_xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
+        let prior_xdg_state_home = std::env::var("XDG_STATE_HOME").ok();
+        let prior_xdg_runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok();
         let prior_data_dir = std::env::var(crate::paths::HOMEBOY_DATA_DIR_ENV).ok();
         let prior_daemon_state_dir = std::env::var(crate::paths::DAEMON_STATE_DIR_ENV).ok();
         let prior_daemon_namespace = std::env::var(TEST_DAEMON_NAMESPACE_ENV).ok();
@@ -555,10 +585,18 @@ impl HomeGuard {
         // they read it under a lock instead of racing this `setenv` from
         // worker threads a test spawns inside itself (#7505).
         crate::paths::set_home_root_override(Some(context.home().to_path_buf()));
-        // Preserve the legacy in-process defaults while the subprocess context
-        // uses explicit paths. These tests exercise fallback path resolution.
+        // Preserve the legacy in-process data fallback while the subprocess
+        // context uses explicit paths. Unit tests assert this resolver's XDG
+        // behavior, so an inherited explicit data root must not override it.
+        std::env::set_var("XDG_CONFIG_HOME", context.home().join(".config"));
+        std::env::set_var("XDG_CACHE_HOME", context.home().join(".cache"));
         std::env::set_var("XDG_DATA_HOME", context.home().join(".local").join("share"));
-        std::env::set_var(crate::paths::HOMEBOY_DATA_DIR_ENV, context.data_dir());
+        std::env::set_var(
+            "XDG_STATE_HOME",
+            context.home().join(".local").join("state"),
+        );
+        std::env::set_var("XDG_RUNTIME_DIR", context.runtime_dir());
+        std::env::remove_var(crate::paths::HOMEBOY_DATA_DIR_ENV);
         std::env::set_var(crate::paths::DAEMON_STATE_DIR_ENV, context.daemon_dir());
         std::env::set_var(TEST_DAEMON_NAMESPACE_ENV, context.daemon_dir());
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
@@ -585,11 +623,11 @@ impl HomeGuard {
         // the bytes at the few call sites that do.
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-            test_controller_fixture_path(TestBinary::CurrentTest),
+            test_controller_fixture_path(binary),
         );
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV,
-            test_binary_path(TestBinary::CurrentTest),
+            test_controller_fixture_source(binary),
         );
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
@@ -597,7 +635,11 @@ impl HomeGuard {
         );
         Self {
             prior,
+            prior_xdg_config_home,
+            prior_xdg_cache_home,
             prior_xdg_data_home,
+            prior_xdg_state_home,
+            prior_xdg_runtime_dir,
             prior_data_dir,
             prior_daemon_state_dir,
             prior_daemon_namespace,
@@ -792,14 +834,17 @@ const LEAKED_TEMPDIR_MAX_AGE: std::time::Duration = std::time::Duration::from_se
 /// the first tempdir is created. It only removes directories:
 /// - directly under a known tempdir root (never recurses into subdirs),
 /// - whose name starts with `hb-test-`,
+/// - that does not contain this process's active `TMPDIR`,
 /// - that this process does not own, and whose owning PID is gone — or, for
 ///   names with no PID (written by an older binary), whose mtime is older than
 ///   [`LEAKED_TEMPDIR_MAX_AGE`].
 ///
 /// All errors are swallowed — a failed sweep must never break a test.
 #[cfg(unix)]
-fn sweep_leaked_test_tempdirs(roots: &[PathBuf]) {
+fn sweep_leaked_test_tempdirs(roots: &[PathBuf], active_tempdir: Option<&Path>) {
     let now = std::time::SystemTime::now();
+    let active_tempdir =
+        active_tempdir.map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
     let mut swept_roots: Vec<PathBuf> = Vec::new();
     for root in roots {
         if swept_roots.contains(root) {
@@ -822,6 +867,13 @@ fn sweep_leaked_test_tempdirs(roots: &[PathBuf]) {
                 continue;
             };
             if !metadata.is_dir() {
+                continue;
+            }
+            let canonical_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if active_tempdir
+                .as_ref()
+                .is_some_and(|active| active.starts_with(&canonical_path))
+            {
                 continue;
             }
             let abandoned = match tempdir_owner_pid(name) {
@@ -856,7 +908,8 @@ fn sweep_leaked_test_tempdirs_once() {
                 roots.push(extra);
             }
         }
-        sweep_leaked_test_tempdirs(&roots);
+        let active_tempdir = std::env::var_os("TMPDIR").map(PathBuf::from);
+        sweep_leaked_test_tempdirs(&roots, active_tempdir.as_deref());
     });
 }
 
@@ -964,9 +1017,25 @@ impl Drop for HomeGuard {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+        match &self.prior_xdg_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match &self.prior_xdg_cache_home {
+            Some(value) => std::env::set_var("XDG_CACHE_HOME", value),
+            None => std::env::remove_var("XDG_CACHE_HOME"),
+        }
         match &self.prior_xdg_data_home {
             Some(value) => std::env::set_var("XDG_DATA_HOME", value),
             None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        match &self.prior_xdg_state_home {
+            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        match &self.prior_xdg_runtime_dir {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
         }
         match &self.prior_data_dir {
             Some(value) => std::env::set_var(crate::paths::HOMEBOY_DATA_DIR_ENV, value),
@@ -1046,6 +1115,44 @@ fn test_binary_path(binary: TestBinary) -> PathBuf {
             std::env::var_os("CARGO_BIN_EXE_homeboy")
                 .expect("CARGO_BIN_EXE_homeboy fixture binary"),
         ),
+    }
+}
+
+/// The source for a controller-runtime fixture. A unit-test executable is a
+/// libtest harness, not the Homeboy CLI: invoking it with `--version` reports
+/// its filtered test count. Give in-process tests a deterministic version
+/// responder instead; integration tests that need a real re-exec select
+/// `HomeboyFixture` explicitly.
+fn test_controller_fixture_source(binary: TestBinary) -> PathBuf {
+    match binary {
+        TestBinary::CurrentTest => {
+            #[cfg(unix)]
+            {
+                SHARED_CONTROLLER_RUNTIME_VERSION_FIXTURE
+                    .get_or_init(|| {
+                        let root = SHARED_CONTROLLER_RUNTIME_FIXTURE.get_or_init(exec_capable_tempdir);
+                        let source = root.path().join("homeboy-controller-version-fixture");
+                        fs::write(
+                            &source,
+                            format!(
+                                "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nexit 64\n",
+                                crate::build_identity::current().display
+                            ),
+                        )
+                        .expect("write controller version fixture");
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&source, fs::Permissions::from_mode(0o500))
+                            .expect("seal controller version fixture");
+                        source
+                    })
+                    .clone()
+            }
+            #[cfg(not(unix))]
+            {
+                test_binary_path(binary)
+            }
+        }
+        TestBinary::HomeboyFixture => test_binary_path(binary),
     }
 }
 
@@ -1930,6 +2037,67 @@ fn write_broker_response(stream: &mut TcpStream, body: serde_json::Value) {
 mod tests {
     use super::*;
 
+    /// Holds the one environment lock across sentinel setup, HomeGuard's
+    /// snapshot, both restoration boundaries, and panic unwinding.
+    struct HomeGuardTestScope {
+        prior: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        home: Option<HomeGuard>,
+        unwind_validation: Option<Arc<AtomicBool>>,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuardTestScope {
+        fn new(names: &[&'static str], setup: impl FnOnce()) -> Self {
+            let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let mut scope = Self {
+                prior: names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+                home: None,
+                unwind_validation: None,
+                _guard: guard,
+            };
+            setup();
+            scope.home = Some(HomeGuard::new_while_locked());
+            scope
+        }
+
+        fn home(&self) -> &HomeGuard {
+            self.home.as_ref().expect("isolated home is active")
+        }
+
+        fn restore_isolated_home(&mut self) {
+            drop(self.home.take());
+        }
+
+        fn restore_real_environment_and_assert(&mut self) {
+            self.restore_isolated_home();
+            for (name, value) in &self.prior {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            for (name, value) in &self.prior {
+                assert_eq!(&std::env::var_os(name), value, "{name} was fully restored");
+            }
+        }
+
+        fn record_unwind_validation(&mut self, validation: Arc<AtomicBool>) {
+            self.unwind_validation = Some(validation);
+        }
+    }
+
+    impl Drop for HomeGuardTestScope {
+        fn drop(&mut self) {
+            self.restore_real_environment_and_assert();
+            if let Some(validation) = &self.unwind_validation {
+                validation.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
     impl EnvRestore {
@@ -2081,6 +2249,118 @@ mod tests {
     }
 
     #[test]
+    fn home_guard_owns_xdg_and_preserves_process_temp_roots() {
+        let names = [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_RUNTIME_DIR",
+            "TMPDIR",
+            "TEMP",
+            "TMP",
+            crate::paths::HOMEBOY_DATA_DIR_ENV,
+        ];
+        let mut scope = HomeGuardTestScope::new(&names, || {
+            for name in names {
+                std::env::set_var(name, format!("/ambient/{name}"));
+            }
+        });
+
+        let expected = {
+            let guard = scope.home();
+            let root = guard.context.home().to_path_buf();
+            assert_eq!(
+                crate::paths::homeboy_data().expect("isolated data root"),
+                root.join(".local/share/homeboy")
+            );
+            for (name, path) in [
+                ("XDG_CONFIG_HOME", root.join(".config")),
+                ("XDG_CACHE_HOME", root.join(".cache")),
+                ("XDG_DATA_HOME", root.join(".local/share")),
+                ("XDG_STATE_HOME", root.join(".local/state")),
+                ("XDG_RUNTIME_DIR", guard.context.runtime_dir().to_path_buf()),
+            ] {
+                assert_eq!(
+                    std::env::var_os(name),
+                    Some(path.into_os_string()),
+                    "{name}"
+                );
+            }
+            let command = guard.context.command(TestBinary::CurrentTest);
+            for name in ["TMPDIR", "TEMP", "TMP"] {
+                assert_eq!(
+                    std::env::var(name).expect("ambient temp root"),
+                    format!("/ambient/{name}"),
+                    "{name} must remain process-global"
+                );
+                assert_eq!(
+                    command_env(&command, name),
+                    Some(Some(guard.context.temp_dir().into_os_string())),
+                    "{name} must be isolated for subprocesses"
+                );
+            }
+            assert!(std::env::var_os(crate::paths::HOMEBOY_DATA_DIR_ENV).is_none());
+            root
+        };
+
+        scope.restore_isolated_home();
+
+        assert!(
+            !expected.exists(),
+            "the isolated root is dropped after restoration"
+        );
+        for name in names {
+            assert_eq!(
+                std::env::var(name).expect("sentinel environment"),
+                format!("/ambient/{name}"),
+                "{name} was restored to its immediate sentinel"
+            );
+        }
+
+        scope.restore_real_environment_and_assert();
+    }
+
+    #[test]
+    fn home_guard_test_scope_restores_the_real_environment_after_unwind() {
+        const NAME: &str = "__HOMEBOY_TEST_SCOPE_UNWIND__";
+        let validated = Arc::new(AtomicBool::new(false));
+
+        let panicked = std::panic::catch_unwind({
+            let validated = Arc::clone(&validated);
+            move || {
+                let mut scope = HomeGuardTestScope::new(&[NAME], || {
+                    std::env::set_var(NAME, "sentinel");
+                });
+                scope.record_unwind_validation(validated);
+                panic!("exercise scope unwind");
+            }
+        })
+        .is_err();
+
+        assert!(panicked);
+        assert!(validated.load(Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_test_controller_fixture_answers_with_the_cli_identity() {
+        let source = test_controller_fixture_source(TestBinary::CurrentTest);
+        let output = Command::new(source)
+            .arg("--version")
+            .output()
+            .expect("run controller version fixture");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .expect("version output")
+                .trim(),
+            crate::build_identity::current().display
+        );
+    }
+
+    #[test]
     fn hermetic_commands_allow_explicit_complete_lab_transport_metadata() {
         let context = HermeticTestContext::new();
         let source = crate::observation::SOURCE_SNAPSHOT_METADATA_ENV;
@@ -2154,7 +2434,7 @@ mod tests {
         fs::write(&stray_file, b"file").expect("write stray file");
         let _ = fs::set_permissions(&stray_file, fs::Permissions::from_mode(0o644));
 
-        sweep_leaked_test_tempdirs(std::slice::from_ref(&root.path().to_path_buf()));
+        sweep_leaked_test_tempdirs(std::slice::from_ref(&root.path().to_path_buf()), None);
 
         assert!(!stale.exists(), "stale hb-test- dir should be swept");
         assert!(fresh.exists(), "fresh hb-test- dir must be spared");
@@ -2306,6 +2586,10 @@ mod tests {
         let dead = root
             .path()
             .join(format!("{TEST_TEMPDIR_PREFIX}{dead_pid}-deadxx"));
+        let active = root
+            .path()
+            .join(format!("{TEST_TEMPDIR_PREFIX}{dead_pid}-active"));
+        let active_tmp = active.join("tmp");
         // This process is unambiguously alive.
         let live = root.path().join(owned_tempdir_prefix() + "livexx");
         // No PID segment and freshly created — the age fallback must keep it.
@@ -2313,14 +2597,18 @@ mod tests {
         // Not ours at all.
         let unrelated = root.path().join("someone-elses-dir");
 
-        for path in [&dead, &live, &legacy_fresh, &unrelated] {
+        for path in [&dead, &active_tmp, &live, &legacy_fresh, &unrelated] {
             fs::create_dir_all(path).expect("seed sweep fixture");
             fs::write(path.join("payload"), b"x").expect("seed payload");
         }
 
-        sweep_leaked_test_tempdirs(&[root.path().to_path_buf()]);
+        sweep_leaked_test_tempdirs(&[root.path().to_path_buf()], Some(&active_tmp));
 
         assert!(!dead.exists(), "a dead owner's tempdir must be reclaimed");
+        assert!(
+            active.exists(),
+            "the active TMPDIR hierarchy must never be reclaimed"
+        );
         assert!(live.exists(), "a live owner's tempdir must be preserved");
         assert!(
             legacy_fresh.exists(),

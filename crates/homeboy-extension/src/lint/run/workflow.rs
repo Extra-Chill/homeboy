@@ -241,7 +241,12 @@ pub fn run_main_lint_workflow(
         || producer_summaries
             .iter()
             .any(|producer| producer.status == "error");
-    let exit_code = effective_lint_exit_code(lint_exit_code, baseline_exit_override, hard_error);
+    let exit_code = effective_lint_exit_code(
+        lint_exit_code,
+        baseline_exit_override,
+        hard_error,
+        lint_findings.is_empty(),
+    );
     let status = if exit_code == 0 {
         "passed"
     } else if infrastructure_failure {

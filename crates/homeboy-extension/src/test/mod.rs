@@ -204,12 +204,39 @@ pub fn build_test_runner(
 
         if let Some(routing) = test_changed_file_routing(&extension_id)? {
             for (name, value) in build_changed_test_routing_env(component, files, &routing) {
-                runner = runner.env(&name, &value);
+                if name == "HOMEBOY_RUST_CHANGED_TEST_SELECTION_JSON" {
+                    if let Some(selection_path) = write_rust_changed_selection(run_dir, &value) {
+                        runner =
+                            runner.env("HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE", &selection_path);
+                    } else {
+                        runner = runner
+                            .env("HOMEBOY_TEST_SCOPE_KIND", "full")
+                            .env(
+                                "HOMEBOY_TEST_SCOPE_MESSAGE",
+                                "Rust changed-test selection could not be materialized; running the full test command.",
+                            );
+                    }
+                } else {
+                    runner = runner.env(&name, &value);
+                }
             }
         }
     }
 
     Ok(runner)
+}
+
+fn write_rust_changed_selection(
+    run_dir: &homeboy_core::engine::run_dir::RunDir,
+    selection: &str,
+) -> Option<String> {
+    if selection.len() > 1024 * 1024 {
+        return None;
+    }
+    let path = run_dir.step_file("rust-changed-test-selection.json");
+    std::fs::write(&path, selection)
+        .ok()
+        .map(|()| path.to_string_lossy().to_string())
 }
 
 pub(crate) fn effective_secret_env_names(
@@ -431,8 +458,7 @@ fn changed_test_strategy_name(strategy: &TestChangedFileRoutingStrategy) -> &'st
 }
 
 fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(String, String)> {
-    let mut filter_args = Vec::new();
-    let mut integration_args = Vec::new();
+    let mut candidates = BTreeSet::new();
     let mut fallback_message = None;
 
     for test_file in files {
@@ -444,10 +470,33 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
             continue;
         };
 
+        // Git scopes intentionally omit deletions, but callers may provide a
+        // precomputed list. A removed test cannot name a current inventory
+        // identity, so it contributes no candidate rather than a stale filter.
+        let file_exists = component_source_path(component).join(test_file).is_file();
+        if !file_exists && routing_file.starts_with("tests/") {
+            continue;
+        }
+
+        let package = owning_cargo_package(component, test_file);
+        let Some(package) = package else {
+            fallback_message = Some(
+                "Changed Rust test path has no owning Cargo package; running the full test command."
+                    .to_string(),
+            );
+            continue;
+        };
+
         if routing_file.starts_with("tests/") && routing_file.ends_with(".rs") {
             let rest = routing_file.trim_start_matches("tests/");
             if !rest.contains('/') {
-                integration_args.push(rest.trim_end_matches(".rs").to_string());
+                candidates.insert((
+                    package,
+                    "test".to_string(),
+                    rest.trim_end_matches(".rs").to_string(),
+                    None,
+                    test_file.clone(),
+                ));
                 continue;
             }
         }
@@ -513,13 +562,39 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
         // tests". Resolve the real mount point before falling back to the file
         // name. (#10179)
         if let Some(mounted) = path_attr_mounted_module_path(component, test_file, &routing_file) {
-            filter_args.push(mounted);
+            let Some(target) = cargo_lib_target(component, test_file, &package) else {
+                fallback_message = Some(
+                    "Changed Rust inline test has no resolvable lib target; running the full test command."
+                        .to_string(),
+                );
+                continue;
+            };
+            candidates.insert((
+                package,
+                "lib".to_string(),
+                target,
+                Some(mounted),
+                test_file.clone(),
+            ));
             continue;
         }
 
         module_path = module_path.replace('/', "::");
         if !module_path.is_empty() {
-            filter_args.push(module_path);
+            let Some(target) = cargo_lib_target(component, test_file, &package) else {
+                fallback_message = Some(
+                    "Changed Rust inline test has no resolvable lib target; running the full test command."
+                        .to_string(),
+                );
+                continue;
+            };
+            candidates.insert((
+                package,
+                "lib".to_string(),
+                target,
+                Some(module_path),
+                test_file.clone(),
+            ));
         }
     }
 
@@ -530,81 +605,74 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
         ];
     }
 
-    if !integration_args.is_empty() && !filter_args.is_empty() {
-        return vec![
-            ("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string()),
-            (
-                "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
-                "Changed files include integration and inline tests; running the full test command."
-                    .to_string(),
-            ),
-        ];
+    if candidates.is_empty() {
+        return Vec::new();
     }
 
-    if !integration_args.is_empty() {
-        let args = integration_args
-            .iter()
-            .flat_map(|target| ["--test".to_string(), target.clone()])
-            .collect::<Vec<_>>();
-        return vec![
-            (
-                "HOMEBOY_TEST_SCOPE_KIND".to_string(),
-                "rust_integration".to_string(),
-            ),
-            ("HOMEBOY_TEST_RUNNER_ARGS".to_string(), args.join("\n")),
-            (
-                "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
-                format!(
-                    "Scoped to changed integration tests: {}",
-                    integration_args.join(" ")
-                ),
-            ),
-        ];
+    let candidates = candidates
+        .into_iter()
+        .map(|(package, target_kind, target, module, path)| {
+            serde_json::json!({
+                "package": package,
+                "target_kind": target_kind,
+                "target": target,
+                "module": module,
+                "path": path,
+            })
+        })
+        .collect::<Vec<_>>();
+    let selection = serde_json::json!({
+        "schema": "homeboy/rust-changed-test-selection/v2",
+        "candidates": candidates,
+    });
+    vec![
+        (
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "rust_changed_union".to_string(),
+        ),
+        (
+            "HOMEBOY_RUST_CHANGED_TEST_SELECTION_JSON".to_string(),
+            selection.to_string(),
+        ),
+        (
+            "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
+            "Scoped to the exact union of changed Rust test identities.".to_string(),
+        ),
+    ]
+}
+
+fn owning_cargo_package(component: &Component, test_file: &str) -> Option<String> {
+    let component_root = component_source_path(component);
+    let file_path = component_root.join(test_file);
+    let mut directory = file_path.parent()?;
+    loop {
+        let manifest = directory.join("Cargo.toml");
+        if manifest.is_file() {
+            return cargo_manifest_package_name(&manifest);
+        }
+        directory = directory.parent()?;
+        if !directory.starts_with(&component_root) {
+            return None;
+        }
     }
+}
 
-    if filter_args.len() == 1 {
-        // A module filter (`cargo test -- <module>`) is applied against every
-        // target cargo builds. At a workspace root that only tests the root
-        // package (no `--workspace` for filter scopes), a filter naming a
-        // *member crate's* module matches zero tests in the root package and
-        // the run fails closed with "0 tests". Bind the filter to the owning
-        // crate's lib target with `-p <crate> --lib` so it executes against the
-        // package that actually defines the module. (#8758)
-        let owning_package = files
-            .first()
-            .and_then(|file| owning_workspace_member_package(component, file));
-
-        let runner_args = match &owning_package {
-            Some(package) => format!("-p\n{package}\n--lib\n--\n{}", filter_args[0]),
-            None => format!("--\n{}", filter_args[0]),
-        };
-        let message = match &owning_package {
-            Some(package) => format!("Scoped to changed files in {package}: {}", filter_args[0]),
-            None => format!("Scoped to changed files: {}", filter_args[0]),
-        };
-
-        return vec![
-            (
-                "HOMEBOY_TEST_SCOPE_KIND".to_string(),
-                "rust_filter".to_string(),
-            ),
-            ("HOMEBOY_TEST_RUNNER_ARGS".to_string(), runner_args),
-            ("HOMEBOY_TEST_SCOPE_MESSAGE".to_string(), message),
-        ];
+fn cargo_lib_target(component: &Component, test_file: &str, package: &str) -> Option<String> {
+    let component_root = component_source_path(component);
+    let file_path = component_root.join(test_file);
+    let mut directory = file_path.parent()?;
+    loop {
+        if directory.join("Cargo.toml").is_file() {
+            return directory
+                .join("src/lib.rs")
+                .is_file()
+                .then(|| package.replace('-', "_"));
+        }
+        directory = directory.parent()?;
+        if !directory.starts_with(&component_root) {
+            return None;
+        }
     }
-
-    if filter_args.len() > 1 {
-        return vec![
-            ("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string()),
-            (
-                "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
-                "Changed files include multiple inline test modules; running the full test command."
-                    .to_string(),
-            ),
-        ];
-    }
-
-    Vec::new()
 }
 
 /// Return a changed file path relative to its Cargo package.
@@ -629,38 +697,6 @@ fn cargo_relative_test_path(component: &Component, test_file: &str) -> Option<St
                 .strip_prefix(directory)
                 .ok()
                 .map(|path| path.to_string_lossy().replace('\\', "/"));
-        }
-        directory = directory.parent()?;
-        if !directory.starts_with(&component_root) {
-            return None;
-        }
-    }
-}
-
-/// Resolve the workspace-member package that owns `test_file`, when it is a
-/// crate strictly below the component root.
-///
-/// When the component is itself a single crate (its root `Cargo.toml` is a
-/// `[package]`), a bare module filter already runs against that package, so no
-/// package selector is needed and this returns `None`. When the component is a
-/// workspace and the changed file lives in a member crate under the root, the
-/// module filter must be scoped to that crate's lib target — otherwise cargo
-/// applies it only to the root package and matches zero tests. In that case
-/// this returns the owning member crate's package name. (#8758)
-fn owning_workspace_member_package(component: &Component, test_file: &str) -> Option<String> {
-    let component_root = component_source_path(component);
-    let file_path = component_root.join(test_file);
-    let mut directory = file_path.parent()?;
-
-    loop {
-        let manifest = directory.join("Cargo.toml");
-        if manifest.is_file() {
-            // The component root's own manifest is the default cargo scope; a
-            // filter already resolves against it, so it needs no `-p`.
-            if directory == component_root {
-                return None;
-            }
-            return cargo_manifest_package_name(&manifest);
         }
         directory = directory.parent()?;
         if !directory.starts_with(&component_root) {
@@ -1207,6 +1243,49 @@ mod tests {
         }
     }
 
+    fn assert_union_candidates(env: &[(String, String)], expected: &[&str]) {
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "rust_changed_union".to_string()
+        )));
+        let selection = env
+            .iter()
+            .find(|(key, _)| key == "HOMEBOY_RUST_CHANGED_TEST_SELECTION_JSON")
+            .map(|(_, value)| value)
+            .expect("changed Rust selection");
+        let candidates = serde_json::from_str::<serde_json::Value>(selection)
+            .expect("selection JSON")["candidates"]
+            .as_array()
+            .expect("selection candidates")
+            .iter()
+            .map(|candidate| {
+                let module = candidate["module"].as_str().unwrap_or_default();
+                format!(
+                    "{}::{}::{}::{}",
+                    candidate["package"].as_str().unwrap(),
+                    candidate["target_kind"].as_str().unwrap(),
+                    candidate["target"].as_str().unwrap(),
+                    module
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(candidates, expected);
+    }
+
+    #[test]
+    fn rust_changed_selection_is_bounded_and_written_in_the_run_dir() {
+        let run_dir = homeboy_core::engine::run_dir::RunDir::create().expect("run dir");
+        let selection = r#"{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[]}"#;
+        let path = write_rust_changed_selection(&run_dir, selection).expect("selection artifact");
+        assert_eq!(
+            std::fs::read_to_string(path).expect("selection contents"),
+            selection
+        );
+        assert!(write_rust_changed_selection(&run_dir, &"x".repeat(1024 * 1024 + 1)).is_none());
+        std::fs::remove_dir_all(run_dir.path()).expect("remove run dir");
+        assert!(write_rust_changed_selection(&run_dir, selection).is_none());
+    }
+
     #[test]
     fn conditional_secret_projection_composes_static_and_matching_names() {
         let names = effective_secret_env_names(
@@ -1355,6 +1434,22 @@ mod tests {
     #[test]
     fn rust_cargo_changed_routing_emits_integration_args() {
         let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("tests")).expect("test directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.path().join("tests/integration_scope.rs"),
+            "#[test] fn runs() {}",
+        )
+        .expect("integration test");
+        std::fs::write(
+            dir.path().join("tests/another_scope.rs"),
+            "#[test] fn runs() {}",
+        )
+        .expect("integration test");
         let component = Component::new(
             "fixture-component".to_string(),
             dir.path().to_string_lossy().to_string(),
@@ -1370,19 +1465,25 @@ mod tests {
             ],
         );
 
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
-            format!("{}_{}", "rust", "integration")
-        )));
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
-            "--test\nintegration_scope\n--test\nanother_scope".to_string()
-        )));
+        assert_union_candidates(
+            &env,
+            &[
+                "fixture::test::another_scope::",
+                "fixture::test::integration_scope::",
+            ],
+        );
     }
 
     #[test]
     fn rust_cargo_changed_routing_emits_inline_filter() {
         let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src/core")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "mod core;").expect("lib target");
         let component = Component::new(
             "fixture-component".to_string(),
             dir.path().to_string_lossy().to_string(),
@@ -1392,14 +1493,62 @@ mod tests {
 
         let env = rust_cargo_changed_test_env(&component, &["src/core/daemon.rs".to_string()]);
 
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
-            format!("{}_{}", "rust", "filter")
-        )));
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
-            "--\ncore::daemon".to_string()
-        )));
+        assert_union_candidates(&env, &["fixture::lib::fixture::core::daemon"]);
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_unions_exact_sorted_identities() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .expect("workspace manifest");
+        for (name, module) in [("alpha-pkg", "first"), ("beta-pkg", "second")] {
+            let crate_dir = dir.path().join(format!("crates/{name}"));
+            fs::create_dir_all(crate_dir.join("src")).expect("source directory");
+            fs::write(
+                crate_dir.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+            )
+            .expect("member manifest");
+            fs::write(crate_dir.join("src/lib.rs"), "pub fn value() {}").expect("lib target");
+            fs::write(
+                crate_dir.join(format!("src/{module}.rs")),
+                "#[cfg(test)] mod tests { #[test] fn runs() {} }",
+            )
+            .expect("inline tests");
+        }
+        let alpha_tests = dir.path().join("crates/alpha-pkg/tests");
+        fs::create_dir_all(&alpha_tests).expect("integration directory");
+        fs::write(alpha_tests.join("api.rs"), "#[test] fn api_runs() {}")
+            .expect("integration test");
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &[
+                "crates/beta-pkg/src/second.rs".to_string(),
+                "crates/alpha-pkg/tests/api.rs".to_string(),
+                "crates/alpha-pkg/src/first.rs".to_string(),
+                "crates/beta-pkg/src/second.rs".to_string(),
+                "crates/alpha-pkg/tests/deleted.rs".to_string(),
+            ],
+        );
+
+        assert_union_candidates(
+            &env,
+            &[
+                "alpha-pkg::lib::alpha_pkg::first",
+                "alpha-pkg::test::api::",
+                "beta-pkg::lib::beta_pkg::second",
+            ],
+        );
     }
 
     #[test]
@@ -1420,21 +1569,9 @@ mod tests {
             &["crates/homeboy-lab-runner/src/workspace/tests/snapshot.rs".to_string()],
         );
 
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
-            "rust_filter".to_string()
-        )));
-        // The changed file lives in the `homeboy-lab-runner` member crate, not
-        // the workspace root, so the module filter must bind to that crate's lib
-        // target (`-p homeboy-lab-runner --lib`). A bare `-- <module>` filter at
-        // the workspace root only tests the root package and matches zero tests,
-        // which fails the release-blocking changed-scope gate. (#8758)
-        assert!(
-            env.contains(&(
-                "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
-                "-p\nhomeboy-lab-runner\n--lib\n--\nworkspace::tests::snapshot".to_string()
-            )),
-            "env: {env:?}"
+        assert_union_candidates(
+            &env,
+            &["homeboy-lab-runner::lib::homeboy_lab_runner::workspace::tests::snapshot"],
         );
     }
 
@@ -1460,6 +1597,7 @@ mod tests {
             "[package]\nname = \"homeboy-lab-runner\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .expect("member manifest");
+        fs::write(member.join("src/lib.rs"), "pub mod lab;").expect("member lib target");
         fs::write(
             member.join("src/lab/offload/hydration.rs"),
             "pub fn hydrate() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn hydrates() {}\n}\n",
@@ -1478,16 +1616,9 @@ mod tests {
             &["crates/homeboy-lab-runner/src/lab/offload/hydration.rs".to_string()],
         );
 
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
-            "rust_filter".to_string()
-        )));
-        assert!(
-            env.contains(&(
-                "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
-                "-p\nhomeboy-lab-runner\n--lib\n--\nlab::offload::hydration".to_string()
-            )),
-            "inline tests beside a change must run against their own crate: {env:?}"
+        assert_union_candidates(
+            &env,
+            &["homeboy-lab-runner::lib::homeboy_lab_runner::lab::offload::hydration"],
         );
     }
 
@@ -1502,6 +1633,8 @@ mod tests {
             "[package]\nname = \"fixture-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .expect("write component Cargo.toml");
+        std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn fixture() {}").expect("lib target");
         let test_rel = "src/core/tests/scope.rs";
         let test_path = dir.path().join(test_rel);
         std::fs::create_dir_all(test_path.parent().expect("parent dir"))
@@ -1518,16 +1651,9 @@ mod tests {
 
         let env = rust_cargo_changed_test_env(&component, &[test_rel.to_string()]);
 
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
-            "rust_filter".to_string()
-        )));
-        assert!(
-            env.contains(&(
-                "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
-                "--\ncore::tests::scope".to_string()
-            )),
-            "env: {env:?}"
+        assert_union_candidates(
+            &env,
+            &["fixture-crate::lib::fixture_crate::core::tests::scope"],
         );
     }
 
@@ -1582,6 +1708,13 @@ mod tests {
     #[test]
     fn rust_cargo_changed_routing_keeps_filter_when_inline_module_declares_tests() {
         let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn fixture() {}").expect("lib target");
         let test_rel = "src/commands/agent_task/tests/lifecycle.rs";
         let test_path = dir.path().join(test_rel);
         std::fs::create_dir_all(test_path.parent().expect("parent dir"))
@@ -1601,14 +1734,10 @@ mod tests {
 
         let env = rust_cargo_changed_test_env(&component, &[test_rel.to_string()]);
 
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
-            format!("{}_{}", "rust", "filter")
-        )));
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
-            "--\ncommands::agent_task::tests::lifecycle".to_string()
-        )));
+        assert_union_candidates(
+            &env,
+            &["fixture::lib::fixture::commands::agent_task::tests::lifecycle"],
+        );
     }
 
     #[test]
@@ -1617,6 +1746,13 @@ mod tests {
         // `tests` module, so the filter must target `...::cook::tests` rather
         // than the `...::cook_tests` the file name implies.
         let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn fixture() {}").expect("lib target");
         let module_dir = dir.path().join("src/agent_task_service");
         std::fs::create_dir_all(&module_dir).expect("create module dirs");
         std::fs::write(
@@ -1642,15 +1778,22 @@ mod tests {
             &["src/agent_task_service/cook_tests.rs".to_string()],
         );
 
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
-            "--\nagent_task_service::cook::tests".to_string()
-        )));
+        assert_union_candidates(
+            &env,
+            &["fixture::lib::fixture::agent_task_service::cook::tests"],
+        );
     }
 
     #[test]
     fn rust_cargo_changed_routing_keeps_file_name_when_no_path_attr_mount_exists() {
         let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn fixture() {}").expect("lib target");
         let module_dir = dir.path().join("src/agent_task_service");
         std::fs::create_dir_all(&module_dir).expect("create module dirs");
         // A sibling that mounts a *different* file must not capture this one.
@@ -1677,10 +1820,10 @@ mod tests {
             &["src/agent_task_service/cook_tests.rs".to_string()],
         );
 
-        assert!(env.contains(&(
-            "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
-            "--\nagent_task_service::cook_tests".to_string()
-        )));
+        assert_union_candidates(
+            &env,
+            &["fixture::lib::fixture::agent_task_service::cook_tests"],
+        );
     }
 
     #[test]

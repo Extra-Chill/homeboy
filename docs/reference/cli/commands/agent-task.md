@@ -105,9 +105,9 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | Option | Value | Description |
 | --- | --- | --- |
 | `--prompt` | `<PROMPT>` | Inline prompt, `@<path>` to read a file, `-` to read stdin, or `@prompt:<id>` for a stored prompt |
-| `--cwd` | `<PATH>` | Existing local repo checkout or worktree path to cook in |
-| `--workspace` | `<ID_OR_PATH>` | Homeboy workspace ID or existing local workspace path to cook in |
-| `--repo` | `<REPO>` | Repo/component slug for metadata and task grouping, e.g. sample-plugin |
+| `--cwd` | `<PATH>` | Existing local repo checkout or worktree path to cook in. For Cook, omitting --repo infers its configured component when the Git remote maps unambiguously to one registered component |
+| `--workspace` | `<ID_OR_PATH>` | Homeboy workspace ID or existing local workspace path to cook in. For Cook, omitting --repo infers its configured component when the workspace Git remote maps unambiguously to one registered component |
+| `--repo` | `<REPO>` | Repo/component slug for metadata and task grouping, e.g. sample-plugin. Cook infers this from an explicit --workspace or --cwd Git checkout when its configured remote mapping is unambiguous; an explicit value must match the checkout |
 | `--task-url` | `<URL>` | Issue, PR, or tracker URL the task is cooking |
 | `--backend` | `<BACKEND>` | Executor backend to request. Defaults to the configured coding backend |
 | `--selector` | `<PROVIDER_ID>` | Optional provider id when more than one provider exists for the backend |
@@ -117,9 +117,9 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--run-id` | `<ID>` | Optional durable run id. Generated when omitted |
 | `--provider-config` | `<JSON>` | Provider config JSON object, @file, or - for stdin. Merged with workspace metadata |
 | `--client-context` | `<JSON>` | Opaque client context JSON object, @file, or - for stdin |
-| `--max-provider-executions` | `<N>` | Maximum total provider executions per task, including same-provider retries and provider rotations. For Cook, this must be at least --max-attempts; use --max-same-provider-retries for gate and review-form remediation. `--attempts 1` runs exactly once. When omitted, defaults to the total attempts the configured provider rotation needs, or 1 when no rotation is configured |
+| `--max-provider-executions` | `<N>` | Maximum total provider executions per task, including same-provider retries and provider rotations. For Cook, this must be at least --max-attempts; use --max-same-provider-retries for gate and review-form remediation. `--attempts 1` runs exactly once. An explicit total cap bounds rotations inherited from configuration: for example, `--max-attempts 1 --max-provider-executions 1` runs once even when a rotation is configured, and reports those rotations as unreachable. An explicit `--max-provider-rotations` must fit within this total. When omitted, defaults to the total attempts the configured provider rotation needs, or 1 when no rotation is configured |
 | `--max-same-provider-retries` | `<N>` | Same-provider retries allowed after the first provider execution. Cook needs one for each possible gate or required review-form remediation; provider rotations cannot replace those retries. Defaults to 0; a configured provider rotation never funds these |
-| `--max-provider-rotations` | `<N>` | Cross-provider rotations allowed after the first provider execution. Rotations are distinct from same-provider Cook remediation and do not satisfy its required review-form retry budget. When omitted, defaults to the number of entries in the configured provider rotation, or 0 when no rotation is configured |
+| `--max-provider-rotations` | `<N>` | Cross-provider rotations allowed after the first provider execution. Rotations are distinct from same-provider Cook remediation and do not satisfy its required review-form retry budget. When omitted, defaults to the number of entries in the configured provider rotation, or 0 when no rotation is configured. When supplied with an explicit total execution cap, this request must fit within that cap; only inherited rotations are truncated automatically |
 | `--queue-only` | flag | Persist the run for a daemon/runner but do not execute immediately |
 | `--timeout-ms` | `<MS>` | Provider wall-clock timeout in milliseconds. Defaults to Homeboy's provider timeout |
 | `--deny-command` | `<PATTERN>` | Command pattern the provider agent must not run. Repeatable, and additive to the host-level `agent_task.command_policy` config |
@@ -127,7 +127,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--command-policy-reason` | `<TEXT>` | Why the command policy exists, returned verbatim to the agent with every refusal. Telling the agent what to do instead (e.g. "this host routes builds to CI; make your edits and push") converts a refused command into correct behaviour rather than a wasted budget |
 | `--candidate-completion` | `<POLICY>` | Completion rule for isolated candidates: wait for all results (default) or promote the first successful candidate |
 | `--goal` | `<TEXT>` | One-line statement of what a successful cook must achieve. Recorded as framing metadata for the provider task and used for review. Without --prompt, it supplies the one provider task |
-| `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into. The handle is `<repo>@<branch-slug>`, where the slug replaces every character of --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle `repo@fix-1234-x`. Existing destinations are reused. Creating a missing one is not a built-in capability: it requires an enabled worktree provider with a `commands.ensure` argv template, and without one you must create the destination first with `homeboy worktree create`. When omitted, --repo plus --task-url derives an issue-owned destination through that same configured provider |
+| `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into. The handle is `<repo>@<branch-slug>`, where the slug replaces every character of --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle `repo@fix-1234-x`. Existing destinations are reused. Creating a missing one is not a built-in capability: it requires an enabled worktree provider with a `commands.ensure` argv template, and without one you must create the destination first with `homeboy worktree create`. When omitted, --repo plus --task-url derives an issue-owned destination through that same configured provider. An explicit --workspace or --cwd Git checkout can infer --repo when its remote maps to exactly one configured component; an explicit --repo must match that checkout |
 | `--provider-command` | `<COMMAND>` | Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`. |
 | `--provider-argv` | `<ARG>` | Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`. |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
@@ -727,7 +727,7 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--repo` | `<REPO>` | _no help text_ |
+| `--repo` | `<REPO_SLUG_OR_PRIMARY_PATH>` | Registered repository slug or exact registered primary checkout path |
 | `--from` | `<REF>` | _no help text_ |
 | `--base` | `<BRANCH>` | _no help text_ |
 | `--branch-prefix` | `<PREFIX>` | _no help text_ |
@@ -949,6 +949,7 @@ Adopt an immutable commit candidate through a tracked cook's normal gates and fi
 | `--candidate-ref` | `<SHA>` | Immutable commit revision in the recorded source worktree |
 | `--ai-model` | `<MODEL>` | Concrete model that prepared the externally supplied candidate |
 | `--replace-interrupted` | flag | Replace a stale interrupted adoption while retaining its lifecycle evidence |
+| `--accept-inherited-failures` | flag | Permit finalization only when a failed recorded gate reproduces with the same bounded fingerprint on the immutable candidate base. New or changed failures remain blocking and inherited-red evidence remains in the report |
 | `--full` | flag | Return the complete cook adoption report, including nested gate evidence |
 
 ## `homeboy agent-task finalize-pr`
@@ -963,7 +964,7 @@ This is the core-owned publication boundary for external runtimes.
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--recover` | `<RUN_OR_COOK_ID>` | Hydrate finalization from a durable Cook recipe and its applied promotion |
+| `--recover` | `<RUN_OR_COOK_ID>` | Hydrate finalization from a durable Cook recipe or a validated manual-finalization record |
 | `--run-id` | `<ID>` | _no help text_ |
 | `--path` | `<PATH>` | _no help text_ |
 | `--base` | `<BRANCH>` | _no help text_ |
