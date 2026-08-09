@@ -222,7 +222,7 @@ jobs:
     name: homeboy
     needs: [pr-state, ci-capacity-admission]
     if: ${{ needs.pr-state.outputs.active == 'true' }}
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@5103e9d0045da80ad9783eb9ca32f3496911800e
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
