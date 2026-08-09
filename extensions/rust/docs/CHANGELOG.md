@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.33.2] - 2026-08-09
+
+### Fixed
+- scope shard inventory to changed tests
+
 ## [1.33.1] - 2026-08-09
 
 ### Fixed
