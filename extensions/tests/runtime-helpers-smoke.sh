@@ -183,6 +183,126 @@ if [ ! -f "$HARNESS_TEMP" ]; then
     echo "Expected harness temp helper to create a file" >&2
     exit 1
 fi
+
+HARNESS_EXIT_FILE="$TMP_DIR/harness-exit-file"
+HARNESS_EXIT_DIR_PATH="$TMP_DIR/harness-exit-dir-path"
+HARNESS_EXIT_SUMMARY="$TMP_DIR/harness-exit-summary"
+printf 'temporary\n' > "$HARNESS_EXIT_FILE"
+set +e
+HOMEBOY_CACHE_DIR="$TMP_DIR" HOMEBOY_HARNESS_SUMMARY="$HARNESS_EXIT_SUMMARY" HOMEBOY_HARNESS_DIR_PATH="$HARNESS_EXIT_DIR_PATH" bash -c '
+    source "$1"
+    homeboy_print_failure_summary() { printf "failure summary\n" > "$HOMEBOY_HARNESS_SUMMARY"; }
+    trap homeboy_print_failure_summary EXIT
+    homeboy_runner_harness_register_cleanup "$3"
+    homeboy_runner_harness_temp_dir OWNED_DIRECTORY
+    printf "%s\n" "$OWNED_DIRECTORY" > "$HOMEBOY_HARNESS_DIR_PATH"
+    exit 37
+' _ "$RUNNER_HARNESS_HELPER" ignored "$HARNESS_EXIT_FILE"
+HARNESS_EXIT=$?
+set -e
+HARNESS_EXIT_DIR="$(<"$HARNESS_EXIT_DIR_PATH")"
+if [ "$HARNESS_EXIT" -ne 37 ] || [ -e "$HARNESS_EXIT_FILE" ] || [ -e "$HARNESS_EXIT_DIR" ]; then
+    echo "Expected harness EXIT cleanup to preserve failure status and remove files and directories" >&2
+    exit 1
+fi
+assert_contains "$HARNESS_EXIT_SUMMARY" 'failure summary'
+
+HARNESS_SIDECAR_FILE="$TMP_DIR/harness-sidecar"
+HARNESS_SIDECAR_TEMP="$TMP_DIR/harness-sidecar-temp"
+printf 'temporary\n' > "$HARNESS_SIDECAR_TEMP"
+set +e
+HOMEBOY_HARNESS_SIDECAR="$HARNESS_SIDECAR_FILE" bash -c '
+    source "$1"
+    sidecar_exit_handler() { printf "sidecar\n" >> "$HOMEBOY_HARNESS_SIDECAR"; }
+    trap sidecar_exit_handler EXIT
+    homeboy_runner_harness_register_cleanup "$3"
+    exit 23
+' _ "$RUNNER_HARNESS_HELPER" ignored "$HARNESS_SIDECAR_TEMP"
+HARNESS_SIDECAR_EXIT=$?
+set -e
+if [ "$HARNESS_SIDECAR_EXIT" -ne 23 ] || [ -e "$HARNESS_SIDECAR_TEMP" ] || [ "$(wc -l < "$HARNESS_SIDECAR_FILE" | tr -d ' ')" -ne 1 ]; then
+    echo "Expected harness to compose the existing sidecar EXIT handler exactly once" >&2
+    exit 1
+fi
+
+HARNESS_REPLACED_FILE="$TMP_DIR/harness-replaced-sidecars"
+HARNESS_REPLACED_FIRST="$TMP_DIR/harness-replaced-first"
+HARNESS_REPLACED_SECOND="$TMP_DIR/harness-replaced-second"
+printf 'first\n' > "$HARNESS_REPLACED_FIRST"
+printf 'second\n' > "$HARNESS_REPLACED_SECOND"
+set +e
+HOMEBOY_HARNESS_REPLACED="$HARNESS_REPLACED_FILE" bash -c '
+    source "$1"
+    first_exit_handler() { printf "first\n" >> "$HOMEBOY_HARNESS_REPLACED"; }
+    replacement_exit_handler() { printf "replacement\n" >> "$HOMEBOY_HARNESS_REPLACED"; }
+    trap first_exit_handler EXIT
+    homeboy_runner_harness_register_cleanup "$2"
+    trap replacement_exit_handler EXIT
+    homeboy_runner_harness_register_cleanup "$3"
+    exit 29
+' _ "$RUNNER_HARNESS_HELPER" "$HARNESS_REPLACED_FIRST" "$HARNESS_REPLACED_SECOND"
+HARNESS_REPLACED_EXIT=$?
+set -e
+if [ "$HARNESS_REPLACED_EXIT" -ne 29 ] || [ -e "$HARNESS_REPLACED_FIRST" ] || [ -e "$HARNESS_REPLACED_SECOND" ] || [ "$(wc -l < "$HARNESS_REPLACED_FILE" | tr -d ' ')" -ne 2 ]; then
+    echo "Expected harness to compose an EXIT trap installed after initial cleanup registration" >&2
+    exit 1
+fi
+assert_contains "$HARNESS_REPLACED_FILE" 'first'
+assert_contains "$HARNESS_REPLACED_FILE" 'replacement'
+
+HARNESS_DIR_ROOT="$TMP_DIR/harness-directory-root"
+HARNESS_DIR_SYMLINK="$TMP_DIR/harness-directory-symlink"
+mkdir -p "$HARNESS_DIR_ROOT"
+HOMEBOY_CACHE_DIR="$HARNESS_DIR_ROOT" bash -c '
+    source "$1"
+    homeboy_runner_harness_temp_dir OWNED
+    [ -d "$OWNED" ]
+    ! homeboy_runner_harness_register_cleanup / directory
+    ! homeboy_runner_harness_register_cleanup "$2" directory
+    ln -s "$OWNED" "$3"
+    ! homeboy_runner_harness_register_cleanup "$3" directory
+    mkdir "$2/homeboy-runner.unexpected"
+    ! homeboy_runner_harness_register_cleanup "$2/homeboy-runner.unexpected" directory
+    homeboy_runner_harness_cleanup
+    [ ! -e "$OWNED" ]
+' _ "$RUNNER_HARNESS_HELPER" "$HARNESS_DIR_ROOT" "$HARNESS_DIR_SYMLINK"
+
+HARNESS_REPLACEMENT_ROOT="$TMP_DIR/harness-replacement-root"
+mkdir -p "$HARNESS_REPLACEMENT_ROOT"
+HOMEBOY_CACHE_DIR="$HARNESS_REPLACEMENT_ROOT" bash -c '
+    source "$1"
+    homeboy_runner_harness_temp_dir MOVED
+    mv "$MOVED" "$2/original"
+    mkdir "$MOVED"
+    ! homeboy_runner_harness_cleanup_path directory "$MOVED"
+    [ -d "$MOVED" ] && [ -d "$2/original" ]
+    homeboy_runner_harness_temp_dir LINKED
+    mv "$LINKED" "$2/original-link"
+    ln -s "$2" "$LINKED"
+    ! homeboy_runner_harness_cleanup_path directory "$LINKED"
+    [ -L "$LINKED" ] && [ -d "$2/original-link" ]
+' _ "$RUNNER_HARNESS_HELPER" "$HARNESS_REPLACEMENT_ROOT"
+
+python3 - "$ROOT_DIR" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+violations = []
+for path in root.rglob("*.sh"):
+    if "tests" in path.parts or ".git" in path.parts:
+        continue
+    if path == root / "scripts/lib/runner-harness.sh":
+        continue
+    lines = path.read_text(encoding="utf-8").splitlines()
+    first_registration = next((index for index, line in enumerate(lines) if re.search(r"homeboy_runner_harness_(temp|temp_dir|register_cleanup)\b", line)), None)
+    if first_registration is None:
+        continue
+    if any(re.search(r"\btrap\b.*\bEXIT\b", line) for line in lines[first_registration + 1:]):
+        violations.append(str(path.relative_to(root)))
+assert not violations, f"EXIT trap installed after harness cleanup registration: {violations}"
+PY
 homeboy_runner_harness_cleanup
 if [ -e "$HARNESS_TEMP" ]; then
     echo "Expected harness cleanup to remove temp file" >&2
