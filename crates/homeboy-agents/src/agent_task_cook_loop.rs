@@ -266,8 +266,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     // (and actually produced changes) does the AI-authored form become the last
     // outstanding "gate".
     let gates_green_with_changes = failed_gates.is_empty()
-        && options.promotion_report.status != AgentTaskPromotionStatus::NoChangesGateFailed
-        && quality.classification != AgentTaskCookLoopQualityClassification::NoChanges;
+        && options.promotion_report.status == AgentTaskPromotionStatus::Applied;
     let review_form_gap = (options.require_review_form && gates_green_with_changes)
         .then(|| review_form_requirement_gap(&options.review_form));
 
@@ -1353,7 +1352,7 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-verified-no-op".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
+            require_review_form: true,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1362,6 +1361,7 @@ mod tests {
             verified.quality.classification,
             AgentTaskCookLoopQualityClassification::VerifiedNoOp
         );
+        assert!(verified.follow_up_request.is_none());
 
         let failed = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),

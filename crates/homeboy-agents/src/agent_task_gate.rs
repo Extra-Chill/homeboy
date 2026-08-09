@@ -2641,9 +2641,8 @@ fn gate_failure_evidence(
         stderr.contains(&format!("Missing script: \"{script}\""))
             || stderr.contains(&format!("Missing script: {script}"))
     });
-    let zero_tests_selected = test_result.is_some_and(|result| {
-        result.runner_exit_code == 0 && result.total == 0 && result.filtered > 0
-    });
+    let zero_tests_selected =
+        test_result.is_some_and(|result| result.runner_exit_code == 0 && result.total == 0);
     let classification = zero_tests_selected
         .then_some(AgentTaskGateFailureClassification::ZeroTestsSelected)
         .or_else(|| {
@@ -2694,9 +2693,7 @@ fn effective_gate_exit_code(
     runner_exit_code: i32,
     test_result: Option<&AgentTaskGateTestResult>,
 ) -> i32 {
-    if test_result.is_some_and(|result| {
-        result.runner_exit_code == 0 && result.total == 0 && result.filtered > 0
-    }) {
+    if test_result.is_some_and(|result| result.runner_exit_code == 0 && result.total == 0) {
         1
     } else {
         runner_exit_code
@@ -2983,7 +2980,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_test_results_preserve_selected_counts_and_reject_filtered_only_output() {
+    fn cargo_test_results_preserve_selected_counts_and_reject_zero_test_output() {
         let summary = "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1675 filtered out; finished in 0.00s\n";
         let zero = cargo_test_result(
             "RUSTFLAGS=-Dwarnings timeout 30 cargo --quiet test selected_test -- --exact",
@@ -2995,6 +2992,17 @@ mod tests {
         assert_eq!(zero.total, 0);
         assert_eq!(zero.filtered, 1675);
         assert_eq!(effective_gate_exit_code(0, Some(&zero)), 1);
+
+        let empty = cargo_test_result(
+            "cargo test --locked -p empty-crate",
+            0,
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+            "",
+        )
+        .expect("empty Cargo summary is parsed");
+        assert_eq!(empty.total, 0);
+        assert_eq!(empty.filtered, 0);
+        assert_eq!(effective_gate_exit_code(0, Some(&empty)), 1);
 
         let selected = cargo_test_result(
             "cargo test --locked selected_test",
