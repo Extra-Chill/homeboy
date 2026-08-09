@@ -8,6 +8,7 @@ use homeboy_lab_runner_contract::RunnerKind;
 use homeboy_upgrade::upgrade::version_is_newer;
 use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
 use homeboy_upgrade::upgrade::InstallMethod;
+use homeboy_upgrade::upgrade::RunnerDaemonDriftEntry;
 use homeboy_upgrade::upgrade::RunnerUpgradeEntry;
 use std::path::Path;
 
@@ -434,6 +435,15 @@ pub fn upgrade_runner_with_executor(
     let previous_version = runner_homeboy_version(runner, &original_homeboy_path, exec)
         .ok()
         .flatten();
+    if is_managed_immutable_homeboy_path(runner, &original_homeboy_path) {
+        return refresh_managed_immutable_runner(
+            runner,
+            original_homeboy_path,
+            previous_version,
+            extension_updates,
+            exec,
+        );
+    }
     let expected_build_identity = expected_controller_identity
         .map(str::to_string)
         .or_else(|| {
@@ -839,6 +849,169 @@ pub fn upgrade_runner_with_executor(
         stale_daemon,
         daemon_previous_version,
         daemon_new_version,
+        exit_code,
+        detail,
+    }
+}
+
+fn refresh_managed_immutable_runner(
+    runner: &Runner,
+    previous_homeboy_path: String,
+    previous_version: Option<String>,
+    extension_updates: &[ExtensionUpgradeEntry],
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+) -> RunnerUpgradeEntry {
+    let recovery_commands = managed_immutable_runner_recovery_commands(&runner.id);
+    let options = crate::HomeboyBinaryRefreshOptions {
+        runner_id: runner.id.clone(),
+        mode: crate::HomeboyBinaryRefreshMode::Materialize,
+        source: None,
+        git_ref: Some(crate::homeboy_refresh::controller_refresh_ref()),
+        target_dir: None,
+        reconnect: true,
+        force: false,
+        allow_downgrade: false,
+        dry_run: false,
+    };
+    let (refreshed, exit_code) = match crate::refresh_homeboy_binary(options) {
+        Ok(result) => result,
+        Err(error) => {
+            return managed_immutable_runner_failure_entry(
+                &runner.id,
+                previous_homeboy_path,
+                previous_version,
+                1,
+                format!(
+                    "managed immutable runner refresh failed: {}; recover with {}",
+                    error.message,
+                    recovery_commands.join(" && ")
+                ),
+            );
+        }
+    };
+    if !managed_refresh_can_reconcile(
+        exit_code,
+        refreshed.daemon_refreshed,
+        refreshed.failure.is_some(),
+    ) {
+        return RunnerUpgradeEntry {
+            runner_id: runner.id.clone(),
+            homeboy_path: refreshed.selected_binary_path,
+            success: false,
+            upgraded: false,
+            previous_version,
+            new_version: None,
+            bare_homeboy_version: None,
+            path_drift: Some("managed immutable runner refresh did not converge".to_string()),
+            recovery_commands,
+            extensions_synced: Vec::new(),
+            extensions_skipped: Vec::new(),
+            extensions_failed: Vec::new(),
+            stale_daemon: None,
+            daemon_previous_version: None,
+            daemon_new_version: None,
+            exit_code,
+            detail: format!(
+                "managed immutable runner refresh failed: {:?}",
+                refreshed.failure
+            ),
+        };
+    }
+    let reconciled = match runner::reconcile_status(&runner.id) {
+        Ok(report) => report,
+        Err(error) => {
+            return managed_immutable_runner_failure_entry(
+                &runner.id,
+                refreshed.selected_binary_path,
+                previous_version,
+                1,
+                format!(
+                    "managed immutable runner refresh completed but reconciliation failed: {}; recover with {}",
+                    error.message,
+                    recovery_commands.join(" && ")
+                ),
+            );
+        }
+    };
+    let homeboy_path = refreshed.selected_binary_path;
+    let new_version = runner_homeboy_version(runner, &homeboy_path, exec)
+        .ok()
+        .flatten();
+    let (extensions_synced, extensions_skipped, extensions_failed) =
+        sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
+    let admission_ready = managed_immutable_admission_ready(&reconciled);
+    let stale_daemon = reconciled
+        .stale_daemon
+        .map(|warning| RunnerDaemonDriftEntry {
+            session_homeboy_version: warning.session_homeboy_version,
+            current_homeboy_version: warning.current_homeboy_version,
+            recovery_commands: warning.recovery_commands,
+        });
+    let success = new_version.is_some()
+        && admission_ready
+        && stale_daemon.is_none()
+        && extensions_failed.is_empty();
+    RunnerUpgradeEntry {
+        runner_id: runner.id.clone(),
+        homeboy_path: homeboy_path.clone(),
+        success,
+        upgraded: homeboy_path != previous_homeboy_path,
+        previous_version,
+        new_version,
+        bare_homeboy_version: None,
+        path_drift: (!success).then(|| {
+            "managed immutable runner did not satisfy binary, daemon, and admission convergence"
+                .to_string()
+        }),
+        recovery_commands: (!success).then_some(recovery_commands).unwrap_or_default(),
+        extensions_synced,
+        extensions_skipped,
+        extensions_failed,
+        stale_daemon,
+        daemon_previous_version: None,
+        daemon_new_version: None,
+        exit_code: i32::from(!success),
+        detail: format!(
+            "managed immutable runner refreshed through controller-owned promotion, daemon rotation, and reconciliation; admission ready: {admission_ready}"
+        ),
+    }
+}
+
+pub(super) fn managed_immutable_admission_ready(status: &crate::RunnerStatusReport) -> bool {
+    status.admission_summary(0).accepting_jobs
+}
+
+pub(super) fn managed_refresh_can_reconcile(
+    exit_code: i32,
+    daemon_refreshed: bool,
+    refresh_failed: bool,
+) -> bool {
+    !refresh_failed && (exit_code == 0 || daemon_refreshed)
+}
+
+fn managed_immutable_runner_failure_entry(
+    runner_id: &str,
+    homeboy_path: String,
+    previous_version: Option<String>,
+    exit_code: i32,
+    detail: String,
+) -> RunnerUpgradeEntry {
+    RunnerUpgradeEntry {
+        runner_id: runner_id.to_string(),
+        homeboy_path,
+        success: false,
+        upgraded: false,
+        previous_version,
+        new_version: None,
+        bare_homeboy_version: None,
+        path_drift: Some("managed immutable runner refresh did not converge".to_string()),
+        recovery_commands: managed_immutable_runner_recovery_commands(runner_id),
+        extensions_synced: Vec::new(),
+        extensions_skipped: Vec::new(),
+        extensions_failed: Vec::new(),
+        stale_daemon: None,
+        daemon_previous_version: None,
+        daemon_new_version: None,
         exit_code,
         detail,
     }
