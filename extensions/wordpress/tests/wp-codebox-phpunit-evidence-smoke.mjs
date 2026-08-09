@@ -123,6 +123,7 @@ try {
     { kind: 'structured-test-results', uri: 'artifact://files/test-results.json' },
     { kind: 'raw-phpunit-output', uri: 'artifact://files/phpunit-output.log' },
     { kind: 'test-execution-diagnosis', uri: 'artifact://files/phpunit-execution-diagnosis.json' },
+    { kind: 'recipe-run-steps', uri: 'artifact://files/recipe-run-steps.json' },
   ]);
   assert.deepEqual(JSON.parse(await readFile(resultsFile, 'utf8')), { total: 3, passed: 0, failed: 2, skipped: 1 });
   const invocationManifest = JSON.parse(await readFile(path.join(invocationArtifacts, 'homeboy-artifact-manifest.json'), 'utf8'));
@@ -130,6 +131,7 @@ try {
     'wp-codebox-phpunit/files/test-results.json',
     'wp-codebox-phpunit/files/phpunit-output.log',
     'wp-codebox-phpunit/files/phpunit-execution-diagnosis.json',
+    'wp-codebox-phpunit/files/recipe-run-steps.json',
     'wp-codebox-phpunit/files/test-failures.json',
   ]);
   const publishedDirectory = path.join(invocationArtifacts, 'wp-codebox-phpunit/files');
