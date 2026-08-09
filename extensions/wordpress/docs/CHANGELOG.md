@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.42] - 2026-08-09
+
+### Fixed
+- name the stage that stopped a zero-test WP Codebox run
+
 ## [3.34.41] - 2026-08-07
 
 ### Fixed
