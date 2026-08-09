@@ -215,6 +215,31 @@ resolve_baseline_commands() {
   printf '%s\n' "${result[*]}"
 }
 
+# Whether one exact command is selected by the documented baseline input. This
+# keeps independently scheduled baseline work aligned with normal reruns.
+baseline_command_selected() {
+  local command="$1"
+  local baseline_input="${2:-auto}"
+  local requested
+
+  baseline_input="$(printf '%s' "${baseline_input}" | xargs)"
+  case "${baseline_input}" in
+    auto)
+      case "${command}" in
+        review\ audit|review\ lint|review\ test|audit|lint|test) return 0 ;;
+      esac
+      return 1
+      ;;
+    none|false|off|'') return 1 ;;
+  esac
+
+  IFS=',' read -ra REQUESTED_BASELINES <<< "${baseline_input}"
+  for requested in "${REQUESTED_BASELINES[@]}"; do
+    [ "$(printf '%s' "${requested}" | xargs)" = "${command}" ] && return 0
+  done
+  return 1
+}
+
 settings_json_flags() {
   local raw="${HOMEBOY_SETTINGS_JSON:-}"
   if [ -z "${raw}" ] || [ "${raw}" = "{}" ]; then

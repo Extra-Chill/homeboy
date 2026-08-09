@@ -8,12 +8,14 @@ source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 command="${TEST_SHARD_COMMAND:?TEST_SHARD_COMMAND is required}"
 results_file="${TEST_SHARD_RESULTS_FILE:?TEST_SHARD_RESULTS_FILE is required}"
 result_file="${TEST_SHARD_RESULT_FILE:?TEST_SHARD_RESULT_FILE is required}"
-baseline_enabled="${TEST_SHARD_BASELINE_ENABLED:?TEST_SHARD_BASELINE_ENABLED is required}"
+event="${TEST_SHARD_EVENT:?TEST_SHARD_EVENT is required}"
+differential_gating="${TEST_SHARD_DIFFERENTIAL_GATING:?TEST_SHARD_DIFFERENTIAL_GATING is required}"
+baseline_commands="${TEST_SHARD_BASELINE_COMMANDS:?TEST_SHARD_BASELINE_COMMANDS is required}"
 result_filename="$(command_result_filename "${command}")"
 
-case "${baseline_enabled}" in
+case "${differential_gating}" in
   true|false) ;;
-  *) echo "::error::TEST_SHARD_BASELINE_ENABLED must be true or false." >&2; exit 1 ;;
+  *) echo "::error::TEST_SHARD_DIFFERENTIAL_GATING must be true or false." >&2; exit 1 ;;
 esac
 
 [ -s "${results_file}" ] || { echo "::error::Candidate shard results are missing: ${results_file}" >&2; exit 1; }
@@ -35,7 +37,7 @@ jq -e --arg root "${command%% *}" '
   exit 1
 }
 
-if [ "${status}" = pass ] || [ "${baseline_enabled}" = false ]; then
+if [ "${status}" = pass ] || [ "${event}" != pull_request ] || [ "${differential_gating}" != true ] || ! baseline_command_selected "${command}" "${baseline_commands}"; then
   echo 'baseline-command=' >> "${GITHUB_OUTPUT}"
 else
   echo "baseline-command=${command}" >> "${GITHUB_OUTPUT}"

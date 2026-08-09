@@ -878,7 +878,9 @@ jobs:
         env:
           TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
           TEST_SHARD_RESULTS_FILE: candidate-test-results/homeboy-ci-results/results.json
-          TEST_SHARD_BASELINE_ENABLED: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && inputs.baseline-commands != 'none' }}
+          TEST_SHARD_EVENT: ${{ github.event_name }}
+          TEST_SHARD_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
+          TEST_SHARD_BASELINE_COMMANDS: ${{ inputs.baseline-commands }}
         run: |
           source .homeboy-action/scripts/core/lib.sh
           TEST_SHARD_RESULT_FILE="candidate-test-results/homeboy-ci-results/$(command_result_filename "${TEST_SHARD_COMMAND}")" bash .homeboy-action/scripts/core/select-test-baseline.sh
