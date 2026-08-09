@@ -33,7 +33,7 @@ use std::path::Path;
 use std::time::Duration;
 
 #[cfg(unix)]
-use std::io::Read;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -72,6 +72,8 @@ const TEST_INVENTORY_FILE_ENV: &str = "HOMEBOY_TEST_INVENTORY_FILE";
 const TEST_INVENTORY_SCHEMA: &str = "homeboy/test-inventory/v1";
 #[cfg(unix)]
 const TEST_INVENTORY_FILE: &str = "test-inventory.json";
+#[cfg(unix)]
+const TEST_INVENTORY_PUBLIC_FILE: &str = "homeboy-test-inventory.json";
 #[cfg(unix)]
 const MAX_TEST_INVENTORY_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 25 * 60;
@@ -128,20 +130,32 @@ fn test_inventory_mode(ci_env: &[(String, String)]) -> bool {
 #[cfg(unix)]
 #[derive(Debug)]
 struct TestInventoryBinding {
-    path: PathBuf,
+    child_path: PathBuf,
     workspace_fingerprint: String,
     cargo_runner_fingerprint: Option<String>,
     nextest_runner_fingerprint: Option<String>,
+    project_root: std::fs::File,
     run_dir: std::fs::File,
     run_dir_device: u64,
     run_dir_inode: u64,
 }
 
 #[cfg(unix)]
-fn test_inventory_binding(source_path: &Path, run_dir: &RunDir) -> Option<TestInventoryBinding> {
+fn test_inventory_binding(
+    ci_env: &[(String, String)],
+    source_path: &Path,
+    run_dir: &RunDir,
+) -> Option<TestInventoryBinding> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-    let path = run_dir.path().join(TEST_INVENTORY_FILE);
+    let child_path = run_dir.path().join(TEST_INVENTORY_FILE);
+    let workspace_root = cargo_workspace_root(source_path)?;
+    requested_test_inventory_path(ci_env, &workspace_root)?;
+    let project_root = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&workspace_root)
+        .ok()?;
     let run_dir = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -151,9 +165,8 @@ fn test_inventory_binding(source_path: &Path, run_dir: &RunDir) -> Option<TestIn
     if !metadata.is_dir() {
         return None;
     }
-    let workspace_root = cargo_workspace_root(source_path)?;
     Some(TestInventoryBinding {
-        path,
+        child_path,
         workspace_fingerprint: workspace_fingerprint(&workspace_root)?,
         // Inventory producers select one runner. Record each independently so
         // Cargo inventory remains valid on systems without cargo-nextest.
@@ -161,8 +174,28 @@ fn test_inventory_binding(source_path: &Path, run_dir: &RunDir) -> Option<TestIn
         nextest_runner_fingerprint: runner_fingerprint(&workspace_root, "nextest"),
         run_dir_device: metadata.dev(),
         run_dir_inode: metadata.ino(),
+        project_root,
         run_dir,
     })
+}
+
+#[cfg(unix)]
+fn requested_test_inventory_path(ci_env: &[(String, String)], workspace_root: &Path) -> Option<()> {
+    let requested = ci_env
+        .iter()
+        .find_map(|(key, value)| (key == TEST_INVENTORY_FILE_ENV).then_some(value))?;
+    let requested = Path::new(requested);
+    let requested = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        workspace_root.join(requested)
+    };
+    // The Action contract permits one output, immediately below the canonical
+    // Cargo project root. Lexical equality rejects aliases such as nested paths.
+    if requested != workspace_root.join(TEST_INVENTORY_PUBLIC_FILE) {
+        return None;
+    }
+    Some(())
 }
 
 #[cfg(unix)]
@@ -301,7 +334,7 @@ fn prepare_test_inventory(binding: &TestInventoryBinding) -> bool {
 }
 
 #[cfg(unix)]
-fn valid_test_inventory(binding: &TestInventoryBinding) -> Option<TestInventoryOutput> {
+fn valid_test_inventory(binding: &TestInventoryBinding) -> Option<(TestInventoryOutput, Vec<u8>)> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let file = unsafe {
         let fd = libc::openat(
@@ -332,7 +365,103 @@ fn valid_test_inventory(binding: &TestInventoryBinding) -> Option<TestInventoryO
     let Ok(inventory) = serde_json::from_slice::<TestInventoryEvidence>(&bytes) else {
         return None;
     };
-    valid_test_inventory_payload(&inventory, binding)
+    valid_test_inventory_payload(&inventory, binding).map(|inventory| (inventory, bytes))
+}
+
+#[cfg(unix)]
+fn remove_published_test_inventory(binding: &TestInventoryBinding, file: &std::fs::File) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(created) = file.metadata() else {
+        return;
+    };
+    let mut entry = unsafe { std::mem::zeroed::<libc::stat>() };
+    let matched = unsafe {
+        libc::fstatat(
+            binding.project_root.as_raw_fd(),
+            c"homeboy-test-inventory.json".as_ptr(),
+            &mut entry,
+            libc::AT_SYMLINK_NOFOLLOW,
+        ) == 0
+            && (entry.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && entry.st_dev as u64 == created.dev()
+            && entry.st_ino as u64 == created.ino()
+    };
+    if matched {
+        let _ = unsafe {
+            libc::unlinkat(
+                binding.project_root.as_raw_fd(),
+                c"homeboy-test-inventory.json".as_ptr(),
+                0,
+            )
+        };
+    }
+}
+
+#[cfg(unix)]
+fn publish_test_inventory_with<W, S, M>(
+    binding: &TestInventoryBinding,
+    write: W,
+    sync: S,
+    metadata: M,
+) -> bool
+where
+    W: FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    S: FnOnce(&std::fs::File) -> std::io::Result<()>,
+    M: FnOnce(&std::fs::File) -> std::io::Result<std::fs::Metadata>,
+{
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+
+    let fd = unsafe {
+        libc::openat(
+            binding.project_root.as_raw_fd(),
+            c"homeboy-test-inventory.json".as_ptr(),
+            libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    if write(&mut file).is_err() || sync(&file).is_err() {
+        remove_published_test_inventory(binding, &file);
+        return false;
+    }
+    let Ok(created) = metadata(&file) else {
+        remove_published_test_inventory(binding, &file);
+        return false;
+    };
+    let mut published = unsafe { std::mem::zeroed::<libc::stat>() };
+    let verified = unsafe {
+        libc::fstatat(
+            binding.project_root.as_raw_fd(),
+            c"homeboy-test-inventory.json".as_ptr(),
+            &mut published,
+            libc::AT_SYMLINK_NOFOLLOW,
+        ) == 0
+            && (published.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && published.st_dev as u64 == created.dev()
+            && published.st_ino as u64 == created.ino()
+    };
+    if !verified {
+        remove_published_test_inventory(binding, &file);
+    }
+    verified
+}
+
+/// The parent publishes exactly the bytes it validated, never a reserialized
+/// approximation of child evidence.
+#[cfg(unix)]
+fn publish_test_inventory(binding: &TestInventoryBinding, bytes: &[u8]) -> bool {
+    publish_test_inventory_with(
+        binding,
+        |file| file.write_all(bytes),
+        |file| file.sync_all(),
+        |file| file.metadata(),
+    )
 }
 
 #[cfg(unix)]
@@ -794,7 +923,7 @@ fn run_main_test_workflow_inner(
         .then(|| {
             test_context
                 .as_ref()
-                .and_then(|_| test_inventory_binding(source_path, run_dir))
+                .and_then(|_| test_inventory_binding(&args.ci_env, source_path, run_dir))
         })
         .flatten()
         .filter(prepare_test_inventory);
@@ -849,7 +978,7 @@ fn run_main_test_workflow_inner(
         TEST_INVENTORY_FILE_ENV,
         inventory_binding
             .as_ref()
-            .map(|binding| binding.path.to_string_lossy())
+            .map(|binding| binding.child_path.to_string_lossy())
             .as_deref()
             .unwrap_or_default(),
     );
@@ -935,8 +1064,11 @@ fn run_main_test_workflow_inner(
 
     #[cfg(unix)]
     let test_inventory = inventory_binding.as_ref().and_then(|binding| {
-        valid_test_inventory(binding).filter(|inventory| {
+        valid_test_inventory(binding).and_then(|(inventory, bytes)| {
             revalidate_test_inventory_binding(binding, source_path, &inventory.runner)
+                .then(|| publish_test_inventory(binding, &bytes))
+                .filter(|published| *published)
+                .map(|_| inventory)
         })
     });
     // Descriptor-bound inventory evidence is Unix-only. Other platforms retain
@@ -2590,19 +2722,23 @@ mod tests {
             "requesting inventory mode without evidence must remain unmeasured"
         );
 
-        std::fs::write(&binding.path, "not json").expect("write malformed inventory");
+        std::fs::write(&binding.child_path, "not json").expect("write malformed inventory");
         assert!(
             valid_test_inventory(&binding).is_none(),
             "a malformed inventory must remain fail-closed"
         );
+        assert!(
+            !temp.path().join(TEST_INVENTORY_PUBLIC_FILE).exists(),
+            "malformed evidence must never publish a root inventory"
+        );
 
         std::fs::write(
-            &binding.path,
+            &binding.child_path,
             valid_inventory_document(&binding, "test", "executed"),
         )
         .expect("write inventory");
         let measured = valid_test_inventory(&binding);
-        let evidence = measured.as_ref().expect("validated inventory");
+        let (evidence, _) = measured.as_ref().expect("validated inventory");
         assert_eq!(evidence.schema, TEST_INVENTORY_SCHEMA);
         assert_eq!(evidence.test_count, 1);
         assert_eq!(
@@ -2675,7 +2811,7 @@ mod tests {
                 valid_inventory_document(&binding, "test", "skipped"),
             ),
         ] {
-            std::fs::write(&binding.path, document).expect("write invalid inventory");
+            std::fs::write(&binding.child_path, document).expect("write invalid inventory");
             assert!(
                 valid_test_inventory(&binding).is_none(),
                 "{case} must remain fail-closed"
@@ -2690,7 +2826,7 @@ mod tests {
             &canonical_inventory_json(&duplicate),
         );
         std::fs::write(
-            &binding.path,
+            &binding.child_path,
             serde_json::to_vec(&duplicate).expect("serialize duplicate inventory"),
         )
         .expect("write duplicate inventory");
@@ -2708,7 +2844,7 @@ mod tests {
             expected_outcome: None,
         };
         std::fs::write(
-            &binding.path,
+            &binding.child_path,
             inventory_document(&binding, vec![missing_outcome]),
         )
         .expect("write missing outcome inventory");
@@ -2725,24 +2861,24 @@ mod tests {
         let binding = test_inventory_binding_for_test(temp.path());
 
         std::fs::write(
-            &binding.path,
+            &binding.child_path,
             valid_inventory_document(&binding, "test", "executed"),
         )
         .expect("write stale inventory");
         assert!(prepare_test_inventory(&binding));
         assert!(
-            !binding.path.exists(),
+            !binding.child_path.exists(),
             "pre-existing evidence must not satisfy a new invocation"
         );
 
         std::fs::write(
-            &binding.path,
+            &binding.child_path,
             valid_inventory_document(&binding, "test", "executed"),
         )
         .expect("write inventory");
         assert!(valid_test_inventory(&binding).is_some());
         std::fs::write(
-            &binding.path,
+            &binding.child_path,
             valid_inventory_document(&binding, "tést", "executed"),
         )
         .expect("write unicode inventory");
@@ -2755,7 +2891,7 @@ mod tests {
             "suite::other",
             1,
         );
-        std::fs::write(&binding.path, tampered).expect("write tampered inventory");
+        std::fs::write(&binding.child_path, tampered).expect("write tampered inventory");
         assert!(
             valid_test_inventory(&binding).is_none(),
             "the inventory fingerprint must bind the listed tests"
@@ -2788,7 +2924,7 @@ mod tests {
             &canonical_inventory_json(&inventory),
         );
         std::fs::write(
-            &binding.path,
+            &binding.child_path,
             serde_json::to_vec(&inventory).expect("serialize cargo inventory"),
         )
         .expect("write cargo inventory");
@@ -2923,7 +3059,7 @@ print(hashlib.sha256(content.encode()).hexdigest())
             valid_inventory_document(&binding, "test", "executed"),
         )
         .expect("write target");
-        symlink(&target, &binding.path).expect("link inventory");
+        symlink(&target, &binding.child_path).expect("link inventory");
 
         assert!(valid_test_inventory(&binding).is_none());
         assert!(prepare_test_inventory(&binding));
@@ -2965,10 +3101,141 @@ print(hashlib.sha256(content.encode()).hexdigest())
     }
 
     #[cfg(unix)]
+    #[test]
+    fn inventory_publication_requires_the_fixed_root_output_and_preserves_collisions() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let run = tempfile::tempdir().expect("run directory");
+        let binding = test_inventory_binding_for_test_in(workspace.path(), run.path());
+        let output = workspace.path().join(TEST_INVENTORY_PUBLIC_FILE);
+        let valid = valid_inventory_document(&binding, "published", "executed").into_bytes();
+
+        assert!(requested_test_inventory_path(
+            &[(
+                TEST_INVENTORY_FILE_ENV.to_string(),
+                output.to_string_lossy().into_owned()
+            )],
+            workspace.path()
+        )
+        .is_some());
+        for rejected in [
+            tempfile::tempdir()
+                .expect("outside")
+                .path()
+                .join(TEST_INVENTORY_PUBLIC_FILE),
+            workspace
+                .path()
+                .join("nested")
+                .join(TEST_INVENTORY_PUBLIC_FILE),
+        ] {
+            assert!(requested_test_inventory_path(
+                &[(
+                    TEST_INVENTORY_FILE_ENV.to_string(),
+                    rejected.to_string_lossy().into_owned()
+                )],
+                workspace.path()
+            )
+            .is_none());
+        }
+
+        std::fs::write(&output, "existing regular entry").expect("create collision");
+        assert!(!publish_test_inventory(&binding, &valid));
+        assert_eq!(
+            std::fs::read(&output).expect("read collision"),
+            b"existing regular entry"
+        );
+        std::fs::remove_file(&output).expect("remove test collision");
+
+        let target = tempfile::NamedTempFile::new().expect("symlink target");
+        symlink(target.path(), &output).expect("create collision symlink");
+        assert!(!publish_test_inventory(&binding, &valid));
+        assert!(std::fs::symlink_metadata(&output)
+            .expect("inspect symlink")
+            .file_type()
+            .is_symlink());
+        std::fs::remove_file(&output).expect("remove test symlink");
+
+        assert!(publish_test_inventory(&binding, &valid));
+        assert_eq!(
+            std::fs::read(&output).expect("read published output"),
+            valid
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_publication_uses_held_project_root_and_cleans_only_its_entry_on_failure() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().expect("parent");
+        let workspace = parent.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let run = tempfile::tempdir().expect("run directory");
+        let binding = test_inventory_binding_for_test_in(&workspace, run.path());
+        let moved = parent.path().join("workspace-moved");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::rename(&workspace, &moved).expect("rename project root");
+        symlink(outside.path(), &workspace).expect("replace project root");
+        let bytes = valid_inventory_document(&binding, "held", "executed").into_bytes();
+        assert!(publish_test_inventory(&binding, &bytes));
+        assert_eq!(
+            std::fs::read(moved.join(TEST_INVENTORY_PUBLIC_FILE)).expect("read held output"),
+            bytes
+        );
+        assert!(!outside.path().join(TEST_INVENTORY_PUBLIC_FILE).exists());
+
+        let cleanup_root = tempfile::tempdir().expect("cleanup root");
+        let cleanup_run = tempfile::tempdir().expect("cleanup run");
+        for failure in ["write", "sync", "fstat"] {
+            let cleanup =
+                test_inventory_binding_for_test_in(cleanup_root.path(), cleanup_run.path());
+            let failed = match failure {
+                "write" => publish_test_inventory_with(
+                    &cleanup,
+                    |_| Err(std::io::Error::other("simulated write failure")),
+                    |_| Ok(()),
+                    |file| file.metadata(),
+                ),
+                "sync" => publish_test_inventory_with(
+                    &cleanup,
+                    |_| Ok(()),
+                    |_| Err(std::io::Error::other("simulated sync failure")),
+                    |file| file.metadata(),
+                ),
+                "fstat" => publish_test_inventory_with(
+                    &cleanup,
+                    |_| Ok(()),
+                    |_| Ok(()),
+                    |_| Err(std::io::Error::other("simulated fstat failure")),
+                ),
+                _ => unreachable!(),
+            };
+            assert!(!failed, "{failure} failure must reject publication");
+            assert!(
+                !cleanup_root
+                    .path()
+                    .join(TEST_INVENTORY_PUBLIC_FILE)
+                    .exists(),
+                "{failure} failure must remove only the file this parent created"
+            );
+        }
+    }
+
+    #[cfg(unix)]
     fn test_inventory_binding_for_test(run_dir: &Path) -> TestInventoryBinding {
+        test_inventory_binding_for_test_in(run_dir, run_dir)
+    }
+
+    #[cfg(unix)]
+    fn test_inventory_binding_for_test_in(
+        project_root: &Path,
+        run_dir: &Path,
+    ) -> TestInventoryBinding {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
         let run_dir = run_dir.canonicalize().expect("canonical run dir");
+        let project_root = project_root.canonicalize().expect("canonical project root");
         let descriptor = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -2976,10 +3243,11 @@ print(hashlib.sha256(content.encode()).hexdigest())
             .expect("open run directory");
         let metadata = descriptor.metadata().expect("run directory metadata");
         TestInventoryBinding {
-            path: run_dir.join(TEST_INVENTORY_FILE),
+            child_path: run_dir.join(TEST_INVENTORY_FILE),
             workspace_fingerprint: "b".repeat(64),
             cargo_runner_fingerprint: Some("a".repeat(64)),
             nextest_runner_fingerprint: Some("a".repeat(64)),
+            project_root: std::fs::File::open(&project_root).expect("open project root"),
             run_dir: descriptor,
             run_dir_device: metadata.dev(),
             run_dir_inode: metadata.ino(),
