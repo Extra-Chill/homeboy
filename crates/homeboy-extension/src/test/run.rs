@@ -26,7 +26,9 @@ pub use homeboy_extension_contract::test_results::{TestInventoryOutput, TestRunW
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(unix)]
+use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
 
@@ -838,17 +840,19 @@ fn run_main_test_workflow_inner(
                 .as_ref()
                 .map(|context| context.extension_id.as_str())
                 .unwrap_or_default(),
-        )
-        // The child receives a fixed run-dir output path; CI input cannot select it.
-        .env_if(
-            inventory_mode,
-            TEST_INVENTORY_FILE_ENV,
-            inventory_binding
-                .as_ref()
-                .map(|binding| binding.path.to_string_lossy())
-                .as_deref()
-                .unwrap_or_default(),
         );
+    // The child receives a fixed descriptor-bound output path; CI input cannot
+    // select it. Non-Unix inventory mode deliberately receives no producer path.
+    #[cfg(unix)]
+    let runner = runner.env_if(
+        inventory_mode,
+        TEST_INVENTORY_FILE_ENV,
+        inventory_binding
+            .as_ref()
+            .map(|binding| binding.path.to_string_lossy())
+            .as_deref()
+            .unwrap_or_default(),
+    );
     // In summary mode, capture the child's stdout/stderr into run evidence
     // instead of tee-ing the full compiler/test stream to the terminal. The
     // output is still persisted to artifacts below and a bounded failure tail
