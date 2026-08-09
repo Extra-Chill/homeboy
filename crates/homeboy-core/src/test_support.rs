@@ -148,6 +148,8 @@ impl HermeticTestContext {
             .env("HOMEBOY_ARTIFACT_ROOT", self.artifact_dir())
             .env("HOMEBOY_RUNTIME_TMPDIR", self.runtime_dir())
             .env("TMPDIR", self.temp_dir())
+            .env("TEMP", self.temp_dir())
+            .env("TMP", self.temp_dir())
             .env(
                 crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
                 self.invocation_runtime.path(),
@@ -453,9 +455,6 @@ pub struct HomeGuard {
     prior_controller_runtime_executable: Option<String>,
     prior_controller_runtime_source: Option<String>,
     prior_controller_runtime_identity: Option<String>,
-    prior_tmpdir: Option<String>,
-    prior_temp: Option<String>,
-    prior_tmp: Option<String>,
     context: HermeticTestContext,
     _guard: Option<MutexGuard<'static, ()>>,
 }
@@ -571,9 +570,6 @@ impl HomeGuard {
             std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV).ok();
         let prior_controller_runtime_identity =
             std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV).ok();
-        let prior_tmpdir = std::env::var("TMPDIR").ok();
-        let prior_temp = std::env::var("TEMP").ok();
-        let prior_tmp = std::env::var("TMP").ok();
         // The isolated HOME hosts `~/.config/homeboy/extensions/**/*.sh`
         // capability scripts that tests execute. On `noexec`-`/tmp` hosts a
         // plain `TempDir::new()` lands the whole HOME on a `noexec` mount,
@@ -606,9 +602,6 @@ impl HomeGuard {
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
-        std::env::set_var("TMPDIR", context.temp_dir());
-        std::env::set_var("TEMP", context.temp_dir());
-        std::env::set_var("TMP", context.temp_dir());
         crate::set_artifact_root_override(None);
         // Pin invocation runtime to a SHORT tempdir, isolated from `$TMPDIR`
         // and from the home tempdir (which itself can already live on a long
@@ -658,9 +651,6 @@ impl HomeGuard {
             prior_controller_runtime_executable,
             prior_controller_runtime_source,
             prior_controller_runtime_identity,
-            prior_tmpdir,
-            prior_temp,
-            prior_tmp,
             context,
             _guard: guard,
         }
@@ -844,14 +834,17 @@ const LEAKED_TEMPDIR_MAX_AGE: std::time::Duration = std::time::Duration::from_se
 /// the first tempdir is created. It only removes directories:
 /// - directly under a known tempdir root (never recurses into subdirs),
 /// - whose name starts with `hb-test-`,
+/// - that does not contain this process's active `TMPDIR`,
 /// - that this process does not own, and whose owning PID is gone — or, for
 ///   names with no PID (written by an older binary), whose mtime is older than
 ///   [`LEAKED_TEMPDIR_MAX_AGE`].
 ///
 /// All errors are swallowed — a failed sweep must never break a test.
 #[cfg(unix)]
-fn sweep_leaked_test_tempdirs(roots: &[PathBuf]) {
+fn sweep_leaked_test_tempdirs(roots: &[PathBuf], active_tempdir: Option<&Path>) {
     let now = std::time::SystemTime::now();
+    let active_tempdir =
+        active_tempdir.map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
     let mut swept_roots: Vec<PathBuf> = Vec::new();
     for root in roots {
         if swept_roots.contains(root) {
@@ -874,6 +867,13 @@ fn sweep_leaked_test_tempdirs(roots: &[PathBuf]) {
                 continue;
             };
             if !metadata.is_dir() {
+                continue;
+            }
+            let canonical_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if active_tempdir
+                .as_ref()
+                .is_some_and(|active| active.starts_with(&canonical_path))
+            {
                 continue;
             }
             let abandoned = match tempdir_owner_pid(name) {
@@ -908,7 +908,8 @@ fn sweep_leaked_test_tempdirs_once() {
                 roots.push(extra);
             }
         }
-        sweep_leaked_test_tempdirs(&roots);
+        let active_tempdir = std::env::var_os("TMPDIR").map(PathBuf::from);
+        sweep_leaked_test_tempdirs(&roots, active_tempdir.as_deref());
     });
 }
 
@@ -1100,18 +1101,6 @@ impl Drop for HomeGuard {
             None => std::env::remove_var(
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
             ),
-        }
-        match &self.prior_tmpdir {
-            Some(value) => std::env::set_var("TMPDIR", value),
-            None => std::env::remove_var("TMPDIR"),
-        }
-        match &self.prior_temp {
-            Some(value) => std::env::set_var("TEMP", value),
-            None => std::env::remove_var("TEMP"),
-        }
-        match &self.prior_tmp {
-            Some(value) => std::env::set_var("TMP", value),
-            None => std::env::remove_var("TMP"),
         }
         reset_cached_test_state();
     }
@@ -2435,7 +2424,7 @@ mod tests {
         fs::write(&stray_file, b"file").expect("write stray file");
         let _ = fs::set_permissions(&stray_file, fs::Permissions::from_mode(0o644));
 
-        sweep_leaked_test_tempdirs(std::slice::from_ref(&root.path().to_path_buf()));
+        sweep_leaked_test_tempdirs(std::slice::from_ref(&root.path().to_path_buf()), None);
 
         assert!(!stale.exists(), "stale hb-test- dir should be swept");
         assert!(fresh.exists(), "fresh hb-test- dir must be spared");
@@ -2587,6 +2576,10 @@ mod tests {
         let dead = root
             .path()
             .join(format!("{TEST_TEMPDIR_PREFIX}{dead_pid}-deadxx"));
+        let active = root
+            .path()
+            .join(format!("{TEST_TEMPDIR_PREFIX}{dead_pid}-active"));
+        let active_tmp = active.join("tmp");
         // This process is unambiguously alive.
         let live = root.path().join(owned_tempdir_prefix() + "livexx");
         // No PID segment and freshly created — the age fallback must keep it.
@@ -2594,14 +2587,18 @@ mod tests {
         // Not ours at all.
         let unrelated = root.path().join("someone-elses-dir");
 
-        for path in [&dead, &live, &legacy_fresh, &unrelated] {
+        for path in [&dead, &active_tmp, &live, &legacy_fresh, &unrelated] {
             fs::create_dir_all(path).expect("seed sweep fixture");
             fs::write(path.join("payload"), b"x").expect("seed payload");
         }
 
-        sweep_leaked_test_tempdirs(&[root.path().to_path_buf()]);
+        sweep_leaked_test_tempdirs(&[root.path().to_path_buf()], Some(&active_tmp));
 
         assert!(!dead.exists(), "a dead owner's tempdir must be reclaimed");
+        assert!(
+            active.exists(),
+            "the active TMPDIR hierarchy must never be reclaimed"
+        );
         assert!(live.exists(), "a live owner's tempdir must be preserved");
         assert!(
             legacy_fresh.exists(),
