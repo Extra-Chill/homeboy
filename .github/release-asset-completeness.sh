@@ -13,13 +13,16 @@
 # group. A guard that lives only on the happy path of a pipeline that is not
 # running is not a guard.
 #
-# So the contract moves here: one script, no cargo-dist invocation, no network
-# beyond a single inventory read, callable from
+# So the contract also lives here: one script, no cargo-dist invocation, no
+# network beyond a single inventory read, callable from `release-integrity.yml`
+# on `release: published` and on a schedule. That catches every publication,
+# including a local `homeboy release` from a laptop, which is what a 7-asset
+# macOS-only inventory looks like.
 #
-#   1. `release.yml`'s `host` job, BEFORE the finalizer publishes (a gate), and
-#   2. `release-integrity.yml`, on `release: published` and on a schedule, which
-#      fires no matter WHO published — including a local `homeboy release` from
-#      a laptop, which is what a 7-asset macOS-only inventory looks like.
+# `release.yml` cannot call this before finalization: absent-release recovery
+# intentionally has a tag but no remote Release object for `gh release view` to
+# inspect. The owning `github.release` finalizer creates that object as a draft,
+# validates its declared artifacts, and only then publishes it.
 #
 # The release workflow passes cargo-dist's planned asset inventory directly.
 # That plan is the authoritative contract: it includes the configured platform
