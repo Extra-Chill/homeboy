@@ -45,6 +45,7 @@ for output in one two; do
 done
 cmp "${tmp}/one.json" "${tmp}/two.json" || { printf 'FAIL: identical inventories must produce byte-identical plans\n'; exit 1; }
 jq -e '[.shards[].tests[]] | sort == ["fast","medium","slow","unknown"]' "${tmp}/one.json" >/dev/null || { printf 'FAIL: plan membership is not exact\n'; exit 1; }
+jq -e '[.shards[].tests[]] | length == (unique | length)' "${tmp}/one.json" >/dev/null || { printf 'FAIL: plan assigns a test to more than one shard\n'; exit 1; }
 jq -e '.inventory_fingerprint == "inventory-a" and all(.shards[]; .inventory_fingerprint != "inventory-a")' "${tmp}/one.json" >/dev/null || { printf 'FAIL: plan must retain the parent fingerprint while shards fingerprint their projections\n'; exit 1; }
 while IFS= read -r shard; do
   shard_id="$(jq -r .id <<< "${shard}")"
