@@ -468,6 +468,34 @@ pub(super) fn write_session(session: &RunnerSession) -> Result<()> {
     )
 }
 
+/// Replace a session only when the durable snapshot is unchanged. Callers hold
+/// the runner registry lock; this prevents a stale controller from attaching a
+/// newly opened tunnel to a reconnected session.
+pub(super) fn replace_session_if_matches(
+    expected: &RunnerSession,
+    replacement: &RunnerSession,
+) -> Result<bool> {
+    let controller_id = if expected.mode == RunnerTunnelMode::DirectSsh {
+        expected.controller_id.clone().unwrap_or_else(controller_id)
+    } else {
+        controller_id()
+    };
+    let path = paths::runner_controller_session_file(&expected.runner_id, &controller_id)?;
+    replace_session_at_if_matches(&path, expected, replacement)
+}
+
+fn replace_session_at_if_matches(
+    path: &Path,
+    expected: &RunnerSession,
+    replacement: &RunnerSession,
+) -> Result<bool> {
+    if read_session_at(path)? != Some(expected.clone()) {
+        return Ok(false);
+    }
+    write_session_at(path, replacement)?;
+    Ok(true)
+}
+
 pub(super) fn write_ownership(session: &RunnerSession) -> Result<()> {
     write_session_at(&ownership_path(&session.runner_id)?, session)
 }
@@ -687,6 +715,23 @@ mod tests {
         assert_eq!(
             read_session_at(&path).expect("read replacement session"),
             Some(replacement)
+        );
+    }
+
+    #[test]
+    fn conditional_replace_refuses_a_reconnected_controller_session() {
+        let root = TempDir::new().expect("session directory");
+        let path = root.path().join("controller.json");
+        let recorded = session("controller", "lease-recorded");
+        let reconnected = session("controller", "lease-reconnected");
+        let projected = session("controller", "lease-recorded");
+        write_session_at(&path, &reconnected).expect("write reconnected session");
+
+        assert!(!replace_session_at_if_matches(&path, &recorded, &projected)
+            .expect("conditional replace"));
+        assert_eq!(
+            read_session_at(&path).expect("read reconnected session"),
+            Some(reconnected)
         );
     }
 

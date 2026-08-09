@@ -1400,6 +1400,21 @@ pub(super) fn runner_status_operator_commands(
         .iter()
         .chain(report.stale_runner_jobs.iter())
     {
+        if job.lifecycle_state.as_deref() == Some("unknown_owner") {
+            if !commands
+                .iter()
+                .any(|command| command.scope == "unknown_owner_reconcile")
+            {
+                commands.push(RunnerOperatorCommand {
+                    scope: "unknown_owner_reconcile",
+                    runner_id: report.runner_id.clone(),
+                    job_id: None,
+                    command: format!("homeboy runner reconcile {}", shell_arg(&report.runner_id)),
+                    description: "Reconcile the daemon lease and /jobs store projection without cancelling the unprojected live owner.".to_string(),
+                });
+            }
+            continue;
+        }
         if job.lifecycle_state.as_deref() == Some("recoverable_orphan") {
             if let Some(run_id) = job.durable_run_id.as_deref() {
                 commands.push(RunnerOperatorCommand {

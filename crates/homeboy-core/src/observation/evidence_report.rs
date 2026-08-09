@@ -231,9 +231,17 @@ pub struct EvidenceHomeboyIdentity {
     pub source: &'static str,
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_commands: Vec<String>,
     pub purpose: &'static str,
 }
 
@@ -440,19 +448,66 @@ fn evidence_homeboy_provenance(run: &RunRecord) -> EvidenceHomeboyProvenance {
         owner: "command_process_that_started_this_observation_run",
         source: "run.homeboy_version",
         version: run.homeboy_version.clone(),
+        build_identity: None,
+        binary_path: None,
+        unavailable_reason: run.homeboy_version.is_none().then_some(
+            "the process that created this observation did not record its Homeboy version",
+        ),
         runner_id: None,
         runner_job_id: None,
+        evidence_commands: Vec::new(),
         purpose: "Version recorded by the Homeboy process that created this observation run; in runner workflows this is the child command/run binary, not proof of the controller CLI, active daemon, or configured runner job binary.",
     }];
 
+    if let Some(provenance) = runner_execution_provenance(&run.metadata_json) {
+        identities.extend([
+            evidence_binary_identity(
+                "controller_cli",
+                "controller_dispatch",
+                "metadata.runner_execution_record.orchestration_provenance.controller_binary",
+                &provenance.controller_binary,
+                "Homeboy CLI that submitted this runner execution.",
+            ),
+            evidence_binary_identity(
+                "active_daemon",
+                "runner_daemon_session",
+                "metadata.runner_execution_record.orchestration_provenance.runner_daemon_binary",
+                &provenance.runner_daemon_binary,
+                "Active runner daemon observed when this execution was dispatched.",
+            ),
+            evidence_binary_identity(
+                "configured_job_binary",
+                "runner_configuration",
+                "metadata.runner_execution_record.orchestration_provenance.runner_command_binary",
+                &provenance.runner_command_binary,
+                "Configured Homeboy binary for runner job commands; this is distinct from the daemon binary.",
+            ),
+        ]);
+    }
+
     if let Some((runner_id, runner_job_id, source)) = runner_job_context(&run.metadata_json) {
+        let evidence_commands = runner_job_id
+            .as_deref()
+            .map(|job_id| {
+                vec![
+                    format!("homeboy runner job logs {runner_id} {job_id}"),
+                    format!("homeboy runner job logs {runner_id} {job_id} --json"),
+                ]
+            })
+            .unwrap_or_default();
         identities.push(EvidenceHomeboyIdentity {
             role: "runner_job_handoff",
             owner: "runner_broker_or_lab_offload",
             source,
             version: None,
+            build_identity: None,
+            binary_path: None,
+            unavailable_reason: Some(
+                "runner handoff identifies a job, not a Homeboy executable; inspect the linked job evidence",
+            ),
             runner_id: Some(runner_id),
             runner_job_id,
+            evidence_commands,
             purpose: "Runner job context associated with this observation run. Use runner status/job logs to compare controller_cli, active_daemon, and configured_job_binary identities for the same runner.",
         });
     }
@@ -470,6 +525,47 @@ fn evidence_homeboy_provenance(run: &RunRecord) -> EvidenceHomeboyProvenance {
         schema: "homeboy/homeboy-provenance/v1",
         identities,
         warnings,
+    }
+}
+
+fn runner_execution_provenance(
+    metadata: &Value,
+) -> Option<crate::runner_execution_envelope::OrchestrationTargetProvenance> {
+    serde_json::from_value(
+        metadata
+            .get("runner_execution_record")?
+            .get("orchestration_provenance")?
+            .clone(),
+    )
+    .ok()
+}
+
+fn evidence_binary_identity(
+    role: &'static str,
+    owner: &'static str,
+    source: &'static str,
+    binary: &crate::runner_execution_envelope::BinaryProvenance,
+    purpose: &'static str,
+) -> EvidenceHomeboyIdentity {
+    let unavailable_reason = match (&binary.version, &binary.build_identity) {
+        (Some(_), _) | (_, Some(_)) => None,
+        _ if binary.path.is_some() => {
+            Some("the binary path was recorded, but its Homeboy version was not observed")
+        }
+        _ => Some("this execution did not observe an identity for this binary"),
+    };
+    EvidenceHomeboyIdentity {
+        role,
+        owner,
+        source,
+        version: binary.version.clone(),
+        build_identity: binary.build_identity.clone(),
+        binary_path: binary.path.clone(),
+        unavailable_reason,
+        runner_id: None,
+        runner_job_id: None,
+        evidence_commands: Vec::new(),
+        purpose,
     }
 }
 
