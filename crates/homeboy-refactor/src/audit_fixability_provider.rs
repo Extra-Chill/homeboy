@@ -78,7 +78,7 @@ pub fn register() {
     register_audit_fixability_provider(Box::new(RefactorFixabilityProvider));
 }
 
-#[cfg(all(test, feature = "slow-tests"))]
+#[cfg(test)]
 mod tests {
     use super::register;
     use homeboy_code_audit::{
