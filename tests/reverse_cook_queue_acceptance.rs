@@ -209,6 +209,15 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
         &checkout,
         &["commit", "-m", "ignore runner workspace"],
     );
+    homeboy::core::component::inventory::write_standalone_registration(
+        &homeboy::core::component::Component::new(
+            "cook-source".to_string(),
+            checkout.display().to_string(),
+            String::new(),
+            None,
+        ),
+    )
+    .expect("register Cook source component");
     let task_worktree = context.root().join("cook-task");
     homeboy_core::test_support::run_git_fixture_command(
         &checkout,
@@ -346,6 +355,8 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
             "--detach-after-handoff",
             "agent-task",
             "cook",
+            "--repo",
+            "cook-source",
             "--prompt",
             "Run the deterministic fixture provider.",
             "--backend",
