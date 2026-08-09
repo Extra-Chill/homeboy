@@ -118,14 +118,18 @@ enum DaemonCommand {
         // closed on the daemon owner lock, daemon process candidates, and a
         // reachable listener at --addr.
         //
-        // This deliberately carries NO doc comment. Controllers negotiate the
-        // lease-less recovery contract by running this subcommand's `--help` on
+        // This deliberately carries NO doc comment. Current controllers
+        // negotiate the lease-less recovery contract from the typed capability
+        // list advertised in `self identity`
+        // (`homeboy_lab_runner_contract::daemon_recovery_capabilities`); older
+        // controllers still fall back to running this subcommand's `--help` on
         // the remote and matching bare long options
-        // (`connection::declared_long_options` only accepts an option whose
-        // trailing tokens are value placeholders). Rendering help text after
-        // `--confirm-no-daemon-owner` removes it from the advertised contract
-        // and makes every controller refuse remote lease-less recovery. The
-        // deprecation is documented in `docs/commands/daemon.md` instead.
+        // (`homeboy_lab_runner_contract::declared_long_options` only accepts an
+        // option whose trailing tokens are value placeholders). Rendering help
+        // text after `--confirm-no-daemon-owner` removes it from the advertised
+        // contract and makes every help-scraping controller refuse remote
+        // lease-less recovery. The deprecation is documented in
+        // `docs/commands/daemon.md` instead.
         #[arg(long)]
         confirm_no_daemon_owner: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
@@ -877,9 +881,10 @@ mod tests {
 
     /// The released spellings still appear in composed remote commands and in
     /// operator runbooks. They must keep parsing for one release, and — because
-    /// controllers negotiate the lease-less recovery contract by reading
-    /// `--confirm-no-daemon-owner` out of the remote's `--help` output — they
-    /// must also stay visible in help rather than being hidden.
+    /// controllers still negotiate the lease-less recovery contract by reading
+    /// `--confirm-no-daemon-owner` out of the remote's `--help` output when the
+    /// remote does not advertise the typed capability list — they must also
+    /// stay visible in help rather than being hidden.
     #[test]
     fn deprecated_confirmations_remain_accepted_and_advertised() {
         for args in [
@@ -932,20 +937,18 @@ mod tests {
     }
 
     /// Controllers negotiate the lease-less recovery contract by running this
-    /// subcommand's `--help` on the remote and matching *bare* long options:
-    /// `homeboy_lab_runner::connection::declared_long_options` only accepts an
-    /// option whose trailing tokens are value placeholders. Adding a doc comment
-    /// to `--confirm-no-daemon-owner` makes clap render help text after the flag
-    /// name, silently removing it from the advertised contract and making every
-    /// controller refuse remote lease-less recovery. This reproduces that
-    /// predicate against the real rendered help so the coupling cannot rot.
+    /// subcommand's `--help` on the remote and matching *bare* long options —
+    /// now only as the fallback for older binaries that do not advertise the
+    /// typed capability list (`self identity`). The predicate lives in
+    /// `homeboy_lab_runner_contract::declared_long_options`, which only accepts
+    /// an option whose trailing tokens are value placeholders. Adding a doc
+    /// comment to `--confirm-no-daemon-owner` makes clap render help text after
+    /// the flag name, silently removing it from the advertised contract and
+    /// making every controller refuse remote lease-less recovery. This
+    /// reproduces that predicate against the real rendered help so the coupling
+    /// cannot rot.
     #[test]
     fn leaseless_recovery_help_advertises_a_bare_confirmation_option() {
-        fn is_option_value_placeholder(token: &str) -> bool {
-            (token.starts_with('<') && token.ends_with('>'))
-                || (token.starts_with("[<") && token.ends_with(">]"))
-        }
-
         let mut command = Cli::command();
         let daemon = command
             .find_subcommand_mut("daemon")
@@ -955,29 +958,9 @@ mod tests {
             .expect("reconcile-leaseless-orphans subcommand");
         let help = leaseless.render_help().to_string();
 
-        let mut declared = Vec::new();
-        let mut in_options = false;
-        for line in help.lines() {
-            let trimmed = line.trim();
-            if line == trimmed && trimmed.ends_with(':') {
-                in_options = trimmed.eq_ignore_ascii_case("options:");
-                continue;
-            }
-            if !in_options || line == trimmed {
-                continue;
-            }
-            let mut tokens = trimmed.split_whitespace();
-            let Some(option) = tokens.next() else {
-                continue;
-            };
-            let option = option.trim_end_matches(',');
-            if option.starts_with("--") && tokens.all(is_option_value_placeholder) {
-                declared.push(option.to_string());
-            }
-        }
-
+        let declared = homeboy_lab_runner_contract::declared_long_options(&help);
         assert!(
-            declared.iter().any(|option| option == "--confirm-no-daemon-owner"),
+            declared.contains("--confirm-no-daemon-owner"),
             "--confirm-no-daemon-owner must render as a bare long option or controllers refuse remote lease-less recovery; declared={declared:?} help={help}"
         );
     }

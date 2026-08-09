@@ -533,6 +533,109 @@ fn parses_self_identity_json_envelope() {
         identity.build_identity.as_deref(),
         Some("homeboy 0.228.13+19a41cd5102d")
     );
+    // An envelope with no capability field is an older binary: absent, not
+    // "advertises none", so the caller keeps the help-scrape fallback (#11102).
+    assert_eq!(identity.daemon_recovery_capabilities, None);
+}
+
+/// #11102: the typed capability list is the primary daemon-recovery contract,
+/// so the parser must actually read the field the identity envelope writes.
+/// Before this, `self identity` serialized a capability list that
+/// `parse_self_identity_output` silently discarded.
+#[test]
+fn parses_advertised_daemon_recovery_capabilities() {
+    let identity = parse_self_identity_output(
+        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-recovery-leaseless","version":1},{"id":"daemon-recovery-state-loss","version":1}]}}"#,
+    )
+    .expect("identity");
+
+    let advertised = identity
+        .daemon_recovery_capabilities
+        .expect("typed capability list is parsed, not discarded");
+    let ids = advertised
+        .iter()
+        .map(|capability| capability.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec!["daemon-recovery-leaseless", "daemon-recovery-state-loss"]
+    );
+}
+
+/// An explicitly empty list is authoritative "this runner advertises no
+/// recovery capability", which must stay distinguishable from an absent field.
+/// Collapsing the two would make a current runner that dropped a capability
+/// silently fall back to scraping its own help text.
+#[test]
+fn an_explicitly_empty_capability_list_is_not_an_absent_one() {
+    let identity = parse_self_identity_output(
+        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[]}}"#,
+    )
+    .expect("identity");
+
+    assert_eq!(identity.daemon_recovery_capabilities, Some(Vec::new()));
+}
+
+/// The parser must never turn a malformed or unexpected capability field into
+/// a hard failure: the identity probe is on the connect path, and an older or
+/// divergent runner has to degrade to the scrape rather than refuse to connect.
+#[test]
+fn malformed_capability_fields_degrade_to_the_scrape_fallback() {
+    for body in [
+        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":null}}"#,
+        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":"leaseless"}}"#,
+        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-recovery-leaseless"}]}}"#,
+    ] {
+        let identity = parse_self_identity_output(body).expect("identity still parses");
+        assert_eq!(identity.version, "0.330.0");
+        assert_eq!(
+            identity.daemon_recovery_capabilities, None,
+            "a malformed capability field must degrade, not fail: {body}"
+        );
+    }
+}
+
+/// Unknown ids and future versions are preserved verbatim rather than filtered.
+/// Matching is by id, so a newer runner advertising capabilities this
+/// controller has never heard of must still negotiate the ones it does know.
+#[test]
+fn unknown_ids_and_future_versions_are_preserved() {
+    let identity = parse_self_identity_output(
+        r#"{"success":true,"data":{"version":"9.9.9","display":"homeboy 9.9.9+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-recovery-leaseless","version":7},{"id":"a-capability-from-the-future","version":2}]}}"#,
+    )
+    .expect("identity");
+
+    let advertised = identity
+        .daemon_recovery_capabilities
+        .expect("forward-compatible list parses");
+    assert_eq!(advertised.len(), 2);
+    assert!(homeboy_lab_runner_contract::daemon_recovery_capability_negotiated(
+        Some(advertised.as_slice()),
+        homeboy_lab_runner_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+        || Err("the scrape must not run when a typed list is present".to_string()),
+    )
+    .expect("negotiation succeeds"));
+}
+
+/// The drift this issue is about: the envelope and the parser are written in
+/// different crates. Bind them, so renaming the field on one side fails here
+/// rather than silently reverting every controller to scraping help text.
+#[test]
+fn the_advertised_capability_set_round_trips_through_the_parser() {
+    let advertised = homeboy_lab_runner_contract::daemon_recovery_capabilities();
+    let body = serde_json::json!({
+        "success": true,
+        "data": {
+            "version": "0.330.0",
+            "display": "homeboy 0.330.0+19a41cd5102d",
+            "daemon_recovery_capabilities": advertised,
+        }
+    })
+    .to_string();
+
+    let identity = parse_self_identity_output(&body).expect("identity");
+
+    assert_eq!(identity.daemon_recovery_capabilities, Some(advertised));
 }
 
 #[test]
@@ -950,6 +1053,7 @@ fn observed_matching_daemon_identity_reconciles_stale_session_metadata() {
     let configured = RemoteHomeboyIdentity {
         version: "0.298.1".to_string(),
         build_identity: Some("homeboy 0.298.1+7d7b8e656466".to_string()),
+        daemon_recovery_capabilities: None,
     };
 
     assert!(reconcile_session_metadata(

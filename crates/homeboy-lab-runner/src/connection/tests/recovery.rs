@@ -2057,6 +2057,7 @@ fn leaseless_recovery_refuses_failed_or_timed_out_probe() {
 fn leaseless_recovery_does_not_mutate_before_successful_negotiation() {
     let events = std::cell::RefCell::new(Vec::new());
     let result = execute_remote_leaseless_recovery(
+        None,
         || {
             events.borrow_mut().push("probe");
             command_output(true, "OPTIONS:\n    --addr <ADDR>\n", false)
@@ -2269,6 +2270,7 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
                 replacement_operation_id: None,
                 admission_fence: None,
                 registry_lock_held: false,
+                daemon_recovery_capabilities: None,
             })
             .expect("replacement succeeds");
             assert_eq!(daemon.lease_id.as_deref(), Some("lease-new"));
@@ -2301,6 +2303,7 @@ fn idle_stale_replacement_refuses_a_post_stop_owner_or_identity_change() {
                 replacement_operation_id: None,
                 admission_fence: None,
                 registry_lock_held: false,
+                daemon_recovery_capabilities: None,
             })
             .expect_err("concurrent stale daemon is refused");
             assert!(error.contains("ownership changed"));
@@ -2327,6 +2330,7 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
                 replacement_operation_id: None,
                 admission_fence: None,
                 registry_lock_held: false,
+                daemon_recovery_capabilities: None,
             })
             .expect_err("stale replacement identity is refused");
             assert!(error.contains("does not match configured runner binary"));
