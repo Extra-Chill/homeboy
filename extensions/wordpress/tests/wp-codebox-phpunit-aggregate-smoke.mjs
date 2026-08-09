@@ -125,6 +125,7 @@ try {
       'wp-codebox-phpunit/files/test-results.json',
       'wp-codebox-phpunit/files/phpunit-output.log',
       'wp-codebox-phpunit/files/phpunit-execution-diagnosis.json',
+      'wp-codebox-phpunit/files/recipe-run-steps.json',
       'wp-codebox-phpunit/files/test-failures.json',
     ], testCase.name);
     const durableSummary = JSON.parse(await readFile(path.join(invocationArtifacts, 'wp-codebox-phpunit/files/test-results.json'), 'utf8')).summary;

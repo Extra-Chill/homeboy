@@ -582,6 +582,7 @@ async function publishPhpunitArtifacts(artifactDirectory, status) {
     { name: 'test-results.json', kind: 'test-results', role: 'structured-test-results', semantic_key: 'test_results', content_type: 'application/json', copy: true },
     { name: 'phpunit-output.log', kind: 'phpunit-output', role: 'raw-test-output', semantic_key: 'phpunit_output', content_type: 'text/plain', copy: true },
     { name: 'phpunit-execution-diagnosis.json', kind: 'phpunit-execution-diagnosis', role: 'test-execution-diagnosis', semantic_key: 'phpunit_execution_diagnosis', content_type: 'application/json', copy: true },
+    { name: 'recipe-run-steps.json', kind: 'recipe-run-steps', role: 'recipe-run-step-ledger', semantic_key: 'recipe_run_steps', content_type: 'application/json', copy: true },
     { name: 'test-failures.json', kind: 'test-failures', role: 'structured-test-failures', semantic_key: 'test_failures', content_type: 'application/json' },
   ];
   await withInvocationArtifactLock(invocationArtifacts, async () => {
@@ -868,6 +869,7 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
   const logsDirectory = path.join(artifactDirectory, 'logs');
   const testResultsPath = path.join(filesDirectory, 'test-results.json');
   const phpunitOutputPath = path.join(filesDirectory, 'phpunit-output.log');
+  const recipeRunStepsPath = path.join(filesDirectory, 'recipe-run-steps.json');
   const managedRuntimeServicesPath = path.join(filesDirectory, 'managed-runtime-services.json');
   await mkdir(filesDirectory, { recursive: true });
   await mkdir(logsDirectory, { recursive: true });
@@ -876,7 +878,13 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
 
   const stdout = await readFile(execution.stdoutPath, 'utf8');
   const stderr = await readFile(execution.stderrPath, 'utf8');
-  const output = extractPhpunitOutput(stdout, stderr);
+  // The recipe-run JSON payload carries the step ledger the raw log concatenation
+  // discards. Preserve it as first-class structured evidence so a run that never
+  // reaches the PHPUnit step still names the stage that stopped it.
+  const recipeRun = parseRecipeRunPayload(stdout);
+  const recipeRunSteps = buildRecipeRunStepsLedger(recipeRun);
+  await writeFile(recipeRunStepsPath, `${JSON.stringify(recipeRunSteps, null, 2)}\n`);
+  const output = extractPhpunitOutput(stdout, stderr, recipeRun);
   await writeFile(phpunitOutputPath, output);
   if (managedRuntimeServices.length > 0) {
     await writeFile(managedRuntimeServicesPath, `${JSON.stringify(managedRuntimeServices, null, 2)}\n`);
@@ -915,6 +923,7 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
       { kind: 'structured-test-results', uri: 'artifact://files/test-results.json' },
       { kind: 'raw-phpunit-output', uri: 'artifact://files/phpunit-output.log' },
       { kind: 'test-execution-diagnosis', uri: 'artifact://files/phpunit-execution-diagnosis.json' },
+      { kind: 'recipe-run-steps', uri: 'artifact://files/recipe-run-steps.json' },
     ];
     if (managedRuntimeServices.length > 0) {
       evidenceReferences.push({ kind: 'managed-runtime-services', uri: 'artifact://files/managed-runtime-services.json' });
@@ -923,12 +932,13 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     await writeFile(testResultsPath, `${JSON.stringify(results, null, 2)}\n`);
   }
 
-  const diagnosis = await phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog);
+  const diagnosis = await phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog, recipeRunSteps);
   await writeFile(path.join(filesDirectory, 'phpunit-execution-diagnosis.json'), `${JSON.stringify(diagnosis, null, 2)}\n`);
 
   process.stdout.write('Structured PHPUnit evidence: artifact://files/test-results.json\n');
   process.stdout.write('Full PHPUnit output: artifact://files/phpunit-output.log\n');
   process.stdout.write('PHPUnit execution diagnosis: artifact://files/phpunit-execution-diagnosis.json\n');
+  process.stdout.write('Recipe run step ledger: artifact://files/recipe-run-steps.json\n');
   if (stageFailure) {
     process.stdout.write(`BOOTSTRAP FAILURE: ${stageFailure.replace(/^STAGE_(FAIL|FATAL|DIE):/, '')}\n`);
   }
@@ -944,8 +954,12 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
 }
 // A selected test set must either execute or say why it did not. The sandbox
 // bootstrap logs stage markers to a diagnostic file; classify them so a zero
-// count names the failing seam instead of reporting an empty pass.
-async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog) {
+// count names the failing seam instead of reporting an empty pass. The
+// recipe-run step ledger supplies the stage identity for runs that never
+// reached the sandbox bootstrap at all (or that stopped inside a recipe step),
+// and is evaluated before the bootstrap_evidence_unavailable fallback so the
+// most specific stage wins.
+async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog, recipeRunSteps) {
   const summary = isObject(results?.summary) ? results.summary : {};
   const executed = Number.isInteger(summary.total) ? summary.total : 0;
   const markers = stageLog === null
@@ -986,7 +1000,43 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
     if (executed > 0) {
       return { cause: 'tests_executed', detail: `PHPUnit executed ${executed} test(s).`, remediation: 'No execution diagnosis is required.' };
     }
+    const failedRecipeStep = (recipeRunSteps?.executions || []).find((step) => Number.isInteger(step.exit_code) && step.exit_code !== 0);
+    if (recipeRunSteps?.parse_status === 'unparseable') {
+      return {
+        cause: 'recipe_run_payload_unparseable',
+        detail: 'The recipe-run JSON payload could not be parsed, so no execution step ledger is available.',
+        remediation: 'Read logs/recipe-run.stdout.log and logs/recipe-run.stderr.log for the raw recipe-run output; a crashed or truncated recipe-run may not have flushed its JSON summary.',
+      };
+    }
+    if (recipeRunSteps?.parse_status === 'no_executions') {
+      return {
+        cause: 'recipe_run_no_executions',
+        detail: 'The recipe-run payload parsed but declared no execution steps, so no sandbox step ran and PHPUnit never started.',
+        remediation: 'Inspect artifact://files/recipe-run-steps.json and logs/recipe-run.stderr.log for why the recipe dispatched no steps.',
+      };
+    }
+    if (failedRecipeStep) {
+      return {
+        cause: 'recipe_step_failed',
+        detail: `recipe step '${recipeStepName(failedRecipeStep)}' exited with code ${failedRecipeStep.exit_code} before PHPUnit executed.`,
+        remediation: 'Read the failing step trace in artifact://files/phpunit-output.log and its ledger entry in artifact://files/recipe-run-steps.json; fix the command, dependency, or configuration that step depends on.',
+      };
+    }
+    // A missing PHPUnit step is inferred from the ledger, so it must lose to
+    // any stage marker that names the seam directly. The bootstrap legitimately
+    // skips the PHPUnit invocation when discovery or the changed-file scope
+    // matched nothing, and `NO_TEST_FILES` / `SCOPED_TEST_FILES ... matched=0`
+    // is a sharper answer than "no step invoked PHPUnit". With no stage log
+    // there is no sharper answer, so the ledger wins there.
+    const phpunitStepNotExecuted = {
+      cause: 'phpunit_step_not_executed',
+      detail: `The recipe-run ledger recorded ${recipeRunSteps?.executions?.length ?? 0} execution step(s) but none invoked PHPUnit, so test execution never started.`,
+      remediation: 'Inspect artifact://files/recipe-run-steps.json for the step ledger and artifact://files/phpunit-output.log for the setup output that was retained.',
+    };
     if (stageLog === null) {
+      if (recipeRunSteps?.phpunit_executed === false) {
+        return phpunitStepNotExecuted;
+      }
       return {
         cause: 'bootstrap_evidence_unavailable',
         detail: 'The sandbox produced no PHPUnit stage log, so the run did not reach the bootstrap that records stage markers.',
@@ -1014,6 +1064,9 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
         remediation: 'Check wp_codebox_phpunit_test_root and the phpunit.xml testsuite directories against the mounted component.',
       };
     }
+    if (recipeRunSteps?.phpunit_executed === false) {
+      return phpunitStepNotExecuted;
+    }
     return {
       cause: 'suite_reported_no_tests',
       detail: 'The sandbox mounted, activated, and discovered the component but the assembled suite contained no test cases.',
@@ -1038,6 +1091,7 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
       { kind: 'structured-test-results', uri: 'artifact://files/test-results.json' },
       { kind: 'recipe-options', uri: 'artifact://wp-codebox-phpunit-recipe-options.json' },
       { kind: 'recipe-provenance', uri: 'artifact://wp-codebox-phpunit-provenance.json' },
+      { kind: 'recipe-run-steps', uri: 'artifact://files/recipe-run-steps.json' },
     ],
     stage_markers: markers.slice(0, 60),
   };
@@ -1085,17 +1139,101 @@ function normalizedTestStatus(results, aggregate, executionStatus, validResults)
   }
   return results.status;
 }
-function extractPhpunitOutput(stdout, stderr) {
+function parseRecipeRunPayload(stdout) {
   const payload = json(stdout.trim(), null);
-  if (payload && Array.isArray(payload.executions)) {
-    const chunks = [];
-    for (const execution of payload.executions) {
-      if (typeof execution?.stdout === 'string') { chunks.push(execution.stdout); }
-      if (typeof execution?.stderr === 'string') { chunks.push(execution.stderr); }
-    }
-    if (chunks.length > 0) {
-      return chunks.join('');
-    }
+  if (payload === null) {
+    return { payload: null, executions: [], phpunitIndexes: [], parse_status: 'unparseable' };
+  }
+  const executions = isObject(payload) && Array.isArray(payload.executions) ? payload.executions : [];
+  const phpunitIndexes = [];
+  executions.forEach((execution, index) => { if (isPhpunitExecution(execution)) { phpunitIndexes.push(index); } });
+  return {
+    payload,
+    executions,
+    phpunitIndexes,
+    parse_status: executions.length > 0 ? 'executions' : 'no_executions',
+  };
+}
+// A PHPUnit invocation is identified by its recipe command name when the
+// payload carries one, and otherwise by the PHPUnit output signatures it
+// produced. Composer install and plugin activation payloads are setup JSON and
+// never match these signatures, so a ledger that records only those steps is
+// correctly reported as not having executed PHPUnit.
+function isPhpunitExecution(execution) {
+  if (!execution || typeof execution !== 'object') {
+    return false;
+  }
+  if (typeof execution.command === 'string' && /phpunit/i.test(execution.command)) {
+    return true;
+  }
+  const output = `${typeof execution.stdout === 'string' ? execution.stdout : ''}\n${typeof execution.stderr === 'string' ? execution.stderr : ''}`;
+  return /PHPUnit\s+\d+\.\d+|\bOK\s*\(\s*\d+\s+tests?|\bTests:\s*\d+,\s*Assertions:/i.test(output);
+}
+function integerExitCode(execution) {
+  const value = execution?.exitCode ?? execution?.exit_code;
+  return Number.isInteger(value) ? value : undefined;
+}
+function buildRecipeRunStepsLedger(recipeRun) {
+  const executions = recipeRun.executions.map((execution, index) => {
+    const stdout = typeof execution?.stdout === 'string' ? execution.stdout : '';
+    const stderr = typeof execution?.stderr === 'string' ? execution.stderr : '';
+    return clean({
+      index,
+      command: typeof execution?.command === 'string' && execution.command !== '' ? execution.command : undefined,
+      status: typeof execution?.status === 'string' && execution.status !== '' ? execution.status : undefined,
+      exit_code: integerExitCode(execution),
+      stdout_bytes: Buffer.byteLength(stdout),
+      stderr_bytes: Buffer.byteLength(stderr),
+      phpunit: recipeRun.phpunitIndexes.includes(index),
+    });
+  });
+  return {
+    schema: 'homeboy/wordpress-recipe-run-steps/v1',
+    parse_status: recipeRun.parse_status,
+    phpunit_executed: recipeRun.phpunitIndexes.length > 0,
+    phpunit_step_indexes: recipeRun.phpunitIndexes,
+    executions,
+  };
+}
+function recipeStepName(step) {
+  return step?.command || `step ${step?.index ?? '?'}`;
+}
+function noPhpunitExecutionBanner(recipeRun) {
+  const steps = recipeRun.executions.map((execution, index) => {
+    const command = recipeStepName({ ...execution, index });
+    const exitCode = integerExitCode(execution);
+    const stdoutBytes = typeof execution?.stdout === 'string' ? Buffer.byteLength(execution.stdout) : 0;
+    const stderrBytes = typeof execution?.stderr === 'string' ? Buffer.byteLength(execution.stderr) : 0;
+    return `  [${index}] ${command} (exit_code=${exitCode === undefined ? 'unset' : exitCode}, stdout=${stdoutBytes}B, stderr=${stderrBytes}B)`;
+  });
+  return [
+    '============================================================',
+    'WP_CODEBOX_RECIPE_RUN: NO_PHPUNIT_EXECUTION',
+    `The recipe-run payload reported ${recipeRun.executions.length} execution step(s), but none invoked PHPUnit.`,
+    'Test execution never started; the setup output below is retained for the record.',
+    'Structured step ledger: artifact://files/recipe-run-steps.json',
+    ...steps,
+    '============================================================',
+    '',
+  ].join('\n');
+}
+function extractPhpunitOutput(stdout, stderr, recipeRun) {
+  const parsed = recipeRun || parseRecipeRunPayload(stdout);
+  if (parsed.payload === null) {
+    return stdout + stderr;
+  }
+  const chunks = [];
+  for (const execution of parsed.executions) {
+    if (typeof execution?.stdout === 'string') { chunks.push(execution.stdout); }
+    if (typeof execution?.stderr === 'string') { chunks.push(execution.stderr); }
+  }
+  // A setup-only run must not read like a successful-but-empty PHPUnit run.
+  // Make the missing PHPUnit step explicit with a machine-greppable banner.
+  if (parsed.executions.length > 0 && parsed.phpunitIndexes.length === 0) {
+    return `${noPhpunitExecutionBanner(parsed)}${chunks.join('')}`;
+  }
+  if (chunks.length > 0) {
+    return chunks.join('');
   }
   return stdout + stderr;
 }
