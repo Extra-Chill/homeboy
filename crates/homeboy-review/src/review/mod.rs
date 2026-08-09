@@ -394,6 +394,7 @@ mod tests {
             phase: None,
             failure: None,
             test_counts: None,
+            test_inventory: None,
             test_durations: None,
             findings: None,
             coverage: None,
