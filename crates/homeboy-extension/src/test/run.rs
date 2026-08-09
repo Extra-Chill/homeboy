@@ -29,6 +29,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -112,91 +113,170 @@ fn test_inventory_mode(ci_env: &[(String, String)]) -> bool {
         .any(|(key, value)| key == TEST_INVENTORY_ONLY_ENV && value == "1")
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct TestInventoryBinding {
-    run_dir: PathBuf,
     path: PathBuf,
-    runner_fingerprint: String,
     workspace_fingerprint: String,
+    cargo_runner_fingerprint: String,
+    nextest_runner_fingerprint: String,
+    #[cfg(unix)]
+    run_dir: std::fs::File,
+    #[cfg(unix)]
+    run_dir_device: u64,
+    #[cfg(unix)]
+    run_dir_inode: u64,
 }
 
-fn test_inventory_binding(
-    context: &crate::ExtensionExecutionContext,
-    source_path: &Path,
-    run_dir: &RunDir,
-) -> Option<TestInventoryBinding> {
-    let run_dir_metadata = std::fs::symlink_metadata(run_dir.path()).ok()?;
-    if !run_dir_metadata.file_type().is_dir() || run_dir_metadata.file_type().is_symlink() {
-        return None;
-    }
-    let run_dir = run_dir.path().canonicalize().ok()?;
-    let extension_path = context.extension_path.canonicalize().ok()?;
-    let script_path = extension_path
-        .join(&context.script_path)
-        .canonicalize()
+#[cfg(not(unix))]
+fn test_inventory_binding(_source_path: &Path, _run_dir: &RunDir) -> Option<TestInventoryBinding> {
+    None
+}
+
+#[cfg(unix)]
+fn test_inventory_binding(source_path: &Path, run_dir: &RunDir) -> Option<TestInventoryBinding> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let path = run_dir.path().join(TEST_INVENTORY_FILE);
+    let run_dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(run_dir.path())
         .ok()?;
-    if !script_path.starts_with(&extension_path) || !script_path.is_file() {
+    let metadata = run_dir.metadata().ok()?;
+    if !metadata.is_dir() {
         return None;
     }
-    let runner_fingerprint =
-        homeboy_engine_primitives::content_hash::sha256_file(&script_path).ok()?;
-    let snapshot = homeboy_core::source_snapshot::collect_local(
-        "homeboy-test-inventory",
-        source_path,
-        None,
-        "local",
-    );
-    if snapshot.git_sha.is_none() {
-        return None;
-    }
-    let workspace_fingerprint = snapshot.snapshot_hash.strip_prefix("sha256:")?.to_string();
-    homeboy_engine_primitives::content_hash::is_sha256_hex(&workspace_fingerprint).then(|| {
-        TestInventoryBinding {
-            path: run_dir.join(TEST_INVENTORY_FILE),
-            run_dir,
-            runner_fingerprint,
-            workspace_fingerprint,
-        }
+    let workspace_root = cargo_workspace_root(source_path)?;
+    Some(TestInventoryBinding {
+        path,
+        workspace_fingerprint: workspace_fingerprint(&workspace_root)?,
+        cargo_runner_fingerprint: runner_fingerprint(&workspace_root, "cargo")?,
+        nextest_runner_fingerprint: runner_fingerprint(&workspace_root, "nextest")?,
+        run_dir_device: metadata.dev(),
+        run_dir_inode: metadata.ino(),
+        run_dir,
     })
 }
 
-fn revalidate_test_inventory_binding(
-    binding: &TestInventoryBinding,
-    context: &crate::ExtensionExecutionContext,
-    source_path: &Path,
-) -> bool {
-    let Ok(run_dir) = RunDir::from_existing(binding.run_dir.clone()) else {
+fn cargo_workspace_root(source_path: &Path) -> Option<PathBuf> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .current_dir(source_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let metadata = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()?;
+    let workspace_root = metadata.get("workspace_root")?.as_str()?;
+    PathBuf::from(workspace_root).canonicalize().ok()
+}
+
+fn runner_fingerprint(workspace_root: &Path, runner: &str) -> Option<String> {
+    let args = if runner == "nextest" {
+        vec!["nextest", "--version"]
+    } else {
+        vec!["--version"]
+    };
+    let output = Command::new("cargo")
+        .args(args)
+        .current_dir(workspace_root)
+        .output()
+        .ok()?;
+    output.status.success().then(|| {
+        let version = String::from_utf8(output.stdout).ok()?;
+        Some(runner_fingerprint_from_version(runner, version.trim()))
+    })?
+}
+
+fn runner_fingerprint_from_version(runner: &str, version: &str) -> String {
+    homeboy_engine_primitives::content_hash::sha256_hex(format!("{runner}\0{version}").as_bytes())
+}
+
+fn workspace_fingerprint(root: &Path) -> Option<String> {
+    fn collect(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Option<()> {
+        for entry in std::fs::read_dir(directory).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let file_type = entry.file_type().ok()?;
+            if file_type.is_dir() {
+                if !matches!(entry.file_name().to_str(), Some(".git" | "target")) {
+                    collect(root, &path, files)?;
+                }
+            } else if path.is_file() {
+                let name = entry.file_name();
+                if matches!(name.to_str(), Some("Cargo.toml" | "Cargo.lock"))
+                    || path.extension().is_some_and(|extension| extension == "rs")
+                {
+                    files.push(path.strip_prefix(root).ok()?.to_path_buf());
+                }
+            }
+        }
+        Some(())
+    }
+
+    let mut files = Vec::new();
+    collect(root, root, &mut files)?;
+    files.sort();
+    let mut content = String::new();
+    for relative in files {
+        let path = root.join(&relative);
+        content.push_str(relative.to_str()?);
+        content.push('\0');
+        content.push_str(&std::fs::read_to_string(path).ok()?);
+        content.push('\0');
+    }
+    Some(homeboy_engine_primitives::content_hash::sha256_hex(
+        content.as_bytes(),
+    ))
+}
+
+#[cfg(unix)]
+fn revalidate_test_inventory_binding(binding: &TestInventoryBinding, source_path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(metadata) = binding.run_dir.metadata() else {
         return false;
     };
-    let Some(current) = test_inventory_binding(context, source_path, &run_dir) else {
+    // This detects replacement for diagnostics, but the held descriptor remains
+    // the authority even when its original name has been renamed by the child.
+    if metadata.dev() != binding.run_dir_device || metadata.ino() != binding.run_dir_inode {
+        return false;
+    }
+    let Some(workspace_root) = cargo_workspace_root(source_path) else {
         return false;
     };
-    current.path == binding.path
-        && current.runner_fingerprint == binding.runner_fingerprint
-        && current.workspace_fingerprint == binding.workspace_fingerprint
+    workspace_fingerprint(&workspace_root) == Some(binding.workspace_fingerprint.clone())
+        && runner_fingerprint(&workspace_root, "cargo")
+            == Some(binding.cargo_runner_fingerprint.clone())
+        && runner_fingerprint(&workspace_root, "nextest")
+            == Some(binding.nextest_runner_fingerprint.clone())
 }
 
 /// Delete stale evidence before the child starts. The child may only write a
 /// regular file directly below its trusted run directory, so a prior run cannot
 /// satisfy this run.
+#[cfg(not(unix))]
+fn prepare_test_inventory(_binding: &TestInventoryBinding) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn unlink_test_inventory(binding: &TestInventoryBinding) -> bool {
+    use std::os::fd::AsRawFd;
+    let result = unsafe {
+        libc::unlinkat(
+            binding.run_dir.as_raw_fd(),
+            c"test-inventory.json".as_ptr(),
+            0,
+        )
+    };
+    result == 0 || std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
+}
+
+#[cfg(unix)]
 fn prepare_test_inventory(binding: &TestInventoryBinding) -> bool {
-    let Some(path_parent) = binding.path.parent() else {
-        return false;
-    };
-    let Ok(parent) = path_parent.canonicalize() else {
-        return false;
-    };
-    if parent != binding.run_dir || binding.path.file_name() != Some(TEST_INVENTORY_FILE.as_ref()) {
-        return false;
-    }
-    match std::fs::symlink_metadata(&binding.path) {
-        Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
-            std::fs::remove_file(&binding.path).is_ok()
-        }
-        Ok(_) => false,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-        Err(_) => false,
-    }
+    unlink_test_inventory(binding)
 }
 
 /// Inventory planning currently runs on Unix CI. Other platforms lack an
@@ -209,36 +289,31 @@ fn valid_test_inventory(binding: &TestInventoryBinding) -> Option<TestInventoryO
 
 #[cfg(unix)]
 fn valid_test_inventory(binding: &TestInventoryBinding) -> Option<TestInventoryOutput> {
-    let parent = binding.path.parent()?.canonicalize().ok()?;
-    if parent != binding.run_dir || binding.path.file_name() != Some(TEST_INVENTORY_FILE.as_ref()) {
-        return None;
-    }
-    let Ok(metadata) = std::fs::symlink_metadata(&binding.path) else {
-        return None;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let file = unsafe {
+        let fd = libc::openat(
+            binding.run_dir.as_raw_fd(),
+            c"test-inventory.json".as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        );
+        (fd >= 0).then(|| std::fs::File::from_raw_fd(fd))
     };
-    if !metadata.file_type().is_file() || metadata.len() > MAX_TEST_INVENTORY_BYTES {
-        return None;
-    }
-
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&binding.path)
-    };
-    let Ok(mut file) = file else {
+    let Some(mut file) = file else {
+        let _ = unlink_test_inventory(binding);
         return None;
     };
     let Ok(opened_metadata) = file.metadata() else {
+        let _ = unlink_test_inventory(binding);
         return None;
     };
     if !opened_metadata.is_file() || opened_metadata.len() > MAX_TEST_INVENTORY_BYTES {
+        let _ = unlink_test_inventory(binding);
         return None;
     }
     let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
-    if file.read_to_end(&mut bytes).is_err() || bytes.len() as u64 != opened_metadata.len() {
+    let read = file.read_to_end(&mut bytes).is_ok() && bytes.len() as u64 == opened_metadata.len();
+    let unlinked = unlink_test_inventory(binding);
+    if !read || !unlinked {
         return None;
     }
     let Ok(inventory) = serde_json::from_slice::<TestInventoryEvidence>(&bytes) else {
@@ -262,7 +337,12 @@ fn valid_test_inventory_payload(
             .tests
             .iter()
             .all(|test| test.expected_outcome.as_deref() == Some("skipped"))
-        || inventory.runner_fingerprint != binding.runner_fingerprint
+        || inventory.runner_fingerprint.as_str()
+            != match inventory.runner.as_str() {
+                "cargo" => binding.cargo_runner_fingerprint.as_str(),
+                "nextest" => binding.nextest_runner_fingerprint.as_str(),
+                _ => return None,
+            }
         || inventory.workspace_fingerprint != binding.workspace_fingerprint
     {
         return None;
@@ -296,7 +376,11 @@ fn valid_test_inventory_payload(
     // Rebuild the signed shape from parent-bound provenance rather than accepting
     // the child fields as the material that defines the schema fingerprint.
     let mut bound_inventory = inventory.clone();
-    bound_inventory.runner_fingerprint = binding.runner_fingerprint.clone();
+    bound_inventory.runner_fingerprint = match inventory.runner.as_str() {
+        "cargo" => binding.cargo_runner_fingerprint.clone(),
+        "nextest" => binding.nextest_runner_fingerprint.clone(),
+        _ => return None,
+    };
     bound_inventory.workspace_fingerprint = binding.workspace_fingerprint.clone();
     (homeboy_engine_primitives::content_hash::sha256_hex(&canonical_inventory_json(
         &bound_inventory,
@@ -701,7 +785,7 @@ fn run_main_test_workflow_inner(
         .then(|| {
             test_context
                 .as_ref()
-                .and_then(|context| test_inventory_binding(context, source_path, run_dir))
+                .and_then(|_| test_inventory_binding(source_path, run_dir))
         })
         .flatten()
         .filter(prepare_test_inventory);
@@ -839,7 +923,7 @@ fn run_main_test_workflow_inner(
     let test_autofix: Option<AppliedRefactor> = None;
 
     let test_inventory = inventory_binding.as_ref().and_then(|binding| {
-        revalidate_test_inventory_binding(binding, test_context.as_ref()?, source_path)
+        revalidate_test_inventory_binding(binding, source_path)
             .then(|| valid_test_inventory(binding))
             .flatten()
     });
@@ -2530,7 +2614,7 @@ mod tests {
             (
                 "arbitrary provenance",
                 valid_inventory_document(&binding, "test", "executed").replacen(
-                    &binding.runner_fingerprint,
+                    &binding.nextest_runner_fingerprint,
                     &"c".repeat(64),
                     1,
                 ),
@@ -2617,6 +2701,26 @@ mod tests {
         );
     }
 
+    /// Golden values produced by `homeboy-extensions/rust/scripts/test-shard-inventory.py`.
+    /// Keep these byte-for-byte values aligned with the producer's v1 contract.
+    #[test]
+    fn inventory_provenance_fingerprints_match_producer_golden_fixture() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_inventory_fingerprint");
+        assert_eq!(
+            workspace_fingerprint(&root).expect("fingerprint fixture"),
+            "3ff128fc5701066e7fc0324c88cd18ec1bc6b1ea5aa8390b1661da891e106712"
+        );
+        assert_eq!(
+            runner_fingerprint_from_version("cargo", "cargo 1.85.0 (fixture)"),
+            "75505895481f59e56262ce8b0cd07ac303f136fca4dc7cfeafd7dd3b1fcfc66a"
+        );
+        assert_eq!(
+            runner_fingerprint_from_version("nextest", "cargo-nextest 0.9.99 (fixture)"),
+            "09c443d61494d183c1a8441ca0f568decd4130b51a0a5c3a66c846efc6991f78"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn inventory_evidence_rejects_symlinks() {
@@ -2639,27 +2743,62 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn inventory_evidence_rejects_intermediate_symlink_swap() {
+    fn inventory_evidence_uses_held_directory_descriptor_across_rename_symlink_race() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().expect("temp dir");
-        let mut binding = test_inventory_binding_for_test(temp.path());
+        let run_dir = temp.path().join("run");
+        std::fs::create_dir(&run_dir).expect("create run dir");
+        let binding = test_inventory_binding_for_test(&run_dir);
         let outside = tempfile::tempdir().expect("outside dir");
-        let nested = temp.path().join("child-controlled");
-        symlink(outside.path(), &nested).expect("link intermediate directory");
-        binding.path = nested.join(TEST_INVENTORY_FILE);
+        let moved = temp.path().join("run-renamed");
+        std::fs::rename(&run_dir, &moved).expect("rename held run directory");
+        symlink(outside.path(), &run_dir).expect("replace run directory with outside link");
+        std::fs::write(
+            moved.join(TEST_INVENTORY_FILE),
+            valid_inventory_document(&binding, "held", "executed"),
+        )
+        .expect("write evidence into held directory");
+        let outside_inventory = outside.path().join(TEST_INVENTORY_FILE);
+        std::fs::write(&outside_inventory, "outside evidence must survive")
+            .expect("write outside evidence");
 
-        assert!(!prepare_test_inventory(&binding));
-        assert!(valid_test_inventory(&binding).is_none());
+        assert!(valid_test_inventory(&binding).is_some());
+        assert!(
+            !moved.join(TEST_INVENTORY_FILE).exists(),
+            "the consumed evidence must be unlinked relative to the held descriptor"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_inventory).expect("read outside evidence"),
+            "outside evidence must survive",
+            "the replacement pathname must neither be read nor unlinked"
+        );
     }
 
     fn test_inventory_binding_for_test(run_dir: &Path) -> TestInventoryBinding {
+        #[cfg(unix)]
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
         let run_dir = run_dir.canonicalize().expect("canonical run dir");
+        #[cfg(unix)]
+        let descriptor = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(&run_dir)
+            .expect("open run directory");
+        #[cfg(unix)]
+        let metadata = descriptor.metadata().expect("run directory metadata");
         TestInventoryBinding {
             path: run_dir.join(TEST_INVENTORY_FILE),
-            run_dir,
-            runner_fingerprint: "a".repeat(64),
             workspace_fingerprint: "b".repeat(64),
+            cargo_runner_fingerprint: "a".repeat(64),
+            nextest_runner_fingerprint: "a".repeat(64),
+            #[cfg(unix)]
+            run_dir: descriptor,
+            #[cfg(unix)]
+            run_dir_device: metadata.dev(),
+            #[cfg(unix)]
+            run_dir_inode: metadata.ino(),
         }
     }
 
@@ -2683,7 +2822,7 @@ mod tests {
         let mut inventory = TestInventoryEvidence {
             schema: TEST_INVENTORY_SCHEMA.to_string(),
             runner: "nextest".to_string(),
-            runner_fingerprint: binding.runner_fingerprint.clone(),
+            runner_fingerprint: binding.nextest_runner_fingerprint.clone(),
             workspace_fingerprint: binding.workspace_fingerprint.clone(),
             tests,
             inventory_fingerprint: String::new(),
