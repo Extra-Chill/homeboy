@@ -264,11 +264,11 @@ pub use execution::{
     record_scheduled_terminal_runner_exec_recovery_child_spawn_failure,
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
     run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
-    runner_exec_failure_error, runner_exec_structured_summary, runner_job_cancel,
-    runner_job_cancel_for_session, runner_job_cancel_projection,
-    schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics, RunnerExecMode,
-    RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecRecoveryChildSchedule,
-    RunnerExecStructuredSummary,
+    runner_exec_failure_error, runner_exec_orchestration_provenance,
+    runner_exec_structured_summary, runner_job_cancel, runner_job_cancel_for_session,
+    runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics,
+    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
+    RunnerExecRecoveryChildSchedule, RunnerExecRecoveryDiagnostic, RunnerExecStructuredSummary,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;

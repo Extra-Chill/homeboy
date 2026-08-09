@@ -85,7 +85,7 @@ pub use crate::{
 // Registry CRUD entry points.
 pub use crate::{
     apply_secret_env_migration, create, delete_safe, effective_env, enable_server_runner, exists,
-    list, load, merge, secret_env_migration_plan,
+    list, load, merge, runner_exec_orchestration_provenance, secret_env_migration_plan,
 };
 
 // Crate-internal helpers that historically flowed through the wildcard

@@ -224,6 +224,9 @@ pub struct RunsListArgs {
     /// Match runs whose command string contains this substring.
     #[arg(long = "command-contains")]
     pub command_contains: Option<String>,
+    /// Match a persisted working directory or durable agent-task workspace locator.
+    #[arg(long)]
+    pub workspace: Option<String>,
     /// Resolve controller run, runner job, and mirrored observation records that
     /// share this correlation/lineage fragment (matches persisted id, run-label,
     /// runner id, or job id).
@@ -320,11 +323,49 @@ pub struct RunsListOutput {
     /// observational only; the action always previews reconciliation first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_runs: Option<RunsStaleRunSummary>,
+    /// Provenance filters are evaluated from the controller observation store.
+    /// This makes a bounded scan or an unqueried foreign/candidate store visible
+    /// instead of conflating it with a confirmed absent record.
+    pub search: RunsListSearch,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "CommandActionableMetadata::is_empty"
     )]
     pub actionable: CommandActionableMetadata,
+}
+
+#[derive(Serialize)]
+pub struct RunsListSearch {
+    pub controller_store: &'static str,
+    pub scanned_rows: usize,
+    pub row_limit: usize,
+    pub complete: bool,
+    pub foreign_store_status: &'static str,
+    pub foreign_store_hint: &'static str,
+}
+
+impl RunsListSearch {
+    pub fn complete(scanned_rows: usize) -> Self {
+        Self {
+            controller_store: "queried",
+            scanned_rows,
+            row_limit: super::handlers::DISCOVERY_SCAN_ROW_LIMIT,
+            complete: true,
+            foreign_store_status: "not_queried",
+            foreign_store_hint: "Candidate binaries and foreign observation stores must mirror records into the controller observation store, or export a bundle and run `homeboy runs import <bundle-dir>`, before runs list can rediscover them.",
+        }
+    }
+
+    pub fn bounded(scanned_rows: usize) -> Self {
+        Self {
+            controller_store: "scan_limit_reached",
+            scanned_rows,
+            row_limit: super::handlers::DISCOVERY_SCAN_ROW_LIMIT,
+            complete: false,
+            foreign_store_status: "not_queried",
+            foreign_store_hint: "Narrow the indexed filters or import/mirror candidate and foreign-store records with `homeboy runs import <bundle-dir>` before treating this result as absent.",
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]

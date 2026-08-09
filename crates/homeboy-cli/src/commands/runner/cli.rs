@@ -436,6 +436,8 @@ pub(super) enum RunnerCommand {
         script_file: Option<String>,
 
         /// Environment variable to inject into the runner process as KEY=VALUE.
+        /// Set a value to `homeboy://controller-proxy` to explicitly project the
+        /// controller proxy as a credential-free runner-loopback URL.
         /// Repeat for multiple values.
         #[arg(long = "env")]
         env: Vec<String>,

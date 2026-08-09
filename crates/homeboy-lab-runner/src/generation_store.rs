@@ -248,6 +248,15 @@ fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>)
     )
 }
 
+/// Cross-process lifecycle serialization for one runner. Operations that mutate
+/// a controller session must use this same lock as generation rotation.
+pub(crate) fn with_runner_registry_lock<T>(
+    runner_id: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_registry_lock(runner_id, operation)
+}
+
 pub(crate) fn with_generation_recovery_lock<T>(
     runner_id: &str,
     generation: &str,

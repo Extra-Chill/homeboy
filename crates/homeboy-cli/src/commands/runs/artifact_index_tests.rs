@@ -105,6 +105,7 @@ fn runs_list_rig_filter_surfaces_compact_artifact_index() {
                 until: None,
                 id: None,
                 command_contains: None,
+                workspace: None,
                 correlation: None,
                 include_mirrors: false,
                 limit: 20,

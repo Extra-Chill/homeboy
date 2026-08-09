@@ -159,6 +159,30 @@ pub fn record_runner_exec_job_identity(
     )
 }
 
+/// Persist controller and runner binary provenance independently of terminal
+/// status. This is recorded before dispatch as well as after a runner response,
+/// so pre-spawn failures retain the identities known at submission time.
+pub fn record_runner_exec_execution_record(
+    run_id: &str,
+    execution_record: &homeboy_core::runner_execution_envelope::RunnerExecutionRecord,
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    run.metadata_json
+        .as_object_mut()
+        .expect("metadata object")
+        .insert(
+            "runner_execution_record".to_string(),
+            serde_json::to_value(execution_record).expect("runner execution record serializes"),
+        );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
 /// Create (or validate ownership of) a generic runner-exec run that has no
 /// daemon runner job — the diagnostic-SSH transport executes synchronously and
 /// never accepts a durable runner job, but a caller-supplied `--run-id` with
@@ -544,14 +568,25 @@ pub fn project_terminal_runner_exec_result(
     metadata.insert("runner_job_id".to_string(), json!(snapshot.job.id));
     metadata.insert("runner_job_status".to_string(), json!(snapshot.job.status));
     metadata.insert("runner_job_events".to_string(), json!(snapshot.events));
-    let mut execution_record =
-        homeboy_core::runner_execution_envelope::RunnerExecutionRecord::terminal(
-            snapshot.job.id.to_string(),
-            runner_id,
-            "daemon",
-            exit_code,
-        )
-        .with_job_id(snapshot.job.id.to_string());
+    let mut execution_record = metadata
+        .get("runner_execution_record")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_else(|| {
+            homeboy_core::runner_execution_envelope::RunnerExecutionRecord::terminal(
+                snapshot.job.id.to_string(),
+                runner_id.clone(),
+                "daemon",
+                exit_code,
+            )
+            .with_job_id(snapshot.job.id.to_string())
+        });
+    execution_record.status = if snapshot.job.status == JobStatus::Succeeded {
+        "succeeded".to_string()
+    } else {
+        "failed".to_string()
+    };
+    execution_record.job_id = Some(snapshot.job.id.to_string());
     if snapshot.job.status == JobStatus::Cancelled {
         execution_record.status = "cancelled".to_string();
     }
@@ -724,13 +759,31 @@ pub fn finish_runner_exec_direct(run_id: &str, transport: &str, exit_code: i32) 
     {
         return Ok(false);
     }
+    let runner_id = run.metadata_json["runner_id"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
     let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    let mut execution_record = metadata
+        .get("runner_execution_record")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_else(|| {
+            homeboy_core::runner_execution_envelope::RunnerExecutionRecord::terminal(
+                run.id.clone(),
+                runner_id,
+                transport,
+                exit_code,
+            )
+        });
+    execution_record.status = if exit_code == 0 {
+        "succeeded".to_string()
+    } else {
+        "failed".to_string()
+    };
     metadata.insert(
         "runner_execution_record".to_string(),
-        json!({
-            "transport": transport, "status": if exit_code == 0 { "succeeded" } else { "failed" },
-            "exit_code": exit_code,
-        }),
+        serde_json::to_value(execution_record).expect("runner execution record serializes"),
     );
     metadata.insert(
         "runner_terminal_projection".to_string(),

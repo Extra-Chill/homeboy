@@ -1092,15 +1092,13 @@ fn release_recovery_skips_the_artifact_rebuild_when_the_draft_is_already_complet
     }
 
     // ...and the adoption phase is not, or the fast path would publish nothing.
-    let adoption = &host[host
-        .find("- name: Create remote draft adoption manifest")
-        .expect("host must build the draft adoption manifest")..];
+    let adoption = release_step_block(host, "name: Create remote draft adoption manifest");
     assert!(
         !adoption.contains("draft-complete != 'true'"),
         "verified draft adoption must run on the fast path — it is the whole point of taking it"
     );
     assert!(
-        adoption.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"),
+        host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"),
         "the fast path must still hand the finalizer the remote-adoption manifest"
     );
 }
@@ -1187,26 +1185,58 @@ fn release_fast_path_keeps_every_publication_verification() {
 }
 
 #[test]
-fn release_recovery_runs_publication_gate_from_the_control_revision() {
+fn release_recovery_runs_reconciliation_from_the_control_revision() {
     let workflow = release_workflow();
     let host = job_section(workflow, "host");
-    let gate = release_step_block(host, "name: Gate publication on the declared asset set");
+    let reconcile = release_step_block(host, "name: Reconcile rebuilt recovery assets");
 
     assert!(
-        gate.contains("CONTROL_SHA: ${{ github.sha }}"),
-        "the publication helper must be pinned to the workflow control revision"
+        reconcile.contains("CONTROL_SHA: ${{ github.sha }}"),
+        "the reconciliation helper must be pinned to the workflow control revision"
     );
     assert!(
-        gate.contains(
+        reconcile.contains(
             "git show \"${CONTROL_SHA}:.github/release-asset-completeness.sh\" > \"${CONTROL_HELPER}\""
         ),
         "a stranded target tag may predate the helper, so recovery must materialize it from the control revision"
     );
-    assert!(gate.contains("bash \"${CONTROL_HELPER}\""));
+    assert!(reconcile.contains("bash \"${CONTROL_HELPER}\""));
     assert!(
-        !gate.contains("bash .github/release-asset-completeness.sh"),
+        !reconcile.contains("bash .github/release-asset-completeness.sh"),
         "the target-tag checkout must not own recovery control helpers"
     );
+}
+
+#[test]
+fn release_recovery_reconciles_rebuilt_assets_before_the_finalizer() {
+    let host = job_section(release_workflow(), "host");
+    let authority = host
+        .find("- name: Create authoritative recovery manifest")
+        .expect("rebuilt recovery must create an authoritative local manifest");
+    let reconcile_start = host
+        .find("- name: Reconcile rebuilt recovery assets")
+        .expect("rebuilt recovery must reconcile its artifacts into the draft");
+    let finalizer = host
+        .find("- name: Finish Homeboy release pipeline at tag")
+        .expect("the release finalizer must remain present");
+    let reconcile = release_step_block(host, "name: Reconcile rebuilt recovery assets");
+
+    assert!(
+        authority < reconcile_start && reconcile_start < finalizer,
+        "recovery must reconcile authoritative local artifacts before finalization"
+    );
+    assert!(reconcile.contains(
+        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
+    ));
+    assert!(reconcile.contains("ASSET_DIR=artifacts RECONCILE=true REQUIRE_ANNOUNCE_ASSETS=false"));
+    assert!(reconcile.contains("git show \"${CONTROL_SHA}:.github/release-asset-completeness.sh\""));
+    let helper = include_str!("../.github/release-asset-completeness.sh");
+    assert!(helper.contains("Checksum contract"));
+    assert!(helper.contains("Unexpected or duplicate assets"));
+    assert!(
+        helper.contains("gh release upload \"${RELEASE_TAG}\" \"${ASSET_DIR}/${asset}\" --clobber")
+    );
+    assert!(helper.contains("Could not re-read the asset inventory"));
 }
 
 /// Recovery is allowed — required — to run a control binary NEWER than the tag
@@ -2100,6 +2130,28 @@ fn asset_contract_rejects_present_but_unusable_assets() {
     );
 }
 
+#[test]
+fn asset_contract_rejects_unexpected_and_duplicate_inventory() {
+    let expected_assets = serde_json::to_string(HEALTHY_RELEASE_ASSETS).expect("asset contract");
+    let mut names = HEALTHY_RELEASE_ASSETS.to_vec();
+    names.push("unexpected.bin");
+    let (code, out) = asset_contract_with_expected_assets(
+        &release_inventory(&names),
+        Some(&expected_assets),
+        "true",
+    );
+    assert_ne!(code, 0, "unexpected inventory must fail closed: {out}");
+
+    let mut names = HEALTHY_RELEASE_ASSETS.to_vec();
+    names.push(HEALTHY_RELEASE_ASSETS[0]);
+    let (code, out) = asset_contract_with_expected_assets(
+        &release_inventory(&names),
+        Some(&expected_assets),
+        "true",
+    );
+    assert_ne!(code, 0, "duplicate inventory must fail closed: {out}");
+}
+
 /// This gate decides whether a release becomes reachable, so every unknown must
 /// land on "do not publish". An inventory that cannot be read is not evidence
 /// of completeness.
@@ -2142,49 +2194,41 @@ fn asset_contract_pre_publication_still_requires_every_platform_archive() {
     );
 }
 
-/// #8687's guard is `verify-published`, and it runs AFTER `host` has already
-/// published. Detect-then-revert is compensation, and compensation only works
-/// if the compensating job runs — the runs that ship incomplete releases are
-/// precisely the runs that never get there.
-///
-/// So the contract must also be a PRECONDITION of publication, evaluated
-/// immediately before the finalizer that flips the draft flag. This is the
-/// existing guard moved upstream of the act it guards, not a second guard
-/// beside it: `verify-published` is deliberately left intact below.
+/// The finalizer owns the public transition. It is the only layer that can
+/// support both recovery states: an existing draft can be reconciled, while an
+/// absent Release must first be created as a draft before any remote inventory
+/// exists. A workflow-level `gh release view` gate before the finalizer makes
+/// the latter state unrecoverable (#11881).
 #[test]
-fn publication_is_gated_on_the_declared_asset_set_before_it_happens() {
+fn finalizer_owns_fail_closed_publication_for_absent_and_existing_draft_recovery() {
     let workflow = release_workflow();
     let host = job_section(workflow, "host");
 
-    let gate = release_step_block(host, "name: Gate publication on the declared asset set");
     assert!(
-        gate.contains("release-asset-completeness.sh"),
-        "the gate must evaluate the shared asset contract; got:\n{gate}"
+        !host.contains("name: Gate publication on the declared asset set"),
+        "a remote inventory gate before finalization cannot recover a tag with no GitHub Release"
     );
     assert!(
-        gate.contains("REQUIRE_ANNOUNCE_ASSETS: 'false'"),
-        "the pre-publication gate runs before announce attaches dist-manifest.json; got:\n{gate}"
+        !host.contains("bash .github/release-asset-completeness.sh"),
+        "the host must not inspect a remote Release before the owning finalizer can create its draft"
     );
     assert!(
-        gate.contains("EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}"),
-        "the pre-publication gate must consume cargo-dist's planned asset contract; got:\n{gate}"
+        host.contains("github.release` owns the public transition"),
+        "the workflow must document why the finalizer owns both recovery states"
     );
-
-    let gate_at = host
-        .find("name: Gate publication on the declared asset set")
-        .expect("publication gate must exist");
-    let publish_at = host
-        .find("name: Finish Homeboy release pipeline at tag")
-        .expect("finalizer must exist");
     assert!(
-        gate_at < publish_at,
-        "the asset contract must be checked BEFORE the finalizer publishes, otherwise it \
-         is detection after the fact — which is exactly what #8687 shipped and what let \
-         v0.323.1 and v0.333.0 stay live and incomplete"
+        host.contains("release-from-artifacts:"),
+        "the finalizer must receive the artifact authority it validates before publishing"
     );
 
-    // Moving the check upstream must not remove the containment that catches a
-    // release which somehow reaches `published` anyway.
+    let finalizer = release_step_block(host, "name: Finish Homeboy release pipeline at tag");
+    assert!(
+        finalizer.contains("release-head: 'true'"),
+        "the finalizer must finish the existing tagged release rather than prepare another tag"
+    );
+
+    // Independent post-publication containment remains responsible for releases
+    // published outside the finalizer.
     assert!(
         workflow.contains("verify-published:"),
         "the post-publication containment guard must be retained, not replaced"

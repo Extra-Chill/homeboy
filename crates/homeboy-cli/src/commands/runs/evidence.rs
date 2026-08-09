@@ -353,6 +353,35 @@ mod tests {
                     serde_json::json!({
                         "exit_code": 1,
                         "error": "boom",
+                        "remote_command": ["node", "review.mjs"],
+                        "runner_execution_record": {
+                            "schema": "homeboy/runner-execution-record/v1",
+                            "execution_id": "job-1",
+                            "runner_id": "lab-default",
+                            "transport": "daemon",
+                            "status": "failed",
+                            "job_id": "job-1",
+                            "orchestration_provenance": {
+                                "schema": "homeboy/orchestration-target-provenance/v1",
+                                "selected_runner_id": "lab-default",
+                                "controller_binary": {
+                                    "owner": "controller",
+                                    "path": "/usr/local/bin/homeboy",
+                                    "version": "0.334.0",
+                                    "build_identity": "homeboy 0.334.0+controller"
+                                },
+                                "runner_daemon_binary": {
+                                    "owner": "daemon",
+                                    "path": "http://127.0.0.1:3000",
+                                    "version": "0.334.0",
+                                    "build_identity": "homeboy 0.334.0+daemon"
+                                },
+                                "runner_command_binary": {
+                                    "owner": "configured binary",
+                                    "path": "/opt/homeboy"
+                                }
+                            }
+                        },
                         "gate_failures": ["p95_ms exceeded"],
                         "hints": ["inspect artifacts"],
                         "child_command_failures": [{
@@ -456,7 +485,7 @@ mod tests {
                 output.homeboy_provenance.schema,
                 "homeboy/homeboy-provenance/v1"
             );
-            assert_eq!(output.homeboy_provenance.identities.len(), 2);
+            assert_eq!(output.homeboy_provenance.identities.len(), 6);
             assert_eq!(
                 output.homeboy_provenance.identities[0].role,
                 "observation_run_binary"
@@ -467,17 +496,51 @@ mod tests {
             );
             assert_eq!(
                 output.homeboy_provenance.identities[1].role,
+                "controller_cli"
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[2].role,
+                "active_daemon"
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[2]
+                    .build_identity
+                    .as_deref(),
+                Some("homeboy 0.334.0+daemon")
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[3].role,
+                "configured_job_binary"
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[3].unavailable_reason,
+                Some("the binary path was recorded, but its Homeboy version was not observed")
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[4].role,
                 "runner_job_handoff"
             );
             assert_eq!(
-                output.homeboy_provenance.identities[1].runner_id.as_deref(),
+                output.homeboy_provenance.identities[4].runner_id.as_deref(),
                 Some("lab-default")
             );
             assert_eq!(
-                output.homeboy_provenance.identities[1]
+                output.homeboy_provenance.identities[4]
                     .runner_job_id
                     .as_deref(),
                 Some("job-1")
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[4].evidence_commands[0],
+                "homeboy runner job logs lab-default job-1"
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[5].role,
+                "executed_child_homeboy"
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[5].state,
+                "inapplicable"
             );
             assert!(output.homeboy_provenance.warnings[0].contains(
                 "controller_cli, active_daemon, configured_job_binary, and observation_run_binary"
