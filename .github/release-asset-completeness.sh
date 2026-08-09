@@ -44,6 +44,11 @@
 #                            attaches during announce (`dist-manifest.json`).
 #                            Set false for the pre-publication gate, where the
 #                            upload step has run but announce has not.
+#   ASSET_DIR                (optional) rebuilt local assets. When set, every
+#                            required file and checksum contract is verified
+#                            against GitHub's authoritative asset digests.
+#   RECONCILE                (optional, default false) replace missing, empty,
+#                            or digest-mismatched expected assets from ASSET_DIR.
 #
 # Exit 0 = every required asset is present, uploaded and non-empty.
 # Exit 1 = incomplete, unreadable, or underivable. This gate fails CLOSED:
@@ -55,6 +60,8 @@ set -uo pipefail
 DIST_WORKSPACE="${DIST_WORKSPACE:-dist-workspace.toml}"
 REQUIRE_ANNOUNCE_ASSETS="${REQUIRE_ANNOUNCE_ASSETS:-true}"
 RELEASE_TAG="${RELEASE_TAG:-}"
+ASSET_DIR="${ASSET_DIR:-}"
+RECONCILE="${RECONCILE:-false}"
 
 # Deliberately no `$GITHUB_OUTPUT` writes. This script's verdict IS its exit
 # status, and both callers consume it that way. Emitting a `complete=true`
@@ -168,11 +175,120 @@ for asset in "${REQUIRED[@]}"; do
   fi
 done
 
-if [ "${#MISSING[@]}" -gt 0 ]; then
+if [ "${#MISSING[@]}" -gt 0 ] && [ "${RECONCILE}" != "true" ]; then
   echo "::error::Release ${RELEASE_TAG} does not satisfy the declared asset contract. Missing or unusable: ${MISSING[*]}"
   echo "::error::Derived from ${CONTRACT_SOURCE}: ${#REQUIRED[@]} assets required. A release that cannot satisfy its own platform matrix must not be published — consumers on the missing platforms get a 404 from \`homeboy upgrade\` (#11749)."
   exit 1
 fi
+
+# A set comparison without cardinality would hide duplicate names. Rejecting
+# extras is intentional: a recovery must never publish an inventory whose
+# bytes were not rebuilt and checked by this run.
+if ! jq -e '
+  .assets | type == "array" and
+  all(.[]; type == "object" and (.name | type == "string" and length > 0))
+' >/dev/null 2>&1 <<< "${INVENTORY}"; then
+  fail "The asset inventory for ${RELEASE_TAG} has malformed asset records. An unreadable inventory is UNKNOWN, not complete."
+fi
+
+EXPECTED_JSON="$(printf '%s\n' "${REQUIRED[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | sort')"
+ACTUAL_JSON="$(jq -Sc '[.assets[].name] | sort' <<< "${INVENTORY}")"
+EXPECTED_COUNT="$(jq -r 'length' <<< "${EXPECTED_JSON}")"
+ACTUAL_COUNT="$(jq -r 'length' <<< "${ACTUAL_JSON}")"
+if [ "${RECONCILE}" = "true" ]; then
+  if ! jq -e --argjson expected "${EXPECTED_JSON}" '
+    [.assets[].name] as $names |
+    ($names | all(.[]; . as $name | $expected | index($name))) and
+    ($names | length) == ($names | unique | length)
+  ' >/dev/null <<< "${INVENTORY}"; then
+    fail "Release ${RELEASE_TAG} inventory has unexpected or duplicate assets. Recovery only replaces expected assets and refuses to publish an unowned inventory."
+  fi
+elif [ "${EXPECTED_JSON}" != "${ACTUAL_JSON}" ] || [ "${EXPECTED_COUNT}" != "${ACTUAL_COUNT}" ]; then
+  fail "Release ${RELEASE_TAG} inventory is not the exact expected asset set (expected ${EXPECTED_COUNT}: ${EXPECTED_JSON}; observed ${ACTUAL_COUNT}: ${ACTUAL_JSON}). Unexpected or duplicate assets must be removed before publication."
+fi
+
+if [ -z "${ASSET_DIR}" ]; then
+  echo "::notice::Release ${RELEASE_TAG} satisfies the declared asset contract (${#REQUIRED[@]} assets from ${CONTRACT_SOURCE})."
+  exit 0
+fi
+
+[ -d "${ASSET_DIR}" ] || fail "Rebuilt asset directory ${ASSET_DIR} does not exist"
+
+# Verify local bytes first. The checksum sidecars are the rebuilt contract for
+# payloads; GitHub's digest must then agree with the actual rebuilt bytes.
+declare -A LOCAL_DIGESTS=()
+declare -A CONTRACT_DIGESTS=()
+for asset in "${REQUIRED[@]}"; do
+  path="${ASSET_DIR}/${asset}"
+  [ -f "${path}" ] && [ -s "${path}" ] || fail "Rebuilt recovery asset ${path} is missing or empty"
+  LOCAL_DIGESTS["${asset}"]="sha256:$(sha256sum "${path}" | cut -d' ' -f1)"
+done
+
+payload_count=0
+for asset in "${REQUIRED[@]}"; do
+  case "${asset}" in *.sha256|sha256.sum) continue ;; esac
+  payload_count=$((payload_count + 1))
+done
+[ "${payload_count}" -gt 0 ] || fail "The rebuilt asset contract has no payloads"
+
+for sidecar in "${REQUIRED[@]}"; do
+  case "${sidecar}" in *.sha256|sha256.sum) ;; *) continue ;; esac
+  references=0
+  while read -r digest name extra; do
+    [ -n "${digest}" ] || continue
+    name="${name#\*}"
+    [[ "${digest}" =~ ^[[:xdigit:]]{64}$ ]] || fail "Invalid checksum contract in ${sidecar}"
+    [ -n "${name}" ] && [ -z "${extra:-}" ] || fail "Invalid checksum contract in ${sidecar}"
+    case "${name}" in *.sha256|sha256.sum) fail "Invalid checksum contract in ${sidecar}" ;; esac
+    [ -n "${LOCAL_DIGESTS[${name}]:-}" ] || fail "Checksum contract ${sidecar} references unexpected payload ${name}"
+    expected="sha256:${digest,,}"
+    [ "${LOCAL_DIGESTS[${name}]}" = "${expected}" ] || fail "Checksum contract ${sidecar} does not match rebuilt payload ${name}"
+    [ -z "${CONTRACT_DIGESTS[${name}]:-}" ] || [ "${CONTRACT_DIGESTS[${name}]}" = "${expected}" ] || fail "Checksum contracts disagree for ${name}"
+    CONTRACT_DIGESTS["${name}"]="${expected}"
+    references=$((references + 1))
+  done < "${ASSET_DIR}/${sidecar}"
+  [ "${references}" -gt 0 ] || fail "Checksum contract ${sidecar} is empty"
+  case "${sidecar}" in *.sha256) [ "${references}" -eq 1 ] && [ "${sidecar%.sha256}" = "${name}" ] || fail "Checksum contract ${sidecar} is incomplete" ;; esac
+done
+for asset in "${REQUIRED[@]}"; do
+  case "${asset}" in *.sha256|sha256.sum) continue ;; esac
+  [ -n "${CONTRACT_DIGESTS[${asset}]:-}" ] || fail "No rebuilt checksum contract covers ${asset}"
+done
+
+remote_digest() {
+  jq -r --arg name "$1" '.assets[] | select(.name == $name) | .digest // empty' <<< "${INVENTORY}"
+}
+remote_valid() {
+  local name="$1"
+  jq -e --arg name "${name}" --arg digest "${LOCAL_DIGESTS[${name}]}" \
+    '.assets[] | select(.name == $name and .state == "uploaded" and .size > 0 and .digest == $digest)' \
+    >/dev/null <<< "${INVENTORY}"
+}
+
+if [ "${RECONCILE}" = "true" ]; then
+  for asset in "${REQUIRED[@]}"; do
+    if remote_valid "${asset}"; then
+      echo "::notice::Retaining verified rebuilt release asset ${asset}"
+    else
+      gh release upload "${RELEASE_TAG}" "${ASSET_DIR}/${asset}" --clobber
+      echo "::notice::Replaced recovery release asset ${asset}"
+    fi
+  done
+  if ! INVENTORY="$(gh release view "${RELEASE_TAG}" --json assets 2>&1)"; then
+    fail "Could not re-read the asset inventory for ${RELEASE_TAG}: ${INVENTORY}"
+  fi
+  FINAL_JSON="$(jq -Sc '[.assets[].name] | sort' <<< "${INVENTORY}" 2>/dev/null)" || fail "The final asset inventory for ${RELEASE_TAG} is unreadable"
+  FINAL_COUNT="$(jq -r 'length' <<< "${FINAL_JSON}")"
+  if [ "${EXPECTED_JSON}" != "${FINAL_JSON}" ] || [ "${EXPECTED_COUNT}" != "${FINAL_COUNT}" ]; then
+    fail "Release ${RELEASE_TAG} final inventory is not the exact rebuilt asset set. No publication is permitted."
+  fi
+fi
+
+# This is deliberately the final operation: no caller may publish after a
+# stale read, a partial upload, or a concurrent inventory mutation.
+for asset in "${REQUIRED[@]}"; do
+  remote_valid "${asset}" || fail "Release ${RELEASE_TAG} asset ${asset} is not an uploaded non-empty GitHub asset with the rebuilt SHA-256 digest ${LOCAL_DIGESTS[${asset}]}"
+done
 
 echo "::notice::Release ${RELEASE_TAG} satisfies the declared asset contract (${#REQUIRED[@]} assets from ${CONTRACT_SOURCE})."
 exit 0
