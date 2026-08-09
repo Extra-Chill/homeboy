@@ -1164,6 +1164,146 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 }
 
 #[test]
+fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() {
+    with_temp_home(|| {
+        let cook_id = "cook-diagnose-review-form";
+        let source_run_id = "cook-diagnose-review-form-attempt-1";
+        let run_id = "cook-diagnose-review-form-attempt-2";
+        let mut plan = test_plan();
+        plan.tasks[0].inputs = json!({
+            "cook_loop": {
+                "review_form_required": true,
+                "execution_budget_authority": {
+                    "kind": "fresh_cook_review",
+                    "max_same_provider_retries": 1
+                }
+            }
+        });
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: plan.clone(),
+            to_worktree: "fixture@review-form".to_string(),
+            source_worktree_path: None,
+            provider_command: None,
+            provider_invocation: None,
+            gates: Default::default(),
+            max_attempts: 1,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Review form continuation".to_string(),
+            commit_message: "Review form continuation".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: Some("fixture-model".to_string()),
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: None,
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist Cook recipe");
+        let mut observed_plan = plan.clone();
+        observed_plan.tasks[0].instructions = "runtime detail is not recipe identity".to_string();
+        agent_task_lifecycle::submit_plan(&observed_plan, Some(source_run_id))
+            .expect("persist source run");
+        agent_task_lifecycle::submit_plan(&observed_plan, Some(run_id))
+            .expect("persist review run");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, source_run_id)
+            .expect("record source attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 2, run_id)
+            .expect("record review attempt");
+
+        let source_promotion = json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "applied",
+            "source": { "kind": "aggregate", "task_id": "task-a", "run_id": source_run_id },
+            "to_worktree": "fixture@review-form",
+            "target": { "worktree": "fixture@review-form", "path": "/tmp/review-form-candidate" },
+            "patch_artifact": { "id": "patch", "kind": "patch", "path": "patch" },
+            "changed_files": ["src/lib.rs"],
+            "deterministic_gates": [],
+            "gate_results": [],
+            "operator_notification": { "status": "completed", "message": "complete" },
+            "provenance": { "candidate": { "sha256": "exact-candidate" } }
+        });
+        agent_task_lifecycle::record_promotion(source_run_id, source_promotion.clone())
+            .expect("persist applied source promotion");
+        let mut review_promotion = source_promotion;
+        review_promotion["source"]["run_id"] = json!(run_id);
+        review_promotion["provenance"]["cook_follow_up"] = json!({
+            "kind": "review_form_only",
+            "source_run_id": source_run_id,
+        });
+        agent_task_lifecycle::record_promotion(run_id, review_promotion)
+            .expect("persist copied review promotion");
+        agent_task_lifecycle::record_run_aggregate(
+            run_id,
+            &observed_plan,
+            &AgentTaskAggregate {
+                schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                plan_id: observed_plan.plan_id.clone(),
+                status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Failed,
+                totals: Default::default(),
+                outcomes: vec![AgentTaskOutcome {
+                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "task-a".to_string(),
+                    status: AgentTaskOutcomeStatus::Timeout,
+                    summary: Some("review form timed out".to_string()),
+                    failure_classification: Some(AgentTaskFailureClassification::Timeout),
+                    artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: Value::Null,
+                    workflow: None,
+                    follow_up: None,
+                    metadata: Value::Null,
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .expect("persist timeout aggregate");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = AgentTaskRunState::PartialFailure;
+        })
+        .expect("mark review attempt terminal");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose timed-out review form");
+
+        let continuation = format!("homeboy agent-task cook-continue {run_id}");
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["retry_replay"]["readiness"], "unavailable");
+        assert!(value["retry_replay"]["action"].is_null());
+        assert!(value["next_commands"]
+            .as_array()
+            .expect("next commands")
+            .iter()
+            .any(|command| command == &json!(continuation)));
+        let actions = value["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("actionable next actions");
+        assert!(actions
+            .iter()
+            .any(|action| action["command"] == continuation));
+        assert!(value.to_string().contains("cook-continue"));
+        assert!(!value.to_string().contains("agent-task retry"));
+    });
+}
+
+#[test]
 fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit() {
     with_temp_home(|| {
         let evidence_dir = tempfile::tempdir().expect("evidence dir");

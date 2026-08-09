@@ -1416,12 +1416,9 @@ fn snapshot_install_restores_workspace_owner_after_root_run() {
 
 #[test]
 fn snapshot_archive_command_disables_extended_attributes() {
-    let command = snapshot_archive_command(
-        Path::new("/Users/user/Developer/wp-site-generator"),
-        "ssh runner 'tar -xf -'",
-        &[],
-    )
-    .expect("snapshot archive command");
+    let source = tempfile::tempdir().expect("snapshot source");
+    let command = snapshot_archive_command(source.path(), "ssh runner 'tar -xf -'", &[])
+        .expect("snapshot archive command");
 
     assert!(command.contains("COPYFILE_DISABLE=1"));
     assert!(command.contains("tar --no-xattrs"));
@@ -1434,16 +1431,13 @@ fn snapshot_archive_command_disables_extended_attributes() {
 /// parses without executing, which is exactly the regression surface.
 #[test]
 fn scratch_scoped_snapshot_command_parses_under_posix_sh() {
+    let source = tempfile::tempdir().expect("snapshot source");
     for excludes in [
         vec![],
         vec!["./target".to_string(), "node_modules".to_string()],
     ] {
-        let command = snapshot_archive_command(
-            Path::new("/Users/user/Developer/wp-site-generator"),
-            "ssh runner 'tar -xf -'",
-            &excludes,
-        )
-        .expect("snapshot archive command");
+        let command = snapshot_archive_command(source.path(), "ssh runner 'tar -xf -'", &excludes)
+            .expect("snapshot archive command");
         let scoped = scratch_scoped_command(&command, Path::new("/var/lib/homeboy/scratch dir"));
 
         assert!(
@@ -1465,6 +1459,7 @@ fn scratch_scoped_snapshot_command_parses_under_posix_sh() {
 fn snapshot_materialization_command_parses_under_posix_shells() {
     use homeboy_core::engine::shell;
 
+    let source = tempfile::tempdir().expect("snapshot source");
     let local_target = format!(
         "sh -c {}",
         shell::quote_arg(&snapshot_install_command(
@@ -1483,13 +1478,9 @@ fn snapshot_materialization_command_parses_under_posix_shells() {
                 Some(Path::new("/var/lib/homeboy/scratch dir")),
                 Some(Path::new("/var/lib/homeboy/scratch")),
             ] {
-                let command = snapshot_materialization_command(
-                    Path::new("/Users/user/Developer/wp-site-generator"),
-                    target,
-                    &excludes,
-                    scratch,
-                )
-                .expect("snapshot materialization command");
+                let command =
+                    snapshot_materialization_command(source.path(), target, &excludes, scratch)
+                        .expect("snapshot materialization command");
 
                 assert_eq!(
                     scratch.is_some(),
@@ -1529,12 +1520,9 @@ fn snapshot_archive_command_selectively_dereferences_external_symlinked_dependen
     // checkout) must be materialized into the runner snapshot so offloaded
     // plans whose embedded paths traverse the symlink resolve on the runner
     // instead of dangling (#3913).
-    let command = snapshot_archive_command(
-        Path::new("/Users/user/Developer/wp-site-generator"),
-        "ssh runner 'tar -xf -'",
-        &[],
-    )
-    .expect("snapshot archive command");
+    let source = tempfile::tempdir().expect("snapshot source");
+    let command = snapshot_archive_command(source.path(), "ssh runner 'tar -xf -'", &[])
+        .expect("snapshot archive command");
 
     assert!(
         command.contains("find \"$stage/source\" -type l -exec sh -c"),

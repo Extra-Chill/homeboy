@@ -40,6 +40,7 @@ pub use capabilities::{
     AgentTaskToolCapabilityContribution, AGENT_TASK_CAPABILITY_EVIDENCE_SCHEMA,
     AGENT_TASK_CAPABILITY_REQUIREMENTS_SCHEMA,
 };
+pub(crate) use command_policy::tokenize_command;
 pub use command_policy::{
     AgentCommandDecision, AgentCommandDenial, AgentCommandPolicy, AgentCommandPolicyMode,
     AgentCommandRule, AGENT_COMMAND_POLICY_SCHEMA, COMMAND_DENIAL_REMEDIATION,

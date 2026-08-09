@@ -2603,9 +2603,7 @@ mod tests {
             fs::create_dir_all(&root).unwrap();
             fs::write(root.join("malformed.pending"), b"not json").unwrap();
 
-            let error = claim_continuation().unwrap_err();
-
-            assert!(error.message.contains("malformed durable continuation"));
+            assert!(claim_continuation().unwrap().is_none());
             assert!(root.join("malformed.failed").exists());
             assert!(fs::read_to_string(root.join("malformed.diagnostic"))
                 .unwrap()

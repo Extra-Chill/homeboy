@@ -11,7 +11,7 @@ use crate::agent_task_gate::{
     AgentTaskGateStatus, AgentTaskGateVisibility,
 };
 use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
-use crate::agent_task_review_dossier::AiFilledReviewForm;
+use crate::agent_task_review_dossier::{review_form_output_declaration, AiFilledReviewForm};
 use homeboy_core::gate::{HomeboyGateResult, HomeboyGateStatus};
 
 pub const AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA: &str =
@@ -21,6 +21,10 @@ const MAX_FAILURE_DIAGNOSTICS: usize = 8;
 const MAX_FAILURE_DELTA_IDENTITIES: usize = 8;
 const MAX_DIAGNOSTIC_FIELD_BYTES: usize = 512;
 const MAX_DIAGNOSTIC_ACTIONS: usize = 4;
+/// A review form is metadata, not a coding attempt. Callers may lower this via
+/// `metadata.cook_loop.review_form_timeout_ms`; the cap keeps it bounded.
+const DEFAULT_REVIEW_FORM_TIMEOUT_MS: u64 = 60_000;
+const MAX_REVIEW_FORM_TIMEOUT_MS: u64 = 120_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskCookLoopOptions {
@@ -262,8 +266,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     // (and actually produced changes) does the AI-authored form become the last
     // outstanding "gate".
     let gates_green_with_changes = failed_gates.is_empty()
-        && options.promotion_report.status != AgentTaskPromotionStatus::NoChangesGateFailed
-        && quality.classification != AgentTaskCookLoopQualityClassification::NoChanges;
+        && options.promotion_report.status == AgentTaskPromotionStatus::Applied;
     let review_form_gap = (options.require_review_form && gates_green_with_changes)
         .then(|| review_form_requirement_gap(&options.review_form));
 
@@ -546,21 +549,45 @@ fn build_review_form_follow_up_request(
         .root
         .clone()
         .or_else(|| worktree_root_hint(&options.promotion_report));
+    // The promoted candidate is authoritative. This task may inspect it but
+    // cannot produce or replace code artifacts.
+    let review_form_timeout_ms = review_form_timeout_ms(&options.source_request);
+    request.expected_artifacts.clear();
+    request.artifact_declarations.clear();
+    request.output_declarations = vec![review_form_output_declaration()];
+    request.limits.timeout_ms = Some(review_form_timeout_ms);
+    request.component_contracts.clear();
+    request.runtime_tools.clear();
+    request.executor.runtime_selection = None;
+    request.policy.tools = Default::default();
     request.policy.grant_workspace_read_tool();
     request.executor.required_capabilities = vec!["structured_outcome".to_string()];
+    request.executor.secret_env.clear();
+    // Provider configuration is an opaque, provider-owned dispatch contract.
+    // Keeping it avoids dropping routing or credential-source configuration
+    // while the explicit secret attachments and runtime authority stay removed.
     request.policy.write = "none".to_string();
     request.policy.apply = "none".to_string();
     request.metadata = json!({
         "cook_loop": {
-            "kind": "review-form-feedback",
+            "kind": "review_form_only",
             "attempt": next_attempt,
             "previous_attempt": options.attempt,
             "max_attempts": options.max_attempts,
             "source_task_id": options.source_request.task_id,
             "source_run_id": options.source_run_id,
+            "review_form_timeout_ms": review_form_timeout_ms,
         }
     });
     request
+}
+
+fn review_form_timeout_ms(source_request: &AgentTaskRequest) -> u64 {
+    source_request.metadata["cook_loop"]["review_form_timeout_ms"]
+        .as_u64()
+        .filter(|timeout_ms| *timeout_ms > 0)
+        .map(|timeout_ms| timeout_ms.min(MAX_REVIEW_FORM_TIMEOUT_MS))
+        .unwrap_or(DEFAULT_REVIEW_FORM_TIMEOUT_MS)
 }
 
 fn gate_failure(
@@ -941,8 +968,9 @@ fn cook_feedback_report_schema() -> String {
 mod tests {
     use super::*;
     use crate::agent_task::{
-        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
-        AgentToolExecutionLocation, AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy,
+        AgentTaskRuntimeSelection, AgentTaskWorkspace, AgentToolExecutionLocation,
+        AgentToolPolicyRule, AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_gate::{AgentTaskGateEnvironment, AgentTaskGateFailureEvidence};
     use crate::agent_task_promotion::{
@@ -1324,7 +1352,7 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-verified-no-op".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
+            require_review_form: true,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1333,6 +1361,7 @@ mod tests {
             verified.quality.classification,
             AgentTaskCookLoopQualityClassification::VerifiedNoOp
         );
+        assert!(verified.follow_up_request.is_none());
 
         let failed = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
@@ -1694,8 +1723,56 @@ mod tests {
 
     #[test]
     fn green_change_without_review_form_requests_another_attempt() {
+        let mut source_request = source_request();
+        source_request.artifact_declarations =
+            vec![crate::agent_task::AgentTaskArtifactDeclaration {
+                name: "transcript".to_string(),
+                artifact_type: Some("text".to_string()),
+                artifact_schema: None,
+                path: None,
+                required: true,
+                description: None,
+                metadata: Value::Null,
+            }];
+        source_request.output_declarations = vec![crate::agent_task::AgentTaskOutputDeclaration {
+            name: "implementation_notes".to_string(),
+            required: true,
+            schema: "homeboy/test-output/v1".to_string(),
+            structural_schema: Value::Null,
+            max_bytes: None,
+            evidence_relationship: None,
+        }];
+        source_request.runtime_tools = vec![serde_json::from_value(json!({
+            "id": "fixture.mutation-tool",
+            "command": ["fixture-tool"],
+            "required_capabilities": ["workspace_write"],
+            "secret_env": ["FIXTURE_TOOL_TOKEN"]
+        }))
+        .expect("runtime tool fixture")];
+        source_request.component_contracts = vec![AgentTaskComponentContract {
+            slug: Some("fixture-component".to_string()),
+            path: None,
+            extra: Default::default(),
+        }];
+        source_request.executor.required_capabilities = vec!["workspace_write".to_string()];
+        source_request.executor.secret_env = vec!["FIXTURE_PROVIDER_TOKEN".to_string()];
+        let provider_config = json!({
+            "provider": "fixture-provider",
+            "credential_source": "configured-provider-auth",
+            "routing": { "endpoint": "fixture://provider" }
+        });
+        source_request.executor.config = provider_config.clone();
+        source_request.executor.runtime_selection = Some(AgentTaskRuntimeSelection::default());
+        source_request.policy.tools.tools.insert(
+            "write".to_string(),
+            AgentToolPolicyRule {
+                execution_location: AgentToolExecutionLocation::Runner,
+                timeout_ms: None,
+                reason: Some("fixture mutation permission".to_string()),
+            },
+        );
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request: source_request(),
+            source_request,
             promotion_report: promotion_report(
                 AgentTaskPromotionStatus::Applied,
                 vec![green_gate()],
@@ -1724,6 +1801,87 @@ mod tests {
         assert_eq!(request.policy.write, "none");
         assert_eq!(request.policy.apply, "none");
         assert!(request.policy.permits_workspace_read_tool());
+        assert_eq!(request.policy.tools.tools.len(), 1);
+        assert!(!request.policy.tools.tools.contains_key("write"));
+        assert!(request.expected_artifacts.is_empty());
+        assert!(request.artifact_declarations.is_empty());
+        assert!(request.runtime_tools.is_empty());
+        assert!(request.component_contracts.is_empty());
+        assert!(request.executor.secret_env.is_empty());
+        assert_eq!(request.executor.config, provider_config);
+        assert!(request.executor.runtime_selection.is_none());
+        assert_eq!(
+            request.output_declarations,
+            vec![review_form_output_declaration()]
+        );
+        assert_eq!(
+            request.limits.timeout_ms,
+            Some(DEFAULT_REVIEW_FORM_TIMEOUT_MS)
+        );
+        assert_eq!(request.metadata["cook_loop"]["kind"], "review_form_only");
+    }
+
+    #[test]
+    fn review_form_retries_retain_the_normalized_timeout() {
+        let mut source_request = source_request();
+        source_request.metadata = json!({
+            "cook_loop": { "review_form_timeout_ms": MAX_REVIEW_FORM_TIMEOUT_MS + 1 }
+        });
+        let first = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request,
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-form-retry-1".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: None,
+            metadata: Value::Null,
+        })
+        .follow_up_request
+        .expect("first missing form retry");
+        assert_eq!(first.limits.timeout_ms, Some(MAX_REVIEW_FORM_TIMEOUT_MS));
+        assert_eq!(
+            first.metadata["cook_loop"]["review_form_timeout_ms"],
+            MAX_REVIEW_FORM_TIMEOUT_MS
+        );
+
+        let second = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: first,
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 2,
+            max_attempts: 3,
+            source_run_id: Some("run-form-retry-2".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: None,
+            metadata: Value::Null,
+        })
+        .follow_up_request
+        .expect("second missing form retry");
+        assert_eq!(second.limits.timeout_ms, Some(MAX_REVIEW_FORM_TIMEOUT_MS));
+        assert_eq!(
+            second.metadata["cook_loop"]["review_form_timeout_ms"],
+            MAX_REVIEW_FORM_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn review_form_timeout_is_configurable_but_capped() {
+        let mut request = source_request();
+        request.metadata = json!({
+            "cook_loop": { "review_form_timeout_ms": MAX_REVIEW_FORM_TIMEOUT_MS + 1 }
+        });
+        assert_eq!(review_form_timeout_ms(&request), MAX_REVIEW_FORM_TIMEOUT_MS);
+
+        request.metadata["cook_loop"]["review_form_timeout_ms"] = json!(5_000);
+        assert_eq!(review_form_timeout_ms(&request), 5_000);
     }
 
     #[test]

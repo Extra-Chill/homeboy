@@ -261,6 +261,27 @@ fn parse_env_provider_output(stdout: &str) -> Result<Vec<(String, String)>> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn install_provider_fixture(root: &Path, id: &str, output: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = root.join(id);
+        std::fs::create_dir_all(&source).expect("provider source directory");
+        std::fs::write(
+            source.join(format!("{id}.json")),
+            format!(
+                r#"{{"id":"{id}","name":"{id}","version":"1.0.0","env_provider":{{"script":"env.sh"}}}}"#
+            ),
+        )
+        .expect("provider manifest");
+        let script = source.join("env.sh");
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{output}'\n"))
+            .expect("provider script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("provider executable");
+        crate::install(&source.display().to_string(), Some(id)).expect("install provider fixture");
+    }
+
     #[test]
     fn parses_blank_output_as_no_env() {
         assert!(parse_env_provider_output("\n").unwrap().is_empty());
@@ -308,5 +329,25 @@ mod tests {
         let payload = provider_command_payload(&context).expect("payload");
         assert!(!payload.contains(secret));
         assert!(payload.contains("claim_ref"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn providers_cannot_contribute_the_same_public_environment_key() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("provider fixtures");
+            install_provider_fixture(root.path(), "first", r#"{"SHARED_KEY":"first"}"#);
+            install_provider_fixture(root.path(), "second", r#"{"SHARED_KEY":"second"}"#);
+
+            let error = resolve_installed_all(
+                &RunnerJobExecutionContext::local("homeboy"),
+                &["first".to_string(), "second".to_string()],
+                root.path(),
+                &[],
+            )
+            .expect_err("provider-provider public env collision must fail");
+
+            assert!(error.message.contains("SHARED_KEY"));
+        });
     }
 }

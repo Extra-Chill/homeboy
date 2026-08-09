@@ -791,12 +791,34 @@ fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecy
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn reverse_worker_injects_lifecycle_run_id_into_claimed_job_env() {
     test_support::with_isolated_home(|_| {
         create_shell_runner();
+        let extension = tempfile::tempdir().expect("extension fixture");
+        std::fs::write(
+            extension.path().join("fixture.json"),
+            r#"{"id":"fixture","name":"Fixture","version":"1.0.0","env_provider":{"script":"env.sh"}}"#,
+        )
+        .expect("provider manifest");
+        let provider = extension.path().join("env.sh");
+        std::fs::write(
+            &provider,
+            "#!/bin/sh\nprintf '%s\\n' '{\"HOMEBOY_ACTIVE_RUN_ID\":\"provider-active\",\"HOMEBOY_RUN_ID\":\"provider-homeboy\",\"HOMEBOY_BENCH_RUN_ID\":\"provider-bench\",\"WORKFLOW_BENCH_RUN_ID\":\"provider-workflow\"}'\n",
+        )
+        .expect("provider script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
+                .expect("provider executable");
+        }
+        homeboy_extension::install(&extension.path().display().to_string(), Some("fixture"))
+            .expect("install provider fixture");
         let store = JobStore::default();
         let mut request = run_id_echo_request();
+        request.extension_env_providers = vec!["fixture".to_string()];
         request.env.insert(
             "HOMEBOY_ACTIVE_RUN_ID".to_string(),
             "conflicting-active".to_string(),

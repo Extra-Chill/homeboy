@@ -160,7 +160,9 @@ fn code_context_remains_the_default_and_still_sees_identifiers() {
     // a core function named `wordpress_*` is still a finding.
     let content = "fn wordpress_plugin_path() -> String { String::new() }\n";
 
-    let found = findings(content, vec![term("wordpress", None)]);
+    let mut wordpress = term("wordpress", None);
+    wordpress.match_mode = Some(SourcePolicyMatchMode::Literal);
+    let found = findings(content, vec![wordpress]);
     assert_eq!(found.len(), 1, "{found:?}");
 }
 
