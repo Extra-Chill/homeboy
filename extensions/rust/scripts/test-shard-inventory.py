@@ -9,6 +9,7 @@ from pathlib import Path
 
 SCHEMA = "homeboy/test-inventory/v1"
 MANIFEST_SCHEMA = "homeboy/test-shard-manifest/v1"
+CHANGED_SELECTION_SCHEMA = "homeboy/rust-changed-test-selection/v1"
 
 
 def fail(message):
@@ -206,17 +207,56 @@ def validate(manifest_path, current):
     return [known[identity] for identity in selected]
 
 
+def resolve_changed_selection(selection_raw, current):
+    try:
+        selection = json.loads(selection_raw)
+    except json.JSONDecodeError as error:
+        fail(f"invalid changed test selection: {error}")
+    if selection.get("schema") != CHANGED_SELECTION_SCHEMA:
+        fail("unsupported changed test selection schema")
+    candidates = selection.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        fail("changed test selection must contain a non-empty candidates array")
+
+    selected = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            fail("changed test selection candidates must be objects")
+        package = candidate.get("package")
+        target_kind = candidate.get("target_kind")
+        target = candidate.get("target")
+        module = candidate.get("module")
+        if not all(isinstance(value, str) and value for value in (package, target_kind, target)):
+            fail("changed test selection candidate has an invalid package or target identity")
+        if module is not None and (not isinstance(module, str) or not module):
+            fail("changed test selection candidate has an invalid module")
+        matches = [
+            test for test in current["tests"]
+            if test["package"] == package
+            and test["target_kind"] == target_kind
+            and test["target"] == target
+            and (module is None or test["name"] == module or test["name"].startswith(f"{module}::"))
+        ]
+        if not matches:
+            fail(f"changed test selection has no inventory match for {package}::{target_kind}::{target}")
+        selected.update({test["id"]: test for test in matches})
+    return [selected[key] for key in sorted(selected)]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
     parser.add_argument("--runner", choices=("cargo", "nextest"), required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--manifest")
+    parser.add_argument("--changed-selection-json")
     args = parser.parse_args()
     current = inventory(args.project, args.runner)
     output = current
     if args.manifest:
         output = {"inventory": current, "selected": validate(args.manifest, current)}
+    if args.changed_selection_json:
+        output = {"inventory": current, "selected": resolve_changed_selection(args.changed_selection_json, current)}
     Path(args.output).write_text(json.dumps(output, indent=2) + "\n")
 
 
