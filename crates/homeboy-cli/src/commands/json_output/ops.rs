@@ -38,13 +38,18 @@ mod tests {
         macro_rules! assert_registered_as_ops {
             ($(($module:ident, $variant:ident, $handler:path),)*) => {
                 $({
-                    // Module names are the command names, except `self_cmd`,
-                    // which exists only because `self` is a Rust keyword.
+                    // Module names are command names with Rust identifier
+                    // separators normalized; `self_cmd` exists only because
+                    // `self` is a Rust keyword.
                     let module = stringify!($module);
-                    let name = if module == "self_cmd" { "self" } else { module };
+                    let name = if module == "self_cmd" {
+                        "self".to_string()
+                    } else {
+                        module.replace('_', "-")
+                    };
 
                     assert_eq!(
-                        registered_command_json_family(name),
+                        registered_command_json_family(&name),
                         Some(CommandJsonFamily::Ops),
                         "ops descriptor `{name}` is missing from COMMAND_SPECS or is \
                          registered outside the Ops JSON family, so it would never \

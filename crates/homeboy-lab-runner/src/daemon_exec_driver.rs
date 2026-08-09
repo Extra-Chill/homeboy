@@ -26,6 +26,7 @@ use super::Runner;
 struct DaemonPreparedPlan {
     plan: PreparedRunnerProcess,
     extension_env_providers: Vec<String>,
+    authoritative_run_id: Option<String>,
 }
 
 /// The runner layer's `RunnerExecDriver`. Registered with core at startup.
@@ -71,6 +72,7 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             &request.env,
             secret_env_plan,
         );
+        let authoritative_run_id = request.authoritative_run_id;
         let plan = prepare_daemon_local_process(RunnerProcessRequest {
             runner_id: request.runner_id,
             runner,
@@ -103,6 +105,7 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             plan_token: Arc::new(DaemonPreparedPlan {
                 plan,
                 extension_env_providers: request.extension_env_providers,
+                authoritative_run_id,
             }),
         }))
     }
@@ -153,17 +156,20 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             execution_context,
             &base.extension_env_providers,
             std::path::Path::new(&plan.cwd),
-            &plan
-                .env
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<Vec<_>>(),
+            &plan.env,
+            base.authoritative_run_id.as_deref(),
         )?;
         for contribution in &contributions {
             for (key, value) in &contribution.public_env {
                 plan.env.insert(key.clone(), value.clone());
             }
         }
+        let diagnostic_hints = super::execution::apply_explicit_runner_exec_run_id_env(
+            &mut plan.env,
+            base.authoritative_run_id.as_deref(),
+        )
+        .into_iter()
+        .collect();
         let extension_env_provenance = serde_json::to_value(&contributions).map_err(|err| {
             homeboy_core::error::Error::internal_json(
                 err.to_string(),
@@ -196,6 +202,7 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
                 .capture
                 .and_then(|capture| serde_json::to_value(capture).ok()),
             extension_env_provenance,
+            diagnostic_hints,
         })
     }
 }

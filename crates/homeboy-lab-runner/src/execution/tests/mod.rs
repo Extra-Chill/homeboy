@@ -84,6 +84,20 @@ pub(super) fn failed_runner_exec_output(stdout: &str, stderr: &str) -> RunnerExe
     }
 }
 
+#[test]
+fn runner_exec_diagnostic_hints_deduplicate_exact_values_in_order() {
+    let mut output = failed_runner_exec_output("", "");
+
+    super::append_runner_exec_diagnostic_hint(&mut output, Some("first hint".to_string()));
+    super::append_runner_exec_diagnostic_hint(&mut output, Some("first hint".to_string()));
+    super::append_runner_exec_diagnostic_hint(&mut output, Some("second hint".to_string()));
+
+    assert_eq!(
+        output.diagnostics.expect("diagnostics").hints,
+        ["first hint", "second hint"]
+    );
+}
+
 pub(super) fn policy_request(options: &RunnerExecOptions) -> RunnerPolicyRequest<'_> {
     RunnerPolicyRequest {
         project_id: options.project_id.as_deref(),
