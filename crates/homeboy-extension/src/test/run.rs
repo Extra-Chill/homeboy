@@ -117,8 +117,8 @@ fn test_inventory_mode(ci_env: &[(String, String)]) -> bool {
 struct TestInventoryBinding {
     path: PathBuf,
     workspace_fingerprint: String,
-    cargo_runner_fingerprint: String,
-    nextest_runner_fingerprint: String,
+    cargo_runner_fingerprint: Option<String>,
+    nextest_runner_fingerprint: Option<String>,
     #[cfg(unix)]
     run_dir: std::fs::File,
     #[cfg(unix)]
@@ -150,8 +150,10 @@ fn test_inventory_binding(source_path: &Path, run_dir: &RunDir) -> Option<TestIn
     Some(TestInventoryBinding {
         path,
         workspace_fingerprint: workspace_fingerprint(&workspace_root)?,
-        cargo_runner_fingerprint: runner_fingerprint(&workspace_root, "cargo")?,
-        nextest_runner_fingerprint: runner_fingerprint(&workspace_root, "nextest")?,
+        // Inventory producers select one runner. Record each independently so
+        // Cargo inventory remains valid on systems without cargo-nextest.
+        cargo_runner_fingerprint: runner_fingerprint(&workspace_root, "cargo"),
+        nextest_runner_fingerprint: runner_fingerprint(&workspace_root, "nextest"),
         run_dir_device: metadata.dev(),
         run_dir_inode: metadata.ino(),
         run_dir,
@@ -232,7 +234,11 @@ fn workspace_fingerprint(root: &Path) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn revalidate_test_inventory_binding(binding: &TestInventoryBinding, source_path: &Path) -> bool {
+fn revalidate_test_inventory_binding(
+    binding: &TestInventoryBinding,
+    source_path: &Path,
+    runner: &str,
+) -> bool {
     use std::os::unix::fs::MetadataExt;
 
     let Ok(metadata) = binding.run_dir.metadata() else {
@@ -247,10 +253,16 @@ fn revalidate_test_inventory_binding(binding: &TestInventoryBinding, source_path
         return false;
     };
     workspace_fingerprint(&workspace_root) == Some(binding.workspace_fingerprint.clone())
-        && runner_fingerprint(&workspace_root, "cargo")
-            == Some(binding.cargo_runner_fingerprint.clone())
-        && runner_fingerprint(&workspace_root, "nextest")
-            == Some(binding.nextest_runner_fingerprint.clone())
+        && runner_fingerprint(&workspace_root, runner)
+            == expected_runner_fingerprint(binding, runner)
+}
+
+fn expected_runner_fingerprint(binding: &TestInventoryBinding, runner: &str) -> Option<String> {
+    match runner {
+        "cargo" => binding.cargo_runner_fingerprint.clone(),
+        "nextest" => binding.nextest_runner_fingerprint.clone(),
+        _ => None,
+    }
 }
 
 /// Delete stale evidence before the child starts. The child may only write a
@@ -337,12 +349,8 @@ fn valid_test_inventory_payload(
             .tests
             .iter()
             .all(|test| test.expected_outcome.as_deref() == Some("skipped"))
-        || inventory.runner_fingerprint.as_str()
-            != match inventory.runner.as_str() {
-                "cargo" => binding.cargo_runner_fingerprint.as_str(),
-                "nextest" => binding.nextest_runner_fingerprint.as_str(),
-                _ => return None,
-            }
+        || expected_runner_fingerprint(binding, &inventory.runner).as_deref()
+            != Some(inventory.runner_fingerprint.as_str())
         || inventory.workspace_fingerprint != binding.workspace_fingerprint
     {
         return None;
@@ -360,7 +368,7 @@ fn valid_test_inventory_payload(
             || test
                 .expected_outcome
                 .as_deref()
-                .is_some_and(|outcome| !matches!(outcome, "executed" | "skipped"))
+                .is_none_or(|outcome| !matches!(outcome, "executed" | "skipped"))
     }) {
         return None;
     }
@@ -376,11 +384,7 @@ fn valid_test_inventory_payload(
     // Rebuild the signed shape from parent-bound provenance rather than accepting
     // the child fields as the material that defines the schema fingerprint.
     let mut bound_inventory = inventory.clone();
-    bound_inventory.runner_fingerprint = match inventory.runner.as_str() {
-        "cargo" => binding.cargo_runner_fingerprint.clone(),
-        "nextest" => binding.nextest_runner_fingerprint.clone(),
-        _ => return None,
-    };
+    bound_inventory.runner_fingerprint = expected_runner_fingerprint(binding, &inventory.runner)?;
     bound_inventory.workspace_fingerprint = binding.workspace_fingerprint.clone();
     (homeboy_engine_primitives::content_hash::sha256_hex(&canonical_inventory_json(
         &bound_inventory,
@@ -923,9 +927,9 @@ fn run_main_test_workflow_inner(
     let test_autofix: Option<AppliedRefactor> = None;
 
     let test_inventory = inventory_binding.as_ref().and_then(|binding| {
-        revalidate_test_inventory_binding(binding, source_path)
-            .then(|| valid_test_inventory(binding))
-            .flatten()
+        valid_test_inventory(binding).filter(|inventory| {
+            revalidate_test_inventory_binding(binding, source_path, &inventory.runner)
+        })
     });
     let status = test_run_status_with_inventory(
         output.success,
@@ -2614,7 +2618,10 @@ mod tests {
             (
                 "arbitrary provenance",
                 valid_inventory_document(&binding, "test", "executed").replacen(
-                    &binding.nextest_runner_fingerprint,
+                    binding
+                        .nextest_runner_fingerprint
+                        .as_deref()
+                        .expect("nextest fingerprint"),
                     &"c".repeat(64),
                     1,
                 ),
@@ -2655,6 +2662,24 @@ mod tests {
         assert!(
             valid_test_inventory(&binding).is_none(),
             "duplicate identities must remain fail-closed even with a matching fingerprint"
+        );
+
+        let missing_outcome = TestInventoryTest {
+            id: "suite::missing-outcome".to_string(),
+            package: "suite".to_string(),
+            target: "suite-tests".to_string(),
+            target_kind: "test".to_string(),
+            name: "missing-outcome".to_string(),
+            expected_outcome: None,
+        };
+        std::fs::write(
+            &binding.path,
+            inventory_document(&binding, vec![missing_outcome]),
+        )
+        .expect("write missing outcome inventory");
+        assert!(
+            valid_test_inventory(&binding).is_none(),
+            "every inventory identity must declare its expected outcome"
         );
     }
 
@@ -2698,6 +2723,41 @@ mod tests {
         assert!(
             valid_test_inventory(&binding).is_none(),
             "the inventory fingerprint must bind the listed tests"
+        );
+    }
+
+    #[test]
+    fn cargo_inventory_binds_without_cargo_nextest() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut binding = test_inventory_binding_for_test(temp.path());
+        let test = TestInventoryTest {
+            id: "suite::cargo".to_string(),
+            package: "suite".to_string(),
+            target: "suite-tests".to_string(),
+            target_kind: "test".to_string(),
+            name: "cargo".to_string(),
+            expected_outcome: Some("executed".to_string()),
+        };
+        let mut inventory: TestInventoryEvidence =
+            serde_json::from_str(&inventory_document(&binding, vec![test]))
+                .expect("parse inventory");
+        binding.nextest_runner_fingerprint = None;
+        inventory.runner = "cargo".to_string();
+        inventory.runner_fingerprint = binding
+            .cargo_runner_fingerprint
+            .clone()
+            .expect("cargo fingerprint");
+        inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
+            &canonical_inventory_json(&inventory),
+        );
+        std::fs::write(
+            &binding.path,
+            serde_json::to_vec(&inventory).expect("serialize cargo inventory"),
+        )
+        .expect("write cargo inventory");
+        assert!(
+            valid_test_inventory(&binding).is_some(),
+            "Cargo inventory must not require cargo-nextest"
         );
     }
 
@@ -2791,8 +2851,8 @@ mod tests {
         TestInventoryBinding {
             path: run_dir.join(TEST_INVENTORY_FILE),
             workspace_fingerprint: "b".repeat(64),
-            cargo_runner_fingerprint: "a".repeat(64),
-            nextest_runner_fingerprint: "a".repeat(64),
+            cargo_runner_fingerprint: Some("a".repeat(64)),
+            nextest_runner_fingerprint: Some("a".repeat(64)),
             #[cfg(unix)]
             run_dir: descriptor,
             #[cfg(unix)]
@@ -2822,7 +2882,10 @@ mod tests {
         let mut inventory = TestInventoryEvidence {
             schema: TEST_INVENTORY_SCHEMA.to_string(),
             runner: "nextest".to_string(),
-            runner_fingerprint: binding.nextest_runner_fingerprint.clone(),
+            runner_fingerprint: binding
+                .nextest_runner_fingerprint
+                .clone()
+                .expect("nextest fingerprint"),
             workspace_fingerprint: binding.workspace_fingerprint.clone(),
             tests,
             inventory_fingerprint: String::new(),
