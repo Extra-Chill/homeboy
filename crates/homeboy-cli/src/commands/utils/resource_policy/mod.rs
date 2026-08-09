@@ -834,25 +834,20 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_mutating_recovery_commands_remain_resource_managed() {
-        // Bounded readers are exempt above; replay and promotion still execute
-        // provider or worktree operations and retain resource admission.
-        for args in [
-            [
-                "homeboy",
-                "agent-task",
-                "replay-provider-boundary",
-                "agent-task-123",
-            ]
-            .as_slice(),
-            ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
-        ] {
-            let cli = Cli::parse_from(args);
-            assert!(
-                hot_command(&cli.command).is_some(),
-                "{args:?} must retain resource admission"
-            );
-        }
+    fn agent_task_provider_replay_remains_resource_managed() {
+        // `review` is a bounded metadata read. Provider replay executes work
+        // against the selected runner and retains resource admission.
+        let args = [
+            "homeboy",
+            "agent-task",
+            "replay-provider-boundary",
+            "agent-task-123",
+        ];
+        let cli = Cli::parse_from(args);
+        assert!(
+            hot_command(&cli.command).is_some(),
+            "{args:?} must retain resource admission"
+        );
     }
 
     #[test]

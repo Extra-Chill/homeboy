@@ -46,6 +46,9 @@ pub struct RunnerExecPrepareRequest {
     pub require_paths: Vec<String>,
     /// Ordered installed extension IDs whose runner-local scripts contribute env.
     pub extension_env_providers: Vec<String>,
+    /// Canonical durable run identity resolved by the daemon from the explicit
+    /// idempotency key or its compatible lifecycle/metadata fallback.
+    pub authoritative_run_id: Option<String>,
     pub validate_require_paths_on_host: bool,
 }
 
@@ -132,6 +135,8 @@ pub struct DaemonExecOutput {
     pub stderr: String,
     pub exit_code: i32,
     pub extension_env_provenance: Value,
+    /// Non-secret runner diagnostics persisted with the terminal result.
+    pub diagnostic_hints: Vec<String>,
     /// Serialized `RunnerResourceMetrics`, if any.
     pub metrics: Option<Value>,
     /// Serialized command-capture metadata, if any.

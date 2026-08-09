@@ -1803,7 +1803,7 @@ fn lab_cook_plan_preserves_actual_cli_provenance_through_handoff_serialization()
                 "--max-attempts",
                 "3",
                 "--max-provider-executions",
-                "1",
+                "3",
                 "--protected-branch",
                 "main",
                 "--protected-branch",

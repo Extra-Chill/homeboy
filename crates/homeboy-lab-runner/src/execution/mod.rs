@@ -195,9 +195,29 @@ pub(crate) fn resolve_provider_env_with_execution_context(
     execution_context: &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
     provider_ids: &[String],
     cwd: &std::path::Path,
-    env: &[(String, String)],
+    env: &HashMap<String, String>,
+    explicit_run_id: Option<&str>,
 ) -> Result<Vec<homeboy_extension::EnvProviderContribution>> {
-    homeboy_extension::resolve_installed_env_providers(execution_context, provider_ids, cwd, env)
+    let env = provider_resolution_env(env, explicit_run_id);
+    homeboy_extension::resolve_installed_env_providers(execution_context, provider_ids, cwd, &env)
+}
+
+/// Environment visible to extension providers before they contribute their
+/// values. An explicit `runner exec --run-id` owns these names, so providers may
+/// report them without conflicting with a request value; the runner reapplies
+/// its authoritative values after every contribution is merged.
+fn provider_resolution_env(
+    env: &HashMap<String, String>,
+    explicit_run_id: Option<&str>,
+) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|(name, _)| {
+            explicit_run_id.is_none()
+                || (!RUNNER_EXEC_RUN_ID_ENV_NAMES.contains(&name.as_str())
+                    && !RUNNER_EXEC_SCRUBBED_RUN_ID_ENV_NAMES.contains(&name.as_str()))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 impl Default for RunnerExecOptions {
@@ -830,7 +850,7 @@ pub(crate) fn exec_with_status_snapshot(
         require_paths: options.require_paths.clone(),
         validate_require_paths_on_host: false,
     })?;
-    let run_id_hint =
+    let mut run_id_hint =
         apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref());
     let runner = plan.runner.clone();
     let cwd = plan.cwd.clone();
@@ -884,20 +904,24 @@ pub(crate) fn exec_with_status_snapshot(
             require_paths: options.require_paths.clone(),
             validate_require_paths_on_host: false,
         })?;
-        let contributions = homeboy_extension::resolve_installed_env_providers(
+        let contributions = resolve_provider_env_with_execution_context(
             &options.execution_context,
             &options.extension_env_providers,
             std::path::Path::new(&plan.cwd),
-            &plan
-                .env
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<Vec<_>>(),
+            &plan.env,
+            options.run_id.as_deref(),
         )?;
         for contribution in contributions {
             for (key, value) in contribution.public_env {
                 plan.env.insert(key, value);
             }
+        }
+        // Provider contributions are merged after the initial request plan. An
+        // explicit runner run ID remains authoritative over both sources.
+        if let Some(hint) =
+            apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref())
+        {
+            run_id_hint = Some(hint);
         }
         let (mut output, exit_code) = exec_local(plan)?;
         append_runner_exec_binary_diagnostics(&mut output, &runner, None);
@@ -1257,7 +1281,7 @@ fn validate_generic_exec_mirror_run_id(
     ))
 }
 
-fn apply_explicit_runner_exec_run_id_env(
+pub(super) fn apply_explicit_runner_exec_run_id_env(
     env: &mut HashMap<String, String>,
     run_id: Option<&str>,
 ) -> Option<String> {
@@ -1325,7 +1349,9 @@ fn append_runner_exec_diagnostic_hint(output: &mut RunnerExecOutput, hint: Optio
             homeboy_binaries: None,
             hints: Vec::new(),
         });
-    diagnostics.hints.push(hint);
+    if !diagnostics.hints.contains(&hint) {
+        diagnostics.hints.push(hint);
+    }
 }
 
 fn append_runner_exec_binary_diagnostics(
