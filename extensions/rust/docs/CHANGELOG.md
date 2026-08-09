@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.33.1] - 2026-08-09
+
+### Fixed
+- count terminal nextest outcomes [AI: OpenAI gpt-5.6-sol via OpenCode]
+
 ## [1.33.0] - 2026-08-09
 
 ### Added
