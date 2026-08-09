@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.17] - 2026-08-08
+
+### Fixed
+- honor shard baseline command selection [AI: OpenAI gpt-5.6-terra via OpenCode - workflow and contract tests]
+- preserve scope for shard inventory [AI: OpenAI gpt-5.6-terra via OpenCode - workflow and contract tests]
+- honor shard baseline policy [AI: OpenAI gpt-5.6-terra via OpenCode - workflow and contract tests]
+- attribute failed shards to baseline [AI: OpenAI gpt-5.6-terra via OpenCode - workflow and contract tests]
+
 ## [2.11.16] - 2026-08-09
 
 ### Fixed
