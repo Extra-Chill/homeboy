@@ -27,10 +27,15 @@ pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct TestRunWorkflowArgs {
@@ -61,8 +66,11 @@ const NO_TESTS_APPLICABLE_EXTENSION_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_EXT
 const NO_TESTS_APPLICABLE_STEP: &str = "test";
 const TEST_INVENTORY_ONLY_ENV: &str = "HOMEBOY_TEST_INVENTORY_ONLY";
 const TEST_INVENTORY_FILE_ENV: &str = "HOMEBOY_TEST_INVENTORY_FILE";
+#[cfg(unix)]
 const TEST_INVENTORY_SCHEMA: &str = "homeboy/test-inventory/v1";
+#[cfg(unix)]
 const TEST_INVENTORY_FILE: &str = "test-inventory.json";
+#[cfg(unix)]
 const MAX_TEST_INVENTORY_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 25 * 60;
 
@@ -84,6 +92,7 @@ struct NoTestsApplicableEvidence {
     reason: String,
 }
 
+#[cfg(unix)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TestInventoryEvidence {
@@ -95,6 +104,7 @@ struct TestInventoryEvidence {
     inventory_fingerprint: String,
 }
 
+#[cfg(unix)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TestInventoryTest {
@@ -113,23 +123,16 @@ fn test_inventory_mode(ci_env: &[(String, String)]) -> bool {
         .any(|(key, value)| key == TEST_INVENTORY_ONLY_ENV && value == "1")
 }
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct TestInventoryBinding {
     path: PathBuf,
     workspace_fingerprint: String,
     cargo_runner_fingerprint: Option<String>,
     nextest_runner_fingerprint: Option<String>,
-    #[cfg(unix)]
     run_dir: std::fs::File,
-    #[cfg(unix)]
     run_dir_device: u64,
-    #[cfg(unix)]
     run_dir_inode: u64,
-}
-
-#[cfg(not(unix))]
-fn test_inventory_binding(_source_path: &Path, _run_dir: &RunDir) -> Option<TestInventoryBinding> {
-    None
 }
 
 #[cfg(unix)]
@@ -160,6 +163,7 @@ fn test_inventory_binding(source_path: &Path, run_dir: &RunDir) -> Option<TestIn
     })
 }
 
+#[cfg(unix)]
 fn cargo_workspace_root(source_path: &Path) -> Option<PathBuf> {
     let output = Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version=1"])
@@ -174,6 +178,7 @@ fn cargo_workspace_root(source_path: &Path) -> Option<PathBuf> {
     PathBuf::from(workspace_root).canonicalize().ok()
 }
 
+#[cfg(unix)]
 fn runner_fingerprint(workspace_root: &Path, runner: &str) -> Option<String> {
     let args = if runner == "nextest" {
         vec!["nextest", "--version"]
@@ -191,10 +196,12 @@ fn runner_fingerprint(workspace_root: &Path, runner: &str) -> Option<String> {
     })?
 }
 
+#[cfg(unix)]
 fn runner_fingerprint_from_version(runner: &str, version: &str) -> String {
     homeboy_engine_primitives::content_hash::sha256_hex(format!("{runner}\0{version}").as_bytes())
 }
 
+#[cfg(unix)]
 fn workspace_fingerprint(root: &Path) -> Option<String> {
     fn collect(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Option<()> {
         for entry in std::fs::read_dir(directory).ok()? {
@@ -264,20 +271,13 @@ fn revalidate_test_inventory_binding(
             == expected_runner_fingerprint(binding, runner)
 }
 
+#[cfg(unix)]
 fn expected_runner_fingerprint(binding: &TestInventoryBinding, runner: &str) -> Option<String> {
     match runner {
         "cargo" => binding.cargo_runner_fingerprint.clone(),
         "nextest" => binding.nextest_runner_fingerprint.clone(),
         _ => None,
     }
-}
-
-/// Delete stale evidence before the child starts. The child may only write a
-/// regular file directly below its trusted run directory, so a prior run cannot
-/// satisfy this run.
-#[cfg(not(unix))]
-fn prepare_test_inventory(_binding: &TestInventoryBinding) -> bool {
-    false
 }
 
 #[cfg(unix)]
@@ -296,14 +296,6 @@ fn unlink_test_inventory(binding: &TestInventoryBinding) -> bool {
 #[cfg(unix)]
 fn prepare_test_inventory(binding: &TestInventoryBinding) -> bool {
     unlink_test_inventory(binding)
-}
-
-/// Inventory planning currently runs on Unix CI. Other platforms lack an
-/// equivalent no-follow open here, so this optional evidence stays closed.
-#[cfg(not(unix))]
-fn valid_test_inventory(binding: &TestInventoryBinding) -> Option<TestInventoryOutput> {
-    let _ = binding;
-    None
 }
 
 #[cfg(unix)]
@@ -341,6 +333,7 @@ fn valid_test_inventory(binding: &TestInventoryBinding) -> Option<TestInventoryO
     valid_test_inventory_payload(&inventory, binding)
 }
 
+#[cfg(unix)]
 fn valid_test_inventory_payload(
     inventory: &TestInventoryEvidence,
     binding: &TestInventoryBinding,
@@ -409,6 +402,7 @@ fn valid_test_inventory_payload(
 /// The Rust inventory producer fingerprints `json.dumps(..., sort_keys=True,
 /// separators=(",", ":"))`. Its default `ensure_ascii=True` is part of the v1
 /// identity, including for non-ASCII test names.
+#[cfg(unix)]
 fn canonical_inventory_json(inventory: &TestInventoryEvidence) -> Vec<u8> {
     let mut json = String::from("{\"runner\":");
     append_python_json_string(&mut json, &inventory.runner);
@@ -445,6 +439,7 @@ fn canonical_inventory_json(inventory: &TestInventoryEvidence) -> Vec<u8> {
     json.into_bytes()
 }
 
+#[cfg(unix)]
 fn append_python_json_string(json: &mut String, value: &str) {
     json.push('"');
     for character in value.chars() {
@@ -792,6 +787,7 @@ fn run_main_test_workflow_inner(
     let write_results_helper = write_test_results_helper(run_dir)?;
 
     let inventory_mode = test_inventory_mode(&args.ci_env);
+    #[cfg(unix)]
     let inventory_binding = inventory_mode
         .then(|| {
             test_context
@@ -933,11 +929,16 @@ fn run_main_test_workflow_inner(
     // Autofix is owned by `refactor --from test --write`; the test command is read-only.
     let test_autofix: Option<AppliedRefactor> = None;
 
+    #[cfg(unix)]
     let test_inventory = inventory_binding.as_ref().and_then(|binding| {
         valid_test_inventory(binding).filter(|inventory| {
             revalidate_test_inventory_binding(binding, source_path, &inventory.runner)
         })
     });
+    // Descriptor-bound inventory evidence is Unix-only. Other platforms retain
+    // normal test execution, but inventory-only mode cannot manufacture a pass.
+    #[cfg(not(unix))]
+    let test_inventory: Option<TestInventoryOutput> = None;
     let status = test_run_status_with_inventory(
         output.success,
         test_counts.as_ref(),
@@ -2524,6 +2525,28 @@ mod tests {
         assert_eq!(test_run_status(true, None, false), "failed");
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_inventory_mode_stays_fail_closed_without_disabling_normal_tests() {
+        assert_eq!(
+            test_run_status_with_inventory(true, None, false, true, None),
+            "failed",
+            "inventory-only mode requires descriptor-bound evidence unavailable on this platform"
+        );
+        assert_eq!(
+            test_run_status_with_inventory(
+                true,
+                Some(&TestCounts::new(3, 3, 0, 0)),
+                false,
+                false,
+                None,
+            ),
+            "passed",
+            "normal test execution must continue to use parsed test counts"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn inventory_success_is_not_re_finalized_from_execution_counts() {
         let mut workflow = failed_test_workflow(
@@ -2550,6 +2573,7 @@ mod tests {
         assert_eq!(workflow.exit_code, 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn inventory_mode_requires_explicit_valid_inventory_evidence() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -2690,6 +2714,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn inventory_evidence_is_fresh_confined_and_fingerprint_bound() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -2733,6 +2758,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn cargo_inventory_binds_without_cargo_nextest() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -2770,6 +2796,7 @@ mod tests {
 
     /// Golden values produced by `homeboy-extensions/rust/scripts/test-shard-inventory.py`.
     /// Keep these byte-for-byte values aligned with the producer's v1 contract.
+    #[cfg(unix)]
     #[test]
     fn inventory_provenance_fingerprints_match_producer_golden_fixture() {
         let root =
@@ -2788,6 +2815,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn workspace_fingerprint_matches_python_producer_for_universal_newlines() {
         let temp = tempfile::tempdir().expect("temp workspace");
@@ -2932,33 +2960,29 @@ print(hashlib.sha256(content.encode()).hexdigest())
         );
     }
 
+    #[cfg(unix)]
     fn test_inventory_binding_for_test(run_dir: &Path) -> TestInventoryBinding {
-        #[cfg(unix)]
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
         let run_dir = run_dir.canonicalize().expect("canonical run dir");
-        #[cfg(unix)]
         let descriptor = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
             .open(&run_dir)
             .expect("open run directory");
-        #[cfg(unix)]
         let metadata = descriptor.metadata().expect("run directory metadata");
         TestInventoryBinding {
             path: run_dir.join(TEST_INVENTORY_FILE),
             workspace_fingerprint: "b".repeat(64),
             cargo_runner_fingerprint: Some("a".repeat(64)),
             nextest_runner_fingerprint: Some("a".repeat(64)),
-            #[cfg(unix)]
             run_dir: descriptor,
-            #[cfg(unix)]
             run_dir_device: metadata.dev(),
-            #[cfg(unix)]
             run_dir_inode: metadata.ino(),
         }
     }
 
+    #[cfg(unix)]
     fn valid_inventory_document(
         binding: &TestInventoryBinding,
         name: &str,
@@ -2975,6 +2999,7 @@ print(hashlib.sha256(content.encode()).hexdigest())
         inventory_document(binding, vec![test])
     }
 
+    #[cfg(unix)]
     fn inventory_document(binding: &TestInventoryBinding, tests: Vec<TestInventoryTest>) -> String {
         let mut inventory = TestInventoryEvidence {
             schema: TEST_INVENTORY_SCHEMA.to_string(),
