@@ -38,6 +38,47 @@ pub fn runner_upgrade_command(
     command
 }
 
+/// A Homeboy-managed slot is immutable: replacing it through the binary's
+/// generic installer bypasses controller-owned promotion and daemon rotation.
+pub fn is_managed_immutable_homeboy_path(runner: &Runner, homeboy_path: &str) -> bool {
+    let Some(workspace_root) = runner.workspace_root.as_deref() else {
+        return false;
+    };
+    let Some(slot) = homeboy_path
+        .strip_prefix(workspace_root.trim_end_matches('/'))
+        .and_then(|path| path.strip_prefix("/_homeboy_binaries/"))
+    else {
+        return false;
+    };
+
+    let slot = slot
+        .strip_suffix("/target/release/homeboy")
+        .or_else(|| slot.strip_suffix("/homeboy"));
+    let Some(slot) = slot else {
+        return false;
+    };
+    let immutable_slot = slot
+        .strip_prefix("homeboy-")
+        .is_some_and(|name| name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || slot.strip_prefix("dev/").is_some_and(|name| {
+            name.len() == 16 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+
+    immutable_slot
+}
+
+pub fn managed_immutable_runner_recovery_commands(runner_id: &str) -> Vec<String> {
+    let refresh = format!(
+        "homeboy runner refresh-homeboy {} --ref {} --reconnect",
+        shell_arg(runner_id),
+        shell_arg(&crate::homeboy_refresh::controller_refresh_ref())
+    );
+    vec![
+        refresh,
+        format!("homeboy runner reconcile {}", shell_arg(runner_id)),
+    ]
+}
+
 pub fn reconnect_runner_daemon(runner_id: &str) -> Result<(String, Option<String>)> {
     runner::disconnect(runner_id)?;
     let (report, exit_code) = runner::connect(runner_id)?;
