@@ -613,7 +613,7 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
         })
         .collect::<Vec<_>>();
     let selection = serde_json::json!({
-        "schema": "homeboy/rust-changed-test-selection/v1",
+        "schema": "homeboy/rust-changed-test-selection/v2",
         "candidates": candidates,
     });
     vec![
