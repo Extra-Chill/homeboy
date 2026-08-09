@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.335.1] - 2026-08-09
+
+### Changed
+- pin Test workflow bootstrap baseline
+- cover bounded selection artifact fallback
+- inventory provider regression
+- enable differential Test gating [AI: openai/gpt-5.6-sol via OpenCode]
+- require provider fixability summary
+
+### Fixed
+- publish validated inventory safely [AI: openai/gpt-5.6-sol via OpenCode]
+- refresh managed runner slots
+- gate inventory producer path on Unix [AI: openai/gpt-5.6-terra via OpenCode]
+- cfg-gate Unix inventory evidence [AI: openai/gpt-5.6-terra via OpenCode]
+- normalize workspace fingerprint newlines [AI: openai/gpt-5.6-terra via OpenCode; matched Python universal-newline hashing]
+- bind inventory to selected runner
+- verify inventory provenance by dirfd [AI: openai/gpt-5.6-terra via OpenCode; implemented Rust producer parity and race hardening]
+- bind inventory evidence provenance [AI: openai/gpt-5.6-terra via OpenCode; implemented reviewed inventory evidence hardening]
+- require validated inventory-only evidence
+- version Rust selection artifact contract
+- materialize bounded Rust selection
+- union changed Rust test identities
+- relocate fixability provider integration test
+
 ## [0.335.0] - 2026-08-09
 
 ### Added
