@@ -236,6 +236,13 @@ def resolve_changed_selection(selection_path, current, project):
             fail("changed test selection candidate has an invalid package or target identity")
         if module is not None and (not isinstance(module, str) or not module):
             fail("changed test selection candidate has an invalid module")
+        if isinstance(path, str) and path:
+            source = (workspace_root / path).resolve()
+            for metadata_package in metadata["packages"]:
+                manifest_parent = Path(metadata_package["manifest_path"]).resolve().parent
+                if source == manifest_parent or manifest_parent in source.parents:
+                    package = metadata_package["name"]
+                    break
         matches = [
             test for test in current["tests"]
             if test["package"] == package
@@ -247,7 +254,6 @@ def resolve_changed_selection(selection_path, current, project):
         # while its target name changes. Resolve that current target through
         # Cargo metadata before deciding that the candidate is stale.
         if not matches and isinstance(path, str) and path:
-            source = (workspace_root / path).resolve()
             for metadata_package in metadata["packages"]:
                 if metadata_package["name"] != package:
                     continue
