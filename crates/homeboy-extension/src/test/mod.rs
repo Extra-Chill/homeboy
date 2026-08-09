@@ -205,20 +205,16 @@ pub fn build_test_runner(
         if let Some(routing) = test_changed_file_routing(&extension_id)? {
             for (name, value) in build_changed_test_routing_env(component, files, &routing) {
                 if name == "HOMEBOY_RUST_CHANGED_TEST_SELECTION_JSON" {
-                    let selection_path = run_dir.step_file("rust-changed-test-selection.json");
-                    if value.len() > 1024 * 1024 || std::fs::write(&selection_path, value).is_err()
-                    {
+                    if let Some(selection_path) = write_rust_changed_selection(run_dir, &value) {
+                        runner =
+                            runner.env("HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE", &selection_path);
+                    } else {
                         runner = runner
                             .env("HOMEBOY_TEST_SCOPE_KIND", "full")
                             .env(
                                 "HOMEBOY_TEST_SCOPE_MESSAGE",
                                 "Rust changed-test selection could not be materialized; running the full test command.",
                             );
-                    } else {
-                        runner = runner.env(
-                            "HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE",
-                            selection_path.to_string_lossy().as_ref(),
-                        );
                     }
                 } else {
                     runner = runner.env(&name, &value);
@@ -228,6 +224,19 @@ pub fn build_test_runner(
     }
 
     Ok(runner)
+}
+
+fn write_rust_changed_selection(
+    run_dir: &homeboy_core::engine::run_dir::RunDir,
+    selection: &str,
+) -> Option<String> {
+    if selection.len() > 1024 * 1024 {
+        return None;
+    }
+    let path = run_dir.step_file("rust-changed-test-selection.json");
+    std::fs::write(&path, selection)
+        .ok()
+        .map(|()| path.to_string_lossy().to_string())
 }
 
 pub(crate) fn effective_secret_env_names(
@@ -1261,6 +1270,20 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(candidates, expected);
+    }
+
+    #[test]
+    fn rust_changed_selection_is_bounded_and_written_in_the_run_dir() {
+        let run_dir = homeboy_core::engine::run_dir::RunDir::create().expect("run dir");
+        let selection = r#"{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[]}"#;
+        let path = write_rust_changed_selection(&run_dir, selection).expect("selection artifact");
+        assert_eq!(
+            std::fs::read_to_string(path).expect("selection contents"),
+            selection
+        );
+        assert!(write_rust_changed_selection(&run_dir, &"x".repeat(1024 * 1024 + 1)).is_none());
+        std::fs::remove_dir_all(run_dir.path()).expect("remove run dir");
+        assert!(write_rust_changed_selection(&run_dir, selection).is_none());
     }
 
     #[test]
