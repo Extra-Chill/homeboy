@@ -207,10 +207,10 @@ def validate(manifest_path, current):
     return [known[identity] for identity in selected]
 
 
-def resolve_changed_selection(selection_raw, current):
+def resolve_changed_selection(selection_path, current, project):
     try:
-        selection = json.loads(selection_raw)
-    except json.JSONDecodeError as error:
+        selection = json.loads(Path(selection_path).read_text())
+    except (OSError, json.JSONDecodeError) as error:
         fail(f"invalid changed test selection: {error}")
     if selection.get("schema") != CHANGED_SELECTION_SCHEMA:
         fail("unsupported changed test selection schema")
@@ -219,6 +219,11 @@ def resolve_changed_selection(selection_raw, current):
         fail("changed test selection must contain a non-empty candidates array")
 
     selected = {}
+    metadata_result = run(["cargo", "metadata", "--no-deps", "--format-version=1"], project)
+    if metadata_result.returncode:
+        fail(f"cargo metadata failed while resolving changed test selection: {metadata_result.stderr.strip()}")
+    metadata = json.loads(metadata_result.stdout)
+    workspace_root = Path(metadata["workspace_root"]).resolve()
     for candidate in candidates:
         if not isinstance(candidate, dict):
             fail("changed test selection candidates must be objects")
@@ -226,6 +231,7 @@ def resolve_changed_selection(selection_raw, current):
         target_kind = candidate.get("target_kind")
         target = candidate.get("target")
         module = candidate.get("module")
+        path = candidate.get("path")
         if not all(isinstance(value, str) and value for value in (package, target_kind, target)):
             fail("changed test selection candidate has an invalid package or target identity")
         if module is not None and (not isinstance(module, str) or not module):
@@ -237,10 +243,31 @@ def resolve_changed_selection(selection_raw, current):
             and test["target"] == target
             and (module is None or test["name"] == module or test["name"].startswith(f"{module}::"))
         ]
+        # A renamed explicit integration target can retain the same source path
+        # while its target name changes. Resolve that current target through
+        # Cargo metadata before deciding that the candidate is stale.
+        if not matches and isinstance(path, str) and path:
+            source = (workspace_root / path).resolve()
+            for metadata_package in metadata["packages"]:
+                if metadata_package["name"] != package:
+                    continue
+                for metadata_target in metadata_package["targets"]:
+                    if target_kind in metadata_target["kind"] and (
+                        target_kind == "lib" or Path(metadata_target["src_path"]).resolve() == source
+                    ):
+                        target = metadata_target["name"]
+                        matches = [
+                            test for test in current["tests"]
+                            if test["package"] == package
+                            and test["target_kind"] == target_kind
+                            and test["target"] == target
+                            and (module is None or test["name"] == module or test["name"].startswith(f"{module}::"))
+                        ]
+                        break
         if not matches:
-            fail(f"changed test selection has no inventory match for {package}::{target_kind}::{target}")
+            return {"fallback_reason": f"Changed test selection no longer matches {package}::{target_kind}::{target}."}
         selected.update({test["id"]: test for test in matches})
-    return [selected[key] for key in sorted(selected)]
+    return {"selected": [selected[key] for key in sorted(selected)]}
 
 
 def main():
@@ -249,14 +276,15 @@ def main():
     parser.add_argument("--runner", choices=("cargo", "nextest"), required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--manifest")
-    parser.add_argument("--changed-selection-json")
+    parser.add_argument("--changed-selection-file")
     args = parser.parse_args()
     current = inventory(args.project, args.runner)
     output = current
     if args.manifest:
         output = {"inventory": current, "selected": validate(args.manifest, current)}
-    if args.changed_selection_json:
-        output = {"inventory": current, "selected": resolve_changed_selection(args.changed_selection_json, current)}
+    if args.changed_selection_file:
+        resolved = resolve_changed_selection(args.changed_selection_file, current, args.project)
+        output = {"inventory": current, **resolved}
     Path(args.output).write_text(json.dumps(output, indent=2) + "\n")
 
 

@@ -151,6 +151,67 @@ if [[ "$OUTPUT" != *"1 passed"* ]]; then
     exit 1
 fi
 
+cat > "$WORKDIR/changed-selection.json" <<'EOF'
+{"schema":"homeboy/rust-changed-test-selection/v1","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"lib","target":"rust_changed_scope_smoke","module":"core::daemon::daemon_test"},{"package":"rust-changed-scope-smoke","target_kind":"test","target":"integration_scope","module":null}]}
+EOF
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_TEST_SCOPE_KIND='rust_changed_union' \
+    HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORKDIR/changed-selection.json" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"inline_scope_runs ... ok"* || "$OUTPUT" != *"integration_scope_runs ... ok"* || "$OUTPUT" == *"second_inline_scope_runs ... ok"* ]]; then
+    printf 'Expected exact mixed changed-scope union membership. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+OUTPUT=$( 
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_RUST_TEST_RUNNER=nextest \
+    HOMEBOY_RUST_NEXTEST_FILTER_MAX_BYTES=180 \
+    HOMEBOY_TEST_SCOPE_KIND='rust_changed_union' \
+    HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORKDIR/changed-selection.json" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"Replaying Rust nextest shard: 2 runnable identities"* || "$OUTPUT" != *"inline_scope_runs"* || "$OUTPUT" != *"integration_scope_runs"* ]]; then
+    printf 'Expected ARG_MAX-safe nextest batches for the exact union. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+# Renames and deletions can leave a candidate absent from the current inventory.
+# They must widen safely instead of returning a green zero-test result.
+cat > "$WORKDIR/changed-selection.json" <<'EOF'
+{"schema":"homeboy/rust-changed-test-selection/v1","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"test","target":"renamed_or_deleted","module":null}]}
+EOF
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_TEST_SCOPE_KIND='rust_changed_union' \
+    HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORKDIR/changed-selection.json" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"second_inline_scope_runs ... ok"* || "$OUTPUT" != *"integration_scope_runs ... ok"* ]]; then
+    printf 'Expected unmatched changed selection to run the full suite. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
 OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \

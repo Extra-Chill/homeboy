@@ -675,7 +675,7 @@ fi
 # target identities and their resolution are runner-specific. Changed selections
 # resolve against the current inventory, then reuse the exact replay and
 # ARG_MAX-safe batching path below.
-if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION:-}${HOMEBOY_TEST_INVENTORY_FILE:-}${HOMEBOY_TEST_INVENTORY_ONLY:-}" ]; then
+if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE:-}${HOMEBOY_TEST_INVENTORY_FILE:-}${HOMEBOY_TEST_INVENTORY_ONLY:-}" ]; then
     if [ "$#" -gt 0 ]; then
         echo "Error: test shard inventory and replay do not support passthrough arguments." >&2
         echo "Remove arguments after -- and encode selection in HOMEBOY_TEST_SHARD_MANIFEST." >&2
@@ -687,8 +687,13 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION:-
     if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ]; then
         SHARD_ARGS+=(--manifest "$HOMEBOY_TEST_SHARD_MANIFEST")
     fi
-    if [ -n "${HOMEBOY_RUST_CHANGED_TEST_SELECTION:-}" ]; then
-        SHARD_ARGS+=(--changed-selection-json "$HOMEBOY_RUST_CHANGED_TEST_SELECTION")
+    if [ -n "${HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE:-}" ]; then
+        if [ ! -f "$HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE" ] || [ "$(wc -c < "$HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE")" -gt 1048576 ]; then
+            echo "Rust changed-test selection is unavailable or exceeds its 1 MiB bound; running the full test command." >&2
+            unset HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE
+            exec bash "$0" "$@"
+        fi
+        SHARD_ARGS+=(--changed-selection-file "$HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE")
     fi
     if ! python3 "$SHARD_TOOL" "${SHARD_ARGS[@]}"; then
         rm -f "$SHARD_DATA"
@@ -702,7 +707,13 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION:-
         rm -f "$SHARD_DATA"
         exit 0
     fi
-    if [ -z "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ]; then
+    if [ -n "${HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE:-}" ] && jq -e '.fallback_reason? // empty' "$SHARD_DATA" >/dev/null; then
+        echo "$(jq -r '.fallback_reason') Running the full test command." >&2
+        rm -f "$SHARD_DATA"
+        unset HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE
+        exec bash "$0" "$@"
+    fi
+    if [ -z "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ] && [ -z "${HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE:-}" ]; then
         rm -f "$SHARD_DATA"
         exit 0
     fi
