@@ -179,7 +179,7 @@ if [[ "$OUTPUT" != *"inline_scope_runs ... ok"* || "$OUTPUT" != *"integration_sc
     exit 1
 fi
 
-OUTPUT=$( 
+OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
@@ -201,7 +201,7 @@ fi
 # Renames and deletions can leave a candidate absent from the current inventory.
 # They must widen safely instead of returning a green zero-test result.
 cat > "$WORKDIR/changed-selection.json" <<'EOF'
-{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"test","target":"renamed_or_deleted","module":null,"path":"tests/deleted.rs"}]}
+{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"rust-changed-scope-smoke","target_kind":"lib","target":"renamed_or_deleted","module":"core::deleted_test","path":"src/core/deleted_test.rs"}]}
 EOF
 OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
@@ -217,6 +217,43 @@ OUTPUT=$(
 )
 if [[ "$OUTPUT" != *"second_inline_scope_runs ... ok"* || "$OUTPUT" != *"integration_scope_runs ... ok"* ]]; then
     printf 'Expected unmatched changed selection to run the full suite. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+# New producers pass only the additive selection-file variable. An older
+# consumer ignores it and retains its normal full-suite behavior.
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_TEST_SCOPE_KIND='rust_changed_union' \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"second_inline_scope_runs ... ok"* || "$OUTPUT" != *"integration_scope_runs ... ok"* ]]; then
+    printf 'Expected missing selection file to preserve old-consumer full suite behavior. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+# Old producers do not set the additive selection-file variable. A new
+# consumer must preserve the ordinary full-suite command rather than treating
+# an absent selection as zero selected tests.
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_TEST_SCOPE_KIND='workspace' \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+if [[ "$OUTPUT" != *"second_inline_scope_runs ... ok"* || "$OUTPUT" != *"integration_scope_runs ... ok"* ]]; then
+    printf 'Expected absent old-producer selection to preserve the full suite. Output:\n%s\n' "$OUTPUT" >&2
     exit 1
 fi
 

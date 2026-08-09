@@ -45,6 +45,18 @@ def runner_fingerprint(cwd, runner):
     return digest(f"{runner}\0{result.stdout.strip()}")
 
 
+def cargo_metadata_roots(project, context):
+    component_root = Path(project).resolve()
+    result = run(["cargo", "metadata", "--no-deps", "--format-version=1"], component_root)
+    if result.returncode:
+        fail(f"cargo metadata failed {context}: {result.stderr.strip()}")
+    metadata = json.loads(result.stdout)
+    workspace_root = Path(metadata["workspace_root"]).resolve()
+    if component_root != workspace_root and workspace_root not in component_root.parents:
+        fail(f"component root is outside Cargo workspace {context}")
+    return metadata, workspace_root, component_root
+
+
 def cargo_inventory(workspace_root, packages):
     tests = []
     command = ["cargo", "test", "--workspace", "--no-run", "--message-format=json"]
@@ -110,11 +122,7 @@ def nextest_inventory(workspace_root):
 
 
 def inventory(project, runner):
-    metadata_result = run(["cargo", "metadata", "--no-deps", "--format-version=1"], project)
-    if metadata_result.returncode:
-        fail(f"cargo metadata failed: {metadata_result.stderr.strip()}")
-    metadata = json.loads(metadata_result.stdout)
-    component_root = Path(project).resolve()
+    metadata, workspace_root, _component_root = cargo_metadata_roots(project, "while building inventory")
     packages = {package["id"]: package["name"] for package in metadata["packages"]}
     tests = nextest_inventory(workspace_root) if runner == "nextest" else cargo_inventory(workspace_root, packages)
     # cargo-nextest does not execute doctests, so its inventory contains only
@@ -219,11 +227,9 @@ def resolve_changed_selection(selection_path, current, project):
         fail("changed test selection must contain a non-empty candidates array")
 
     selected = {}
-    metadata_result = run(["cargo", "metadata", "--no-deps", "--format-version=1"], project)
-    if metadata_result.returncode:
-        fail(f"cargo metadata failed while resolving changed test selection: {metadata_result.stderr.strip()}")
-    metadata = json.loads(metadata_result.stdout)
-    workspace_root = Path(metadata["workspace_root"]).resolve()
+    metadata, _workspace_root, component_root = cargo_metadata_roots(
+        project, "while resolving changed test selection"
+    )
     for candidate in candidates:
         if not isinstance(candidate, dict):
             fail("changed test selection candidates must be objects")
