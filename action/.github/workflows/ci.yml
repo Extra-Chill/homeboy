@@ -843,9 +843,54 @@ jobs:
         if: always() && steps.prepare-workspace.outcome == 'success'
         run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
 
+  candidate-test-result:
+    name: Aggregate candidate Test shards
+    needs: [candidate-test-shards, candidate-test-plan, plan]
+    if: ${{ always() && needs.candidate-test-plan.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      baseline-command: ${{ steps.select.outputs.baseline-command }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: homeboy-test-shard-candidate-*
+          path: test-shard-artifacts
+      - uses: actions/download-artifact@v7
+        with:
+          name: homeboy-test-shard-plan-${{ github.run_attempt }}
+      - name: Aggregate complete candidate Test shard evidence
+        env:
+          TEST_SHARD_ARTIFACT_ROOT: test-shard-artifacts
+          TEST_SHARD_PLAN_FILE: homeboy-test-shard-plan.json
+          TEST_INVENTORY_FILE: homeboy-test-inventory.json
+          TEST_SHARD_PHASE: candidate
+          TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
+          TEST_SHARD_OUTPUT_DIR: candidate-test-results/homeboy-ci-results
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: bash .homeboy-action/scripts/core/shard-tests.sh aggregate
+      - name: Select baseline command from canonical candidate result
+        id: select
+        env:
+          TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
+          TEST_SHARD_RESULTS_FILE: candidate-test-results/homeboy-ci-results/results.json
+        run: |
+          source .homeboy-action/scripts/core/lib.sh
+          TEST_SHARD_RESULT_FILE="candidate-test-results/homeboy-ci-results/$(command_result_filename "${TEST_SHARD_COMMAND}")" bash .homeboy-action/scripts/core/select-test-baseline.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: homeboy-candidate-test-results-${{ github.run_attempt }}
+          path: candidate-test-results
+          if-no-files-found: error
+
   reconcile-test-shards:
     name: Test
-    needs: [candidate-test-shards, candidate-test-plan, baseline-test-shards, baseline-test-plan, plan]
+    needs: [candidate-test-result, candidate-test-plan, baseline-test-shards, baseline-test-plan, plan]
     if: ${{ always() && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
     steps:
@@ -870,50 +915,40 @@ jobs:
           find test-inventory-failure/homeboy-ci-results -type f -maxdepth 1 -print -exec cat {} \; 2>/dev/null || true
           exit 1
       - name: Report baseline Test inventory generation failure
-        if: needs.candidate-test-plan.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result != 'success'
+        if: needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result != 'success'
         run: |
           echo '::error::Baseline Test inventory generation failed; baseline shard artifacts were not downloaded. Inspect Plan baseline Test shards for the underlying command failure.'
           exit 1
       - uses: actions/download-artifact@v7
-        if: needs.candidate-test-plan.result == 'success'
+        if: needs.candidate-test-result.result == 'success'
         with:
-          pattern: homeboy-test-shard-*
-          path: test-shard-artifacts
+          name: homeboy-candidate-test-results-${{ github.run_attempt }}
+          path: candidate-test-results
       - uses: actions/download-artifact@v7
-        if: needs.candidate-test-plan.result == 'success'
-        with:
-          name: homeboy-test-shard-plan-${{ github.run_attempt }}
-      - uses: actions/download-artifact@v7
-        if: needs.candidate-test-plan.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result == 'success'
+        if: needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result == 'success'
         with:
           name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
           path: baseline-test-plan
-      - name: Aggregate complete candidate Test shard evidence
-        if: needs.candidate-test-plan.result == 'success'
-        env:
-          TEST_SHARD_ARTIFACT_ROOT: test-shard-artifacts
-          TEST_SHARD_PLAN_FILE: homeboy-test-shard-plan.json
-          TEST_INVENTORY_FILE: homeboy-test-inventory.json
-          TEST_SHARD_PHASE: candidate
-          TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
-          TEST_SHARD_OUTPUT_DIR: homeboy-ci-results
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: bash .homeboy-action/scripts/core/shard-tests.sh aggregate
+      - uses: actions/download-artifact@v7
+        if: needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result == 'success'
+        with:
+          pattern: homeboy-test-shard-baseline-*
+          path: test-shard-artifacts
       - name: Aggregate complete baseline Test shard evidence
-        if: needs.candidate-test-plan.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result == 'success'
+        if: needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result == 'success'
         env:
           TEST_SHARD_ARTIFACT_ROOT: test-shard-artifacts
           TEST_SHARD_PLAN_FILE: baseline-test-plan/homeboy-test-shard-plan.json
           TEST_INVENTORY_FILE: baseline-test-plan/homeboy-test-inventory.json
           TEST_SHARD_PHASE: baseline
-          TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
+          TEST_SHARD_COMMAND: ${{ needs.candidate-test-result.outputs.baseline-command }}
           TEST_SHARD_OUTPUT_DIR: homeboy-baseline-results
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: bash .homeboy-action/scripts/core/shard-tests.sh aggregate
       - name: Apply differential Test result
-        if: needs.candidate-test-plan.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result == 'success'
+        if: needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result == 'success'
         env:
-          COMMAND: ${{ needs.plan.outputs.test-command }}
+          COMMAND: ${{ needs.candidate-test-result.outputs.baseline-command }}
         run: |
           source .homeboy-action/scripts/core/lib.sh
           result_filename="$(command_result_filename "${COMMAND}")"
@@ -927,18 +962,23 @@ jobs:
           [ -f "homeboy-baseline-results/${result_filename}" ] && structured_output=true
           jq -cn --arg command "${COMMAND}" --arg status "${baseline_result}" --argjson exit_code "${baseline_exit}" --argjson structured_output "${structured_output}" \
             '{($command):{status:$status,exit_code:$exit_code,command:$command,structured_output:$structured_output}}' > homeboy-baseline-results/baseline-status.json
-          python3 .homeboy-action/scripts/core/apply-differential-gate.py "$(cat homeboy-ci-results/results.json)" homeboy-ci-results homeboy-baseline-results > reconciled-results.json
+          python3 .homeboy-action/scripts/core/apply-differential-gate.py "$(cat candidate-test-results/homeboy-ci-results/results.json)" candidate-test-results/homeboy-ci-results homeboy-baseline-results > reconciled-results.json
           RESULTS="$(cat reconciled-results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
-      - name: Enforce sharded Test result
-        if: needs.candidate-test-plan.result == 'success' && (github.event_name != 'pull_request' || inputs.differential-gating != 'true')
+      - name: Report candidate Test aggregation failure
+        if: needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'
+        run: |
+          echo '::error::Candidate Test shard evidence could not be aggregated into a canonical result.'
+          exit 1
+      - name: Enforce passing sharded Test result
+        if: needs.candidate-test-result.result == 'success' && (needs.candidate-test-result.outputs.baseline-command == '' || github.event_name != 'pull_request')
         env:
           COMMAND: ${{ needs.plan.outputs.test-command }}
-        run: RESULTS="$(cat homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
+        run: RESULTS="$(cat candidate-test-results/homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
 
   baseline-test-plan:
     name: Plan baseline Test shards
-    needs: [binary, plan]
-    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
+    needs: [binary, plan, candidate-test-result]
+    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && github.event_name == 'pull_request' && needs.candidate-test-result.outputs.baseline-command != '' }}
     runs-on: ubuntu-latest
     outputs:
       test-matrix: ${{ steps.plan.outputs.matrix }}
@@ -981,7 +1021,7 @@ jobs:
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
           extension: ${{ inputs.extension }}
           extension-source: ${{ inputs.extension-source }}
-          commands: ${{ needs.plan.outputs.test-command }}
+          commands: ${{ needs.candidate-test-result.outputs.baseline-command }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
           scope: full
@@ -1001,7 +1041,7 @@ jobs:
           TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
           TEST_SHARD_PLAN_FILE: ${{ github.workspace }}/homeboy-test-shard-plan.json
           TEST_SHARD_COUNT: ${{ inputs.test-shards }}
-          TEST_COMMAND: ${{ needs.plan.outputs.test-command }}
+          TEST_COMMAND: ${{ needs.candidate-test-result.outputs.baseline-command }}
         run: |
           bash .homeboy-action/scripts/core/shard-tests.sh plan
           jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}' >> /dev/null
@@ -1026,8 +1066,8 @@ jobs:
 
   baseline-test-shards:
     name: Baseline Test shard ${{ matrix.shard_id }}
-    needs: [binary, plan, baseline-test-plan]
-    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' && needs.baseline-test-plan.result == 'success' }}
+    needs: [binary, plan, baseline-test-plan, candidate-test-result]
+    if: ${{ always() && needs.binary.result == 'success' && github.event_name == 'pull_request' && needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
