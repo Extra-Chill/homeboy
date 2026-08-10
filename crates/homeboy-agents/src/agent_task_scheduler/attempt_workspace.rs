@@ -37,15 +37,33 @@ impl HarvestExecutionContext {
     pub fn from_current_process() -> homeboy_core::Result<Self> {
         let source = std::env::var(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV).ok();
         let lab = std::env::var(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV).ok();
-        Self::from_transport_values(source.as_deref(), lab.as_deref())
+        Self::from_transport_values_with_runner_execution(
+            source.as_deref(),
+            lab.as_deref(),
+            homeboy_core::resource_policy_context::has_lab_execution_provenance(),
+        )
     }
 
     fn from_transport_values(
         source: Option<&str>,
         lab: Option<&str>,
     ) -> homeboy_core::Result<Self> {
+        Self::from_transport_values_with_runner_execution(source, lab, false)
+    }
+
+    fn from_transport_values_with_runner_execution(
+        source: Option<&str>,
+        lab: Option<&str>,
+        runner_execution: bool,
+    ) -> homeboy_core::Result<Self> {
         match (source, lab) {
             (None, None) => Ok(Self::default()),
+            (Some(_), None) if runner_execution => {
+                // Generic runner exec owns this snapshot provenance. A nested
+                // local plan is not a Lab handoff and harvests its existing Git
+                // workspace normally; the outer run retains the snapshot.
+                Ok(Self::default())
+            }
             (Some(source), Some(lab)) if !source.trim().is_empty() && !lab.trim().is_empty() => {
                 let lab_offload = homeboy_core::observation::resolve_json_value(lab).ok_or_else(
                     || incomplete_transport_error("invalid Lab offload metadata".to_string()),
@@ -818,6 +836,18 @@ mod tests {
             "runner-a"
         );
         assert_eq!(context.lab_offload.expect("lab")["runner_id"], "runner-a");
+    }
+
+    #[test]
+    fn generic_runner_exec_snapshot_stays_with_the_outer_command() {
+        let context = HarvestExecutionContext::from_transport_values_with_runner_execution(
+            Some(r#"{"runner_id":"runner-a"}"#),
+            None,
+            true,
+        )
+        .expect("generic runner exec is not a Lab handoff");
+
+        assert!(!context.snapshot_signaled());
     }
 
     #[test]

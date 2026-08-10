@@ -103,6 +103,7 @@ where
             )?;
             return Err(error);
         }
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
         let harvest_context = match supplied_harvest_context.clone().map(Ok).unwrap_or_else(
             crate::agent_task_scheduler::HarvestExecutionContext::from_current_process,
         ) {
@@ -120,7 +121,6 @@ where
         if harvest_context.snapshot_signaled() {
             bind_runner_snapshot_workspace_attestations(&mut plan)?;
         }
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
         agent_task_lifecycle::mark_running(run_id)?;
         let aggregate = run_plan_with_scheduler(
             plan.clone(),
