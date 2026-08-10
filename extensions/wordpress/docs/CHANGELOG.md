@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.44] - 2026-08-10
+
+### Fixed
+- repair and register the file routing smoke
+
 ## [3.34.43] - 2026-08-09
 
 ### Fixed
