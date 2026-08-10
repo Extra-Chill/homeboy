@@ -23,6 +23,7 @@
       "node tests/wp-codebox-phpunit-recipe-run-ledger-smoke.mjs",
       "node tests/wp-codebox-phpunit-changed-scope-path-smoke.mjs",
       "bash scripts/test/changed-scope-test-routing-smoke.sh",
+      "bash scripts/test/test-runner-file-routing-smoke.sh",
       "bash scripts/test/wp-codebox-mount-translation-smoke.sh",
       "bash scripts/build/build-clean-vendor-smoke.sh",
       "bash scripts/build/build-helper-smoke.sh",
