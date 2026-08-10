@@ -601,6 +601,44 @@ fn lab_runner_handoff_materializes_the_run_before_preparation_failure() {
 }
 
 #[test]
+fn runner_exec_materializes_the_run_before_incomplete_harvest_transport_failure() {
+    with_isolated_home(|_| {
+        let source_env = homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV;
+        let lab_env = homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV;
+        let previous_source = std::env::var_os(source_env);
+        let previous_lab = std::env::var_os(lab_env);
+        std::env::set_var(source_env, "{}");
+        std::env::remove_var(lab_env);
+
+        let error = run_loaded_plan(
+            test_plan(),
+            Some("runner-exec-incomplete-harvest-transport"),
+            SucceedingExecutor,
+        )
+        .expect_err("runner exec source metadata requires paired Lab transport");
+
+        match previous_source {
+            Some(value) => std::env::set_var(source_env, value),
+            None => std::env::remove_var(source_env),
+        }
+        match previous_lab {
+            Some(value) => std::env::set_var(lab_env, value),
+            None => std::env::remove_var(lab_env),
+        }
+
+        let record = lifecycle_status("runner-exec-incomplete-harvest-transport")
+            .expect("pre-execution failure remains inspectable");
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("incomplete Lab snapshot transport"));
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "validate_harvest_transport"
+        );
+    });
+}
+
+#[test]
 fn submitted_terminal_runs_reuse_durable_evidence_without_reexecution() {
     with_isolated_home(|_| {
         for (run_id, expected_exit_code) in [("terminal-succeeded", 0), ("terminal-failed", 1)] {
