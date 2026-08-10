@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.335.2] - 2026-08-10
+
+### Fixed
+- preserve nested runner lifecycle records
+
 ## [0.335.1] - 2026-08-09
 
 ### Changed
