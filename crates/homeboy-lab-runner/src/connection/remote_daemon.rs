@@ -453,6 +453,39 @@ pub(super) enum RemoteDaemonWorkEvidence {
     AuthoritativelyIdle,
 }
 
+/// The remote daemon is the authority for lifecycle decisions. Consumers must
+/// derive zero-job and rotation decisions from this snapshot rather than
+/// interpreting a persisted controller session as current daemon state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RemoteDaemonAuthoritySnapshot {
+    pub(super) source: &'static str,
+    pub(super) active_jobs: usize,
+    pub(super) active_lease_id: Option<String>,
+    pub(super) proven_idle: bool,
+    pub(super) safe_to_rotate: bool,
+}
+
+pub(super) fn authority_snapshot(status: &RemoteDaemonStatus) -> RemoteDaemonAuthoritySnapshot {
+    let proven_idle = status.reachable
+        && status.endpoint_probe_error.is_none()
+        && status.active_jobs == 0
+        && status.work_evidence.is_authoritatively_idle();
+    let daemon = status.daemon.as_ref();
+    let active_lease_id = daemon.and_then(|daemon| daemon.lease_id.clone());
+    let safe_to_rotate = proven_idle
+        && daemon.is_some_and(|daemon| daemon.pid.is_some())
+        && active_lease_id
+            .as_deref()
+            .is_some_and(|lease| !lease.is_empty());
+    RemoteDaemonAuthoritySnapshot {
+        source: "remote daemon SSH status and typed /jobs probe",
+        active_jobs: status.active_jobs,
+        active_lease_id,
+        proven_idle,
+        safe_to_rotate,
+    }
+}
+
 /// Return the one live lease that may replace a ledger containing only stale
 /// leases. The remote daemon status and typed jobs endpoint are authoritative;
 /// a persisted lease is never used to stop a different daemon.
@@ -463,32 +496,27 @@ pub(super) fn authoritative_idle_lease_for_stale_generations(
     if persisted_leases.is_empty() {
         return Ok(None);
     }
-    let daemon = status.daemon.as_ref().ok_or_else(|| {
-        "authoritative daemon reconciliation cannot prove a live daemon lease and PID".to_string()
+    let snapshot = authority_snapshot(status);
+    if status.daemon.is_none() {
+        return Err(
+            "authoritative daemon reconciliation cannot prove a live daemon lease and PID"
+                .to_string(),
+        );
+    }
+    let lease_id = snapshot.active_lease_id.as_deref().ok_or_else(|| {
+        "authoritative daemon reconciliation cannot prove the live daemon lease".to_string()
     })?;
-    let lease_id = daemon
-        .lease_id
-        .as_deref()
-        .filter(|lease| !lease.is_empty())
-        .ok_or_else(|| {
-            "authoritative daemon reconciliation cannot prove the live daemon lease".to_string()
-        })?;
     if persisted_leases
         .iter()
         .any(|persisted| persisted == lease_id)
     {
         return Ok(None);
     }
-    if daemon.pid.is_none()
-        || !status.reachable
-        || status.endpoint_probe_error.is_some()
-        || status.active_jobs != 0
-        || !status.work_evidence.is_authoritatively_idle()
-    {
-        return Err(
-            "authoritative daemon reconciliation requires a reachable lease/PID, successful endpoint probes, and zero typed active jobs"
-                .to_string(),
-        );
+    if !snapshot.safe_to_rotate {
+        return Err(format!(
+            "authoritative daemon reconciliation from {} requires a reachable lease/PID, successful endpoint probes, and zero typed active jobs",
+            snapshot.source
+        ));
     }
     Ok(Some(lease_id.to_string()))
 }
@@ -588,11 +616,11 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
     // branch below, which produced no adoption command and left Lab placement
     // waiting for controller generation admission (#8694). "Protected active
     // jobs" is also nonsensical when there are provably zero.
+    let authority = authority_snapshot(status);
     let recoverable_fresh_idle = !proven_dead
         && !leaseless_reconciliation_available
         && status.fresh
-        && status.active_jobs == 0
-        && status.work_evidence.is_authoritatively_idle();
+        && authority.proven_idle;
     let mut ownership_evidence = if proven_dead {
         Some(format!(
             "remote daemon status over SSH proved PID {} is dead for lease `{}`",
@@ -602,7 +630,10 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
     } else if leaseless_reconciliation_available {
         Some("active durable jobs require explicit reconciliation; it will verify the owner lock, process list, and configured listener before terminalizing them".to_string())
     } else if recoverable_fresh_idle {
-        Some("remote daemon is fresh with zero authoritatively idle jobs; the controller session can be safely reconnected".to_string())
+        Some(format!(
+            "{} proved the remote daemon is fresh with zero authoritatively idle jobs; the controller session can be safely reconnected",
+            authority.source
+        ))
     } else {
         Some("remote daemon lease evidence is unavailable; active jobs are protected from implicit replacement".to_string())
     };
