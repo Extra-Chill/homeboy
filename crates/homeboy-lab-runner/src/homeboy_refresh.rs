@@ -2313,15 +2313,24 @@ fn refreshed_runner_env(
 ) -> Result<std::collections::HashMap<String, String>> {
     let runner = load(runner_id)?;
     let mut env = runner.env;
+    // A refreshed daemon must not inherit a prior generation's control-plane
+    // authority. The selected binary becomes the new command authority below.
+    env.remove("HOMEBOY_COMMAND");
+    env.remove("HOMEBOY_DAEMON_STATE_DIR");
     normalize_runner_command_env_for_homeboy_path(&mut env, Some(homeboy_path));
     Ok(env)
 }
 
 fn refreshed_runner_patch(runner_id: &str, homeboy_path: &str) -> Result<Value> {
-    let _ = runner_id;
-    Ok(serde_json::json!({
+    let env = refreshed_runner_env(runner_id, homeboy_path)?;
+    let mut patch = serde_json::json!({
         "homeboy_path": homeboy_path,
-    }))
+        "env": env,
+    });
+    // Config merge deletes null object fields. Include the deletion explicitly
+    // because omitted map keys retain their prior persisted values.
+    patch["env"]["HOMEBOY_DAEMON_STATE_DIR"] = Value::Null;
+    Ok(patch)
 }
 
 /// Persist a verified selection in the controller-owned runner registry.
@@ -2329,9 +2338,6 @@ fn refreshed_runner_patch(runner_id: &str, homeboy_path: &str) -> Result<Value> 
 /// the controller so subsequent jobs use the selected binary.
 fn promote_verified_runner_binary(runner_id: &str, homeboy_path: &str) -> Result<Vec<String>> {
     homeboy_core::config::with_config_lock(|| {
-        if load(runner_id)?.settings.homeboy_path.as_deref() == Some(homeboy_path) {
-            return Ok(Vec::new());
-        }
         let patch = refreshed_runner_patch(runner_id, homeboy_path)?;
         match merge(Some(runner_id), &patch.to_string(), &[])? {
             MergeOutput::Single(result) => Ok(result.updated_fields),

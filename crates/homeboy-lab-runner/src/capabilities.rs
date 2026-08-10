@@ -413,7 +413,7 @@ impl RunnerCapabilitySnapshot {
             .into_iter()
             .map(|tool| {
                 let command = if tool.id() == "homeboy" {
-                    remote_runner_homeboy_path(runner, "runner capability preflight")?.to_string()
+                    effective_homeboy_command(runner, "runner capability preflight")?
                 } else {
                     RunnerToolRegistry::spec_for_required_tool(&tool)
                         .map(|spec| spec.command)
@@ -465,19 +465,15 @@ impl RunnerCapabilitySnapshot {
             .into_iter()
             .map(|tool| {
                 let command = if tool.id() == "homeboy" {
-                    runner
-                        .settings
-                        .homeboy_path
-                        .clone()
-                        .unwrap_or_else(|| "homeboy".to_string())
+                    effective_homeboy_command(runner, "runner capability preflight")?
                 } else {
                     RunnerToolRegistry::spec_for_required_tool(&tool)
                         .map(|spec| spec.command)
                         .unwrap_or_else(|| tool.id().to_string())
                 };
-                (tool, command)
+                Ok((tool, command))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let command_names = normalized_command_names(&preflight.required_commands);
         let capability_probes = normalized_tool_capability_probes(preflight);
         let script = batch_probe_script(
@@ -521,6 +517,17 @@ impl RunnerCapabilitySnapshot {
         client.env.extend(runner.env.clone());
         Ok(client)
     }
+}
+
+fn effective_homeboy_command(runner: &Runner, context: &str) -> Result<String> {
+    runner
+        .env
+        .get("HOMEBOY_COMMAND")
+        .map(String::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_string)
+        .map(Ok)
+        .unwrap_or_else(|| remote_runner_homeboy_path(runner, context).map(str::to_string))
 }
 
 // `Clone` so one probe's answer can be handed to every caller that coalesced
@@ -903,6 +910,21 @@ mod tests {
             resources: Default::default(),
             policy: RunnerPolicy::default(),
         }
+    }
+
+    #[test]
+    fn capability_preflight_uses_injected_homeboy_command() {
+        let mut runner = ssh_runner();
+        runner.settings.homeboy_path = Some("/configured/homeboy".to_string());
+        runner.env.insert(
+            "HOMEBOY_COMMAND".to_string(),
+            "/injected/homeboy".to_string(),
+        );
+
+        assert_eq!(
+            effective_homeboy_command(&runner, "test").expect("effective command"),
+            "/injected/homeboy"
+        );
     }
 
     /// The probe gate collapses concurrent callers that share a fingerprint, so

@@ -52,7 +52,7 @@ fn materialized_identity_requires_commit_and_matching_source_sha() {
 }
 
 #[test]
-fn refreshed_runner_env_prepends_selected_homeboy_dir_to_path() {
+fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
     test_support::with_isolated_home(|_| {
         crate::create(
             r#"{
@@ -60,7 +60,12 @@ fn refreshed_runner_env_prepends_selected_homeboy_dir_to_path() {
                 "kind": "local",
                 "workspace_root": "/runner/ws",
                 "homeboy_path": "/old/homeboy",
-                "env": {"PATH": "/usr/bin:/bin", "RUST_LOG": "info"}
+                "env": {
+                    "PATH": "/usr/bin:/bin",
+                    "RUST_LOG": "info",
+                    "HOMEBOY_COMMAND": "/old/homeboy",
+                    "HOMEBOY_DAEMON_STATE_DIR": "/old/daemon-state"
+                }
             }"#,
             false,
         )
@@ -81,6 +86,19 @@ fn refreshed_runner_env_prepends_selected_homeboy_dir_to_path() {
             env.get("HOMEBOY_COMMAND").map(String::as_str),
             Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy")
         );
+        assert_eq!(env.get("HOMEBOY_DAEMON_STATE_DIR"), None);
+
+        promote_verified_runner_binary(
+            "lab-local",
+            "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy",
+        )
+        .expect("promote refreshed binary");
+        let offload_env = crate::effective_env("lab-local").expect("effective offload env");
+        assert_eq!(
+            offload_env.get("HOMEBOY_COMMAND").map(String::as_str),
+            Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy")
+        );
+        assert_eq!(offload_env.get("HOMEBOY_DAEMON_STATE_DIR"), None);
     });
 }
 
