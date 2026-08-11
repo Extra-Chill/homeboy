@@ -872,6 +872,11 @@ fn cook_resolves_existing_provider_destination_without_creation_metadata() {
     with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         init_runtime_component_checkout(workspace.path());
+        add_remote(
+            workspace.path(),
+            "origin",
+            "https://github.com/example/existing.git",
+        );
         let destination_root = tempfile::tempdir().expect("destination root");
         let destination = destination_root.path().join("task");
         assert!(Command::new("git")
@@ -932,22 +937,124 @@ fn cook_resolves_existing_provider_destination_without_creation_metadata() {
         );
         homeboy::core::defaults::save_config(&config).expect("save provider config");
 
-        let args = cook_args_from_cli(vec![
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
             "--prompt".to_string(),
             "reuse destination".to_string(),
+            "--repo".to_string(),
+            "existing".to_string(),
             "--to-worktree".to_string(),
             "fixture@existing".to_string(),
             "--no-finalize".to_string(),
-        ]);
+        ]))
+        .expect("repo-only Cook retains its requested repository expectation");
         let provision = super::super::run::provision_cook_destination(&args)
             .expect("existing provider destination resolves without creation fields");
 
         assert_eq!(provision["action"], "existing");
         assert_eq!(provision["provider"], "fixture");
         assert_eq!(provision["path"], destination.display().to_string());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn cook_rejects_immediately_resolved_provider_destination_from_another_repository() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        add_remote(
+            workspace.path(),
+            "origin",
+            "https://token:provider-secret@github.com/example/foreign.git",
+        );
+        let destination_root = tempfile::tempdir().expect("destination root");
+        let destination = destination_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/foreign",
+                destination.to_str().expect("destination path"),
+                "HEAD",
+            ])
+            .current_dir(workspace.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
+        let provider_dir = tempfile::tempdir().expect("provider dir");
+        let provider = provider_dir.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@foreign\",\"path\":\"{}\",\"branch\":\"fix/foreign\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                destination.display()
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider config");
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "reject foreign destination".to_string(),
+            "--repo".to_string(),
+            "expected".to_string(),
+            "--to-worktree".to_string(),
+            "fixture@foreign".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("persist generic repo expectation");
+
+        let error = super::super::run::provision_cook_destination(&args)
+            .expect_err("foreign immediate provider checkout is rejected before plan creation");
+
+        assert!(
+            error
+                .message
+                .contains("does not match the requested Cook repository"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("provider-secret"));
     });
 }
 

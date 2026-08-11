@@ -681,6 +681,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
                 Path::new(&resolution.worktree.path),
                 to_worktree,
             )?;
+            validate_cook_destination_identity(args, Path::new(&resolution.worktree.path))?;
             return Ok(
                 serde_json::json!({ "action": "existing", "kind": "provider", "provider": resolution.provider_id, "handle": resolution.worktree.handle, "path": resolution.worktree.path, "branch": resolution.worktree.branch }),
             );
@@ -1045,44 +1046,16 @@ fn validate_cook_destination_identity(
     args: &AgentTaskCookArgs,
     destination: &Path,
 ) -> homeboy::core::Result<()> {
-    let Some(expected) = args
-        .repository_identity
-        .as_ref()
-        .and_then(|identity| identity.get("remote_identity"))
-        .and_then(Value::as_str)
-    else {
-        return Ok(());
-    };
-    let Some(git_root) = homeboy::core::git::repo_root(destination) else {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "to_worktree",
-            "Cook destination is not a Git checkout bound to the resolved repository identity",
-            Some(destination.display().to_string()),
-            None,
-        ));
-    };
-    let identities = homeboy::core::git::output_optional(&git_root, &["remote"])
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|remote| homeboy::core::git::remote_url(&git_root, remote))
-        .filter_map(|remote| canonical_remote_identity(&remote))
-        .collect::<std::collections::BTreeSet<_>>();
-    if identities.len() == 1 && identities.contains(expected) {
-        return Ok(());
-    }
-    Err(homeboy::core::Error::validation_invalid_argument(
-        "to_worktree",
-        format!(
-            "Cook destination repository identity does not match resolved `{expected}`; destination identities: {}",
-            if identities.is_empty() {
-                "unresolved".to_string()
-            } else {
-                identities.into_iter().collect::<Vec<_>>().join(", ")
-            }
-        ),
-        Some(destination.display().to_string()),
-        None,
-    ))
+    let identity = args.repository_identity.as_ref();
+    homeboy::core::worktree_providers::validate_task_worktree_repository_identity(
+        destination,
+        identity
+            .and_then(|identity| identity.get("remote_identity"))
+            .and_then(Value::as_str),
+        identity
+            .and_then(|identity| identity.get("repository_name"))
+            .and_then(Value::as_str),
+    )
 }
 
 fn repository_identity_error(
