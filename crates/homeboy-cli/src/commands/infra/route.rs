@@ -177,24 +177,30 @@ pub fn route_after_parse_with_provenance(
     let lab_command = lab_offload_command(&cli.command)?;
     let normalized_args = inline_portable_settings_profiles(cli, normalized_args)?;
 
-    // Keep the readiness verdict, not just the selected id: when no runner is
-    // eligible the reasons and remediation commands are the only thing that can
-    // explain a local fallback to the operator.
-    let mut lab_readiness = if lab_command.is_some() && cli.runner.is_none() {
-        runners::lab_runner_readiness().ok()
-    } else {
-        None
-    };
+    // Reuse the admission snapshot when preflight captured one. A second
+    // readiness lookup could otherwise turn an admitted Lab attempt into a
+    // local fallback before routing constructs its immutable decision.
+    let admitted_lab_runner = admitted_lab_runner_id(cli, lab_command.as_ref());
+    let mut lab_readiness =
+        if lab_command.is_some() && cli.runner.is_none() && admitted_lab_runner.is_none() {
+            runners::lab_runner_readiness().ok()
+        } else {
+            None
+        };
     let mut inferred_runner_id = if lab_command.is_some() {
-        cli.runner.clone().or_else(|| {
-            lab_readiness
-                .as_ref()
-                .and_then(|readiness| readiness.selected_runner_id.clone())
-        })
+        cli.runner
+            .clone()
+            .or_else(|| admitted_lab_runner.clone().flatten())
+            .or_else(|| {
+                lab_readiness
+                    .as_ref()
+                    .and_then(|readiness| readiness.selected_runner_id.clone())
+            })
     } else {
         None
     };
-    if inferred_runner_id.is_none() && detached_cook_can_queue(cli) {
+    if inferred_runner_id.is_none() && admitted_lab_runner.is_none() && detached_cook_can_queue(cli)
+    {
         // The first readiness observation is intentionally non-mutating. Before
         // refusing a hot-machine Cook, reconcile the live Lab inventory: a
         // terminal runner job may have freed capacity since that observation.
@@ -567,6 +573,19 @@ pub fn route_after_parse_with_provenance(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+/// Return the Lab choice made by resource admission. `Some(None)` is an
+/// intentional no-runner decision and must retain normal local fallback.
+fn admitted_lab_runner_id(
+    cli: &Cli,
+    lab_command: Option<&runners::LabOffloadCommand>,
+) -> Option<Option<String>> {
+    (lab_command.is_some() && cli.runner.is_none())
+        .then(resource_policy::captured_context)
+        .flatten()
+        .filter(|context| !context.local_override)
+        .map(|context| context.runner_selection.runner_id)
 }
 
 /// The runner the *generic* Lab route may use, given what the command's
