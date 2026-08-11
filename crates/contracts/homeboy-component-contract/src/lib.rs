@@ -23,4 +23,6 @@ pub use config::{
     PackageCoverageArtifactMatch, PackageCoverageConfig, ScopeConfig, ScopedExtensionConfig,
     VersionTarget,
 };
-pub use model::{render_remote_path_template, Component, ComponentLifecycle};
+pub use model::{
+    render_remote_path_template, Component, ComponentLifecycle, ComponentManagedExecution,
+};

@@ -78,7 +78,8 @@ Component configuration defines buildable and deployable units stored in `compon
   - Each value is an array of shell commands run sequentially in `local_path`
   - Resolution order is `scripts.<capability>` first, then linked extension support, then not-applicable
   - Scripts receive the same runner env paths (`HOMEBOY_COMPONENT_ID`, `HOMEBOY_COMPONENT_PATH`, `HOMEBOY_RUN_DIR` and sidecar file vars when relevant) as extension runners, with `HOMEBOY_EXTENSION_ID=component-script`
-  - Use `scripts.build`, not `build_command`; `build_command` is still only a diagnostic output field.
+   - Use `scripts.build`, not `build_command`; `build_command` is still only a diagnostic output field.
+- **`managed_execution.shared_cargo_target`** (boolean): Explicitly lease and export a shared Cargo target for managed component capability runs. The stable store is keyed by component identity so compatible worktrees reuse it. An explicit `CARGO_TARGET_DIR` from the caller remains authoritative; relative overrides intentionally resolve under the component checkout. Children receive `HOMEBOY_CARGO_TARGET_RESOLUTION` as `shared` or `local` for diagnostics.
 - **`env`** (object): Component-scoped environment variables applied to Homeboy-managed capability runs for the component
   - Applies to component scripts and extension runners for managed build/test/lint/bench/trace/deps-style capability execution.
   - Per-run environment variables supplied by command workflows are applied after component config and win on key conflicts.

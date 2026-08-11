@@ -90,6 +90,24 @@ pub struct SharedCargoTargetLease {
     _lock: File,
 }
 
+/// The Cargo target selected for a managed child process. Holding this value
+/// keeps a shared-store lease alive until that child exits.
+pub struct ManagedCargoTarget {
+    target_dir: PathBuf,
+    resolution: &'static str,
+    _lease: Option<SharedCargoTargetLease>,
+}
+
+impl ManagedCargoTarget {
+    pub fn target_dir(&self) -> &Path {
+        &self.target_dir
+    }
+
+    pub fn resolution(&self) -> &'static str {
+        self.resolution
+    }
+}
+
 impl SharedCargoTargetLease {
     pub fn target_dir(&self) -> &Path {
         &self.target_dir
@@ -111,6 +129,38 @@ pub fn acquire_shared_cargo_target(owner: &str) -> Result<SharedCargoTargetLease
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
     acquire_shared_cargo_target_in(&root, owner, SystemTime::now())
+}
+
+/// Resolve Cargo output for an explicit managed-execution declaration.
+///
+/// An explicit caller target is authoritative, including a relative target
+/// used to intentionally keep output in the checkout. Otherwise this acquires
+/// a stable shared-store lease for the complete child lifetime.
+pub fn acquire_managed_cargo_target(
+    owner: &str,
+    source_path: &Path,
+    explicit_target: Option<&str>,
+) -> Result<ManagedCargoTarget> {
+    if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
+        let target_dir = PathBuf::from(target);
+        let target_dir = if target_dir.is_absolute() {
+            target_dir
+        } else {
+            source_path.join(target_dir)
+        };
+        return Ok(ManagedCargoTarget {
+            target_dir,
+            resolution: "local",
+            _lease: None,
+        });
+    }
+
+    let lease = acquire_shared_cargo_target(owner)?;
+    Ok(ManagedCargoTarget {
+        target_dir: lease.target_dir().to_path_buf(),
+        resolution: "shared",
+        _lease: Some(lease),
+    })
 }
 
 /// Resolve the one shared Cargo store used by producers, cleanup, and reports.
