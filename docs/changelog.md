@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.335.3] - 2026-08-11
+
+### Fixed
+- stabilize stale generation owner selection
+- refresh stale control-plane env
+- share remote authority snapshot
+
 ## [0.335.2] - 2026-08-10
 
 ### Fixed
