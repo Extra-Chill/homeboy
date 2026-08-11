@@ -119,8 +119,11 @@ pub struct ArtifactCleanupOptions {
 /// ordering and limit, so a small root cannot consume the budget before a
 /// larger eligible artifact is considered.
 pub fn run_automatic_artifact_retention(roots: Vec<PathBuf>) -> Result<ArtifactCleanupOutput> {
-    let retention = crate::defaults::load_config().retention;
-    run_automatic_artifact_retention_in(&roots, &retention, SystemTime::now())
+    try_run_automatic_artifact_retention(roots)?.ok_or_else(|| {
+        Error::internal_unexpected(
+            "automatic artifact retention is already running; remeasure capacity before admitting work",
+        )
+    })
 }
 
 /// Reclaim idle, reconstructable worktree artifacts before managed work writes
@@ -158,7 +161,7 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
 
     // A busy owner is not treated as success: every caller still measures below
     // and deterministically admits or refuses from the current filesystem facts.
-    let _ = try_run_automatic_artifact_retention(&roots, &retention)?;
+    let _ = try_run_automatic_artifact_retention_with_config(&roots, &retention)?;
 
     for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
@@ -183,7 +186,14 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
 
 /// Run one bounded artifact-retention pass when no other process owns it.
 /// `None` means another pass is active; callers must remeasure before writing.
-fn try_run_automatic_artifact_retention(
+pub fn try_run_automatic_artifact_retention(
+    roots: Vec<PathBuf>,
+) -> Result<Option<ArtifactCleanupOutput>> {
+    let retention = crate::defaults::load_config().retention;
+    try_run_automatic_artifact_retention_with_config(&roots, &retention)
+}
+
+fn try_run_automatic_artifact_retention_with_config(
     roots: &[PathBuf],
     retention: &crate::defaults::RetentionConfig,
 ) -> Result<Option<ArtifactCleanupOutput>> {
@@ -2316,7 +2326,7 @@ mod tests {
                 .lock()
                 .expect("hold retention owner");
 
-            let result = try_run_automatic_artifact_retention(
+            let result = try_run_automatic_artifact_retention_with_config(
                 &[repo.path().to_path_buf()],
                 &crate::defaults::RetentionConfig::default(),
             )
