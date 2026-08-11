@@ -2711,6 +2711,8 @@ mod tests {
             "[package]\nname = \"homeboy\"\n",
         )
         .expect("write manifest");
+        fs::create_dir(tmp.path().join("src")).expect("source directory");
+        fs::write(tmp.path().join("src/main.rs"), "fn main() {}\n").expect("binary source");
         init_git_repository(tmp.path());
 
         let root = validate_homeboy_manifest_dir(tmp.path()).expect("homeboy manifest");
