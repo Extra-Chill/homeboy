@@ -169,48 +169,6 @@ pub fn extract_staged_source_artifact(
         .iter()
         .filter(|entry| entry.kind == SourcePackageEntryKind::Symlink)
     {
-        let target = files
-            .get(&entry.path)
-            .and_then(|value| value.get("target"))
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "source_package",
-                    "source package symlink payload is invalid",
-                    Some(entry.path.clone()),
-                    None,
-                )
-            })?;
-        let path = root.join(&entry.path);
-        ensure_extraction_parent(&root, &entry.path)?;
-        #[cfg(unix)]
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                let existing = fs::read_link(&path).map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
-                })?;
-                if existing != Path::new(target) {
-                    fs::remove_file(&path).map_err(|error| {
-                        Error::internal_io(error.to_string(), Some(path.display().to_string()))
-                    })?;
-                    std::os::unix::fs::symlink(target, &path).map_err(|error| {
-                        Error::internal_io(error.to_string(), Some(path.display().to_string()))
-                    })?;
-                }
-            }
-            Ok(_) => return Err(extraction_conflict(&path)),
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                std::os::unix::fs::symlink(target, &path).map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
-                })?;
-            }
-            Err(error) => {
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some(path.display().to_string()),
-                ))
-            }
-        }
         #[cfg(not(unix))]
         return Err(Error::validation_invalid_argument(
             "source_package",
@@ -218,6 +176,50 @@ pub fn extract_staged_source_artifact(
             Some(entry.path.clone()),
             None,
         ));
+        #[cfg(unix)]
+        {
+            let target = files
+                .get(&entry.path)
+                .and_then(|value| value.get("target"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "source_package",
+                        "source package symlink payload is invalid",
+                        Some(entry.path.clone()),
+                        None,
+                    )
+                })?;
+            let path = root.join(&entry.path);
+            ensure_extraction_parent(&root, &entry.path)?;
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let existing = fs::read_link(&path).map_err(|error| {
+                        Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                    })?;
+                    if existing != Path::new(target) {
+                        fs::remove_file(&path).map_err(|error| {
+                            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                        })?;
+                        std::os::unix::fs::symlink(target, &path).map_err(|error| {
+                            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                        })?;
+                    }
+                }
+                Ok(_) => return Err(extraction_conflict(&path)),
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    std::os::unix::fs::symlink(target, &path).map_err(|error| {
+                        Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                    })?;
+                }
+                Err(error) => {
+                    return Err(Error::internal_io(
+                        error.to_string(),
+                        Some(path.display().to_string()),
+                    ))
+                }
+            }
+        }
     }
     Ok(root)
 }

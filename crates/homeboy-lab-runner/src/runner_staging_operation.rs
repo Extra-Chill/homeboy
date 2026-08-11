@@ -9,8 +9,10 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
 use std::fs;
 use std::path::{Component, Path};
+#[cfg(unix)]
 use std::process::Command;
 
 use homeboy_core::{Error, Result};
@@ -408,106 +410,106 @@ impl SourceArtifactTransfer {
             ));
         }
         #[cfg(unix)]
-        fn tracked_symlinks(root: &std::fs::File) -> Result<BTreeSet<String>> {
-            use std::os::fd::AsRawFd;
-            use std::os::unix::process::CommandExt;
+        {
+            fn tracked_symlinks(root: &std::fs::File) -> Result<BTreeSet<String>> {
+                use std::os::fd::AsRawFd;
+                use std::os::unix::process::CommandExt;
 
-            let root_fd = root.as_raw_fd();
-            let mut command = Command::new("git");
-            command.args(["ls-files", "--stage", "-z", "--", "."]);
-            // `fchdir` binds Git's index inspection to the retained root
-            // descriptor, avoiding a second lookup of the mutable root path.
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::fchdir(root_fd) == 0 {
-                        Ok(())
-                    } else {
-                        Err(std::io::Error::last_os_error())
-                    }
-                });
-            }
-            let output = match command.output() {
-                Ok(output) => output,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(BTreeSet::new())
-                }
-                Err(error) => return Err(Error::internal_io(error.to_string(), None)),
-            };
-            if !output.status.success() {
-                // A non-Git source directory has no authoritative link inventory.
-                if String::from_utf8_lossy(&output.stderr).contains("not a git repository") {
-                    return Ok(BTreeSet::new());
-                }
-                return Err(Error::validation_invalid_argument(
-                    "source_path",
-                    format!(
-                        "could not read Git tracking metadata for source package: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ),
-                    None,
-                    None,
-                ));
-            }
-            let links = output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|record| !record.is_empty())
-                .filter_map(|record| {
-                    let separator = record.iter().position(|byte| *byte == b'\t')?;
-                    let (metadata, path) = record.split_at(separator);
-                    let path = &path[1..];
-                    (metadata.starts_with(b"120000 ") && std::str::from_utf8(path).is_ok()).then(
-                        || {
-                            source_package_path_text(
-                                std::str::from_utf8(path).expect("validated UTF-8"),
-                            )
-                        },
-                    )
-                })
-                .collect::<BTreeSet<_>>();
-            Ok(links)
-        }
-        #[cfg(unix)]
-        fn collect(
-            directory: &std::fs::File,
-            relative_directory: &str,
-            tracked_links: &BTreeSet<String>,
-            entries: &mut BTreeMap<String, SourcePackagePayload>,
-        ) -> Result<()> {
-            for name in source_directory::directory_entries(directory)? {
-                let name_text = name.to_str().ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                        "source_path",
-                        "source package paths must be valid UTF-8 text",
-                        None,
-                        None,
-                    )
-                })?;
-                let relative = if relative_directory.is_empty() {
-                    name_text.to_string()
-                } else {
-                    format!("{relative_directory}/{name_text}")
-                };
-                // Git metadata is controller-local state, never source content.
-                if relative == ".git" {
-                    continue;
-                }
-                let mode = source_directory::mode_at(directory, &name)?;
-                match mode & libc::S_IFMT {
-                    libc::S_IFLNK => {
-                        if !tracked_links.contains(&relative) {
-                            continue;
+                let root_fd = root.as_raw_fd();
+                let mut command = Command::new("git");
+                command.args(["ls-files", "--stage", "-z", "--", "."]);
+                // `fchdir` binds Git's index inspection to the retained root
+                // descriptor, avoiding a second lookup of the mutable root path.
+                unsafe {
+                    command.pre_exec(move || {
+                        if libc::fchdir(root_fd) == 0 {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::last_os_error())
                         }
-                        let target = source_directory::read_link_at(directory, &name)?;
-                        let target = target.into_string().map_err(|target| {
-                            Error::validation_invalid_argument(
-                                "source_path",
-                                "tracked source symlink target must be valid UTF-8 text",
-                                Some(format!("{} -> {}", relative, target.to_string_lossy())),
-                                None,
-                            )
-                        })?;
-                        let verdict = source_package_symlink_verdict(&relative, &target).map_err(|_| {
+                    });
+                }
+                let output = match command.output() {
+                    Ok(output) => output,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(BTreeSet::new())
+                    }
+                    Err(error) => return Err(Error::internal_io(error.to_string(), None)),
+                };
+                if !output.status.success() {
+                    // A non-Git source directory has no authoritative link inventory.
+                    if String::from_utf8_lossy(&output.stderr).contains("not a git repository") {
+                        return Ok(BTreeSet::new());
+                    }
+                    return Err(Error::validation_invalid_argument(
+                        "source_path",
+                        format!(
+                            "could not read Git tracking metadata for source package: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                        None,
+                        None,
+                    ));
+                }
+                let links = output
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|record| !record.is_empty())
+                    .filter_map(|record| {
+                        let separator = record.iter().position(|byte| *byte == b'\t')?;
+                        let (metadata, path) = record.split_at(separator);
+                        let path = &path[1..];
+                        (metadata.starts_with(b"120000 ") && std::str::from_utf8(path).is_ok())
+                            .then(|| {
+                                source_package_path_text(
+                                    std::str::from_utf8(path).expect("validated UTF-8"),
+                                )
+                            })
+                    })
+                    .collect::<BTreeSet<_>>();
+                Ok(links)
+            }
+            #[cfg(unix)]
+            fn collect(
+                directory: &std::fs::File,
+                relative_directory: &str,
+                tracked_links: &BTreeSet<String>,
+                entries: &mut BTreeMap<String, SourcePackagePayload>,
+            ) -> Result<()> {
+                for name in source_directory::directory_entries(directory)? {
+                    let name_text = name.to_str().ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "source_path",
+                            "source package paths must be valid UTF-8 text",
+                            None,
+                            None,
+                        )
+                    })?;
+                    let relative = if relative_directory.is_empty() {
+                        name_text.to_string()
+                    } else {
+                        format!("{relative_directory}/{name_text}")
+                    };
+                    // Git metadata is controller-local state, never source content.
+                    if relative == ".git" {
+                        continue;
+                    }
+                    let mode = source_directory::mode_at(directory, &name)?;
+                    match mode & libc::S_IFMT {
+                        libc::S_IFLNK => {
+                            if !tracked_links.contains(&relative) {
+                                continue;
+                            }
+                            let target = source_directory::read_link_at(directory, &name)?;
+                            let target = target.into_string().map_err(|target| {
+                                Error::validation_invalid_argument(
+                                    "source_path",
+                                    "tracked source symlink target must be valid UTF-8 text",
+                                    Some(format!("{} -> {}", relative, target.to_string_lossy())),
+                                    None,
+                                )
+                            })?;
+                            let verdict = source_package_symlink_verdict(&relative, &target).map_err(|_| {
                         Error::validation_invalid_argument(
                             "source_path",
                             "tracked source symlink must have a relative target contained within the source root",
@@ -515,170 +517,171 @@ impl SourceArtifactTransfer {
                             None,
                         )
                     })?;
-                        entries.insert(
-                            relative,
-                            SourcePackagePayload::Symlink {
-                                target: verdict.target,
-                            },
-                        );
-                        continue;
+                            entries.insert(
+                                relative,
+                                SourcePackagePayload::Symlink {
+                                    target: verdict.target,
+                                },
+                            );
+                            continue;
+                        }
+                        libc::S_IFDIR => {
+                            let child = source_directory::open_directory_at(directory, &name)?;
+                            collect(&child, &relative, tracked_links, entries)?;
+                        }
+                        libc::S_IFREG => {
+                            let bytes = source_directory::read_regular_file_at(directory, &name)?;
+                            entries.insert(
+                                relative,
+                                SourcePackagePayload::File {
+                                    content_base64: base64::engine::general_purpose::STANDARD
+                                        .encode(bytes),
+                                },
+                            );
+                        }
+                        _ => {
+                            return Err(Error::validation_invalid_argument(
+                                "source_path",
+                                "source package accepts only regular files and directories",
+                                Some(relative),
+                                None,
+                            ));
+                        }
                     }
-                    libc::S_IFDIR => {
-                        let child = source_directory::open_directory_at(directory, &name)?;
-                        collect(&child, &relative, tracked_links, entries)?;
-                    }
-                    libc::S_IFREG => {
-                        let bytes = source_directory::read_regular_file_at(directory, &name)?;
-                        entries.insert(
-                            relative,
-                            SourcePackagePayload::File {
-                                content_base64: base64::engine::general_purpose::STANDARD
-                                    .encode(bytes),
-                            },
-                        );
-                    }
-                    _ => {
+                    if entries.len() > MAX_SOURCE_PACKAGE_ENTRIES
+                        || entries
+                            .values()
+                            .map(|entry| match entry {
+                                SourcePackagePayload::File { content_base64 } => {
+                                    base64::engine::general_purpose::STANDARD
+                                        .decode(content_base64)
+                                        .map_or(0, |bytes| bytes.len() as u64)
+                                }
+                                SourcePackagePayload::Symlink { target } => target.len() as u64,
+                            })
+                            .sum::<u64>()
+                            > MAX_SOURCE_ARTIFACT_BYTES
+                    {
                         return Err(Error::validation_invalid_argument(
                             "source_path",
-                            "source package accepts only regular files and directories",
-                            Some(relative),
+                            "source package exceeds configured entry or total size bounds",
+                            None,
                             None,
                         ));
                     }
                 }
-                if entries.len() > MAX_SOURCE_PACKAGE_ENTRIES
-                    || entries
-                        .values()
-                        .map(|entry| match entry {
-                            SourcePackagePayload::File { content_base64 } => {
+                Ok(())
+            }
+
+            #[cfg(unix)]
+            let root_metadata = fs::symlink_metadata(root).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(root.display().to_string()))
+            })?;
+            #[cfg(unix)]
+            if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+                return Err(Error::validation_invalid_argument(
+                    "source_path",
+                    "source package root must be a readable non-symlink directory",
+                    Some(root.display().to_string()),
+                    None,
+                ));
+            }
+            #[cfg(unix)]
+            let root_directory = source_directory::open_root(root)?;
+            #[cfg(unix)]
+            let tracked_links = tracked_symlinks(&root_directory)?;
+            let mut payloads = BTreeMap::new();
+            #[cfg(unix)]
+            collect(&root_directory, "", &tracked_links, &mut payloads)?;
+            if payloads.is_empty() {
+                return Err(Error::validation_invalid_argument(
+                    "source_path",
+                    "source package root must contain at least one regular file",
+                    Some(root.display().to_string()),
+                    None,
+                ));
+            }
+            let entries = payloads
+                .iter()
+                .map(|(path, payload)| SourcePackageEntry {
+                    path: path.clone(),
+                    kind: match payload {
+                        SourcePackagePayload::File { .. } => SourcePackageEntryKind::File,
+                        SourcePackagePayload::Symlink { .. } => SourcePackageEntryKind::Symlink,
+                    },
+                    sha256: match payload {
+                        SourcePackagePayload::File { content_base64 } => format!(
+                            "sha256:{:x}",
+                            Sha256::digest(
                                 base64::engine::general_purpose::STANDARD
                                     .decode(content_base64)
-                                    .map_or(0, |bytes| bytes.len() as u64)
-                            }
-                            SourcePackagePayload::Symlink { target } => target.len() as u64,
-                        })
-                        .sum::<u64>()
-                        > MAX_SOURCE_ARTIFACT_BYTES
-                {
-                    return Err(Error::validation_invalid_argument(
-                        "source_path",
-                        "source package exceeds configured entry or total size bounds",
-                        None,
-                        None,
-                    ));
-                }
-            }
-            Ok(())
-        }
-
-        #[cfg(unix)]
-        let root_metadata = fs::symlink_metadata(root).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(root.display().to_string()))
-        })?;
-        #[cfg(unix)]
-        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-            return Err(Error::validation_invalid_argument(
-                "source_path",
-                "source package root must be a readable non-symlink directory",
-                Some(root.display().to_string()),
-                None,
-            ));
-        }
-        #[cfg(unix)]
-        let root_directory = source_directory::open_root(root)?;
-        #[cfg(unix)]
-        let tracked_links = tracked_symlinks(&root_directory)?;
-        let mut payloads = BTreeMap::new();
-        #[cfg(unix)]
-        collect(&root_directory, "", &tracked_links, &mut payloads)?;
-        if payloads.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "source_path",
-                "source package root must contain at least one regular file",
-                Some(root.display().to_string()),
-                None,
-            ));
-        }
-        let entries = payloads
-            .iter()
-            .map(|(path, payload)| SourcePackageEntry {
-                path: path.clone(),
-                kind: match payload {
-                    SourcePackagePayload::File { .. } => SourcePackageEntryKind::File,
-                    SourcePackagePayload::Symlink { .. } => SourcePackageEntryKind::Symlink,
-                },
-                sha256: match payload {
-                    SourcePackagePayload::File { content_base64 } => format!(
-                        "sha256:{:x}",
-                        Sha256::digest(
+                                    .expect("package bytes")
+                            )
+                        ),
+                        SourcePackagePayload::Symlink { target } => {
+                            source_package_symlink_verdict(path, target)
+                                .expect("scanner normalized symlink target")
+                                .sha256
+                        }
+                    },
+                    size_bytes: match payload {
+                        SourcePackagePayload::File { content_base64 } => {
                             base64::engine::general_purpose::STANDARD
                                 .decode(content_base64)
                                 .expect("package bytes")
-                        )
-                    ),
-                    SourcePackagePayload::Symlink { target } => {
-                        source_package_symlink_verdict(path, target)
-                            .expect("scanner normalized symlink target")
-                            .sha256
+                                .len() as u64
+                        }
+                        SourcePackagePayload::Symlink { target } => {
+                            source_package_symlink_verdict(path, target)
+                                .expect("scanner normalized symlink target")
+                                .size_bytes
+                        }
+                    },
+                })
+                .collect::<Vec<_>>();
+            let has_symlinks = entries
+                .iter()
+                .any(|entry| entry.kind == SourcePackageEntryKind::Symlink);
+            let package = if has_symlinks {
+                serde_json::to_vec(&payloads)
+            } else {
+                serde_json::to_vec(
+                    &payloads
+                        .iter()
+                        .map(|(path, payload)| match payload {
+                            SourcePackagePayload::File { content_base64 } => (path, content_base64),
+                            SourcePackagePayload::Symlink { .. } => unreachable!("v1 has no links"),
+                        })
+                        .collect::<BTreeMap<_, _>>(),
+                )
+            }
+            .expect("source package serializes");
+            let transfer = Self {
+                schema: SOURCE_ARTIFACT_TRANSFER_SCHEMA.to_string(),
+                artifact_id: artifact_id.into(),
+                sha256: format!("sha256:{:x}", Sha256::digest(&package)),
+                size_bytes: package.len() as u64,
+                content_base64: base64::engine::general_purpose::STANDARD.encode(package),
+                package: SourcePackageManifest {
+                    schema: if has_symlinks {
+                        "homeboy/source-package-manifest/v2"
+                    } else {
+                        "homeboy/source-package-manifest/v1"
                     }
+                    .into(),
+                    format: if has_symlinks {
+                        "homeboy/source-package-json/v2"
+                    } else {
+                        "homeboy/source-package-json/v1"
+                    }
+                    .into(),
+                    extraction_root: "workspace".into(),
+                    entries,
                 },
-                size_bytes: match payload {
-                    SourcePackagePayload::File { content_base64 } => {
-                        base64::engine::general_purpose::STANDARD
-                            .decode(content_base64)
-                            .expect("package bytes")
-                            .len() as u64
-                    }
-                    SourcePackagePayload::Symlink { target } => {
-                        source_package_symlink_verdict(path, target)
-                            .expect("scanner normalized symlink target")
-                            .size_bytes
-                    }
-                },
-            })
-            .collect::<Vec<_>>();
-        let has_symlinks = entries
-            .iter()
-            .any(|entry| entry.kind == SourcePackageEntryKind::Symlink);
-        let package = if has_symlinks {
-            serde_json::to_vec(&payloads)
-        } else {
-            serde_json::to_vec(
-                &payloads
-                    .iter()
-                    .map(|(path, payload)| match payload {
-                        SourcePackagePayload::File { content_base64 } => (path, content_base64),
-                        SourcePackagePayload::Symlink { .. } => unreachable!("v1 has no links"),
-                    })
-                    .collect::<BTreeMap<_, _>>(),
-            )
+            };
+            transfer.decode_verified()?;
+            Ok(transfer)
         }
-        .expect("source package serializes");
-        let transfer = Self {
-            schema: SOURCE_ARTIFACT_TRANSFER_SCHEMA.to_string(),
-            artifact_id: artifact_id.into(),
-            sha256: format!("sha256:{:x}", Sha256::digest(&package)),
-            size_bytes: package.len() as u64,
-            content_base64: base64::engine::general_purpose::STANDARD.encode(package),
-            package: SourcePackageManifest {
-                schema: if has_symlinks {
-                    "homeboy/source-package-manifest/v2"
-                } else {
-                    "homeboy/source-package-manifest/v1"
-                }
-                .into(),
-                format: if has_symlinks {
-                    "homeboy/source-package-json/v2"
-                } else {
-                    "homeboy/source-package-json/v1"
-                }
-                .into(),
-                extraction_root: "workspace".into(),
-                entries,
-            },
-        };
-        transfer.decode_verified()?;
-        Ok(transfer)
     }
 
     pub fn from_bytes(artifact_id: impl Into<String>, bytes: &[u8]) -> Self {
