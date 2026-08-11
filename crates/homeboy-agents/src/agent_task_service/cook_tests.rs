@@ -3141,13 +3141,14 @@ fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
             std::fs::read_to_string(marker).expect("provider marker"),
             "original"
         );
+        let canonical_original = std::fs::canonicalize(&original).expect("canonical original");
         assert_eq!(
             options.source_worktree_path.as_deref(),
-            Some(original.as_path())
+            Some(canonical_original.as_path())
         );
         assert_eq!(
             options.initial_plan.tasks[0].workspace.root.as_deref(),
-            original.to_str()
+            canonical_original.to_str()
         );
     });
 }
