@@ -172,6 +172,8 @@ pub struct BuildOutput {
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_scope: Option<BuildChangedScopeReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cargo_target: Option<homeboy_core::CargoTargetEvidence>,
     pub success: bool,
 }
 
@@ -466,6 +468,7 @@ fn execute_build_component(
                 artifact_inputs: Vec::new(),
                 extension_phase_timings: Vec::new(),
                 changed_scope: changed_scope.map(|decision| decision.report),
+                cargo_target: None,
                 success: true,
             },
             0,
@@ -494,6 +497,7 @@ fn execute_build_component(
                     artifact_inputs: Vec::new(),
                     extension_phase_timings: Vec::new(),
                     changed_scope: changed_scope.clone().map(|decision| decision.report),
+                    cargo_target: None,
                     success: false,
                 },
                 exit_code,
@@ -558,6 +562,7 @@ fn execute_build_component(
     };
 
     let success = runner_output.success;
+    let cargo_target = runner_output.cargo_target.clone();
     let artifact_inputs = if success {
         apply_artifact_inputs(comp)?
     } else {
@@ -574,6 +579,7 @@ fn execute_build_component(
             artifact_inputs,
             extension_phase_timings: runner_output.extension_phase_timings,
             changed_scope: changed_scope.map(|decision| decision.report),
+            cargo_target,
             success,
         },
         runner_output.exit_code,
@@ -991,6 +997,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             extension_phase_timings: Vec::new(),
             changed_scope: None,
+            cargo_target: None,
             success: true,
         }));
 

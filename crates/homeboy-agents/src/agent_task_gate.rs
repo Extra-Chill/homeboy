@@ -155,10 +155,10 @@ pub struct AgentTaskGateEnvironmentPolicy {
     /// Rust cache hydration follows the enclosing dependency-hydration policy.
     #[serde(default = "default_hydrate_dependencies")]
     pub hydrate_rust_cache: bool,
-    /// Explicitly lease a shared Cargo target for this gate. This declaration
-    /// is intentionally independent of the shell command text.
-    #[serde(default)]
-    pub shared_cargo_target: bool,
+    /// Explicit gate override. When omitted, inherit the component's declared
+    /// managed-execution policy for the gate workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_cargo_target: Option<bool>,
     /// Selected extension sources are copied under the isolated HOME. Gates
     /// never receive a writable path to the controller-owned source.
     #[serde(default)]
@@ -228,7 +228,7 @@ impl Default for AgentTaskGateEnvironmentPolicy {
             isolate_home: true,
             isolate_xdg: true,
             hydrate_rust_cache: true,
-            shared_cargo_target: false,
+            shared_cargo_target: None,
             extension_inputs: Vec::new(),
         }
     }
@@ -678,6 +678,7 @@ pub struct AgentTaskGateEnvironment {
 pub struct AgentTaskGateCargoTargetEvidence {
     pub path: String,
     pub resolution: String,
+    pub owner: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -790,7 +791,7 @@ impl AgentTaskGateEnvironment {
                 .iter()
                 .any(|variable| XDG_ENV_VARS.contains(&variable.name.as_str())),
             hydrate_rust_cache: true,
-            shared_cargo_target: self.cargo_target.is_some(),
+            shared_cargo_target: self.cargo_target.as_ref().map(|_| true),
             extension_inputs: self
                 .extension_inputs
                 .iter()
@@ -1817,7 +1818,12 @@ impl SelectedGateEnvironment {
         Ok(())
     }
 
-    fn configure_cargo_target(&mut self, cwd: &Path, enabled: bool) -> Result<()> {
+    fn configure_cargo_target(&mut self, cwd: &Path, override_enabled: Option<bool>) -> Result<()> {
+        let enabled = override_enabled.unwrap_or_else(|| {
+            homeboy_core::component::resolve_effective(None, Some(&cwd.to_string_lossy()), None)
+                .map(|component| component.managed_execution.shared_cargo_target)
+                .unwrap_or(false)
+        });
         if !enabled {
             return Ok(());
         }
@@ -1838,6 +1844,7 @@ impl SelectedGateEnvironment {
         self.report.cargo_target = Some(AgentTaskGateCargoTargetEvidence {
             path: target.target_dir().to_string_lossy().to_string(),
             resolution: target.resolution().to_string(),
+            owner: target.evidence().owner,
         });
         self._cargo_target = Some(target);
         Ok(())
@@ -3141,7 +3148,7 @@ mod tests {
     fn declared_shared_cargo_target_is_reported_without_parsing_gate_shell_text() {
         let temp = tempfile::tempdir().expect("gate fixture");
         let mut policy = AgentTaskGateEnvironmentPolicy::default();
-        policy.shared_cargo_target = true;
+        policy.shared_cargo_target = Some(true);
         // The test runner's required Cargo target is an ambient override. An
         // explicit empty declaration clears it so this exercises the contract.
         policy
@@ -3164,6 +3171,45 @@ mod tests {
         let target = report.environment.cargo_target.expect("target evidence");
         assert_eq!(target.resolution, "shared");
         assert!(target.path.contains("cargo-target"));
+        assert!(target.owner.starts_with("agent-task-gate"));
+    }
+
+    #[test]
+    fn gate_inherits_shared_cargo_target_from_component_metadata() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("gate fixture");
+            std::fs::write(
+                temp.path().join("homeboy.json"),
+                r#"{"id":"cargo-fixture","managed_execution":{"shared_cargo_target":true}}"#,
+            )
+            .expect("component manifest");
+            let mut policy = AgentTaskGateEnvironmentPolicy::default();
+            policy
+                .variables
+                .insert("CARGO_TARGET_DIR".to_string(), String::new());
+
+            let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                temp.path(),
+                1,
+                "test -n \"$CARGO_TARGET_DIR\"",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                &policy,
+                &[],
+            )
+            .expect("metadata-managed gate");
+
+            assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+            assert_eq!(
+                report
+                    .environment
+                    .cargo_target
+                    .expect("target evidence")
+                    .resolution,
+                "shared"
+            );
+        });
     }
 
     /// Restores process-global environment variables when dropped.
@@ -4168,7 +4214,7 @@ mod tests {
             isolate_home: false,
             isolate_xdg: false,
             hydrate_rust_cache: true,
-            shared_cargo_target: false,
+            shared_cargo_target: Some(false),
             extension_inputs: Vec::new(),
         };
         let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(

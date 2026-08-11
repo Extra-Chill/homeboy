@@ -116,10 +116,13 @@ pub struct VerifyGateArgs {
         action = clap::ArgAction::Set
     )]
     pub isolate_gate_xdg: bool,
-    /// Lease a Homeboy-managed shared Cargo target for declared deterministic
-    /// gates. This is explicit so gate command text remains opaque.
-    #[arg(long = "gate-shared-cargo-target")]
+    /// Override the component's declared shared Cargo target policy for
+    /// deterministic gates. Omit to inherit the repository component policy.
+    #[arg(long = "gate-shared-cargo-target", action = clap::ArgAction::SetTrue, conflicts_with = "no_gate_shared_cargo_target")]
     pub gate_shared_cargo_target: bool,
+    /// Explicitly keep deterministic gate Cargo output local to its workspace.
+    #[arg(long = "no-gate-shared-cargo-target", action = clap::ArgAction::SetTrue)]
+    pub no_gate_shared_cargo_target: bool,
 }
 impl VerifyGateArgs {
     pub fn has_deterministic_gate(&self) -> bool {
@@ -157,7 +160,10 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                 isolate_home: args.isolate_gate_home,
                 isolate_xdg: args.isolate_gate_xdg,
                 hydrate_rust_cache: true,
-                shared_cargo_target: args.gate_shared_cargo_target,
+                shared_cargo_target: args
+                    .gate_shared_cargo_target
+                    .then_some(true)
+                    .or_else(|| args.no_gate_shared_cargo_target.then_some(false)),
                 extension_inputs: args.gate_extension_inputs,
             },
             gate_toolchains: args

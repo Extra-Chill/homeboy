@@ -30,6 +30,7 @@ pub struct RunnerOutput {
     pub timed_out: bool,
     pub child_resource: Option<ExtensionChildResourceSummary>,
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
+    pub cargo_target: Option<homeboy_core::CargoTargetEvidence>,
 }
 
 use super::ExtensionExecutionContext;
@@ -421,6 +422,7 @@ impl ExtensionRunner {
                 .map(read_extension_phase_timings)
                 .transpose()?
                 .unwrap_or_default(),
+            cargo_target: _cargo_target.as_ref().map(|target| target.evidence()),
         })
     }
 

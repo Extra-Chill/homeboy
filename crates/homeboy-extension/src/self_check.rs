@@ -20,6 +20,7 @@ pub struct SelfCheckOutput {
     pub stdout: String,
     pub stderr: String,
     pub capture: SelfCheckCaptureMetadata,
+    pub cargo_target: Option<homeboy_core::CargoTargetEvidence>,
 }
 
 #[cfg(test)]
@@ -62,7 +63,11 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
     }
 
     let working_dir = source_path.to_string_lossy();
-    let explicit_cargo_target = std::env::var("CARGO_TARGET_DIR").ok();
+    let explicit_cargo_target = component
+        .env
+        .get("CARGO_TARGET_DIR")
+        .cloned()
+        .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
     let cargo_target = component
         .managed_execution
         .shared_cargo_target
@@ -131,11 +136,23 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
         stderr.push_capture(output.stderr);
 
         if !output.success {
-            return Ok(self_check_output(output.exit_code, false, &stdout, &stderr));
+            return Ok(self_check_output(
+                output.exit_code,
+                false,
+                &stdout,
+                &stderr,
+                cargo_target.as_ref().map(|target| target.evidence()),
+            ));
         }
     }
 
-    Ok(self_check_output(0, true, &stdout, &stderr))
+    Ok(self_check_output(
+        0,
+        true,
+        &stdout,
+        &stderr,
+        cargo_target.as_ref().map(|target| target.evidence()),
+    ))
 }
 
 fn self_check_output(
@@ -143,6 +160,7 @@ fn self_check_output(
     success: bool,
     stdout: &BoundedCapture,
     stderr: &BoundedCapture,
+    cargo_target: Option<homeboy_core::CargoTargetEvidence>,
 ) -> SelfCheckOutput {
     SelfCheckOutput {
         exit_code,
@@ -153,6 +171,7 @@ fn self_check_output(
             stdout: stdout.metadata(),
             stderr: stderr.metadata(),
         },
+        cargo_target,
     }
 }
 

@@ -3918,6 +3918,7 @@ fi
                 isolate_gate_home: true,
                 isolate_gate_xdg: true,
                 gate_shared_cargo_target: false,
+                no_gate_shared_cargo_target: false,
             },
             verification_profiles: None,
             max_concurrency: None,

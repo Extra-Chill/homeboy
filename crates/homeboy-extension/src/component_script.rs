@@ -19,6 +19,7 @@ impl From<RunnerOutput> for ComponentScriptOutput {
             timed_out: output.timed_out,
             child_resource: output.child_resource,
             extension_phase_timings: output.extension_phase_timings,
+            cargo_target: output.cargo_target,
         }
     }
 }
@@ -33,6 +34,7 @@ impl From<ComponentScriptOutput> for RunnerOutput {
             timed_out: output.timed_out,
             child_resource: output.child_resource,
             extension_phase_timings: output.extension_phase_timings,
+            cargo_target: output.cargo_target,
         }
     }
 }
@@ -147,6 +149,7 @@ fn run_component_scripts_with_env_and_timeout(
                 timed_out,
                 child_resource,
                 extension_phase_timings: Vec::new(),
+                cargo_target: _cargo_target.as_ref().map(|target| target.evidence()),
             });
         }
     }
@@ -159,6 +162,7 @@ fn run_component_scripts_with_env_and_timeout(
         timed_out,
         child_resource,
         extension_phase_timings: Vec::new(),
+        cargo_target: _cargo_target.as_ref().map(|target| target.evidence()),
     })
 }
 

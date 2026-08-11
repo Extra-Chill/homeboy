@@ -78,6 +78,7 @@ pub struct LintRunWorkflowResult {
     pub summary: Option<LintSummaryOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub self_check_capture: Option<SelfCheckCaptureMetadata>,
+    pub cargo_target: Option<homeboy_core::CargoTargetEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
 }

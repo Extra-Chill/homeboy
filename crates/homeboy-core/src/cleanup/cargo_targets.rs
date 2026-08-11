@@ -95,6 +95,7 @@ pub struct SharedCargoTargetLease {
 pub struct ManagedCargoTarget {
     target_dir: PathBuf,
     resolution: &'static str,
+    owner: String,
     _lease: Option<SharedCargoTargetLease>,
 }
 
@@ -105,6 +106,14 @@ impl ManagedCargoTarget {
 
     pub fn resolution(&self) -> &'static str {
         self.resolution
+    }
+
+    pub fn evidence(&self) -> homeboy_engine_primitives::cargo_target::CargoTargetEvidence {
+        homeboy_engine_primitives::cargo_target::CargoTargetEvidence {
+            path: self.target_dir.to_string_lossy().to_string(),
+            resolution: self.resolution.to_string(),
+            owner: self.owner.clone(),
+        }
     }
 }
 
@@ -151,6 +160,7 @@ pub fn acquire_managed_cargo_target(
         return Ok(ManagedCargoTarget {
             target_dir,
             resolution: "local",
+            owner: owner.to_string(),
             _lease: None,
         });
     }
@@ -160,6 +170,7 @@ pub fn acquire_managed_cargo_target(
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
         resolution: "shared",
+        owner: owner.to_string(),
         _lease: Some(lease),
     })
 }

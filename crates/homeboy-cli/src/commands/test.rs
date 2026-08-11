@@ -1397,6 +1397,7 @@ mod tests {
                     })],
                     metadata: Default::default(),
                 }],
+                cargo_target: None,
             };
             let collection_error = persist_declared_test_artifacts(&observation, &mut workflow)
                 .expect_err("injected artifact store failure must propagate");
@@ -1479,6 +1480,7 @@ mod tests {
                 summary: None,
                 raw_output: None,
                 extension_phase_timings: Vec::new(),
+                cargo_target: None,
             };
             finish_test_observation(Some(observation), &workflow);
 
@@ -1571,6 +1573,7 @@ mod tests {
                     summary: None,
                     raw_output: None,
                     extension_phase_timings: Vec::new(),
+                    cargo_target: None,
                 },
             );
 
@@ -1650,6 +1653,7 @@ mod tests {
                 summary: None,
                 raw_output: None,
                 extension_phase_timings: vec![timing],
+                cargo_target: None,
             };
             persist_declared_test_artifacts(&observation, &mut workflow)
                 .expect("persist declared artifacts");
@@ -1808,6 +1812,7 @@ mod tests {
                         })],
                         metadata: Default::default(),
                     }],
+                    cargo_target: None,
                 };
 
                 persist_declared_test_artifacts(&observation, &mut workflow)
@@ -1888,6 +1893,7 @@ mod tests {
                 })],
                 metadata: Default::default(),
             }],
+            cargo_target: None,
         };
 
         rewrite_reported_artifact_locators(
@@ -1954,6 +1960,7 @@ mod tests {
                     summary: None,
                     raw_output: None,
                     extension_phase_timings: Vec::new(),
+                    cargo_target: None,
                 },
             );
 

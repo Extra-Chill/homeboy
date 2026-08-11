@@ -30,6 +30,7 @@ pub struct ComponentScriptOutput {
     pub timed_out: bool,
     pub child_resource: Option<ExtensionChildResourceSummary>,
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
+    pub cargo_target: Option<crate::CargoTargetEvidence>,
 }
 
 /// Runs a component's declared scripts for a capability. Supplied by the
