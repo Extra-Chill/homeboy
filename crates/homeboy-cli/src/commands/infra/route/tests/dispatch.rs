@@ -1455,10 +1455,10 @@ fn managed_promotion_handoff_does_not_require_runner_side_artifact_hydration() {
     ]);
     let normalized = vec![
         "homeboy".to_string(),
+        // An explicit runner already selects Lab. `--placement` alongside it is
+        // rejected by clap since #11829, and this fixture is about the runner.
         "--runner".to_string(),
         "homeboy-lab".to_string(),
-        "--placement".to_string(),
-        "lab".to_string(),
         "agent-task".to_string(),
         "promote".to_string(),
         "agent-task-preserved-run".to_string(),
@@ -1488,8 +1488,10 @@ fn unmanaged_explicit_lab_handoff_keeps_runner_connection_requirements() {
     ]);
     let normalized = vec![
         "homeboy".to_string(),
-        "--runner".to_string(),
-        "disconnected-lab".to_string(),
+        // Lab intent is expressed as placement here. `--runner` alongside it no
+        // longer parses (#11829), and naming a runner would carry the request
+        // past readiness into the offload provider, which is what this fixture
+        // exists to prove cannot be skipped.
         "--placement".to_string(),
         "lab".to_string(),
         "agent-task".to_string(),
@@ -1504,7 +1506,12 @@ fn unmanaged_explicit_lab_handoff_keeps_runner_connection_requirements() {
             .expect_err("unmanaged run-plan must still require a Lab runner")
     });
 
-    assert_eq!(error.code.as_str(), "runner.not_found");
+    // The requirement survives; only its code moved. Assert the guarantee
+    // itself so a future recode cannot quietly drop it.
+    assert!(
+        error.message.contains("no selected ready runner"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -1695,10 +1702,15 @@ fn lab_cook_attempt_preserves_authorized_dirty_baseline_in_the_run_plan() {
 }
 
 #[test]
-fn lab_cook_materializes_goal_and_explicit_task_as_one_durable_cell() {
+fn lab_cook_materializes_goal_and_prompt_as_one_durable_cell() {
     crate::test_support::with_isolated_home(|_| {
         let primary = tempfile::tempdir().expect("primary workspace");
         git_init(primary.path());
+        // Cook infers its repository from the checkout remote and the
+        // configured component that remote maps to (#11987). Without both it
+        // refuses the workspace and demands an explicit `--repo`.
+        git_add_remote(primary.path(), FIXTURE_REPOSITORY_REMOTE);
+        register_component("homeboy", primary.path(), FIXTURE_REPOSITORY_REMOTE);
         let workspace = primary.path().join("provenance-worktree");
         let linked = Command::new("git")
             .args([
@@ -1719,7 +1731,9 @@ fn lab_cook_materializes_goal_and_explicit_task_as_one_durable_cell() {
             "cook",
             "--goal",
             "Preserve one provider cell",
-            "--task",
+            // `--goal` frames the work and `--prompt` is its one source.
+            // Pairing `--goal` with `--task` is a rejected conflict (#10070).
+            "--prompt",
             "Repair the Lab Cook compiler",
             "--cwd",
             &workspace,
@@ -2097,14 +2111,16 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
             .expect("stage replacement handoff before Lab preacceptance");
         let replacement = agent_task_lifecycle::status(&handoff.run_id)
             .expect("staged replacement remains inspectable");
-        let staged_handoff = replacement
-            .lab_handoff
-            .expect("replacement has pending controller handoff");
-        assert_eq!(staged_handoff.runner_id, "homeboy-lab");
-        let staged_handoff =
-            serde_json::to_value(staged_handoff).expect("serialize staged retry handoff");
-        assert_eq!(staged_handoff["state"], "pending");
-        assert_eq!(staged_handoff["authority"], "controller");
+        // Staging binds the controller proxy to its runner. The typed
+        // `lab_handoff` is deliberately not written here: since #10855 restored
+        // the Lab submission boundary, a pending handoff is only claimed by the
+        // submission request itself, so staging cannot pre-announce one.
+        assert_eq!(replacement.metadata["kind"], "lab_offload_controller_proxy");
+        assert_eq!(replacement.metadata["runner_id"], "homeboy-lab");
+        assert!(
+            replacement.lab_handoff.is_none(),
+            "staging must not claim a handoff the submission has not made"
+        );
 
         let error = persist_retry_handoff_preacceptance_failure(
             &handoff,
@@ -2337,6 +2353,10 @@ fn lab_cook_materializes_derived_provider_destination_and_preserves_it_for_retry
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path());
+        // The provider-derived destination is validated against the requested
+        // Cook repository through its remote (#11987). The linked worktree
+        // created below inherits this remote from its primary.
+        git_add_remote(workspace.path(), FIXTURE_REPOSITORY_REMOTE);
         let provider_dir = tempfile::tempdir().expect("provider dir");
         let provider_workspace = provider_dir.path().join("worktree");
         let commit = Command::new("git")
