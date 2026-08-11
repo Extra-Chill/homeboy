@@ -3,7 +3,7 @@
 //! resolution. Pure move out of the former `agent_task_service.rs` god-file.
 
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -2899,6 +2899,7 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
     if !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
+        && !cook_workspace_lookup_pending(&options.initial_plan)
         && options.attempt_dispatcher.is_none()
         && options.source_worktree_path.is_none()
         && options.provider_command.is_none()
@@ -2907,6 +2908,7 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
         crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)?;
     }
     if cook_attempt_needs_execution(&options.initial_run_id)
+        && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
         validate_cook_workspace(options)?;
@@ -3219,6 +3221,7 @@ where
     if !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
+        && !cook_workspace_lookup_pending(&options.initial_plan)
         && options.attempt_dispatcher.is_none()
         && options.source_worktree_path.is_none()
         && options.provider_command.is_none()
@@ -3300,6 +3303,7 @@ where
     // Its initial handoff has no controller-local source path to validate yet;
     // requiring one here turns an accepted detached retry into a local failure.
     if cook_attempt_needs_execution(&options.initial_run_id)
+        && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
         validate_cook_workspace(&options)?;
@@ -3333,6 +3337,29 @@ where
         .transpose()?;
     agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
     materialize_initial_cook_attempt(&options)?;
+    if cook_workspace_lookup_pending(&options.initial_plan) {
+        if let Err(error) = materialize_pending_cook_workspace(&mut options) {
+            let error = with_pre_execution_phase(error, "worktree_provider_lookup");
+            record_pre_execution_failure(
+                &options.initial_plan,
+                &options.initial_run_id,
+                &error,
+                "worktree_provider_lookup",
+            )?;
+            return Ok(pre_execution_failure_report(
+                options.cook_id.clone(),
+                Vec::new(),
+                pre_execution_failure_details(
+                    agent_task_lifecycle::exact_record(&options.initial_run_id)
+                        .ok()
+                        .as_ref(),
+                    &error,
+                ),
+                error,
+                Some(&options.initial_run_id),
+            ));
+        }
+    }
     record_active_cook_worktree_warning(&options)?;
     // Durable identity now exists and resolves through the Cook alias. Publish
     // it before every remaining long controller phase — gate toolchain
@@ -3594,11 +3621,11 @@ where
                     attempt_limit,
                 );
             }
-            if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
-                validate_cook_workspace(&options)?;
-            }
             let mut failed_dispatch_plan = None;
             let execution = (|| {
+                if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
+                    validate_cook_workspace(&options)?;
+                }
                 homeboy_core::cleanup::admit_reconstructable_artifact_work(
                     plan.tasks
                         .iter()
@@ -4914,6 +4941,116 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         ));
     }
     Ok(())
+}
+
+fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
+    plan.metadata
+        .pointer("/cook_provision/action")
+        .and_then(Value::as_str)
+        == Some("lookup_pending")
+}
+
+/// A pending lookup carries no provider path. Resolve the declared exact handle
+/// only after Cook's recipe and first run record exist, then persist that path
+/// before any provider can receive work.
+fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions) -> Result<()> {
+    let provider_id = options
+        .initial_plan
+        .metadata
+        .pointer("/cook_provision/worktree_provider_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "worktree_provider",
+                "pending Cook workspace lookup is missing its timed-out provider identity",
+                Some(options.to_worktree.clone()),
+                None,
+            )
+        })?;
+    let resolution = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_by_id_from_config(
+        &options.to_worktree,
+        provider_id,
+        &homeboy_core::defaults::load_config(),
+    )?;
+    if resolution.worktree.handle != options.to_worktree {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "worktree provider did not resolve the declared exact Cook handle",
+            Some(options.to_worktree.clone()),
+            None,
+        ));
+    }
+    let target = PathBuf::from(&resolution.worktree.path);
+    homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
+    let target = std::fs::canonicalize(&target).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(target.display().to_string()))
+    })?;
+    validate_pending_cook_repository_identity(&options.initial_plan, &target)?;
+    for task in &mut options.initial_plan.tasks {
+        task.workspace.root = Some(target.display().to_string());
+        task.metadata["cook_workspace_identity"] =
+            crate::agent_task_workspace_identity::attest_workspace(&target)?;
+    }
+    options.source_worktree_path = Some(target);
+    agent_task_lifecycle::persist_controller_plan(&options.initial_run_id, &options.initial_plan)
+}
+
+fn validate_pending_cook_repository_identity(plan: &AgentTaskPlan, target: &Path) -> Result<()> {
+    let Some(expected) = plan
+        .metadata
+        .pointer("/cook_repository_identity/remote_identity")
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    let Some(git_root) = homeboy_core::git::repo_root(target) else {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook destination is not a Git checkout bound to the resolved repository identity",
+            Some(target.display().to_string()),
+            None,
+        ));
+    };
+    let identities = homeboy_core::git::output_optional(&git_root, &["remote"])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|remote| homeboy_core::git::remote_url(&git_root, remote))
+        .filter_map(|remote| canonical_remote_identity(&remote))
+        .collect::<std::collections::BTreeSet<_>>();
+    if identities.len() == 1 && identities.contains(expected) {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "to_worktree",
+        format!("Cook destination repository identity does not match resolved `{expected}`"),
+        Some(target.display().to_string()),
+        None,
+    ))
+}
+
+fn canonical_remote_identity(remote_url: &str) -> Option<String> {
+    let remote_url = remote_url.trim();
+    let (host, path) = if let Some((_, rest)) = remote_url.split_once("://") {
+        let (authority, path) = rest.split_once('/')?;
+        (authority.rsplit('@').next()?, path)
+    } else {
+        let (authority, path) = remote_url.split_once(':')?;
+        (authority.rsplit('@').next()?, path)
+    };
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    (!host.is_empty()
+        && path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .count()
+            >= 2)
+        .then(|| {
+            format!(
+                "git://{}/{}",
+                host.to_ascii_lowercase(),
+                path.to_ascii_lowercase()
+            )
+        })
 }
 
 /// The normal configured-provider preflight rejects every dirty destination. A
