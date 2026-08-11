@@ -40,6 +40,15 @@ semantics:
 | `--write`, `--apply`, `write`, `apply` | `apply` | Materialize an approved or command-permitted change locally. |
 | `--execute`, `run`, `execute` | `execute` | Execute the requested workflow directly. |
 
+Operator **confirmations** are not execution modes and must not be added to this
+table. A confirmation attests to a condition; it does not select whether work
+happens. `deploy --confirm-dangerous` is the canonical example: deploy executes
+by default, and the flag only authorizes a non-canonical source mode
+(`--head`, `--ref`, `--release-set`, `--force`). It was spelled `--apply` until
+#11139, which read as an `apply` mode mapping and meant the opposite of
+`--apply` everywhere else. Confirmations follow the `--confirm-<condition>`
+spelling instead.
+
 Use `ExecutionMode::from_cli_value()` for value-style inputs. Boolean flag
 handlers should map their selected command behavior to the same mode values at
 the call site when they adopt the contract.

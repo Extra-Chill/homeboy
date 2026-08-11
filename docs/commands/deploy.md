@@ -3,7 +3,7 @@
 ## Synopsis
 
 ```sh
-homeboy deploy [<project_id>|<component_id>] [<component_ids...>] [-p|--project <id>] [-c|--component <id>]... [--all] [--outdated|--behind-upstream] [--head|--ref <git-ref-or-sha>] [--release-set <path>] [--check] [--dry-run] [--apply] [--json '<spec>']
+homeboy deploy [<project_id>|<component_id>] [<component_ids...>] [-p|--project <id>] [-c|--component <id>]... [--all] [--outdated|--behind-upstream] [--head|--ref <git-ref-or-sha>] [--release-set <path>] [--check] [--dry-run] [--confirm-dangerous] [--json '<spec>']
 # If no component IDs are provided, you must use --all, --outdated, --behind-upstream, or --check.
 
 # Multi-project deployment
@@ -33,7 +33,7 @@ Options:
   - Shows all components for the project with version comparison status.
   - Combines with `--outdated` or component IDs to filter results.
 - `--dry-run`: preview what would be deployed without executing (no build, no upload)
-- `--apply`: confirm real deploys that use dangerous modes such as `--head`, `--ref`, or `--force`
+- `--confirm-dangerous`: confirm real deploys that use dangerous modes such as `--head`, `--ref`, or `--force`
 - `--force`: deploy even with uncommitted changes
 - `--json`: JSON input spec for bulk operations (`{"component_ids": ["component-id", ...]}`)
 - `--projects`: deploy to multiple projects (comma-separated). When using this flag, all positional arguments are treated as component IDs. Each project deployment builds independently.
@@ -46,7 +46,7 @@ Options:
 - `--ref <git-ref-or-sha>`: resolve a commit from each component's declared Git repository and deploy that exact immutable tree. The configured checkout's current branch and `HEAD` do not affect resolution.
 - `--tagged`: force tag-based deploy and ignore reusable build artifacts.
 
-Real deploys with `--head`, `--ref`, or `--force` require `--apply`. Preview and status commands (`--dry-run` or `--check`) do not require `--apply`.
+Real deploys with `--head`, `--ref`, or `--force` require `--confirm-dangerous`. Preview and status commands (`--dry-run` or `--check`) do not require `--confirm-dangerous`.
 
 `--ref` is an explicit source selector and conflicts with `--head`, `--tagged`, `--version`, `--outdated`, `--behind-upstream`, and `--check`. Without `--ref`, release and `--head` selection behave as before. File sources and `deploy_strategy: "git"` are rejected because those strategies cannot package and upload the selected Git tree.
 

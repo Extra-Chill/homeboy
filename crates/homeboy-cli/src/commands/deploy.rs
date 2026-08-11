@@ -48,7 +48,7 @@ pub struct DeployArgs {
     pub dry_run: bool,
     /// Confirm dangerous deploy modes like --head, --ref, or --force
     #[arg(long)]
-    pub apply: bool,
+    pub confirm_dangerous: bool,
     /// Check component status without building or deploying
     #[arg(long, visible_alias = "status")]
     pub check: bool,
@@ -192,7 +192,7 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
         .as_deref()
         .map(load_release_set)
         .transpose()?;
-    validate_apply_boundary(&args)?;
+    validate_dangerous_mode_confirmation(&args)?;
     if let Some(release_set) = release_set.as_ref() {
         let (project_id, _) = resolve_single_deploy_target(&args)?;
         args.target_id = Some(project_id.clone());
@@ -293,8 +293,8 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
 
 // === Argument resolution helpers ===
 
-fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
-    if args.apply
+fn validate_dangerous_mode_confirmation(args: &DeployArgs) -> homeboy::core::Result<()> {
+    if args.confirm_dangerous
         || args.dry_run
         || args.check
         || (!args.head && args.requested_ref.is_none() && args.release_set.is_none() && !args.force)
@@ -314,9 +314,9 @@ fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
     .join(" and ");
 
     Err(homeboy::core::Error::validation_invalid_argument(
-        "apply",
+        "confirm_dangerous",
         format!(
-            "Real deploys with {dangerous_flags} require explicit --apply. Use --dry-run to preview or re-run with --apply to deploy."
+            "Real deploys with {dangerous_flags} require explicit --confirm-dangerous. Use --dry-run to preview or re-run with --confirm-dangerous to deploy."
         ),
         None,
         None,
@@ -703,7 +703,7 @@ fn resume_deploy_command(
         args.push("--tagged".to_string());
     }
     args.push(format!("--resume {}", quote_arg(run_id)));
-    args.push("--apply".to_string());
+    args.push("--confirm-dangerous".to_string());
     args.join(" ")
 }
 
