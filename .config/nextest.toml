@@ -17,3 +17,11 @@ command = { command-line = "scripts/nextest-hermetic-test-environment.sh", relat
 [[profile.default.scripts]]
 filter = "all()"
 run-wrapper = "hermetic-test-environment"
+
+[[profile.ci.scripts]]
+filter = "all()"
+run-wrapper = "hermetic-test-environment"
+
+[[profile.quick.scripts]]
+filter = "all()"
+run-wrapper = "hermetic-test-environment"
