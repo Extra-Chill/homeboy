@@ -597,12 +597,10 @@ impl<M: RunnerStagingMaterializer> RemoteRunnerStagingTransport for RunnerStagin
     }
     fn supports_capability(&self, capability: &str) -> bool {
         self.compatible
-            && matches!(
+            && (matches!(
                 capability,
-                REMOTE_RUNNER_STAGING_CAPABILITY
-                    | REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY
-                    | REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY
-            )
+                REMOTE_RUNNER_STAGING_CAPABILITY | REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY
+            ) || (cfg!(unix) && capability == REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY))
     }
     fn stage_durable(
         &mut self,
@@ -831,11 +829,14 @@ struct ProductionStagingProvider;
 
 impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionStagingProvider {
     fn capabilities(&self, _runner_id: &str) -> Result<Vec<String>> {
-        Ok(vec![
+        let mut capabilities = vec![
             REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
             REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
-            REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY.to_string(),
-        ])
+        ];
+        if cfg!(unix) {
+            capabilities.push(REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY.to_string());
+        }
+        Ok(capabilities)
     }
 
     fn stage(
