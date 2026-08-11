@@ -362,7 +362,7 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
             "--backend",
             "fixture",
             "--cwd",
-            checkout.to_str().expect("checkout path"),
+            task_worktree.to_str().expect("task worktree path"),
             "--to-worktree",
             task_worktree.to_str().expect("task worktree path"),
             "--provider-command",
