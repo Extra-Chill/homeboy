@@ -2894,6 +2894,115 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn cook_persists_only_redacted_failed_provider_timeout_attribution() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let provider_dir = tempfile::tempdir().expect("provider directory");
+        let provider = provider_dir.path().join("provider");
+        std::fs::write(
+            &provider,
+            "#!/bin/sh\nprintf '%s\\n' '{\"status\":\"failed\",\"error\":{\"code\":\"git_command_timeout\",\"access_token\":\"provider-secret-must-not-persist\"}}'\n",
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy_core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy_core::defaults::save_config(&config).expect("save provider config");
+
+        let cook_id = "cook-slow-worktree-lookup";
+        let run_id = "cook-slow-worktree-lookup-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        // Exercise normal local Cook: a retryable provider failure must retain
+        // the exact handle without persisting provider-owned diagnostics.
+        options.attempt_dispatcher = None;
+        options.initial_run_id = run_id.to_string();
+        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "action": "lookup_pending",
+            "kind": "provider",
+            "handle": options.to_worktree,
+        });
+        let exact_handle = options.to_worktree.clone();
+
+        let result = run_cook(options, UnusedExecutor).expect("Cook records lookup failure");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.cook_id, cook_id);
+        assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
+        assert_eq!(result.value.status, "pre_execution_failure");
+        let record = agent_task_lifecycle::status(run_id).expect("durable failed lookup");
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "worktree_provider_lookup"
+        );
+        assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["failure_classification"],
+            "transient"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_lookup"],
+            "timed_out"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["provider_timeout_attribution"],
+            serde_json::json!({ "error_code": "git_command_timeout" })
+        );
+        assert!(!record
+            .metadata
+            .to_string()
+            .contains("provider-secret-must-not-persist"));
+        let recipe = super::super::load_recipe(cook_id).expect("durable Cook identity");
+        assert_eq!(recipe.attempts[0].run_id, run_id);
+        let persisted_plan = agent_task_lifecycle::load_plan(run_id).expect("durable lookup plan");
+        assert_eq!(
+            persisted_plan.metadata["cook_provision"]["handle"],
+            exact_handle
+        );
+        assert_eq!(persisted_plan.tasks[0].workspace.root, None);
+        assert!(persisted_plan.tasks[0]
+            .metadata
+            .get("cook_workspace_identity")
+            .is_none());
+        let retry = agent_task_lifecycle::retry(run_id, Some("cook-slow-worktree-lookup-retry"))
+            .expect("lookup timeout remains retryable");
+        assert_eq!(retry.metadata["retry_of"], run_id);
+    });
+}
+
 #[test]
 fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
     homeboy_core::test_support::with_isolated_home(|_| {
