@@ -815,20 +815,27 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     }
 
     let config = defaults::load_config();
-    match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
-        to_worktree,
-        &config,
-        None,
-    ) {
-        Ok(resolution) => {
+    match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(to_worktree, &config) {
+        Ok(identity) => {
             homeboy::core::worktree_providers::validate_task_worktree_root(
-                Path::new(&resolution.worktree.path),
+                Path::new(&identity.path),
                 to_worktree,
             )?;
-            validate_cook_destination_identity(args, Path::new(&resolution.worktree.path))?;
-            return Ok(
-                serde_json::json!({ "action": "existing", "kind": "provider", "provider": resolution.provider_id, "handle": resolution.worktree.handle, "path": resolution.worktree.path, "branch": resolution.worktree.branch }),
-            );
+            validate_cook_destination_identity(args, Path::new(&identity.path))?;
+            match homeboy::core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config) {
+                Ok(safety) if safety.fresh && !safety.dirty && !safety.unpushed && !identity.primary => return Ok(serde_json::json!({
+                    "action": "existing", "kind": "provider", "provider": identity.provider_id, "handle": identity.handle, "path": identity.path, "branch": identity.branch,
+                    "workspace_identity": identity, "workspace_safety": safety,
+                })),
+                Ok(_) => return Err(homeboy::core::Error::validation_invalid_argument("to_worktree", "worktree provider safety attestation is not safe for mutation", Some(to_worktree.to_string()), None)),
+                Err(error) if error.details["worktree_provider_split"] == "timed_out" => return Ok(serde_json::json!({
+                    "action": "attestation_pending", "kind": "provider", "provider": identity.provider_id, "handle": identity.handle, "path": identity.path, "branch": identity.branch,
+                    "worktree_provider_id": identity.provider_id,
+                    "workspace_identity": identity,
+                    "workspace_safety": { "state": "timed_out", "latency_ms": error.details["latency_ms"], "budget_ms": error.details["budget_ms"] },
+                })),
+                Err(error) => return Err(error),
+            }
         }
         Err(error)
             if error
@@ -1989,7 +1996,10 @@ pub(crate) fn compile_cook_plan(
     args: &AgentTaskCookArgs,
     provision: Value,
 ) -> homeboy::core::Result<AgentTaskPlan> {
-    let pending_lookup = provision.get("action").and_then(Value::as_str) == Some("lookup_pending");
+    let pending_lookup = matches!(
+        provision.get("action").and_then(Value::as_str),
+        Some("lookup_pending" | "attestation_pending")
+    );
     let workspace = provision
         .get("path")
         .and_then(Value::as_str)
