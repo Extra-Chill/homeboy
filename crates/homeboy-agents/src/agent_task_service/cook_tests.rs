@@ -2895,6 +2895,67 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
 }
 
 #[test]
+fn cook_failure_context_counts_preflight_cook_alias_as_zero_execution() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-provider-execution-accounting";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = cook_id.to_string();
+        options.max_attempts = 2;
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize preflight attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            cook_id,
+            &options.initial_plan,
+            "worktree_resolution",
+            &Error::internal_io("worktree is unavailable", None).with_retryable(true),
+        )
+        .expect("record zero-execution preflight failure");
+
+        let preflight = agent_task_lifecycle::exact_record(cook_id)
+            .expect("read preflight record without resolving its Cook alias");
+        assert_eq!(preflight.metadata["provider_executions_consumed"], 0);
+        assert_eq!(
+            preflight.metadata["pre_execution_failure"]["provider_executions_consumed"],
+            0
+        );
+
+        let provider_run_id = format!("{cook_id}-attempt-2");
+        super::super::record_recipe_attempt(cook_id, 2, &provider_run_id, &options.initial_plan)
+            .expect("append provider attempt to recipe");
+        super::super::materialize_cook_attempt(cook_id, &provider_run_id, &options.initial_plan)
+            .expect("materialize provider attempt");
+        assert_eq!(
+            agent_task_lifecycle::reserve_provider_execution(
+                &provider_run_id,
+                &options.initial_plan.tasks[0],
+                1,
+            )
+            .expect("reserve one real provider execution"),
+            agent_task_lifecycle::ProviderExecutionReservation::Acquired
+        );
+
+        let report = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "gate_failed",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some(&provider_run_id),
+        });
+        let context = report.value.failure_context.expect("failure context");
+        assert_eq!(context.provider_executions_consumed, 1);
+        assert!(context.provider_budget_consumed);
+        assert!(context
+            .next_actions
+            .iter()
+            .any(|action| action.action == "resume"));
+    });
+}
+
+#[test]
 fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
