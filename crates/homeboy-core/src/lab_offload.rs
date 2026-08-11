@@ -92,13 +92,12 @@ impl LabOffloadProvider for NoopProvider {
         &self,
         request: crate::lab_routing::LabRoutingRequest<'_>,
     ) -> Result<LabOffloadOutcome> {
-        if request.command.is_none()
-            && request.placement_decision.selected
-                == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+        if request.placement_decision.selected
+            == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
         {
-            // Selecting local execution for an uncontracted command never needs
-            // runner behavior, so core can return its typed routing outcome even
-            // when this process has no runner layer to register.
+            // The controller has already made the authoritative placement
+            // decision. A local outcome never needs runner behavior, whether or
+            // not the command also carries a Lab contract.
             let mut plan = HomeboyPlan::builder_for_description(PlanKind::LabOffload, "command")
                 .mode("lab_offload")
                 .build();
@@ -106,7 +105,7 @@ impl LabOffloadProvider for NoopProvider {
                 PlanStep::disabled_with_reason(
                     "lab.select_runner",
                     "lab.select_runner",
-                    "command has no Lab contract",
+                    "command selected local execution",
                 )
                 .build(),
             );

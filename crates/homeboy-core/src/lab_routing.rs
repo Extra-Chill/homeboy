@@ -1153,14 +1153,17 @@ mod tests {
     }
 
     #[test]
-    fn route_lab_offload_runs_non_lab_contract_locally() {
+    fn route_lab_offload_runs_contracted_local_decision_without_provider() {
         let outcome = route_lab_offload(LabRoutingRequest {
             placement_decision: compatibility_placement_decision(
                 homeboy_lab_runner_contract::Placement::Auto,
                 None,
                 false,
             ),
-            command: None,
+            command: Some(lab_offload_command_from_contract(
+                lab_contract(),
+                Vec::new(),
+            )),
             normalized_args: &["homeboy".to_string(), "status".to_string()],
             explicit_runner: None,
             placement: homeboy_lab_runner_contract::Placement::Auto,
