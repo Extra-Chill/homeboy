@@ -2259,6 +2259,81 @@ fn batch_cook_options(
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn explicit_cook_workspace_bypasses_a_timed_out_provider_lookup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary repository");
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(primary.path(), &["init", "--initial-branch=main"]);
+        git(
+            primary.path(),
+            &["config", "user.email", "agent@example.test"],
+        );
+        git(primary.path(), &["config", "user.name", "Agent"]);
+        std::fs::write(primary.path().join("tracked.txt"), "base\n").expect("write base");
+        git(primary.path(), &["add", "tracked.txt"]);
+        git(primary.path(), &["commit", "-m", "base"]);
+        git(
+            primary.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fix/cwd-authority",
+                target.to_str().expect("target path"),
+                "HEAD",
+            ],
+        );
+
+        let provider = tempfile::NamedTempFile::new().expect("provider file");
+        std::fs::write(provider.path(), "#!/bin/sh\nsleep 2\n").expect("write provider");
+        let mut permissions = std::fs::metadata(provider.path())
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "timeout".to_string(),
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 1,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.path().display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            },
+        );
+        homeboy_core::defaults::save_config(&config).expect("save provider config");
+
+        let mut options = batch_cook_options(
+            "cwd-authoritative-workspace",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.to_worktree = "fixture@cwd-authority".to_string();
+        options.source_worktree_path = Some(target);
+
+        validate_cook_workspace(&options)
+            .expect("explicit workspace must not wait for provider resolution");
+    });
+}
+
 #[test]
 fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     let mut options = batch_cook_options(

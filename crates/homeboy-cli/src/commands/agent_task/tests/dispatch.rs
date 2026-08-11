@@ -889,6 +889,133 @@ fn cook_resolves_existing_provider_destination_without_creation_metadata() {
 
 #[cfg(unix)]
 #[test]
+fn cook_cwd_is_authoritative_when_provider_lookup_times_out() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        let worktree_root = tempfile::tempdir().expect("worktree root");
+        let cwd = worktree_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/cwd-authority",
+                cwd.to_str().expect("worktree path"),
+                "HEAD",
+            ])
+            .current_dir(primary.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
+        homeboy::core::worktree::adopt(homeboy::core::worktree::WorktreeAdoptOptions {
+            handle: "fixture@cwd-authority".to_string(),
+            path: cwd.display().to_string(),
+            kind: Some("test".to_string()),
+            provenance: None,
+        })
+        .expect("register linked worktree");
+
+        let provider = tempfile::NamedTempFile::new().expect("provider file");
+        std::fs::write(provider.path(), "#!/bin/sh\nsleep 2\n").expect("write provider");
+        let mut permissions = std::fs::metadata(provider.path())
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "timeout".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 1,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.path().display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "reuse supplied worktree".to_string(),
+            "--cwd".to_string(),
+            cwd.display().to_string(),
+            "--to-worktree".to_string(),
+            "fixture@cwd-authority".to_string(),
+            "--no-finalize".to_string(),
+        ]);
+        let provision = super::super::run::provision_cook_destination(&args)
+            .expect("provider timeout must not block an explicit cwd");
+
+        assert_eq!(provision["kind"], "explicit_cwd");
+        assert_eq!(
+            provision["path"],
+            std::fs::canonicalize(&cwd)
+                .expect("canonical cwd")
+                .display()
+                .to_string()
+        );
+    });
+}
+
+#[test]
+fn cook_rejects_mismatched_cwd_and_destination() {
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        let worktree_root = tempfile::tempdir().expect("worktree root");
+        let cwd = worktree_root.path().join("cwd");
+        let destination = worktree_root.path().join("destination");
+        for (path, branch) in [(&cwd, "fix/cwd"), (&destination, "fix/destination")] {
+            assert!(Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    path.to_str().expect("worktree path"),
+                    "HEAD"
+                ])
+                .current_dir(primary.path())
+                .status()
+                .expect("create linked worktree")
+                .success());
+        }
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "reject mismatch".to_string(),
+            "--cwd".to_string(),
+            cwd.display().to_string(),
+            "--to-worktree".to_string(),
+            destination.display().to_string(),
+            "--no-finalize".to_string(),
+        ]);
+
+        let error = super::super::run::provision_cook_destination(&args)
+            .expect_err("mismatched worktrees must fail");
+        assert_eq!(error.details["field"], "to_worktree");
+        assert!(error
+            .message
+            .contains("must resolve to the same linked task worktree"));
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn cook_does_not_collapse_provider_lookup_failures_into_missing_destination_metadata() {
     use std::os::unix::fs::PermissionsExt;
 
