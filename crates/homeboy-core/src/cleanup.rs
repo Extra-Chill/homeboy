@@ -549,11 +549,11 @@ fn cargo_target_lock_is_held(target: &Path) -> bool {
     directory_has_held_cargo_lock(&target, 2)
 }
 
-/// Platforms without descriptor-relative no-follow traversal retain any target
-/// path rather than racing a build while trying to inspect it.
+/// Platforms without descriptor-relative no-follow traversal preserve the
+/// established fail-open contract: no lock probe means no active-build evidence.
 #[cfg(not(unix))]
-fn cargo_target_lock_is_held(target: &Path) -> bool {
-    fs::symlink_metadata(target).is_ok()
+fn cargo_target_lock_is_held(_target: &Path) -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -2143,6 +2143,20 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::defaults::{WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind};
+
+    #[cfg(not(unix))]
+    #[test]
+    fn an_existing_cargo_target_is_idle_without_supported_lock_probing() {
+        let dir = TempDir::new().expect("worktree");
+        std::fs::create_dir_all(dir.path().join(".cargo-target/debug"))
+            .expect("Cargo target profile dir");
+
+        assert!(!cargo_build_lock_is_held(dir.path()));
+        assert_eq!(
+            ActiveWorktrees::default().liveness(dir.path()),
+            LIVENESS_IDLE
+        );
+    }
 
     #[test]
     fn safe_artifact_paths_are_repo_relative() {
