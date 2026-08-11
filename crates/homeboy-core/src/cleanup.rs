@@ -59,7 +59,8 @@ use self_artifacts::{homeboy_source_checkout, self_temp_artifact_candidates};
 
 const ARTIFACT_DIR_REMOVE_ATTEMPTS: usize = 3;
 const ARTIFACT_DIR_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
-const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[("target", "rust_target")];
+const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] =
+    &[("target", "rust_target"), (".cargo-target", "rust_target")];
 const SECONDS_PER_DAY: u64 = 86_400;
 const AUTOMATIC_ARTIFACT_AGE_POLICY: u64 = u64::MAX;
 const AUTOMATIC_ARTIFACT_RETENTION_LOCK_FILE: &str = "automatic-artifact-retention.lock";
@@ -589,26 +590,133 @@ impl ActiveWorktrees {
     }
 }
 
-/// Whether a Cargo build currently owns `worktree`'s target directory.
+/// Whether a Cargo build currently owns one of `worktree`'s target directories.
 ///
-/// Cargo holds an exclusive advisory lock on `target/<profile>/.cargo-lock` for
-/// the duration of a build and releases it on completion, so probing that lock
-/// answers "is something building here right now" for ANY checkout — managed,
-/// unmanaged, or mid-rebase. Registry state cannot: it only describes checkouts
-/// Homeboy created (#9481).
+/// Cargo holds an exclusive advisory lock on `<target>/<profile>/.cargo-lock`
+/// for the duration of a build and releases it on completion, so probing every
+/// declared local Rust target answers "is something building here right now" for
+/// ANY checkout — managed, unmanaged, or mid-rebase. Registry state cannot: it
+/// only describes checkouts Homeboy created (#9481).
 ///
 /// Deliberately fail-open. An unreadable or absent lock means "no evidence of a
 /// build", never "definitely safe to delete" — the registry and age gates still
 /// apply on top of this.
 fn cargo_build_lock_is_held(worktree: &Path) -> bool {
-    let target = worktree.join("target");
-    let Ok(entries) = fs::read_dir(&target) else {
+    BUILTIN_ARTIFACT_PATHS
+        .iter()
+        .filter(|(_, kind)| *kind == "rust_target")
+        .any(|(relative_path, _)| cargo_target_lock_is_held(&worktree.join(relative_path)))
+}
+
+/// Probe direct `<target>/<profile>` and cross-target
+/// `<target>/<triple>/<profile>` Cargo layouts through no-follow descriptors.
+#[cfg(unix)]
+fn cargo_target_lock_is_held(target: &Path) -> bool {
+    let Some(target) = open_directory(target) else {
         return false;
     };
-    entries
-        .flatten()
-        .map(|entry| entry.path().join(".cargo-lock"))
-        .any(|lock| path_lock_is_held(&lock))
+    directory_has_held_cargo_lock(&target, 2)
+}
+
+/// Platforms without descriptor-relative no-follow traversal preserve the
+/// established fail-open contract: no lock probe means no active-build evidence.
+#[cfg(not(unix))]
+fn cargo_target_lock_is_held(_target: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn directory_has_held_cargo_lock(target: &fs::File, remaining_depth: u8) -> bool {
+    lock_in_directory_is_held(target)
+        || (remaining_depth > 0
+            && directory_has_child(target, |child| {
+                directory_has_held_cargo_lock(&child, remaining_depth - 1)
+            }))
+}
+
+#[cfg(unix)]
+fn open_directory(path: &Path) -> Option<fs::File> {
+    use std::ffi::CString;
+    use std::os::unix::io::FromRawFd;
+
+    let path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    (fd >= 0).then(|| unsafe { fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn directory_has_child(target: &fs::File, mut inspect: impl FnMut(fs::File) -> bool) -> bool {
+    use std::ffi::CStr;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let duplicate = unsafe { libc::dup(target.as_raw_fd()) };
+    if duplicate < 0 {
+        return false;
+    }
+    let directory = unsafe { libc::fdopendir(duplicate) };
+    if directory.is_null() {
+        unsafe {
+            libc::close(duplicate);
+        }
+        return false;
+    }
+    let mut held = false;
+    loop {
+        let entry = unsafe { libc::readdir(directory) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let fd = unsafe {
+            libc::openat(
+                target.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 && inspect(unsafe { fs::File::from_raw_fd(fd) }) {
+            held = true;
+            break;
+        }
+    }
+    unsafe {
+        libc::closedir(directory);
+    }
+    held
+}
+
+#[cfg(unix)]
+fn lock_in_directory_is_held(target: &fs::File) -> bool {
+    use std::ffi::CStr;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let lock = CStr::from_bytes_with_nul(b".cargo-lock\0").expect("static Cargo lock name");
+    let fd = unsafe {
+        libc::openat(
+            target.as_raw_fd(),
+            lock.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    let lock = unsafe { fs::File::from_raw_fd(fd) };
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(lock.as_raw_fd(), metadata.as_mut_ptr()) } != 0
+        || unsafe { metadata.assume_init().st_mode & libc::S_IFMT } != libc::S_IFREG
+    {
+        return false;
+    }
+    path_lock_is_held(&lock)
 }
 
 /// Probe one advisory lock without blocking.
@@ -616,13 +724,10 @@ fn cargo_build_lock_is_held(worktree: &Path) -> bool {
 /// Acquiring it proves no build holds it; the lock is released immediately so
 /// this never delays a build that starts during the probe.
 #[cfg(unix)]
-fn path_lock_is_held(lock: &Path) -> bool {
+fn path_lock_is_held(lock: &fs::File) -> bool {
     use std::os::unix::io::AsRawFd;
 
-    let Ok(file) = fs::File::open(lock) else {
-        return false;
-    };
-    let fd = file.as_raw_fd();
+    let fd = lock.as_raw_fd();
     let acquired = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if acquired == 0 {
         unsafe {
@@ -633,11 +738,6 @@ fn path_lock_is_held(lock: &Path) -> bool {
     // EWOULDBLOCK is the only answer that means "someone else holds it".
     // Any other errno is an unusable probe, which must not read as active.
     io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
-}
-
-#[cfg(not(unix))]
-fn path_lock_is_held(_lock: &Path) -> bool {
-    false
 }
 
 impl Default for ActiveWorktrees {
@@ -1987,6 +2087,62 @@ mod tests {
             assert!(cargo_build_lock_is_held(dir.path()));
         }
 
+        #[test]
+        fn a_held_cargo_target_lock_is_an_active_build() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let profile = dir.path().join(".cargo-target/debug");
+            std::fs::create_dir_all(&profile).expect("Cargo target profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+
+            assert!(cargo_build_lock_is_held(dir.path()));
+        }
+
+        #[test]
+        fn a_held_cross_target_cargo_lock_is_an_active_build() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let profile = dir.path().join("target/aarch64-apple-darwin/release");
+            std::fs::create_dir_all(&profile).expect("cross-target profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+
+            assert!(cargo_build_lock_is_held(dir.path()));
+        }
+
+        #[test]
+        fn a_symlinked_cargo_target_is_not_traversed() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let external = tempfile::tempdir().expect("external target");
+            let profile = external.path().join("debug");
+            std::fs::create_dir_all(&profile).expect("external profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+            std::os::unix::fs::symlink(external.path(), dir.path().join(".cargo-target"))
+                .expect("link external target");
+
+            assert!(!cargo_build_lock_is_held(dir.path()));
+        }
+
+        #[test]
+        fn a_symlinked_cross_target_directory_is_not_traversed() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let external = tempfile::tempdir().expect("external target");
+            let profile = external.path().join("release");
+            std::fs::create_dir_all(&profile).expect("external profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+            let target = dir.path().join("target");
+            std::fs::create_dir(&target).expect("target dir");
+            std::os::unix::fs::symlink(&external, target.join("aarch64-apple-darwin"))
+                .expect("link external cross-target directory");
+
+            assert!(!cargo_build_lock_is_held(dir.path()));
+        }
+
         /// Releasing must clear the signal, or a finished build would pin the
         /// target as undeletable forever.
         #[test]
@@ -2062,6 +2218,20 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::defaults::{WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind};
+
+    #[cfg(not(unix))]
+    #[test]
+    fn an_existing_cargo_target_is_idle_without_supported_lock_probing() {
+        let dir = TempDir::new().expect("worktree");
+        std::fs::create_dir_all(dir.path().join(".cargo-target/debug"))
+            .expect("Cargo target profile dir");
+
+        assert!(!cargo_build_lock_is_held(dir.path()));
+        assert_eq!(
+            ActiveWorktrees::default().liveness(dir.path()),
+            LIVENESS_IDLE
+        );
+    }
 
     #[test]
     fn safe_artifact_paths_are_repo_relative() {
@@ -2141,7 +2311,7 @@ mod tests {
 
             let declarations = artifact_declarations(tmp.path()).expect("declarations");
 
-            assert_eq!(declarations.len(), 1);
+            assert_eq!(declarations.len(), 2);
             assert_eq!(declarations[0].relative_path, "target");
             assert_eq!(declarations[0].kind, "rust_target");
             assert_eq!(
@@ -2151,6 +2321,8 @@ mod tests {
             assert_eq!(declarations[0].category, LEGACY_ARTIFACT_CATEGORY);
             assert!(declarations[0].reconstructable);
             assert!(declarations[0].liveness_protected);
+            assert_eq!(declarations[1].relative_path, ".cargo-target");
+            assert_eq!(declarations[1].kind, "rust_target");
         });
     }
 
@@ -2209,17 +2381,95 @@ mod tests {
     fn worktree_artifact_cleanup_removes_rebuildable_output_and_preserves_source() {
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "artifact");
+        write_file(
+            &repo.path().join(".cargo-target/debug/app"),
+            "Cargo artifact",
+        );
         write_file(&repo.path().join("src/lib.rs"), "changed source");
 
         let output = cleanup_worktree_artifacts(repo.path()).expect("cleanup worktree artifacts");
 
         assert_eq!(output.worktree_count, 1);
-        assert_eq!(output.applied_count, 1);
+        assert_eq!(output.applied_count, 2);
         assert!(!repo.path().join("target").exists());
+        assert!(!repo.path().join(".cargo-target").exists());
         assert_eq!(
             fs::read_to_string(repo.path().join("src/lib.rs")).expect("source remains"),
             "changed source"
         );
+    }
+
+    #[test]
+    fn artifact_cleanup_reclaims_idle_cargo_target_alongside_target() {
+        let repo = repo_with_ignored_artifacts();
+        write_file(&repo.path().join("target/debug/app"), "target artifact");
+        write_file(
+            &repo.path().join(".cargo-target/debug/app"),
+            "Cargo target artifact",
+        );
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            ..Default::default()
+        })
+        .expect("cleanup idle Cargo targets");
+
+        assert_eq!(output.applied_count, 2);
+        assert!(!repo.path().join("target").exists());
+        assert!(!repo.path().join(".cargo-target").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_cleanup_keeps_cargo_target_with_active_cargo_lock() {
+        use std::os::unix::io::AsRawFd;
+
+        let repo = repo_with_ignored_artifacts();
+        let lock_path = repo.path().join(".cargo-target/debug/.cargo-lock");
+        write_file(&lock_path, "");
+        let lock = fs::File::open(&lock_path).expect("open Cargo lock");
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "test must hold the Cargo lock"
+        );
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            ..Default::default()
+        })
+        .expect("cleanup active Cargo target");
+
+        assert_eq!(output.applied_count, 0);
+        assert!(repo.path().join(".cargo-target").exists());
+        assert!(output
+            .skipped
+            .iter()
+            .any(|row| row.relative_path == ".cargo-target" && row.reason.contains("active")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_cleanup_unlinks_cargo_target_symlink_without_following_it() {
+        let repo = repo_with_ignored_artifacts();
+        let external = TempDir::new().expect("external artifact");
+        write_file(&external.path().join("debug/app"), "external artifact");
+        std::os::unix::fs::symlink(external.path(), repo.path().join(".cargo-target"))
+            .expect("link external artifact");
+        write_file(&repo.path().join(".git/info/exclude"), "/.cargo-target\n");
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            ..Default::default()
+        })
+        .expect("cleanup Cargo target symlink");
+
+        assert_eq!(output.applied_count, 1);
+        assert!(!repo.path().join(".cargo-target").exists());
+        assert!(external.path().join("debug/app").exists());
     }
 
     #[test]
@@ -2250,6 +2500,36 @@ mod tests {
             assert_eq!(output.applied_count, 1);
             assert!(!large.path().join("target").exists());
             assert!(small.path().join("target").exists());
+        });
+    }
+
+    #[test]
+    fn automatic_artifact_retention_reclaims_idle_cargo_target() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = repo_with_ignored_artifacts();
+            write_file(
+                &repo.path().join(".cargo-target/debug/app"),
+                "Cargo artifact",
+            );
+            let retention = crate::defaults::RetentionConfig {
+                reconstructable_artifact_days: 0,
+                ..Default::default()
+            };
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                retention: retention.clone(),
+                ..Default::default()
+            })
+            .expect("save retention");
+
+            let output = run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                SystemTime::now(),
+            )
+            .expect("automatic retention");
+
+            assert_eq!(output.applied_count, 1);
+            assert!(!repo.path().join(".cargo-target").exists());
         });
     }
 
@@ -2521,6 +2801,8 @@ mod tests {
             "[package]\nname = \"homeboy\"\n",
         )
         .expect("write manifest");
+        fs::create_dir(tmp.path().join("src")).expect("source directory");
+        fs::write(tmp.path().join("src/main.rs"), "fn main() {}\n").expect("binary source");
         init_git_repository(tmp.path());
 
         let root = validate_homeboy_manifest_dir(tmp.path()).expect("homeboy manifest");
@@ -3474,7 +3756,7 @@ mod tests {
         );
         write_file(
             &repo.path().join(".gitignore"),
-            "target/\nnode_modules/\ndist/\n",
+            "target/\n.cargo-target/\nnode_modules/\ndist/\n",
         );
         git(
             repo.path(),
@@ -3730,7 +4012,7 @@ mod tests {
         write_file(&repo.path().join("scope.marker"), "{}");
         write_file(
             &repo.path().join(".gitignore"),
-            "deps/\npackaged/\ntarget/\n",
+            "deps/\npackaged/\ntarget/\n.cargo-target/\n",
         );
         git(
             repo.path(),
