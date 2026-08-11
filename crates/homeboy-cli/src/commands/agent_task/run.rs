@@ -47,9 +47,9 @@ pub(crate) fn durable_cook_identity_lines(cook_id: Option<&str>, run_id: &str) -
         .unwrap_or_default();
     vec![
         format!("cook: durable run id `{run_id}`{cook_suffix} — persisted before materialization."),
-        format!("cook: status -> homeboy --placement local agent-task status {run_id}"),
-        format!("cook: logs   -> homeboy --placement local agent-task logs {run_id}"),
-        format!("cook: cancel -> homeboy --placement local agent-task cancel {run_id}"),
+        format!("cook: status -> homeboy agent-task status {run_id}"),
+        format!("cook: logs   -> homeboy agent-task logs {run_id}"),
+        format!("cook: cancel -> homeboy agent-task cancel {run_id}"),
     ]
 }
 

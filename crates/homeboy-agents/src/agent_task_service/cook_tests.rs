@@ -2963,11 +2963,62 @@ fn cook_persists_pending_identity_when_safety_attestation_times_out() {
     use std::os::unix::fs::PermissionsExt;
 
     homeboy_core::test_support::with_isolated_home(|_| {
+        let root = tempfile::tempdir().expect("workspace root");
+        let source = root.path().join("source");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&source).expect("source directory");
+        assert!(Command::new("git")
+            .args(["init", "--quiet", "-b", "main"])
+            .current_dir(&source)
+            .status()
+            .expect("git init")
+            .success());
+        for args in [
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .status()
+                .expect("git config")
+                .success());
+        }
+        std::fs::write(source.join("tracked.txt"), "base\n").expect("write base");
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&source)
+            .status()
+            .expect("git add")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "base"])
+            .current_dir(&source)
+            .status()
+            .expect("git commit")
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "cook-slow-worktree-lookup"
+            ])
+            .arg(&workspace)
+            .current_dir(&source)
+            .status()
+            .expect("git worktree add")
+            .success());
+        let workspace = workspace.canonicalize().expect("canonical workspace");
         let provider_dir = tempfile::tempdir().expect("provider directory");
         let provider = provider_dir.path().join("provider");
         std::fs::write(
             &provider,
-            "#!/bin/sh\nif test \"$1\" = safety; then sleep 1; else printf '%s\\n' '{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"pending-identity\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"/tmp/pending-worktree\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}'; fi\n",
+            format!(
+                "#!/bin/sh\nif test \"$1\" = safety; then sleep 1; else printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"pending-identity\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"{}\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'; fi\n",
+                workspace.display()
+            ),
         )
         .expect("write provider");
         let mut permissions = std::fs::metadata(&provider)
@@ -3028,7 +3079,7 @@ fn cook_persists_pending_identity_when_safety_attestation_times_out() {
             "worktree_provider_id": "fixture",
             "workspace_identity": {
                 "schema": "homeboy/worktree-provider-identity/v1", "provider_id": "fixture", "token": "pending-identity",
-                "handle": options.to_worktree, "path": "/tmp/pending-worktree", "branch": "cook-slow-worktree-lookup", "primary": false,
+                "handle": options.to_worktree, "path": workspace, "branch": "cook-slow-worktree-lookup", "primary": false,
                 "latency_ms": 1, "budget_ms": 25
             }
         });
