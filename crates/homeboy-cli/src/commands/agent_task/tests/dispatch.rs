@@ -177,6 +177,62 @@ fn cook_infers_repo_from_an_explicit_git_workspace_and_persists_its_provenance()
 }
 
 #[test]
+fn repo_only_cook_persists_configured_repository_identity_for_deferred_lookup() {
+    with_isolated_home(|_| {
+        let component_root = tempfile::tempdir().expect("component root");
+        register_component(
+            "expected",
+            component_root.path(),
+            "https://token:secret@github.com/example/expected.git",
+        );
+
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "expected".to_string(),
+            "--to-worktree".to_string(),
+            "fixture@expected".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("bind configured repository identity");
+
+        let identity = args.repository_identity.expect("repository identity");
+        assert_eq!(
+            identity["remote_identity"],
+            "git://github.com/example/expected"
+        );
+        assert_eq!(identity["provenance"], "--repo:configured-component");
+        assert!(!identity.to_string().contains("secret"));
+    });
+}
+
+#[test]
+fn repo_only_cook_rejects_component_without_a_canonical_repository_identity() {
+    with_isolated_home(|_| {
+        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "unidentified".to_string(),
+            "--to-worktree".to_string(),
+            "fixture@unidentified".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect_err("repo-only Cook must establish an identity before deferred lookup");
+
+        assert_eq!(error.details["field"], "repo");
+        assert!(!error.message.contains("git://"));
+    });
+}
+
+#[test]
 fn cook_rejects_ambiguous_or_mismatching_workspace_repository_identity() {
     with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");

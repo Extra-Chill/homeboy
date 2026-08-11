@@ -825,7 +825,7 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
                 "the supplied workspace is not a Git checkout with a configured repository remote",
             );
         }
-        return Ok(());
+        return bind_cook_repository_identity_from_config(args);
     }
 
     let source_remotes = source_identities
@@ -876,6 +876,41 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
         "provenance": selected.provenance,
     }));
     Ok(())
+}
+
+/// A repo-only Cook has no local checkout to attest before a deferred provider
+/// lookup. Bind its configured repository identity into the durable recipe so
+/// the returned provider workspace still has to prove the requested ownership.
+fn bind_cook_repository_identity_from_config(
+    args: &mut AgentTaskCookArgs,
+) -> homeboy::core::Result<()> {
+    let Some(repo) = args.dispatch.repo.as_deref() else {
+        return Ok(());
+    };
+    let component = homeboy::core::component::registered()?
+        .into_iter()
+        .find(|component| component.id == repo)
+        .ok_or_else(|| repository_identity_unavailable_error(repo))?;
+    let remote_identity = component
+        .remote_url
+        .as_deref()
+        .and_then(canonical_remote_identity)
+        .ok_or_else(|| repository_identity_unavailable_error(repo))?;
+    args.repository_identity = Some(serde_json::json!({
+        "slug": component.id,
+        "remote_identity": remote_identity,
+        "provenance": "--repo:configured-component",
+    }));
+    Ok(())
+}
+
+fn repository_identity_unavailable_error(repo: &str) -> homeboy::core::Error {
+    homeboy::core::Error::validation_invalid_argument(
+        "repo",
+        "Cook requires the selected configured component to declare a canonical repository identity before deferred workspace lookup",
+        Some(repo.to_string()),
+        None,
+    )
 }
 
 fn require_explicit_cook_repo(args: &AgentTaskCookArgs, reason: &str) -> homeboy::core::Result<()> {

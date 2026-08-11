@@ -3153,6 +3153,147 @@ fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn pending_repo_only_lookup_rejects_provider_workspace_from_another_repository() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("provider tempdir");
+        let primary = temp.path().join("foreign-primary");
+        let foreign = temp.path().join("foreign-worktree");
+        for args in [
+            vec![
+                "init",
+                "--initial-branch",
+                "main",
+                primary.to_str().expect("primary path"),
+            ],
+            vec![
+                "-C",
+                primary.to_str().expect("primary path"),
+                "config",
+                "user.email",
+                "test@example.com",
+            ],
+            vec![
+                "-C",
+                primary.to_str().expect("primary path"),
+                "config",
+                "user.name",
+                "Test",
+            ],
+            vec![
+                "-C",
+                primary.to_str().expect("primary path"),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+            vec![
+                "-C",
+                primary.to_str().expect("primary path"),
+                "remote",
+                "add",
+                "origin",
+                "https://token:provider-secret@example.com/foreign.git",
+            ],
+            vec![
+                "-C",
+                primary.to_str().expect("primary path"),
+                "worktree",
+                "add",
+                "-b",
+                "foreign",
+                foreign.to_str().expect("foreign path"),
+            ],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .status()
+                .expect("git runs")
+                .success());
+        }
+        let provider = temp.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@repo-only-mismatch\",\"path\":\"{}\",\"branch\":\"foreign\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                foreign.display()
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy_core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy_core::defaults::save_config(&config).expect("save provider config");
+        let cook_id = "repo-only-mismatch";
+        let run_id = "repo-only-mismatch-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.attempt_dispatcher = None;
+        options.initial_run_id = run_id.to_string();
+        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "action": "lookup_pending", "kind": "provider", "handle": options.to_worktree,
+            "worktree_provider_id": "fixture",
+        });
+        options.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "slug": "expected", "remote_identity": "git://example.com/expected",
+            "provenance": "--repo:configured-component",
+        });
+
+        let result = run_cook(options, UnusedExecutor).expect("Cook records identity failure");
+
+        assert_eq!(result.value.status, "pre_execution_failure");
+        let record = agent_task_lifecycle::status(run_id).expect("durable identity failure");
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "worktree_provider_lookup"
+        );
+        assert!(record.metadata["pre_execution_failure"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("does not match"));
+        assert!(!record.metadata.to_string().contains("provider-secret"));
+        let persisted = agent_task_lifecycle::load_plan(run_id).expect("persisted plan");
+        assert!(persisted.tasks[0].workspace.root.is_none());
+        assert!(persisted.tasks[0]
+            .metadata
+            .get("cook_workspace_identity")
+            .is_none());
+    });
+}
+
 #[test]
 fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
     homeboy_core::test_support::with_isolated_home(|_| {
