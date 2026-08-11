@@ -382,7 +382,33 @@ fn admit_shared_cargo_target(root: &Path) -> Result<()> {
     fs::create_dir_all(root).map_err(|error| io_error(error, "create shared Cargo target root"))?;
     let retention = crate::defaults::load_config().retention;
     let capacity = filesystem_capacity(root)?;
-    admit_shared_cargo_target_with_capacity(root, &retention, capacity)
+    admit_shared_cargo_target_after_bounded_retention(root, &retention, capacity, || {
+        // The automatic owner is bounded and single-flight across processes.
+        // A busy pass is followed by this fresh measurement, never assumed to
+        // have restored capacity.
+        super::run_automatic_cargo_retention()?;
+        filesystem_capacity(root)
+    })
+}
+
+/// Run one bounded retention pass only when a new build would breach the
+/// configured reserve, then require a fresh capacity measurement before
+/// admitting it.
+fn admit_shared_cargo_target_after_bounded_retention<Retain>(
+    root: &Path,
+    retention: &crate::defaults::RetentionConfig,
+    capacity: FilesystemCapacity,
+    mut retain: Retain,
+) -> Result<()>
+where
+    Retain: FnMut() -> Result<FilesystemCapacity>,
+{
+    if capacity.available_bytes >= retention.shared_store_reserve_bytes
+        && capacity.available_inodes >= retention.shared_store_reserve_inodes
+    {
+        return Ok(());
+    }
+    admit_shared_cargo_target_with_capacity(root, retention, retain()?)
 }
 
 fn admit_shared_cargo_target_with_capacity(
@@ -914,6 +940,38 @@ mod tests {
             "homeboy cleanup --include shared-cargo-targets --apply"
         );
         assert!(protected.target_dir().exists());
+    }
+
+    #[test]
+    fn capacity_breach_runs_one_bounded_retention_pass_before_refusing_admission() {
+        let root = TempDir::new().unwrap();
+        let retention = crate::defaults::RetentionConfig {
+            shared_store_reserve_bytes: 100,
+            ..crate::defaults::RetentionConfig::default()
+        };
+        let mut passes = 0;
+
+        let error = admit_shared_cargo_target_after_bounded_retention(
+            root.path(),
+            &retention,
+            FilesystemCapacity {
+                filesystem: "constrained-test-volume".to_string(),
+                available_bytes: 99,
+                available_inodes: u64::MAX,
+            },
+            || {
+                passes += 1;
+                Ok(FilesystemCapacity {
+                    filesystem: "constrained-test-volume".to_string(),
+                    available_bytes: 99,
+                    available_inodes: u64::MAX,
+                })
+            },
+        )
+        .expect_err("admission must still refuse when bounded retention cannot recover reserve");
+
+        assert_eq!(passes, 1, "one admission performs one bounded pass");
+        assert_eq!(error.details["reserve_bytes"], 100);
     }
 
     #[test]

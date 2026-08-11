@@ -125,6 +125,12 @@ pub struct ScheduleView {
     #[serde(skip_serializing_if = "Option::is_none")]
     next_run_at: Option<String>,
     due: bool,
+    /// A stale overlap marker blocks a skip-on-overlap schedule until the
+    /// daemon reclaims it. Keep `due` truthful while making that condition
+    /// explicit and recoverable.
+    stale_running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_command: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -153,6 +159,19 @@ pub struct TickReport {
 
 fn view(schedule: Schedule) -> ScheduleView {
     let state = schedule::load_state(&schedule.id);
+    let now = chrono::Utc::now();
+    let stale_running = state.running
+        && state
+            .started_at
+            .as_deref()
+            .and_then(|started| chrono::DateTime::parse_from_rfc3339(started).ok())
+            .map(|started| {
+                (now - started.with_timezone(&chrono::Utc)).num_seconds()
+                    > homeboy::core::schedule::ticker::STALE_RUN_RECLAIM_SECS
+            })
+            // An unaged running marker is equally unrecoverable without a
+            // daemon restart, so surface the same deterministic action.
+            .unwrap_or(true);
     let next_run_at = state
         .next_run_at(&schedule)
         .map(|next| next.to_rfc3339())
@@ -173,6 +192,8 @@ fn view(schedule: Schedule) -> ScheduleView {
         state,
         next_run_at,
         due,
+        stale_running,
+        recovery_command: stale_running.then(|| "homeboy daemon start".to_string()),
     }
 }
 
@@ -425,5 +446,49 @@ mod tests {
     fn rejects_unbalanced_quotes_and_empty_commands() {
         assert!(split_command(r#"deploy "unclosed"#).is_err());
         assert!(split_command("   ").is_err());
+    }
+
+    #[test]
+    fn stale_running_marker_is_visible_with_a_recovery_command() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let schedule = Schedule {
+                id: "stale-marker".to_string(),
+                command: Some(vec!["triage".to_string()]),
+                exec: None,
+                steps: Vec::new(),
+                every: Cadence::from_seconds(3_600).expect("cadence"),
+                notify_on: NotifyPolicy::default(),
+                on_overlap: OverlapPolicy::Skip,
+                notification_transport: None,
+                notification_route: None,
+                jitter_seconds: None,
+                enabled: true,
+                description: None,
+                aliases: Vec::new(),
+            };
+            schedule::save_state(
+                &schedule.id,
+                &ScheduleState {
+                    running: true,
+                    started_at: Some(
+                        (chrono::Utc::now()
+                            - chrono::Duration::seconds(
+                                homeboy::core::schedule::ticker::STALE_RUN_RECLAIM_SECS + 1,
+                            ))
+                        .to_rfc3339(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .expect("save stale state");
+
+            let output = view(schedule);
+            assert!(!output.due, "skip-overlap remains single-flight");
+            assert!(output.stale_running);
+            assert_eq!(
+                output.recovery_command.as_deref(),
+                Some("homeboy daemon start")
+            );
+        });
     }
 }
