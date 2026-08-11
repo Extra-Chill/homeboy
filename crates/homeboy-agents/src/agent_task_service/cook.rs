@@ -4940,23 +4940,24 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
 }
 
 fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
-    plan.metadata
-        .pointer("/cook_provision/action")
-        .and_then(Value::as_str)
-        == Some("lookup_pending")
+    matches!(
+        plan.metadata
+            .pointer("/cook_provision/action")
+            .and_then(Value::as_str),
+        Some("lookup_pending" | "attestation_pending")
+    )
 }
 
 /// A pending lookup carries no provider path. Resolve the declared exact handle
 /// only after Cook's recipe and first run record exist, then persist that path
 /// before any provider can receive work.
 fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions) -> Result<()> {
-    let resolution =
-        homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
-            &options.to_worktree,
-            &homeboy_core::defaults::load_config(),
-            None,
-        )?;
-    if resolution.worktree.handle != options.to_worktree {
+    let config = homeboy_core::defaults::load_config();
+    let identity = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(
+        &options.to_worktree,
+        &config,
+    )?;
+    if identity.handle != options.to_worktree {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             "worktree provider did not resolve the declared exact Cook handle",
@@ -4964,7 +4965,46 @@ fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions)
             None,
         ));
     }
-    let target = PathBuf::from(&resolution.worktree.path);
+    if let Some(expected) = options
+        .initial_plan
+        .metadata
+        .pointer("/cook_provision/workspace_identity")
+    {
+        let expected: homeboy_core::worktree_providers::WorktreeProviderExactIdentity =
+            serde_json::from_value(expected.clone()).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "cook_provision.workspace_identity",
+                    format!("pending Cook identity is invalid: {error}"),
+                    None,
+                    None,
+                )
+            })?;
+        if expected.schema != identity.schema
+            || expected.provider_id != identity.provider_id
+            || expected.token != identity.token
+            || expected.handle != identity.handle
+            || expected.path != identity.path
+            || expected.branch != identity.branch
+            || expected.primary != identity.primary
+        {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "provider exact identity no longer matches the durable pending Cook identity",
+                Some(options.to_worktree.clone()),
+                None,
+            ));
+        }
+    }
+    let safety = homeboy_core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config)?;
+    if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "provider safety attestation is not current and safe for pending Cook execution",
+            Some(options.to_worktree.clone()),
+            None,
+        ));
+    }
+    let target = PathBuf::from(&identity.path);
     homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
@@ -4974,6 +5014,12 @@ fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions)
         task.metadata["cook_workspace_identity"] =
             crate::agent_task_workspace_identity::attest_workspace(&target)?;
     }
+    options.initial_plan.metadata["cook_provision"]["workspace_identity"] =
+        serde_json::to_value(&identity).expect("workspace identity serializes");
+    options.initial_plan.metadata["cook_provision"]["workspace_safety"] =
+        serde_json::to_value(&safety).expect("workspace safety serializes");
+    options.initial_plan.metadata["cook_provision"]["action"] =
+        Value::String("existing".to_string());
     options.source_worktree_path = Some(target);
     agent_task_lifecycle::persist_controller_plan(&options.initial_run_id, &options.initial_plan)
 }
