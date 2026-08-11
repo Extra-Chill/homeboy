@@ -1,9 +1,11 @@
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -60,6 +62,11 @@ const ARTIFACT_DIR_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[("target", "rust_target")];
 const SECONDS_PER_DAY: u64 = 86_400;
 const AUTOMATIC_ARTIFACT_AGE_POLICY: u64 = u64::MAX;
+const AUTOMATIC_ARTIFACT_RETENTION_LOCK_FILE: &str = "automatic-artifact-retention.lock";
+
+// POSIX advisory locks are process-scoped, so retain an in-process gate in
+// addition to the filesystem lock used by independent Homeboy processes.
+static AUTOMATIC_ARTIFACT_RETENTION_ADMISSION: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Default artifact class for declarations that predate categorized cleanup.
 /// Both the built-in path and repository-declared paths describe output that a
@@ -149,7 +156,9 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    run_automatic_artifact_retention_in(&roots, &retention, SystemTime::now())?;
+    // A busy owner is not treated as success: every caller still measures below
+    // and deterministically admits or refuses from the current filesystem facts.
+    let _ = try_run_automatic_artifact_retention(&roots, &retention)?;
 
     for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
@@ -170,6 +179,41 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Run one bounded artifact-retention pass when no other process owns it.
+/// `None` means another pass is active; callers must remeasure before writing.
+fn try_run_automatic_artifact_retention(
+    roots: &[PathBuf],
+    retention: &crate::defaults::RetentionConfig,
+) -> Result<Option<ArtifactCleanupOutput>> {
+    let Ok(_admission) = AUTOMATIC_ARTIFACT_RETENTION_ADMISSION
+        .get_or_init(|| Mutex::new(()))
+        .try_lock()
+    else {
+        return Ok(None);
+    };
+    let data = homeboy_paths::homeboy_data()?;
+    fs::create_dir_all(&data).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create automatic artifact retention state directory".to_string()),
+        )
+    })?;
+    let lock_path = data.join(AUTOMATIC_ARTIFACT_RETENTION_LOCK_FILE);
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(lock_path.display().to_string()))
+        })?;
+    if lock.try_lock_exclusive().is_err() {
+        return Ok(None);
+    }
+    run_automatic_artifact_retention_in(roots, retention, SystemTime::now()).map(Some)
 }
 
 fn existing_unique_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -2260,6 +2304,28 @@ mod tests {
             assert!(error.is_storage_exhausted());
             assert_eq!(error.details["reserve_bytes"], u64::MAX);
             assert!(repo.path().join("target/debug/app").exists());
+        });
+    }
+
+    #[test]
+    fn pressured_artifact_admissions_share_one_retention_owner_in_process() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            let _owner = AUTOMATIC_ARTIFACT_RETENTION_ADMISSION
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("hold retention owner");
+
+            let result = try_run_automatic_artifact_retention(
+                &[repo.path().to_path_buf()],
+                &crate::defaults::RetentionConfig::default(),
+            )
+            .expect("busy admission is not an error");
+
+            assert!(
+                result.is_none(),
+                "a concurrent admission must not start a second pass"
+            );
         });
     }
 
