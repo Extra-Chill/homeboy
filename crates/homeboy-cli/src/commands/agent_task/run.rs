@@ -700,11 +700,22 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
         {
             // The lookup is bounded, but a timeout says nothing about whether
             // this exact handle exists. Carry only the declared handle into
-            // Cook; durable materialization retries the same exact lookup.
+            // Cook; durable materialization retries the same exact provider.
+            let provider_id = error
+                .details
+                .get("worktree_provider_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    homeboy::core::Error::internal_unexpected(
+                        "timed-out worktree provider lookup omitted its provider identity"
+                            .to_string(),
+                    )
+                })?;
             return Ok(serde_json::json!({
                 "action": "lookup_pending",
                 "kind": "provider",
                 "handle": to_worktree,
+                "worktree_provider_id": provider_id,
             }));
         }
         Err(error) => return Err(error),

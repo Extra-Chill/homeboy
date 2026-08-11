@@ -2953,6 +2953,7 @@ fn cook_persists_only_redacted_failed_provider_timeout_attribution() {
             "action": "lookup_pending",
             "kind": "provider",
             "handle": options.to_worktree,
+            "worktree_provider_id": "fixture",
         });
         let exact_handle = options.to_worktree.clone();
 
@@ -3000,6 +3001,154 @@ fn cook_persists_only_redacted_failed_provider_timeout_attribution() {
         let retry = agent_task_lifecycle::retry(run_id, Some("cook-slow-worktree-lookup-retry"))
             .expect("lookup timeout remains retryable");
         assert_eq!(retry.metadata["retry_of"], run_id);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("provider tempdir");
+        let primary = temp.path().join("primary");
+        let original = temp.path().join("original");
+        let switched = temp.path().join("switched");
+        for args in [
+            vec![
+                "init",
+                "--initial-branch",
+                "main",
+                primary.to_str().expect("primary path"),
+            ],
+            vec![
+                "-C",
+                primary.to_str().expect("primary path"),
+                "config",
+                "user.email",
+                "test@example.com",
+            ],
+            vec![
+                "-C",
+                primary.to_str().expect("primary path"),
+                "config",
+                "user.name",
+                "Test",
+            ],
+            vec![
+                "-C",
+                primary.to_str().expect("primary path"),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+            vec![
+                "-C",
+                primary.to_str().expect("primary path"),
+                "worktree",
+                "add",
+                "-b",
+                "original",
+                original.to_str().expect("original path"),
+            ],
+            vec![
+                "-C",
+                primary.to_str().expect("primary path"),
+                "worktree",
+                "add",
+                "-b",
+                "switched",
+                switched.to_str().expect("switched path"),
+            ],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .status()
+                .expect("git runs")
+                .success());
+        }
+        let marker = temp.path().join("provider-marker");
+        let original_provider = temp.path().join("original-provider");
+        let switched_provider = temp.path().join("switched-provider");
+        for (script, label, branch, path) in [
+            (&original_provider, "original", "original", &original),
+            (&switched_provider, "switched", "switched", &switched),
+        ] {
+            std::fs::write(
+                script,
+                format!(
+                    "#!/bin/sh\nprintf '%s' '{label}' > '{}'\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@provider-bound\",\"path\":\"{}\",\"branch\":\"{branch}\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                    marker.display(), path.display()
+                ),
+            )
+            .expect("write provider");
+            let mut permissions = std::fs::metadata(script)
+                .expect("provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(script, permissions).expect("make provider executable");
+        }
+        let provider_config =
+            |script: &std::path::Path| homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![script.display().to_string(), "{handle}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy_core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            };
+        // The timeout recipe predates the new provider. A re-selection would use
+        // `a-switched`; durable retry must invoke only `z-original`.
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "z-original".to_string(),
+            provider_config(&original_provider),
+        );
+        config.worktree_providers.insert(
+            "a-switched".to_string(),
+            provider_config(&switched_provider),
+        );
+        homeboy_core::defaults::save_config(&config).expect("save changed provider config");
+        let mut options = batch_cook_options(
+            "provider-bound",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "action": "lookup_pending", "kind": "provider", "handle": options.to_worktree,
+            "worktree_provider_id": "z-original",
+        });
+
+        materialize_pending_cook_workspace(&mut options)
+            .expect("materialize original provider workspace");
+
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("provider marker"),
+            "original"
+        );
+        assert_eq!(
+            options.source_worktree_path.as_deref(),
+            Some(original.as_path())
+        );
+        assert_eq!(
+            options.initial_plan.tasks[0].workspace.root.as_deref(),
+            original.to_str()
+        );
     });
 }
 

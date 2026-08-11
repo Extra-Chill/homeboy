@@ -360,6 +360,58 @@ pub fn resolve_apply_enabled_worktree_provider_from_config(
     )
 }
 
+/// Resolve a workspace through one previously selected apply-enabled provider.
+/// Durable callers use this when the provider identity is part of their recipe.
+pub fn resolve_apply_enabled_worktree_provider_by_id_from_config(
+    handle: &str,
+    provider_id: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderResolution> {
+    let provider = config.worktree_providers.get(provider_id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "worktree_provider",
+            "timed-out worktree provider is no longer configured",
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    if !provider.enabled || !provider.apply_enabled {
+        return Err(Error::validation_invalid_argument(
+            "worktree_provider",
+            "timed-out worktree provider is no longer enabled and apply-enabled",
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    let worktrees = if let Some(command) = provider.commands.resolve.as_ref() {
+        run_provider_resolve_command(provider_id, provider, command, handle)?
+    } else if let Some(command) = provider.commands.list.as_ref() {
+        run_provider_list_command(provider_id, provider, command)?
+    } else {
+        return Err(Error::validation_invalid_argument(
+            "worktree_provider",
+            "timed-out worktree provider has no resolve or list command",
+            Some(provider_id.to_string()),
+            None,
+        ));
+    };
+    let worktree = worktrees.into_iter().find(|item| item.handle == handle).ok_or_else(|| {
+        let mut error = Error::validation_invalid_argument(
+            "to_worktree",
+            format!("worktree handle `{handle}` was not returned by timed-out provider `{provider_id}`"),
+            Some(handle.to_string()),
+            None,
+        );
+        error.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
+        error
+    })?;
+    validate_provider_handle(provider_id, &worktree, None, None)?;
+    Ok(WorktreeProviderResolution {
+        provider_id: provider_id.to_string(),
+        worktree,
+    })
+}
+
 /// Find the sole apply-enabled provider worktree owned by a tracker URL.
 /// Providers must map `task_url` to participate, preserving existing provider
 /// configurations that only support handle-based lookup.
