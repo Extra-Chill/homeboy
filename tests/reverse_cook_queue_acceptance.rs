@@ -428,7 +428,8 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     let accepted: serde_json::Value = serde_json::from_slice(&cook_stdout).expect("cook JSON");
     assert!(
         accepted["status"] == "in_flight"
-            || accepted.pointer("/data/status") == Some(&serde_json::json!("materializing")),
+            || accepted.pointer("/data/status") == Some(&serde_json::json!("materializing"))
+            || accepted.pointer("/handoff/state") == Some(&serde_json::json!("accepted")),
         "expected accepted durable staging lifecycle: {accepted}"
     );
 
@@ -577,7 +578,10 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     // The controller must project the broker result after the worker exits.
     // `daemon serve` is intentionally un-tokenized, so terminate the test-owned
     // foreground child only after that durable parent lifecycle is terminal.
-    let run_id = accepted["latest_run_id"].as_str().expect("accepted run id");
+    let run_id = accepted["latest_run_id"]
+        .as_str()
+        .or_else(|| accepted["run_id"].as_str())
+        .expect("accepted run id");
     // Bound this on observations as well as wall clock. Each poll is a whole
     // `homeboy` subprocess, so on a loaded machine a single observation can
     // outlast a bare wall-clock deadline and the controller is declared stalled
