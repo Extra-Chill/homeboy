@@ -536,15 +536,44 @@ fn cargo_build_lock_is_held(worktree: &Path) -> bool {
     BUILTIN_ARTIFACT_PATHS
         .iter()
         .filter(|(_, kind)| *kind == "rust_target")
-        .any(|(relative_path, _)| {
-            fs::read_dir(worktree.join(relative_path))
+        .any(|(relative_path, _)| cargo_target_lock_is_held(&worktree.join(relative_path)))
+}
+
+/// Probe direct `<target>/<profile>` and cross-target
+/// `<target>/<triple>/<profile>` Cargo layouts without following symlinks.
+fn cargo_target_lock_is_held(target: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(target) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(target) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            return false;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return false;
+        }
+        path_lock_is_held(&path.join(".cargo-lock"))
+            || fs::read_dir(path)
                 .ok()
                 .into_iter()
                 .flatten()
                 .flatten()
-                .map(|entry| entry.path().join(".cargo-lock"))
-                .any(|lock| path_lock_is_held(&lock))
-        })
+                .any(|entry| {
+                    let path = entry.path();
+                    fs::symlink_metadata(&path).is_ok_and(|metadata| {
+                        metadata.is_dir()
+                            && !metadata.file_type().is_symlink()
+                            && path_lock_is_held(&path.join(".cargo-lock"))
+                    })
+                })
+    })
 }
 
 /// Probe one advisory lock without blocking.
@@ -555,6 +584,11 @@ fn cargo_build_lock_is_held(worktree: &Path) -> bool {
 fn path_lock_is_held(lock: &Path) -> bool {
     use std::os::unix::io::AsRawFd;
 
+    if !fs::symlink_metadata(lock)
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    {
+        return false;
+    }
     let Ok(file) = fs::File::open(lock) else {
         return false;
     };
@@ -1929,6 +1963,33 @@ mod tests {
             assert!(cargo_build_lock_is_held(dir.path()));
         }
 
+        #[test]
+        fn a_held_cross_target_cargo_lock_is_an_active_build() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let profile = dir.path().join("target/aarch64-apple-darwin/release");
+            std::fs::create_dir_all(&profile).expect("cross-target profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+
+            assert!(cargo_build_lock_is_held(dir.path()));
+        }
+
+        #[test]
+        fn a_symlinked_cargo_target_is_not_traversed() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let external = tempfile::tempdir().expect("external target");
+            let profile = external.path().join("debug");
+            std::fs::create_dir_all(&profile).expect("external profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+            std::os::unix::fs::symlink(external.path(), dir.path().join(".cargo-target"))
+                .expect("link external target");
+
+            assert!(!cargo_build_lock_is_held(dir.path()));
+        }
+
         /// Releasing must clear the signal, or a finished build would pin the
         /// target as undeletable forever.
         #[test]
@@ -2153,13 +2214,18 @@ mod tests {
     fn worktree_artifact_cleanup_removes_rebuildable_output_and_preserves_source() {
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "artifact");
+        write_file(
+            &repo.path().join(".cargo-target/debug/app"),
+            "Cargo artifact",
+        );
         write_file(&repo.path().join("src/lib.rs"), "changed source");
 
         let output = cleanup_worktree_artifacts(repo.path()).expect("cleanup worktree artifacts");
 
         assert_eq!(output.worktree_count, 1);
-        assert_eq!(output.applied_count, 1);
+        assert_eq!(output.applied_count, 2);
         assert!(!repo.path().join("target").exists());
+        assert!(!repo.path().join(".cargo-target").exists());
         assert_eq!(
             fs::read_to_string(repo.path().join("src/lib.rs")).expect("source remains"),
             "changed source"
@@ -2267,6 +2333,36 @@ mod tests {
             assert_eq!(output.applied_count, 1);
             assert!(!large.path().join("target").exists());
             assert!(small.path().join("target").exists());
+        });
+    }
+
+    #[test]
+    fn automatic_artifact_retention_reclaims_idle_cargo_target() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = repo_with_ignored_artifacts();
+            write_file(
+                &repo.path().join(".cargo-target/debug/app"),
+                "Cargo artifact",
+            );
+            let retention = crate::defaults::RetentionConfig {
+                reconstructable_artifact_days: 0,
+                ..Default::default()
+            };
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                retention: retention.clone(),
+                ..Default::default()
+            })
+            .expect("save retention");
+
+            let output = run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                SystemTime::now(),
+            )
+            .expect("automatic retention");
+
+            assert_eq!(output.applied_count, 1);
+            assert!(!repo.path().join(".cargo-target").exists());
         });
     }
 
@@ -3445,7 +3541,7 @@ mod tests {
         );
         write_file(
             &repo.path().join(".gitignore"),
-            "target/\nnode_modules/\ndist/\n",
+            "target/\n.cargo-target/\nnode_modules/\ndist/\n",
         );
         git(
             repo.path(),
