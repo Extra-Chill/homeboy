@@ -540,40 +540,114 @@ fn cargo_build_lock_is_held(worktree: &Path) -> bool {
 }
 
 /// Probe direct `<target>/<profile>` and cross-target
-/// `<target>/<triple>/<profile>` Cargo layouts without following symlinks.
+/// `<target>/<triple>/<profile>` Cargo layouts through no-follow descriptors.
+#[cfg(unix)]
 fn cargo_target_lock_is_held(target: &Path) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(target) else {
+    let Some(target) = open_directory(target) else {
         return false;
     };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+    directory_has_held_cargo_lock(&target, 2)
+}
+
+/// Platforms without descriptor-relative no-follow traversal retain any target
+/// path rather than racing a build while trying to inspect it.
+#[cfg(not(unix))]
+fn cargo_target_lock_is_held(target: &Path) -> bool {
+    fs::symlink_metadata(target).is_ok()
+}
+
+#[cfg(unix)]
+fn directory_has_held_cargo_lock(target: &fs::File, remaining_depth: u8) -> bool {
+    lock_in_directory_is_held(target)
+        || (remaining_depth > 0
+            && directory_has_child(target, |child| {
+                directory_has_held_cargo_lock(&child, remaining_depth - 1)
+            }))
+}
+
+#[cfg(unix)]
+fn open_directory(path: &Path) -> Option<fs::File> {
+    use std::ffi::CString;
+    use std::os::unix::io::FromRawFd;
+
+    let path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    (fd >= 0).then(|| unsafe { fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn directory_has_child(target: &fs::File, mut inspect: impl FnMut(fs::File) -> bool) -> bool {
+    use std::ffi::CStr;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let duplicate = unsafe { libc::dup(target.as_raw_fd()) };
+    if duplicate < 0 {
         return false;
     }
-    let Ok(entries) = fs::read_dir(target) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let path = entry.path();
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            return false;
-        };
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return false;
+    let directory = unsafe { libc::fdopendir(duplicate) };
+    if directory.is_null() {
+        unsafe {
+            libc::close(duplicate);
         }
-        path_lock_is_held(&path.join(".cargo-lock"))
-            || fs::read_dir(path)
-                .ok()
-                .into_iter()
-                .flatten()
-                .flatten()
-                .any(|entry| {
-                    let path = entry.path();
-                    fs::symlink_metadata(&path).is_ok_and(|metadata| {
-                        metadata.is_dir()
-                            && !metadata.file_type().is_symlink()
-                            && path_lock_is_held(&path.join(".cargo-lock"))
-                    })
-                })
-    })
+        return false;
+    }
+    let mut held = false;
+    loop {
+        let entry = unsafe { libc::readdir(directory) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let fd = unsafe {
+            libc::openat(
+                target.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 && inspect(unsafe { fs::File::from_raw_fd(fd) }) {
+            held = true;
+            break;
+        }
+    }
+    unsafe {
+        libc::closedir(directory);
+    }
+    held
+}
+
+#[cfg(unix)]
+fn lock_in_directory_is_held(target: &fs::File) -> bool {
+    use std::ffi::CStr;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let lock = CStr::from_bytes_with_nul(b".cargo-lock\0").expect("static Cargo lock name");
+    let fd = unsafe {
+        libc::openat(
+            target.as_raw_fd(),
+            lock.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    let lock = unsafe { fs::File::from_raw_fd(fd) };
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(lock.as_raw_fd(), metadata.as_mut_ptr()) } != 0
+        || unsafe { metadata.assume_init().st_mode & libc::S_IFMT } != libc::S_IFREG
+    {
+        return false;
+    }
+    path_lock_is_held(&lock)
 }
 
 /// Probe one advisory lock without blocking.
@@ -581,18 +655,10 @@ fn cargo_target_lock_is_held(target: &Path) -> bool {
 /// Acquiring it proves no build holds it; the lock is released immediately so
 /// this never delays a build that starts during the probe.
 #[cfg(unix)]
-fn path_lock_is_held(lock: &Path) -> bool {
+fn path_lock_is_held(lock: &fs::File) -> bool {
     use std::os::unix::io::AsRawFd;
 
-    if !fs::symlink_metadata(lock)
-        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-    {
-        return false;
-    }
-    let Ok(file) = fs::File::open(lock) else {
-        return false;
-    };
-    let fd = file.as_raw_fd();
+    let fd = lock.as_raw_fd();
     let acquired = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if acquired == 0 {
         unsafe {
@@ -603,11 +669,6 @@ fn path_lock_is_held(lock: &Path) -> bool {
     // EWOULDBLOCK is the only answer that means "someone else holds it".
     // Any other errno is an unusable probe, which must not read as active.
     io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
-}
-
-#[cfg(not(unix))]
-fn path_lock_is_held(_lock: &Path) -> bool {
-    false
 }
 
 impl Default for ActiveWorktrees {
@@ -1986,6 +2047,23 @@ mod tests {
             let _held = hold(&lock);
             std::os::unix::fs::symlink(external.path(), dir.path().join(".cargo-target"))
                 .expect("link external target");
+
+            assert!(!cargo_build_lock_is_held(dir.path()));
+        }
+
+        #[test]
+        fn a_symlinked_cross_target_directory_is_not_traversed() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let external = tempfile::tempdir().expect("external target");
+            let profile = external.path().join("release");
+            std::fs::create_dir_all(&profile).expect("external profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+            let target = dir.path().join("target");
+            std::fs::create_dir(&target).expect("target dir");
+            std::os::unix::fs::symlink(&external, target.join("aarch64-apple-darwin"))
+                .expect("link external cross-target directory");
 
             assert!(!cargo_build_lock_is_held(dir.path()));
         }
