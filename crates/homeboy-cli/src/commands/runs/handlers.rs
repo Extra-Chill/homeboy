@@ -550,7 +550,9 @@ fn stale_run_summary(
     let stale_ids = runs
         .iter()
         .filter(|run| {
-            reconcile::stale_running_reason(run, &homeboy::core::process::pid_is_running).is_some()
+            run.status == RunStatus::Running.as_str()
+                && reconcile::stale_running_reason(run, &homeboy::core::process::pid_is_running)
+                    .is_some()
                 // A direct daemon snapshot is authoritative for runner-backed
                 // rows. Never call one stale while that job is live or unknown —
                 // but "unknown" cannot mean "forever". Past the reconciliation

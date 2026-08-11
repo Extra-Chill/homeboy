@@ -1044,22 +1044,9 @@ pub(super) fn actionable_for_run_list(
     stale_runs: Option<&RunsStaleRunSummary>,
 ) -> CommandActionableMetadata {
     let run_refs = runs.iter().map(run_ref_from_summary).collect::<Vec<_>>();
-    let mut next_actions = stale_runs
+    let next_actions = stale_runs
         .map(|stale_runs| vec![stale_runs.action.clone()])
         .unwrap_or_default();
-    next_actions.extend(
-        runs.iter()
-            .take(10)
-            .flat_map(|run| {
-                [
-                    CommandNextAction::new("show run", format!("homeboy runs show {}", run.id))
-                        .with_kind(CommandNextActionKind::Show),
-                    CommandNextAction::new("watch run", format!("homeboy runs watch {}", run.id))
-                        .with_kind(CommandNextActionKind::Watch),
-                ]
-            })
-            .collect::<Vec<_>>(),
-    );
 
     CommandActionableMetadata {
         run: run_refs.first().cloned(),
