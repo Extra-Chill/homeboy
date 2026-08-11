@@ -13,7 +13,9 @@ use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{
     NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
 };
-use homeboy::test_support::{serve_public_artifact_base_once, with_isolated_home};
+use homeboy::test_support::{
+    serve_public_artifact_base, serve_public_artifact_base_once, with_isolated_home,
+};
 use serde_json::Value;
 
 struct XdgGuard(Option<String>);
@@ -1640,7 +1642,7 @@ fn artifacts_index_and_fetch_nested_visual_summary_refs_from_public_urls() {
 fn artifacts_command_derives_viewer_links_from_public_artifact_url_metadata() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
-        let public_artifact_base = serve_public_artifact_base_once(200);
+        let public_artifact_base = serve_public_artifact_base(200, 2);
         let _artifact_url = EnvGuard::set(
             homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
             &public_artifact_base,
