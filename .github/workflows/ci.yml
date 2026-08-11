@@ -240,7 +240,7 @@ jobs:
       component: homeboy
       source: .
       scope: auto
-      differential-gating: 'false'
+      differential-gating: 'true'
       baseline-commands: none
       test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}
       execution-timeout-seconds: '1800'

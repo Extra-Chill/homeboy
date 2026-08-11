@@ -1551,7 +1551,11 @@ pub(super) fn preflight_runner_capability_plan(
         return Ok(());
     }
 
-    let capabilities = runner_capability_snapshot_for_preflight(runner, preflight)?;
+    // Probe the command and state authority that this job will receive, not
+    // merely the runner's persisted configuration.
+    let mut effective_runner = runner.clone();
+    effective_runner.env = request_env.clone();
+    let capabilities = runner_capability_snapshot_for_preflight(&effective_runner, preflight)?;
     validate_runner_capability_preflight(&runner.id, preflight, &capabilities, request_env)
 }
 

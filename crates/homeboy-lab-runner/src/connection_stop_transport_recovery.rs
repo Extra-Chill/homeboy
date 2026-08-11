@@ -77,9 +77,7 @@ pub(crate) fn disconnect_local_recovery(runner_id: &str) -> Result<RunnerDisconn
 }
 
 fn local_recovery_zero_jobs_proven(status: &remote_daemon::RemoteDaemonStatus) -> bool {
-    status.active_jobs == 0
-        && status.reachable
-        && status.work_evidence == remote_daemon::RemoteDaemonWorkEvidence::AuthoritativelyIdle
+    remote_daemon::authority_snapshot(status).proven_idle
 }
 
 fn partial_disconnect_report(
@@ -331,11 +329,34 @@ pub(in crate::connection) fn rebind_idle_generation_owner(
     daemon: &remote_daemon::RemoteDaemon,
     lease_id: String,
 ) -> Option<RunnerSession> {
-    let mut authoritative_session = generations.first()?.clone();
+    let mut authoritative_session = generations
+        .iter()
+        .min_by_key(|generation| {
+            (
+                generation
+                    .remote_daemon_lease_id
+                    .as_deref()
+                    .unwrap_or_default(),
+                generation.remote_daemon_pid.unwrap_or_default(),
+                generation
+                    .remote_daemon_address
+                    .as_deref()
+                    .unwrap_or_default(),
+                stable_generation_owner_identity(generation),
+            )
+        })?
+        .clone();
     authoritative_session.remote_daemon_lease_id = Some(lease_id);
     authoritative_session.remote_daemon_pid = daemon.pid;
     authoritative_session.remote_daemon_address = Some(daemon.address.clone());
     Some(authoritative_session)
+}
+
+/// The final owner-selection key preserves every identity field that remains
+/// after the authoritative daemon lease, PID, and address are rebound.
+fn stable_generation_owner_identity(generation: &RunnerSession) -> String {
+    serde_json::to_string(generation)
+        .expect("persisted runner sessions must have a stable serialized identity")
 }
 
 /// Clearing the ledger is safe only when every generation is represented by a
@@ -613,7 +634,7 @@ fn remote_lease_bound_stop_recovery_command(
         command
     } else {
         format!(
-            "the persisted lease `{persisted_lease_id}` differs from the authoritative active lease `{active_lease_id}` (PID {}); use the authoritative lease only: {command}",
+            "the persisted session lease `{persisted_lease_id}` (source: controller-local session) differs from the authoritative active lease `{active_lease_id}` (source: remote daemon SSH status and typed /jobs probe, PID {}); use the authoritative lease only: {command}",
             daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable")
         )
     }
@@ -1006,6 +1027,66 @@ mod tests {
         idle.work_evidence = remote_daemon::RemoteDaemonWorkEvidence::AuthoritativelyIdle;
         idle.active_jobs = 1;
         assert!(!local_recovery_zero_jobs_proven(&idle));
+    }
+
+    #[test]
+    fn authority_snapshot_shares_proven_zero_between_reconcile_and_local_recovery() {
+        let mut idle = remote_daemon_status(true, 0, "lease-live", 4242, None);
+        idle.work_evidence = remote_daemon::RemoteDaemonWorkEvidence::AuthoritativelyIdle;
+
+        let authority = remote_daemon::authority_snapshot(&idle);
+        assert!(authority.proven_idle);
+        assert!(authority.safe_to_rotate);
+        assert_eq!(
+            authority.source,
+            "remote daemon SSH status and typed /jobs probe"
+        );
+        assert!(local_recovery_zero_jobs_proven(&idle));
+        assert_eq!(
+            remote_daemon::authoritative_idle_lease_for_stale_generations(
+                &idle,
+                &["lease-stale".to_string()],
+            )
+            .expect("same snapshot accepts a stale persisted lease"),
+            Some("lease-live".to_string())
+        );
+    }
+
+    #[test]
+    fn concurrent_stale_generations_rebind_the_same_canonical_owner() {
+        let mut first = direct_ssh_session("lease-stale");
+        first.controller_id = Some("controller-z".to_string());
+        first.local_port = Some(49154);
+        first.local_url = Some("http://127.0.0.1:49154".to_string());
+        first.worker_identity = Some("worker-z".to_string());
+        let mut second = direct_ssh_session("lease-stale");
+        second.controller_id = Some("controller-a".to_string());
+        second.local_port = Some(49155);
+        second.local_url = Some("http://127.0.0.1:49155".to_string());
+        second.worker_identity = Some("worker-a".to_string());
+        let daemon = remote_daemon_status(true, 0, "lease-live", 4242, None)
+            .daemon
+            .expect("live daemon");
+
+        let forward = rebind_idle_generation_owner(
+            &[first.clone(), second.clone()],
+            &daemon,
+            "lease-live".to_string(),
+        )
+        .expect("canonical owner");
+        let reverse = rebind_idle_generation_owner(
+            &[second.clone(), first],
+            &daemon,
+            "lease-live".to_string(),
+        )
+        .expect("canonical owner");
+
+        let mut expected = second;
+        expected.remote_daemon_lease_id = Some("lease-live".to_string());
+        expected.remote_daemon_pid = daemon.pid;
+        expected.remote_daemon_address = Some(daemon.address);
+        assert_eq!(forward, expected);
+        assert_eq!(reverse, expected);
     }
 
     #[test]

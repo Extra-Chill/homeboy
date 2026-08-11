@@ -56,6 +56,26 @@ pub fn stop() -> ExecutableAction {
     )
 }
 
+/// Stop the exact daemon that holds `lease_id`.
+///
+/// A bare `homeboy daemon stop` refuses to stop a daemon whose recorded lease
+/// has gone stale, so a restartable report with a lease in hand must render the
+/// bound spelling or an operator copy-pasting the plan lands worse than before
+/// (#11220).
+pub fn stop_for_lease(lease_id: &str) -> ExecutableAction {
+    action(
+        "daemon.stop",
+        format!("stop the local daemon holding lease {lease_id}"),
+        [
+            "daemon".to_string(),
+            "stop".to_string(),
+            "--lease-id".to_string(),
+            lease_id.to_string(),
+        ],
+        ActionSafety::Mutating,
+    )
+}
+
 pub fn start() -> ExecutableAction {
     action(
         "daemon.start",
@@ -256,9 +276,18 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
 mod tests {
     use super::*;
 
+    /// The lease id the `status(...)` fixture carries. Assertions that depend on
+    /// the report's repair rendering reference this so the fixture and the
+    /// expectation cannot drift apart.
+    const LEASE_ID: &str = "661f731f-99c7-436a-aadc-24dee908fd8b";
+
     #[test]
     fn rendered_text_is_derived_from_argv() {
         assert_eq!(stop().render_command(), "homeboy daemon stop");
+        assert_eq!(
+            stop_for_lease("lease-live").render_command(),
+            "homeboy daemon stop --lease-id lease-live"
+        );
         assert_eq!(start().render_command(), "homeboy daemon start");
         assert_eq!(
             adopt_orphan("lease-dead").render_command(),
@@ -318,7 +347,7 @@ mod tests {
                 fresh: stale_reason_code.is_none(),
                 stale_reason_code,
                 restartable: true,
-                lease_id: Some("661f731f-99c7-436a-aadc-24dee908fd8b".to_string()),
+                lease_id: Some(LEASE_ID.to_string()),
                 pid: Some(3_572_046),
                 recovery_evidence: None,
                 ownership_evidence: Some("daemon lease evidence is inconclusive".to_string()),
@@ -344,13 +373,14 @@ mod tests {
     /// The live reproduction this fix was written against: a reachable daemon
     /// whose build identity no longer matches the current binary, zero active
     /// jobs, restartable. The dispatcher must resolve the stop/start pair with
-    /// every argument already filled in.
+    /// every argument already filled in — including the lease the fixture
+    /// carries, so the advertised stop is the exact-lease stop (#11220).
     #[test]
     fn a_version_mismatch_report_resolves_the_restart_plan() {
         let status = status(
             Some(super::super::DaemonStaleReasonCode::VersionMismatch),
             vec![
-                DaemonRepairStep::executable(DAEMON_STOP, stop()),
+                DaemonRepairStep::executable(DAEMON_STOP, stop_for_lease(LEASE_ID)),
                 DaemonRepairStep::executable(DAEMON_START, start()),
             ],
             0,
@@ -366,7 +396,10 @@ mod tests {
                 .map(|step| (step.code.as_str(), step.command.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                (DAEMON_STOP, "homeboy daemon stop"),
+                (
+                    DAEMON_STOP,
+                    format!("homeboy daemon stop --lease-id {LEASE_ID}").as_str(),
+                ),
                 (DAEMON_START, "homeboy daemon start"),
             ]
         );
@@ -440,7 +473,7 @@ mod tests {
             "every durable job id is named: {args:?}"
         );
         assert!(args.contains(&Uuid::from_u128(1).to_string()));
-        assert!(args.contains(&"661f731f-99c7-436a-aadc-24dee908fd8b".to_string()));
+        assert!(args.contains(&LEASE_ID.to_string()));
         assert_eq!(
             plan.required_confirmations,
             vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()],
@@ -453,7 +486,7 @@ mod tests {
             job_id,
             operation: "exec".to_string(),
             status: crate::api_jobs::JobStatus::Running,
-            daemon_lease_id: Some("661f731f-99c7-436a-aadc-24dee908fd8b".to_string()),
+            daemon_lease_id: Some(LEASE_ID.to_string()),
             created_at_ms: 0,
             updated_at_ms: 0,
             started_at_ms: None,
@@ -473,6 +506,7 @@ mod tests {
         assert_eq!(diagnose().safety, ActionSafety::ReadOnly);
         for action in [
             stop(),
+            stop_for_lease("lease"),
             start(),
             adopt_orphan("lease"),
             reconcile_leaseless_orphans(),

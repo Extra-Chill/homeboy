@@ -280,64 +280,10 @@ fn test_compute_fixability_skips_structural_only_results() {
     assert!(compute_fixability(&result).is_none());
 }
 
-#[cfg(feature = "slow-tests")]
-#[test]
-fn test_compute_fixability_counts_fixes_from_real_audit() {
-    use std::fs;
-
-    // Fixability planning is inverted behind a provider the CLI registers at
-    // startup; a core lib test never runs the CLI, so register the refactor-backed
-    // provider explicitly — otherwise fixability is always unavailable (None).
-    crate::refactor::audit_fixability_provider::register();
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let root = dir.path();
-
-    // Create a minimal codebase with a detectable convention + outlier
-    fs::create_dir_all(root.join("commands")).unwrap();
-    // Two conforming files establish a convention (methods: run + helper)
-    fs::write(
-        root.join("commands/good_one.rs"),
-        "pub fn run() {}\npub fn helper() {}\n",
-    )
-    .unwrap();
-    fs::write(
-        root.join("commands/good_two.rs"),
-        "pub fn run() {}\npub fn helper() {}\n",
-    )
-    .unwrap();
-    // One outlier is missing a method → should produce a fixable finding
-    fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
-
-    // Run a real audit
-    let result = crate::audit_path_with_id("fixability-test", &root.to_string_lossy())
-        .expect("audit should run");
-
-    // Compute fixability
-    let fixability = compute_fixability(&result);
-
-    // Should have at least some fixable findings (the missing method outlier)
-    if let Some(fix) = fixability {
-        assert!(
-            fix.fixable_count > 0,
-            "expected at least one fixable finding"
-        );
-        // automated + manual_only should equal fixable_count
-        assert_eq!(
-            fix.fixable_count,
-            fix.automated_count + fix.manual_only_count
-        );
-        // by_kind should not be empty
-        assert!(!fix.by_kind.is_empty(), "expected per-kind breakdown");
-    }
-    // Note: fixability may also be None if the minimal codebase doesn't trigger
-    // enough conventions — that's acceptable for this test.
-}
-
 // Runs the full audit-with-analysis pipeline (walk + fingerprint + detectors +
 // fixability planning) over a fixture tree, matching the broad-machinery slow
 // tier described in `docs/internals/test-tiers.md` — the same tier its sibling
-// `test_compute_fixability_counts_fixes_from_real_audit` already lives in.
+// provider-wiring regression in `homeboy-refactor` lives in.
 #[cfg(feature = "slow-tests")]
 #[test]
 fn test_compute_fixability_with_analysis() {
