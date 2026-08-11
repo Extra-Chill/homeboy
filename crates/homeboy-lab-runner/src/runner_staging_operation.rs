@@ -31,6 +31,7 @@ pub const RUNNER_SOURCE_ARTIFACT_SCHEMA: &str = "homeboy/runner-source-artifact/
 pub const MAX_SOURCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_ENTRIES: usize = 1024;
 pub const MAX_SOURCE_PACKAGE_FILE_BYTES: u64 = 1024 * 1024;
+pub const MAX_SOURCE_PACKAGE_EXCLUSIONS: usize = 1024;
 pub const SOURCE_PACKAGE_CHECK_SCHEMA: &str = "homeboy/source-package-check/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,8 +101,8 @@ pub struct SourcePackageScan {
 pub fn scan_source_package(root: &Path) -> SourcePackageScan {
     // `from_directory` is the sealed package scanner/builder. Reuse its output
     // so this read-only surface cannot drift from staging's v1/v2 identity.
-    match SourceArtifactTransfer::from_directory("source-package-check", root) {
-        Ok(transfer) => {
+    match SourceArtifactTransfer::from_directory_with_exclusions("source-package-check", root) {
+        Ok((transfer, excluded)) => {
             let file_count = transfer.package.entries.len();
             let bytes = transfer
                 .package
@@ -120,7 +121,7 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
                         digest: transfer.sha256,
                     }),
                     partial: None,
-                    excluded: Vec::new(),
+                    excluded,
                     blocked: Vec::new(),
                 },
                 payloads: BTreeMap::new(),
@@ -823,6 +824,13 @@ impl SourceArtifactTransfer {
     /// manifest. Git-indexed, lexically in-tree symlinks retain their target
     /// text in v2; untracked links are omitted without reading their targets.
     pub fn from_directory(artifact_id: impl Into<String>, root: &Path) -> Result<Self> {
+        Self::from_directory_with_exclusions(artifact_id, root).map(|(transfer, _)| transfer)
+    }
+
+    fn from_directory_with_exclusions(
+        artifact_id: impl Into<String>,
+        root: &Path,
+    ) -> Result<(Self, Vec<SourcePackageExclusion>)> {
         #[cfg(not(unix))]
         {
             let _ = artifact_id;
@@ -899,6 +907,7 @@ impl SourceArtifactTransfer {
                 relative_directory: &str,
                 tracked_links: &BTreeSet<String>,
                 entries: &mut BTreeMap<String, SourcePackagePayload>,
+                exclusions: &mut Vec<SourcePackageExclusion>,
             ) -> Result<()> {
                 for name in source_directory::directory_entries(directory)? {
                     let name_text = name.to_str().ok_or_else(|| {
@@ -922,6 +931,18 @@ impl SourceArtifactTransfer {
                     match mode & libc::S_IFMT {
                         libc::S_IFLNK => {
                             if !tracked_links.contains(&relative) {
+                                if exclusions.len() >= MAX_SOURCE_PACKAGE_EXCLUSIONS {
+                                    return Err(Error::validation_invalid_argument(
+                                        "source_path",
+                                        "source package exceeds configured exclusion bound",
+                                        Some(relative),
+                                        None,
+                                    ));
+                                }
+                                exclusions.push(SourcePackageExclusion {
+                                    kind: "untracked_symlink".to_string(),
+                                    path: relative,
+                                });
                                 continue;
                             }
                             let target = source_directory::read_link_at(directory, &name)?;
@@ -951,7 +972,7 @@ impl SourceArtifactTransfer {
                         }
                         libc::S_IFDIR => {
                             let child = source_directory::open_directory_at(directory, &name)?;
-                            collect(&child, &relative, tracked_links, entries)?;
+                            collect(&child, &relative, tracked_links, entries, exclusions)?;
                         }
                         libc::S_IFREG => {
                             let bytes = source_directory::read_regular_file_at(directory, &name)?;
@@ -1015,8 +1036,15 @@ impl SourceArtifactTransfer {
             #[cfg(unix)]
             let tracked_links = tracked_symlinks(&root_directory)?;
             let mut payloads = BTreeMap::new();
+            let mut exclusions = Vec::new();
             #[cfg(unix)]
-            collect(&root_directory, "", &tracked_links, &mut payloads)?;
+            collect(
+                &root_directory,
+                "",
+                &tracked_links,
+                &mut payloads,
+                &mut exclusions,
+            )?;
             if payloads.is_empty() {
                 return Err(Error::validation_invalid_argument(
                     "source_path",
@@ -1104,7 +1132,7 @@ impl SourceArtifactTransfer {
                 },
             };
             transfer.decode_verified()?;
-            Ok(transfer)
+            Ok((transfer, exclusions))
         }
     }
 
@@ -1865,7 +1893,7 @@ pub(crate) mod tests_support {
             check.accepted.as_ref().expect("accepted").digest,
             first.sha256
         );
-        assert!(check.excluded.is_empty());
+        assert_eq!(check.excluded[0].kind, "untracked_symlink");
         assert_eq!(first.package.schema, "homeboy/source-package-manifest/v2");
         assert_eq!(
             first
@@ -2077,7 +2105,7 @@ pub(crate) mod tests_support {
         #[cfg(unix)]
         {
             assert!(first.verdict.valid);
-            assert!(first.verdict.excluded.is_empty());
+            assert_eq!(first.verdict.excluded[0].kind, "untracked_symlink");
             let transfer = SourceArtifactTransfer::from_directory("source-1", source.path())
                 .expect("staging omits the same symlink");
             assert_eq!(
@@ -2085,6 +2113,40 @@ pub(crate) mod tests_support {
                 transfer.sha256
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_package_check_exclusions_are_lexical_bounded_and_never_read_targets() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(source.path().join("file"), b"safe").expect("file");
+        symlink("/outside/first-secret", source.path().join("a-link")).expect("first link");
+        symlink("/outside/second-secret", source.path().join("z-link")).expect("second link");
+
+        let first = scan_source_package(source.path()).verdict;
+        let second = scan_source_package(source.path()).verdict;
+        let transfer = SourceArtifactTransfer::from_directory("source-1", source.path())
+            .expect("staging package");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .excluded
+                .iter()
+                .map(|entry| (entry.path.as_str(), entry.kind.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("a-link", "untracked_symlink"),
+                ("z-link", "untracked_symlink")
+            ]
+        );
+        assert!(
+            !String::from_utf8(transfer.decode_verified().expect("package"))
+                .expect("json")
+                .contains("/outside/")
+        );
     }
 
     #[cfg(unix)]
