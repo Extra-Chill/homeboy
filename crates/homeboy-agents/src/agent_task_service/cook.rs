@@ -2948,6 +2948,7 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
         && !authenticated_historical_review_continuation
         && !cook_workspace_lookup_pending(&options.initial_plan)
         && options.attempt_dispatcher.is_none()
+        && options.source_worktree_path.is_none()
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
     {
@@ -3275,6 +3276,7 @@ where
         && !authenticated_historical_review_continuation
         && !cook_workspace_lookup_pending(&options.initial_plan)
         && options.attempt_dispatcher.is_none()
+        && options.source_worktree_path.is_none()
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
     {
@@ -4935,14 +4937,28 @@ fn cook_attempt_needs_execution(run_id: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// Re-resolve the declared Cook target before a provider can run. Durable
-/// recipes may outlive provider metadata, so the filesystem identity is checked
-/// again on local, Lab, retry, and resume paths rather than trusting the plan.
+/// Validate the Cook target before a provider can run. An explicit source path
+/// is already the authoritative workspace; otherwise resolve the declared
+/// handle through the existing local/provider path.
 fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> {
     let continuation = tracked_promotion_continuation(options)?;
-    let direct_path = std::path::Path::new(&options.to_worktree);
-    let target = if direct_path.is_dir() {
-        direct_path.to_path_buf()
+    let source = options.source_worktree_path.as_deref();
+    let target = if let Some(source) = source {
+        if let Some(record) =
+            homeboy_core::worktree::resolve_workspace_ref_if_present(&options.to_worktree)?
+        {
+            if record.state() != &homeboy_core::worktree::TaskWorktreeState::Active {
+                return Err(Error::validation_invalid_argument(
+                    "to_worktree",
+                    "declared Cook task worktree is no longer active",
+                    Some(options.to_worktree.clone()),
+                    None,
+                ));
+            }
+        }
+        source.to_path_buf()
+    } else if std::path::Path::new(&options.to_worktree).is_dir() {
+        std::path::Path::new(&options.to_worktree).to_path_buf()
     } else if let Some(record) =
         homeboy_core::worktree::resolve_workspace_ref_if_present(&options.to_worktree)?
     {
@@ -4968,7 +4984,7 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         .into()
     };
     homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
-    let source = options.source_worktree_path.as_deref().ok_or_else(|| {
+    let source = source.ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace",
             "Cook requires the provider workspace to be the declared task worktree",
