@@ -2896,7 +2896,7 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
 
 #[cfg(unix)]
 #[test]
-fn cook_persists_only_redacted_failed_provider_timeout_attribution() {
+fn cook_persists_pending_identity_when_safety_attestation_times_out() {
     use std::os::unix::fs::PermissionsExt;
 
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -2904,7 +2904,7 @@ fn cook_persists_only_redacted_failed_provider_timeout_attribution() {
         let provider = provider_dir.path().join("provider");
         std::fs::write(
             &provider,
-            "#!/bin/sh\nprintf '%s\\n' '{\"status\":\"failed\",\"error\":{\"code\":\"git_command_timeout\",\"access_token\":\"provider-secret-must-not-persist\"}}'\n",
+            "#!/bin/sh\nif test \"$1\" = safety; then sleep 1; else printf '%s\\n' '{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"pending-identity\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"/tmp/pending-worktree\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}'; fi\n",
         )
         .expect("write provider");
         let mut permissions = std::fs::metadata(&provider)
@@ -2920,10 +2920,19 @@ fn cook_persists_only_redacted_failed_provider_timeout_attribution() {
                 enabled: true,
                 kind: homeboy_core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
-                lookup_timeout_ms: 10_000,
+                lookup_timeout_ms: 25,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                    resolve_identity: Some(vec![
+                        provider.display().to_string(),
+                        "identity".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    attest_safety: Some(vec![
+                        provider.display().to_string(),
+                        "safety".to_string(),
+                        "{identity}".to_string(),
+                    ]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(
@@ -2950,10 +2959,15 @@ fn cook_persists_only_redacted_failed_provider_timeout_attribution() {
         options.attempt_dispatcher = None;
         options.initial_run_id = run_id.to_string();
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending",
+            "action": "attestation_pending",
             "kind": "provider",
             "handle": options.to_worktree,
             "worktree_provider_id": "fixture",
+            "workspace_identity": {
+                "schema": "homeboy/worktree-provider-identity/v1", "provider_id": "fixture", "token": "pending-identity",
+                "handle": options.to_worktree, "path": "/tmp/pending-worktree", "branch": "cook-slow-worktree-lookup", "primary": false,
+                "latency_ms": 1, "budget_ms": 25
+            }
         });
         let exact_handle = options.to_worktree.clone();
 
@@ -2969,23 +2983,19 @@ fn cook_persists_only_redacted_failed_provider_timeout_attribution() {
             record.metadata["pre_execution_failure"]["phase"],
             "worktree_provider_lookup"
         );
-        assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["retryable"], true,
+            "{}",
+            record.metadata
+        );
         assert_eq!(
             record.metadata["pre_execution_failure"]["failure_classification"],
             "transient"
         );
         assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_lookup"],
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_split"],
             "timed_out"
         );
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["provider_timeout_attribution"],
-            serde_json::json!({ "error_code": "git_command_timeout" })
-        );
-        assert!(!record
-            .metadata
-            .to_string()
-            .contains("provider-secret-must-not-persist"));
         let recipe = super::super::load_recipe(cook_id).expect("durable Cook identity");
         assert_eq!(recipe.attempts[0].run_id, run_id);
         let persisted_plan = agent_task_lifecycle::load_plan(run_id).expect("durable lookup plan");
@@ -2994,6 +3004,10 @@ fn cook_persists_only_redacted_failed_provider_timeout_attribution() {
             exact_handle
         );
         assert_eq!(persisted_plan.tasks[0].workspace.root, None);
+        assert_eq!(
+            persisted_plan.metadata["cook_provision"]["workspace_identity"]["token"],
+            "pending-identity"
+        );
         assert!(persisted_plan.tasks[0]
             .metadata
             .get("cook_workspace_identity")
