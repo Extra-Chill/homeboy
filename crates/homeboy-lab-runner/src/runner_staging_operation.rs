@@ -26,6 +26,196 @@ pub const RUNNER_SOURCE_ARTIFACT_SCHEMA: &str = "homeboy/runner-source-artifact/
 pub const MAX_SOURCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_ENTRIES: usize = 1024;
 pub const MAX_SOURCE_PACKAGE_FILE_BYTES: u64 = 1024 * 1024;
+pub const SOURCE_PACKAGE_CHECK_SCHEMA: &str = "homeboy/source-package-check/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageExclusion {
+    pub kind: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageFailure {
+    pub kind: String,
+    pub path: String,
+    pub message: String,
+}
+
+/// Read-only, deterministic result of applying the sealed source-package policy.
+///
+/// Symlinks are recorded separately from failures so a future package format can
+/// omit them without adding another traversal path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageCheckVerdict {
+    pub schema: String,
+    pub package_format: String,
+    pub valid: bool,
+    pub accepted_file_count: usize,
+    pub accepted_bytes: u64,
+    pub digest: String,
+    pub exclusions: Vec<SourcePackageExclusion>,
+    pub failures: Vec<SourcePackageFailure>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourcePackageScan {
+    pub verdict: SourcePackageCheckVerdict,
+    files: BTreeMap<String, Vec<u8>>,
+}
+
+/// Apply the same source policy as sealed Lab staging without creating a
+/// transfer, artifact, workspace, run, job, or connection.
+pub fn scan_source_package(root: &Path) -> SourcePackageScan {
+    fn failure(kind: &str, path: &Path, message: impl Into<String>) -> SourcePackageFailure {
+        SourcePackageFailure {
+            kind: kind.to_string(),
+            path: path.display().to_string(),
+            message: message.into(),
+        }
+    }
+
+    fn collect(
+        root: &Path,
+        directory: &Path,
+        files: &mut BTreeMap<String, Vec<u8>>,
+        exclusions: &mut Vec<SourcePackageExclusion>,
+        failures: &mut Vec<SourcePackageFailure>,
+    ) {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                failures.push(failure(
+                    "unreadable_directory",
+                    directory,
+                    error.to_string(),
+                ));
+                return;
+            }
+        };
+        let mut entries = match entries.collect::<std::result::Result<Vec<_>, _>>() {
+            Ok(entries) => entries,
+            Err(error) => {
+                failures.push(failure(
+                    "unreadable_directory",
+                    directory,
+                    error.to_string(),
+                ));
+                return;
+            }
+        };
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    failures.push(failure("unreadable_entry", &path, error.to_string()));
+                    continue;
+                }
+            };
+            if metadata.file_type().is_symlink() {
+                exclusions.push(SourcePackageExclusion {
+                    kind: "symlink".to_string(),
+                    path: path.display().to_string(),
+                });
+                failures.push(failure(
+                    "symlink",
+                    &path,
+                    "source package accepts only regular files and directories",
+                ));
+                continue;
+            }
+            if metadata.is_dir() {
+                collect(root, &path, files, exclusions, failures);
+                continue;
+            }
+            if !metadata.is_file() {
+                failures.push(failure(
+                    "special_file",
+                    &path,
+                    "source package accepts only regular files and directories",
+                ));
+                continue;
+            }
+            if metadata.len() > MAX_SOURCE_PACKAGE_FILE_BYTES {
+                failures.push(failure(
+                    "file_too_large",
+                    &path,
+                    "source package file exceeds the configured size bound",
+                ));
+                continue;
+            }
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    failures.push(failure("unreadable_file", &path, error.to_string()));
+                    continue;
+                }
+            };
+            let relative = path.strip_prefix(root).expect("walk remains under root");
+            files.insert(relative.to_string_lossy().replace('\\', "/"), bytes);
+            let bytes = files.values().map(|bytes| bytes.len() as u64).sum::<u64>();
+            if files.len() > MAX_SOURCE_PACKAGE_ENTRIES || bytes > MAX_SOURCE_ARTIFACT_BYTES {
+                failures.push(failure(
+                    "package_too_large",
+                    root,
+                    "source package exceeds configured entry or total size bounds",
+                ));
+                return;
+            }
+        }
+    }
+
+    let mut files = BTreeMap::new();
+    let mut exclusions = Vec::new();
+    let mut failures = Vec::new();
+    match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            collect(root, root, &mut files, &mut exclusions, &mut failures)
+        }
+        Ok(_) => failures.push(failure(
+            "invalid_root",
+            root,
+            "source package root must be a readable directory",
+        )),
+        Err(error) => failures.push(failure("unreadable_root", root, error.to_string())),
+    }
+    if failures.is_empty() && files.is_empty() {
+        failures.push(failure(
+            "empty_root",
+            root,
+            "source package root must contain at least one regular file",
+        ));
+    }
+    let package = serde_json::to_vec(
+        &files
+            .iter()
+            .map(|(path, bytes)| {
+                (
+                    path,
+                    base64::engine::general_purpose::STANDARD.encode(bytes),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
+    )
+    .expect("source package serializes");
+    SourcePackageScan {
+        verdict: SourcePackageCheckVerdict {
+            schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
+            package_format: "homeboy/source-package-json/v1".to_string(),
+            valid: failures.is_empty(),
+            accepted_file_count: files.len(),
+            accepted_bytes: files.values().map(|bytes| bytes.len() as u64).sum(),
+            digest: format!("sha256:{:x}", Sha256::digest(&package)),
+            exclusions,
+            failures,
+        },
+        files,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -62,84 +252,16 @@ impl SourceArtifactTransfer {
     /// manifest. Traversal is lexical and deterministic; links and non-files
     /// are refused rather than crossing a controller filesystem boundary.
     pub fn from_directory(artifact_id: impl Into<String>, root: &Path) -> Result<Self> {
-        fn collect(
-            root: &Path,
-            directory: &Path,
-            files: &mut BTreeMap<String, Vec<u8>>,
-        ) -> Result<()> {
-            let mut entries = fs::read_dir(directory)
-                .map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(directory.display().to_string()))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(directory.display().to_string()))
-                })?;
-            entries.sort_by_key(|entry| entry.file_name());
-            for entry in entries {
-                let path = entry.path();
-                let metadata = fs::symlink_metadata(&path).map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
-                })?;
-                if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
-                    return Err(Error::validation_invalid_argument(
-                        "source_path",
-                        "source package accepts only regular files and directories",
-                        Some(path.display().to_string()),
-                        None,
-                    ));
-                }
-                if metadata.is_dir() {
-                    collect(root, &path, files)?;
-                    continue;
-                }
-                if metadata.len() > MAX_SOURCE_PACKAGE_FILE_BYTES {
-                    return Err(Error::validation_invalid_argument(
-                        "source_path",
-                        "source package file exceeds the configured size bound",
-                        Some(path.display().to_string()),
-                        None,
-                    ));
-                }
-                let relative = path.strip_prefix(root).expect("walk remains under root");
-                let relative = relative.to_string_lossy().replace('\\', "/");
-                let bytes = fs::read(&path).map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
-                })?;
-                files.insert(relative, bytes);
-                if files.len() > MAX_SOURCE_PACKAGE_ENTRIES
-                    || files.values().map(|bytes| bytes.len() as u64).sum::<u64>()
-                        > MAX_SOURCE_ARTIFACT_BYTES
-                {
-                    return Err(Error::validation_invalid_argument(
-                        "source_path",
-                        "source package exceeds configured entry or total size bounds",
-                        Some(root.display().to_string()),
-                        None,
-                    ));
-                }
-            }
-            Ok(())
-        }
-
-        if !root.is_dir() {
+        let scan = scan_source_package(root);
+        if let Some(failure) = scan.verdict.failures.first() {
             return Err(Error::validation_invalid_argument(
                 "source_path",
-                "source package root must be a readable directory",
-                Some(root.display().to_string()),
+                &failure.message,
+                Some(failure.path.clone()),
                 None,
             ));
         }
-        let mut files = BTreeMap::new();
-        collect(root, root, &mut files)?;
-        if files.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "source_path",
-                "source package root must contain at least one regular file",
-                Some(root.display().to_string()),
-                None,
-            ));
-        }
+        let files = scan.files;
         let entries = files
             .iter()
             .map(|(path, bytes)| SourcePackageEntry {
@@ -825,5 +947,29 @@ pub(crate) mod tests_support {
             ["nested/a.txt", "z.txt"]
         );
         first.decode_verified().expect("verified package");
+    }
+
+    #[test]
+    fn source_package_check_matches_staging_and_reports_rejected_symlinks() {
+        let source = tempfile::tempdir().expect("source");
+        let external = tempfile::NamedTempFile::new().expect("external");
+        std::fs::write(source.path().join("source.txt"), b"source").expect("source");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), source.path().join("AGENTS.md")).expect("link");
+
+        let first = scan_source_package(source.path());
+        let second = scan_source_package(source.path());
+
+        assert_eq!(first.verdict, second.verdict);
+        #[cfg(unix)]
+        {
+            assert!(!first.verdict.valid);
+            assert_eq!(first.verdict.accepted_file_count, 1);
+            assert_eq!(first.verdict.exclusions[0].kind, "symlink");
+            assert_eq!(first.verdict.failures[0].kind, "symlink");
+            let error = SourceArtifactTransfer::from_directory("source-1", source.path())
+                .expect_err("staging rejects the same symlink");
+            assert!(error.message.contains(&first.verdict.failures[0].message));
+        }
     }
 }
