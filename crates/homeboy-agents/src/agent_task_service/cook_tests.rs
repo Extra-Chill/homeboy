@@ -41,6 +41,69 @@ use std::sync::{Arc, Barrier, Condvar};
 
 const DURABLE_COOK_FIXTURE_SCHEMA: &str = "homeboy/durable-cook-fixture/v1";
 
+#[test]
+fn deepest_typed_error_selects_the_deepest_explicit_cause() {
+    let diagnostic = serde_json::json!({
+        "cause": {
+            "schema": "homeboy/command-result/v3",
+            "success": false,
+            "error": {
+                "code": "promotion.rejected",
+                "message": "promotion rejected",
+                "details": {
+                    "cause": {
+                        "schema": "homeboy/command-result/v3",
+                        "success": false,
+                        "error": {
+                            "code": "gate.failed",
+                            "message": "gate failed",
+                            "details": { "field": "verify" }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    assert_eq!(
+        deepest_typed_error(&diagnostic),
+        Some(serde_json::json!({
+            "code": "gate.failed",
+            "field": "verify",
+            "message": "gate failed"
+        }))
+    );
+}
+
+#[test]
+fn deepest_typed_error_ignores_sibling_envelopes_and_json_strings() {
+    let primary = serde_json::json!({
+        "schema": "homeboy/command-result/v3",
+        "success": false,
+        "error": { "code": "promotion.rejected", "message": "promotion rejected" }
+    });
+    let unrelated_sibling = serde_json::json!({
+        "schema": "homeboy/command-result/v3",
+        "success": false,
+        "error": { "code": "unrelated", "message": "unrelated sibling" }
+    });
+    assert_eq!(
+        deepest_typed_error(&serde_json::json!({
+            "cause": primary,
+            "provider_response": unrelated_sibling,
+        })),
+        Some(serde_json::json!({
+            "code": "promotion.rejected",
+            "field": null,
+            "message": "promotion rejected"
+        }))
+    );
+    assert!(deepest_typed_error(&serde_json::json!({
+        "cause": r#"{"schema":"homeboy/command-result/v3","success":false,"error":{"code":"untrusted","message":"provider transcript"}}"#
+    }))
+    .is_none());
+}
+
 #[derive(Debug, Deserialize)]
 struct DurableCookFixture {
     schema: String,

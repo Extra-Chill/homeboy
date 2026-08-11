@@ -22,7 +22,7 @@ use super::super::validation_dependencies::{
     sync_validation_dependency_workspaces, RunnerValidationDependencySyncOutput,
 };
 use super::super::{
-    load, source_materialization, RunnerKind, RunnerLifecycleOwner, RunnerWorkspaceLease,
+    load, source_materialization, Runner, RunnerKind, RunnerLifecycleOwner, RunnerWorkspaceLease,
 };
 use super::git::{
     git_snapshot, materialize_git, materialize_git_from_controller_bundle,
@@ -889,11 +889,10 @@ pub fn update_workspace(
 /// Ordinary runner paths remain unchanged; only an exact workspace match gains
 /// the original snapshot and ordered delta lineage recorded at promotion time.
 pub fn hydrate_prepared_workspace_source_snapshot(
-    runner_id: &str,
+    runner: &Runner,
     remote_path: &str,
     source_snapshot: &mut SourceSnapshot,
 ) -> Result<()> {
-    let runner = load(runner_id)?;
     let Some(workspace_root) = runner.workspace_root.as_deref() else {
         return Ok(());
     };
@@ -902,7 +901,7 @@ pub fn hydrate_prepared_workspace_source_snapshot(
         return Ok(());
     }
     let (snapshots, _) = workspace_snapshots(
-        runner_id,
+        &runner.id,
         RunnerWorkspaceSnapshotFilters {
             limit: usize::MAX,
             ..Default::default()
