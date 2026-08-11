@@ -1095,7 +1095,7 @@ mod tests {
         let source_root = temp.path().join("source");
         fs::create_dir_all(source_root.join("nested")).expect("source");
         fs::write(source_root.join("nested/file"), b"safe").expect("file");
-        symlink("nested/file", source_root.join("file-link")).expect("file link");
+        symlink("nested\\file", source_root.join("file-link")).expect("file link");
         symlink("missing", source_root.join("missing-link")).expect("missing link");
         for args in [["init"].as_slice(), ["add", "."].as_slice()] {
             assert!(Command::new("git")

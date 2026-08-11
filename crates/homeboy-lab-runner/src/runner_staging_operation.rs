@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path};
 use std::process::Command;
 
@@ -67,33 +68,120 @@ enum SourcePackagePayload {
     Symlink { target: String },
 }
 
-pub(crate) fn source_package_target_is_in_tree(link_path: &str, target: &str) -> bool {
+/// The portable v2 representation of a tracked source symlink. Consumers that
+/// scan source trees must use this verdict rather than reimplementing target
+/// containment or package identity rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourcePackageSymlinkVerdict {
+    pub target: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+/// Normalizes Windows and Unix separator forms before applying the v2 lexical
+/// containment policy. V1 packages do not admit symlinks.
+pub fn source_package_symlink_verdict(
+    link_path: &str,
+    target: &str,
+) -> Result<SourcePackageSymlinkVerdict> {
+    let target = target.replace('\\', "/");
     if target.is_empty() {
-        return false;
+        return Err(Error::validation_invalid_argument(
+            "source_package",
+            "source package symlink target must be a non-empty relative in-tree path",
+            Some(link_path.to_string()),
+            None,
+        ));
     }
-    let target_path = Path::new(target);
+    let target_path = Path::new(&target);
     if target_path.is_absolute()
         || target_path
             .components()
             .any(|component| matches!(component, Component::Prefix(_)))
     {
-        return false;
+        return Err(Error::validation_invalid_argument(
+            "source_package",
+            "source package symlink target must be relative and contained within the source root",
+            Some(format!("{link_path} -> {target}")),
+            None,
+        ));
     }
     let mut depth = link_path.split('/').count().saturating_sub(1);
     for component in target_path.components() {
         match component {
             Component::ParentDir => {
                 if depth == 0 {
-                    return false;
+                    return Err(Error::validation_invalid_argument(
+                        "source_package",
+                        "source package symlink target must be relative and contained within the source root",
+                        Some(format!("{link_path} -> {target}")),
+                        None,
+                    ));
                 }
                 depth -= 1;
             }
             Component::Normal(_) => depth += 1,
             Component::CurDir => {}
-            Component::RootDir | Component::Prefix(_) => return false,
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(Error::validation_invalid_argument(
+                    "source_package",
+                    "source package symlink target must be relative and contained within the source root",
+                    Some(format!("{link_path} -> {target}")),
+                    None,
+                ))
+            }
         }
     }
-    true
+    Ok(SourcePackageSymlinkVerdict {
+        size_bytes: target.len() as u64,
+        sha256: format!("sha256:{:x}", Sha256::digest(target.as_bytes())),
+        target,
+    })
+}
+
+#[cfg(unix)]
+fn read_regular_file_nofollow(path: &Path) -> Result<Vec<u8>> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    if !metadata.is_file() || metadata.len() > MAX_SOURCE_PACKAGE_FILE_BYTES {
+        return Err(Error::validation_invalid_argument(
+            "source_path",
+            "source package file must remain a bounded regular file when opened",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_SOURCE_PACKAGE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    if bytes.len() as u64 > MAX_SOURCE_PACKAGE_FILE_BYTES {
+        return Err(Error::validation_invalid_argument(
+            "source_path",
+            "source package file exceeds the configured size bound",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(not(unix))]
+fn read_regular_file_nofollow(path: &Path) -> Result<Vec<u8>> {
+    Err(Error::validation_invalid_argument(
+        "source_path",
+        "source package file reads require a no-follow-capable platform",
+        Some(path.display().to_string()),
+        None,
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -217,15 +305,20 @@ impl SourceArtifactTransfer {
                             None,
                         )
                     })?;
-                    if !source_package_target_is_in_tree(&relative, &target) {
-                        return Err(Error::validation_invalid_argument(
+                    let verdict = source_package_symlink_verdict(&relative, &target).map_err(|_| {
+                        Error::validation_invalid_argument(
                             "source_path",
                             "tracked source symlink must have a relative target contained within the source root",
                             Some(format!("{} -> {target}", path.display())),
                             None,
-                        ));
-                    }
-                    entries.insert(relative, SourcePackagePayload::Symlink { target });
+                        )
+                    })?;
+                    entries.insert(
+                        relative,
+                        SourcePackagePayload::Symlink {
+                            target: verdict.target,
+                        },
+                    );
                     continue;
                 }
                 if !(metadata.is_file() || metadata.is_dir()) {
@@ -240,17 +333,7 @@ impl SourceArtifactTransfer {
                     collect(root, &path, tracked_links, entries)?;
                     continue;
                 }
-                if metadata.len() > MAX_SOURCE_PACKAGE_FILE_BYTES {
-                    return Err(Error::validation_invalid_argument(
-                        "source_path",
-                        "source package file exceeds the configured size bound",
-                        Some(path.display().to_string()),
-                        None,
-                    ));
-                }
-                let bytes = fs::read(&path).map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
-                })?;
+                let bytes = read_regular_file_nofollow(&path)?;
                 entries.insert(
                     relative,
                     SourcePackagePayload::File {
@@ -282,10 +365,13 @@ impl SourceArtifactTransfer {
             Ok(())
         }
 
-        if !root.is_dir() {
+        let root_metadata = fs::symlink_metadata(root).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(root.display().to_string()))
+        })?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
             return Err(Error::validation_invalid_argument(
                 "source_path",
-                "source package root must be a readable directory",
+                "source package root must be a readable non-symlink directory",
                 Some(root.display().to_string()),
                 None,
             ));
@@ -319,7 +405,9 @@ impl SourceArtifactTransfer {
                         )
                     ),
                     SourcePackagePayload::Symlink { target } => {
-                        format!("sha256:{:x}", Sha256::digest(target.as_bytes()))
+                        source_package_symlink_verdict(path, target)
+                            .expect("scanner normalized symlink target")
+                            .sha256
                     }
                 },
                 size_bytes: match payload {
@@ -329,7 +417,11 @@ impl SourceArtifactTransfer {
                             .expect("package bytes")
                             .len() as u64
                     }
-                    SourcePackagePayload::Symlink { target } => target.len() as u64,
+                    SourcePackagePayload::Symlink { target } => {
+                        source_package_symlink_verdict(path, target)
+                            .expect("scanner normalized symlink target")
+                            .size_bytes
+                    }
                 },
             })
             .collect::<Vec<_>>();
@@ -596,7 +688,9 @@ impl SourcePackageManifest {
                         })?
                 }
                 (SourcePackagePayload::Symlink { target }, SourcePackageEntryKind::Symlink)
-                    if source_package_target_is_in_tree(&entry.path, target) =>
+                    if source_package_symlink_verdict(&entry.path, target)
+                        .map(|verdict| verdict.target == *target)
+                        .unwrap_or(false) =>
                 {
                     target.as_bytes().to_vec()
                 }
@@ -1180,6 +1274,37 @@ pub(crate) mod tests_support {
         let error = SourceArtifactTransfer::from_directory("source-1", source.path())
             .expect_err("special file");
         assert!(error.message.contains("regular files and directories"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_root_and_regular_file_links_are_never_followed() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(source.path().join("file"), b"safe").expect("file");
+        let root_link = source.path().with_extension("link");
+        symlink(source.path(), &root_link).expect("root link");
+        let error =
+            SourceArtifactTransfer::from_directory("source-1", &root_link).expect_err("root link");
+        assert!(error.message.contains("non-symlink directory"));
+
+        let replacement = source.path().join("replacement");
+        symlink("file", &replacement).expect("replacement link");
+        assert!(read_regular_file_nofollow(&replacement).is_err());
+    }
+
+    #[test]
+    fn symlink_verdict_normalizes_windows_separators_and_rejects_windows_escape() {
+        let verdict = source_package_symlink_verdict("links/tool", "..\\shared\\tool")
+            .expect("normalized target");
+        assert_eq!(verdict.target, "../shared/tool");
+        assert_eq!(verdict.size_bytes, "../shared/tool".len() as u64);
+        assert_eq!(
+            verdict.sha256,
+            format!("sha256:{:x}", Sha256::digest(b"../shared/tool"))
+        );
+        assert!(source_package_symlink_verdict("links/tool", "..\\..\\outside").is_err());
     }
 
     #[test]
