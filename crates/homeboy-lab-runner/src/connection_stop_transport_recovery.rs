@@ -342,6 +342,7 @@ pub(in crate::connection) fn rebind_idle_generation_owner(
                     .remote_daemon_address
                     .as_deref()
                     .unwrap_or_default(),
+                stable_generation_owner_identity(generation),
             )
         })?
         .clone();
@@ -349,6 +350,13 @@ pub(in crate::connection) fn rebind_idle_generation_owner(
     authoritative_session.remote_daemon_pid = daemon.pid;
     authoritative_session.remote_daemon_address = Some(daemon.address.clone());
     Some(authoritative_session)
+}
+
+/// The final owner-selection key preserves every identity field that remains
+/// after the authoritative daemon lease, PID, and address are rebound.
+fn stable_generation_owner_identity(generation: &RunnerSession) -> String {
+    serde_json::to_string(generation)
+        .expect("persisted runner sessions must have a stable serialized identity")
 }
 
 /// Clearing the ledger is safe only when every generation is represented by a
@@ -1046,10 +1054,16 @@ mod tests {
 
     #[test]
     fn concurrent_stale_generations_rebind_the_same_canonical_owner() {
-        let mut first = direct_ssh_session("lease-z");
+        let mut first = direct_ssh_session("lease-stale");
         first.controller_id = Some("controller-z".to_string());
-        let mut second = direct_ssh_session("lease-a");
+        first.local_port = Some(49154);
+        first.local_url = Some("http://127.0.0.1:49154".to_string());
+        first.worker_identity = Some("worker-z".to_string());
+        let mut second = direct_ssh_session("lease-stale");
         second.controller_id = Some("controller-a".to_string());
+        second.local_port = Some(49155);
+        second.local_url = Some("http://127.0.0.1:49155".to_string());
+        second.worker_identity = Some("worker-a".to_string());
         let daemon = remote_daemon_status(true, 0, "lease-live", 4242, None)
             .daemon
             .expect("live daemon");
@@ -1060,12 +1074,19 @@ mod tests {
             "lease-live".to_string(),
         )
         .expect("canonical owner");
-        let reverse =
-            rebind_idle_generation_owner(&[second, first], &daemon, "lease-live".to_string())
-                .expect("canonical owner");
+        let reverse = rebind_idle_generation_owner(
+            &[second.clone(), first],
+            &daemon,
+            "lease-live".to_string(),
+        )
+        .expect("canonical owner");
 
-        assert_eq!(forward.controller_id, Some("controller-a".to_string()));
-        assert_eq!(forward, reverse);
+        let mut expected = second;
+        expected.remote_daemon_lease_id = Some("lease-live".to_string());
+        expected.remote_daemon_pid = daemon.pid;
+        expected.remote_daemon_address = Some(daemon.address);
+        assert_eq!(forward, expected);
+        assert_eq!(reverse, expected);
     }
 
     #[test]
