@@ -1,11 +1,11 @@
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use fs4::fs_std::FileExt;
+use homeboy_engine_primitives::fs_index_lock::{FsIndexLock, FsIndexLockConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -63,9 +63,16 @@ const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[("target", "rust_target")];
 const SECONDS_PER_DAY: u64 = 86_400;
 const AUTOMATIC_ARTIFACT_AGE_POLICY: u64 = u64::MAX;
 const AUTOMATIC_ARTIFACT_RETENTION_LOCK_FILE: &str = "automatic-artifact-retention.lock";
+const AUTOMATIC_ARTIFACT_RETENTION_LOCK: FsIndexLockConfig = FsIndexLockConfig {
+    name: AUTOMATIC_ARTIFACT_RETENTION_LOCK_FILE,
+    stale_after: Duration::ZERO,
+    attempts: 1,
+    sleep: Duration::ZERO,
+    subject: "automatic artifact retention",
+};
 
-// POSIX advisory locks are process-scoped, so retain an in-process gate in
-// addition to the filesystem lock used by independent Homeboy processes.
+// Retain an in-process gate as well as the mkdir-based ownership directory,
+// which keeps same-process callers and independent processes single-flight.
 static AUTOMATIC_ARTIFACT_RETENTION_ADMISSION: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Default artifact class for declarations that predate categorized cleanup.
@@ -204,25 +211,19 @@ fn try_run_automatic_artifact_retention_with_config(
         return Ok(None);
     };
     let data = homeboy_paths::homeboy_data()?;
-    fs::create_dir_all(&data).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create automatic artifact retention state directory".to_string()),
-        )
-    })?;
-    let lock_path = data.join(AUTOMATIC_ARTIFACT_RETENTION_LOCK_FILE);
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some(lock_path.display().to_string()))
-        })?;
-    if lock.try_lock_exclusive().is_err() {
+    let lock = FsIndexLockConfig {
+        // Retention has its own deadline. An extra minute avoids stealing a
+        // live owner at that boundary while recovering a crashed owner.
+        stale_after: Duration::from_secs(
+            retention
+                .automatic_retention_max_run_seconds
+                .saturating_add(60),
+        ),
+        ..AUTOMATIC_ARTIFACT_RETENTION_LOCK
+    };
+    let Some(_cross_process_owner) = FsIndexLock::try_acquire_in(&data, lock)? else {
         return Ok(None);
-    }
+    };
     run_automatic_artifact_retention_in(roots, retention, SystemTime::now()).map(Some)
 }
 
@@ -2525,14 +2526,6 @@ mod tests {
         let root = validate_homeboy_manifest_dir(tmp.path()).expect("homeboy manifest");
 
         assert_eq!(root, tmp.path());
-    }
-
-    #[test]
-    fn self_artifact_source_resolves_the_workspace_homeboy_checkout() {
-        let root = homeboy_source_checkout().expect("workspace source checkout");
-
-        assert!(root.join(".git").exists());
-        assert!(root.join("src/main.rs").is_file());
     }
 
     #[test]

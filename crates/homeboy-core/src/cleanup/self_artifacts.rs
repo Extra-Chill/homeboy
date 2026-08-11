@@ -125,10 +125,10 @@ pub(super) fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathB
     }
 
     if !is_canonical_git_root(manifest_dir) {
-        let error = Error::validation_invalid_argument(
+        let mut error = Error::validation_invalid_argument(
             "self_artifacts",
             format!(
-                "{} is not the canonical root of a Homeboy source git checkout",
+                "{} is not a Homeboy source git checkout (the canonical root is required)",
                 manifest_dir.display()
             ),
             None,
@@ -136,19 +136,14 @@ pub(super) fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathB
         )
         .with_hint("`homeboy cleanup artifacts --self` requires a source checkout, not a packaged Cargo registry source.")
         .with_hint("Pass an explicit checkout with `homeboy cleanup artifacts --path <PATH>`, or configure and run from a source checkout.");
+        if let Some(checkout) = discover_active_homeboy_checkout()? {
+            error = error.with_hint(format!(
+                "Active Homeboy checkout appears to be: {}; retry with `homeboy cleanup artifacts --path {}`.",
+                checkout.display(),
+                checkout.display()
+            ));
+        }
         return Err(error);
-    }
-
-    if !manifest_dir.join("src/main.rs").is_file() {
-        return Err(Error::validation_invalid_argument(
-            "self_artifacts",
-            format!(
-                "{} is not a Homeboy binary source checkout",
-                manifest_dir.display()
-            ),
-            None,
-            None,
-        ));
     }
 
     Ok(manifest_dir.to_path_buf())
@@ -162,6 +157,21 @@ fn is_canonical_git_root(path: &Path) -> bool {
         return false;
     };
     path == root
+}
+
+fn discover_active_homeboy_checkout() -> Result<Option<PathBuf>> {
+    let Ok(current_dir) = std::env::current_dir() else {
+        return Ok(None);
+    };
+    for candidate in current_dir.ancestors() {
+        if candidate.join("Cargo.toml").is_file()
+            && is_canonical_git_root(candidate)
+            && cargo_manifest_package_is_homeboy(&candidate.join("Cargo.toml"))?
+        {
+            return Ok(Some(candidate.to_path_buf()));
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn self_temp_artifact_candidates(
@@ -573,7 +583,11 @@ mod tests {
             "[package]\nname = \"homeboy\"\nversion = \"0.1.0\"\n",
         )
         .expect("manifest");
-        fs::write(checkout.join("src/main.rs"), "fn main() {}\n").expect("source");
+        fs::write(
+            checkout.join("src/main.rs"),
+            format!("// {name}\nfn main() {{}}\n"),
+        )
+        .expect("source");
         commit_git_repository(&checkout);
         checkout
     }
