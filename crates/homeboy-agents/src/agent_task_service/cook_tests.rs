@@ -2335,6 +2335,100 @@ fn explicit_cook_workspace_bypasses_a_timed_out_provider_lookup() {
 }
 
 #[test]
+fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execution() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary repository");
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(primary.path(), &["init", "--initial-branch=main"]);
+        git(
+            primary.path(),
+            &["config", "user.email", "agent@example.test"],
+        );
+        git(primary.path(), &["config", "user.name", "Agent"]);
+        std::fs::write(primary.path().join("tracked.txt"), "base\n").expect("write base");
+        git(primary.path(), &["add", "tracked.txt"]);
+        git(primary.path(), &["commit", "-m", "base"]);
+        git(
+            primary.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fix/continuation",
+                target.to_str().expect("target path"),
+                "HEAD",
+            ],
+        );
+
+        let mut options = batch_cook_options(
+            "removed-managed-continuation",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.to_worktree = "fixture@removed-continuation".to_string();
+        options.source_worktree_path = Some(target.clone());
+        persist_initial_recipe(&options).expect("persist Cook recipe");
+        let recipe = super::super::load_recipe(&options.cook_id).expect("load Cook recipe");
+        let reconstructed = super::super::reconstruct_options_with_dispatcher(
+            &recipe,
+            Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
+        )
+        .expect("reconstruct persisted Cook options");
+
+        let data_root = homeboy_core::paths::observation_db()
+            .expect("observation database")
+            .parent()
+            .expect("observation data root")
+            .to_path_buf();
+        let records = data_root.join("task-worktrees");
+        std::fs::create_dir_all(&records).expect("create task-worktree registry");
+        let record = serde_json::json!({
+            "id": options.to_worktree,
+            "component_id": "fixture",
+            "source_checkout": primary.path(),
+            "worktree_path": target,
+            "branch": "fix/continuation",
+            "base_ref": "main",
+            "cleanup_policy": "remove_when_safe",
+            "branch_cleanup_intent": "delete_when_merged",
+            "created_at": "2026-01-01T00:00:00Z",
+            "state": "removed",
+            "lifecycle_revision": 1,
+        });
+        std::fs::write(
+            records.join(format!(
+                "{}.json",
+                homeboy_core::paths::sanitize_path_segment(&options.to_worktree)
+            )),
+            serde_json::to_vec(&record).expect("serialize removed worktree record"),
+        )
+        .expect("write removed worktree record");
+
+        let error = validate_cook_workspace(&reconstructed)
+            .expect_err("removed managed worktree must reject reconstructed Cook");
+        assert_eq!(
+            error.code,
+            homeboy_core::error::ErrorCode::ValidationInvalidArgument
+        );
+        assert_eq!(error.details["field"], "to_worktree");
+        assert!(error.message.contains("no longer active"));
+
+        let result = run_cook(reconstructed, UnusedExecutor)
+            .expect("durable Cook failure report before provider execution");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status, "durable_failure");
+    });
+}
+
+#[test]
 fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     let mut options = batch_cook_options(
         "initial-review-form-contract",

@@ -4887,6 +4887,18 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
     let continuation = tracked_promotion_continuation(options)?;
     let source = options.source_worktree_path.as_deref();
     let target = if let Some(source) = source {
+        if let Some(record) =
+            homeboy_core::worktree::resolve_workspace_ref_if_present(&options.to_worktree)?
+        {
+            if record.state() != &homeboy_core::worktree::TaskWorktreeState::Active {
+                return Err(Error::validation_invalid_argument(
+                    "to_worktree",
+                    "declared Cook task worktree is no longer active",
+                    Some(options.to_worktree.clone()),
+                    None,
+                ));
+            }
+        }
         source.to_path_buf()
     } else if std::path::Path::new(&options.to_worktree).is_dir() {
         std::path::Path::new(&options.to_worktree).to_path_buf()
