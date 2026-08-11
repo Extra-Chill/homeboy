@@ -113,12 +113,8 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
         if let Some(progress) = progress.as_mut() {
             progress.start(index)?;
         }
-        let output = execute_self_check_command(
-            command,
-            &working_dir,
-            passthrough,
-            cargo_target.as_ref().map(|target| target.target_dir()),
-        );
+        let output =
+            execute_self_check_command(command, &working_dir, passthrough, cargo_target.as_ref());
         let stdout_artifact = if let Some(run_dir) = run_dir {
             write_command_artifact(run_dir, index, "stdout", &output.stdout.to_string_lossy())?
         } else {
@@ -179,7 +175,7 @@ fn execute_self_check_command(
     command: &str,
     working_dir: &str,
     passthrough: bool,
-    cargo_target: Option<&Path>,
+    cargo_target: Option<&homeboy_core::ManagedCargoTarget>,
 ) -> SelfCheckCommandOutput {
     execute_local_self_check_command(command, working_dir, passthrough, cargo_target)
 }
@@ -244,7 +240,7 @@ fn execute_local_self_check_command(
     command: &str,
     working_dir: &str,
     passthrough: bool,
-    cargo_target: Option<&Path>,
+    cargo_target: Option<&homeboy_core::ManagedCargoTarget>,
 ) -> SelfCheckCommandOutput {
     #[cfg(windows)]
     let mut cmd = {
@@ -262,8 +258,8 @@ fn execute_local_self_check_command(
 
     cmd.current_dir(working_dir);
     if let Some(cargo_target) = cargo_target {
-        cmd.env("CARGO_TARGET_DIR", cargo_target);
-        cmd.env("HOMEBOY_CARGO_TARGET_RESOLUTION", "shared");
+        cmd.env("CARGO_TARGET_DIR", cargo_target.target_dir());
+        cmd.env("HOMEBOY_CARGO_TARGET_RESOLUTION", cargo_target.resolution());
     }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -353,6 +349,32 @@ fn capture_stream<R: Read>(mut src: R, passthrough: bool, stderr: bool) -> Bound
 mod tests {
     use super::*;
     use homeboy_core::component::{Component, ComponentScriptsConfig};
+    use std::ffi::OsString;
+
+    struct EnvRestore {
+        name: &'static str,
+        value: Option<OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(name: &'static str, value: &str) -> Self {
+            let restore = Self {
+                name,
+                value: std::env::var_os(name),
+            };
+            std::env::set_var(name, value);
+            restore
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.value {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     #[test]
     fn test_run_self_checks_requires_configured_commands() {
@@ -449,6 +471,123 @@ mod tests {
         assert!(output.success);
         assert_eq!(output.stdout, "self-check-stdout");
         assert_eq!(output.stderr, "self-check-stderr");
+    }
+
+    #[test]
+    fn self_check_child_reports_component_cargo_target_evidence() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("component-target");
+        let mut component = Component::new(
+            "fixture".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "".to_string(),
+            None,
+        );
+        component.managed_execution.shared_cargo_target = true;
+        component.env.insert(
+            "CARGO_TARGET_DIR".to_string(),
+            target.to_string_lossy().to_string(),
+        );
+        component.scripts = Some(ComponentScriptsConfig {
+            lint: vec![
+                "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\""
+                    .to_string(),
+            ],
+            ..Default::default()
+        });
+
+        let output = run_self_checks_with_passthrough(
+            &component,
+            ExtensionCapability::Lint,
+            dir.path(),
+            false,
+        )
+        .expect("self-check should run");
+
+        assert_eq!(output.stdout, format!("local:{}", target.display()));
+        assert_eq!(
+            output.cargo_target,
+            Some(homeboy_core::CargoTargetEvidence {
+                path: target.to_string_lossy().to_string(),
+                resolution: "local".to_string(),
+                owner: "component:fixture".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn self_check_child_reports_ambient_cargo_target_evidence() {
+        let _env_lock = homeboy_core::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("ambient-target");
+        let _restore = EnvRestore::set("CARGO_TARGET_DIR", &target.to_string_lossy());
+        let mut component = Component::new(
+            "fixture".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "".to_string(),
+            None,
+        );
+        component.managed_execution.shared_cargo_target = true;
+        component.scripts = Some(ComponentScriptsConfig {
+            lint: vec![
+                "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\""
+                    .to_string(),
+            ],
+            ..Default::default()
+        });
+
+        let output = run_self_checks_with_passthrough(
+            &component,
+            ExtensionCapability::Lint,
+            dir.path(),
+            false,
+        )
+        .expect("self-check should run");
+
+        assert_eq!(output.stdout, format!("local:{}", target.display()));
+        assert_eq!(
+            output.cargo_target,
+            Some(homeboy_core::CargoTargetEvidence {
+                path: target.to_string_lossy().to_string(),
+                resolution: "local".to_string(),
+                owner: "component:fixture".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn self_check_holds_shared_cargo_target_lease_for_child_lifetime() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let mut component = Component::new(
+                "fixture".to_string(),
+                dir.path().to_string_lossy().to_string(),
+                "".to_string(),
+                None,
+            );
+            component.managed_execution.shared_cargo_target = true;
+            // Override an ambient harness target so this exercises the managed lease.
+            component
+                .env
+                .insert("CARGO_TARGET_DIR".to_string(), String::new());
+            component.scripts = Some(ComponentScriptsConfig {
+                lint: vec!["test -f \"$CARGO_TARGET_DIR/.homeboy-lease\"".to_string()],
+                ..Default::default()
+            });
+
+            let output = run_self_checks_with_passthrough(
+                &component,
+                ExtensionCapability::Lint,
+                dir.path(),
+                false,
+            )
+            .expect("self-check should run");
+            let evidence = output.cargo_target.expect("managed target evidence");
+
+            assert!(output.success);
+            assert_eq!(evidence.resolution, "shared");
+            assert!(!Path::new(&evidence.path).join(".homeboy-lease").exists());
+        });
     }
 
     #[test]
