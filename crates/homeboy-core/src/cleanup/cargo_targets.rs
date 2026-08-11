@@ -155,19 +155,53 @@ pub fn acquire_managed_cargo_target(
         });
     }
 
-    // A commit is a cache-compatibility boundary: separate checkouts at the
-    // same revision share output, while divergent worktrees never overwrite
-    // each other's Cargo fingerprints merely because their component IDs match.
-    let compatibility = source_path
-        .to_str()
-        .and_then(|path| crate::git::get_head_commit(path).ok())
-        .unwrap_or_else(|| "unversioned".to_string());
+    let compatibility = cargo_target_repository_identity(source_path);
     let lease = acquire_shared_cargo_target(&format!("{owner}:{compatibility}"))?;
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
         resolution: "shared",
         _lease: Some(lease),
     })
+}
+
+/// Cargo itself separates compatible crate fingerprints inside one target
+/// directory. The store key therefore identifies the repository rather than a
+/// checkout path or current HEAD, allowing divergent worktrees to reuse it.
+fn cargo_target_repository_identity(source_path: &Path) -> String {
+    let remote = crate::git::resolve_default_remote(source_path);
+    let remote_url = std::process::Command::new("git")
+        .args(["config", "--get", &format!("remote.{remote}.url")])
+        .current_dir(source_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(remote_url) = remote_url {
+        return remote_url;
+    }
+
+    let common_dir = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(source_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty());
+    common_dir
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                source_path.join(path)
+            }
+        })
+        .and_then(|path| fs::canonicalize(path).ok())
+        .unwrap_or_else(|| source_path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Resolve the one shared Cargo store used by producers, cleanup, and reports.

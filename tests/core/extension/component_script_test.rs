@@ -150,6 +150,20 @@ fn homeboy_manifest_preserves_shared_cargo_target_resolution_across_checkouts() 
             .output()
             .expect("create linked worktree");
         assert!(output.status.success(), "git worktree add failed");
+        fs::write(primary.path().join("README"), "divergent fixture\n")
+            .expect("change primary checkout");
+        let output = Command::new("git")
+            .args(["add", "README"])
+            .current_dir(primary.path())
+            .output()
+            .expect("stage divergent fixture");
+        assert!(output.status.success());
+        let output = Command::new("git")
+            .args(["commit", "-qm", "diverge primary checkout"])
+            .current_dir(primary.path())
+            .output()
+            .expect("commit divergent fixture");
+        assert!(output.status.success());
 
         let mut resolved_targets = Vec::new();
         for checkout in [primary.path(), worktree.as_path()] {
