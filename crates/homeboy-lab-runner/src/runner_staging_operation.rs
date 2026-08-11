@@ -59,8 +59,9 @@ pub struct SourceArtifactTransfer {
 
 impl SourceArtifactTransfer {
     /// Packages a controller-owned source tree into the versioned runner
-    /// manifest. Traversal is lexical and deterministic; links and non-files
-    /// are refused rather than crossing a controller filesystem boundary.
+    /// manifest. Traversal is lexical and deterministic; symlinks are omitted
+    /// and special files are refused rather than crossing a controller
+    /// filesystem boundary.
     pub fn from_directory(artifact_id: impl Into<String>, root: &Path) -> Result<Self> {
         fn collect(
             root: &Path,
@@ -81,7 +82,10 @@ impl SourceArtifactTransfer {
                 let metadata = fs::symlink_metadata(&path).map_err(|error| {
                     Error::internal_io(error.to_string(), Some(path.display().to_string()))
                 })?;
-                if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
+                if !(metadata.is_file() || metadata.is_dir()) {
                     return Err(Error::validation_invalid_argument(
                         "source_path",
                         "source package accepts only regular files and directories",
@@ -122,7 +126,10 @@ impl SourceArtifactTransfer {
             Ok(())
         }
 
-        if !root.is_dir() {
+        let root_metadata = fs::symlink_metadata(root).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(root.display().to_string()))
+        })?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
             return Err(Error::validation_invalid_argument(
                 "source_path",
                 "source package root must be a readable directory",
@@ -825,5 +832,62 @@ pub(crate) mod tests_support {
             ["nested/a.txt", "z.txt"]
         );
         first.decode_verified().expect("verified package");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_tree_package_omits_external_symlinks_without_reading_targets() {
+        let source = tempfile::tempdir().expect("source");
+        let external = tempfile::tempdir().expect("external");
+        let target_bytes = b"controller-private-target-bytes";
+        let target = external.path().join("private.txt");
+        std::fs::write(&target, target_bytes).expect("target");
+        std::fs::write(source.path().join("included.txt"), b"included").expect("included");
+        std::os::unix::fs::symlink(&target, source.path().join("AGENTS.md")).expect("symlink");
+
+        let transfer = SourceArtifactTransfer::from_directory("source-1", source.path())
+            .expect("package regular files");
+        let files: BTreeMap<String, String> =
+            serde_json::from_slice(&transfer.decode_verified().expect("verified package"))
+                .expect("package files");
+
+        assert_eq!(
+            transfer
+                .package
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["included.txt"]
+        );
+        assert_eq!(
+            files.get("included.txt"),
+            Some(&base64::engine::general_purpose::STANDARD.encode(b"included"))
+        );
+        assert!(!files.contains_key("AGENTS.md"));
+        assert!(!files.values().any(|contents| {
+            base64::engine::general_purpose::STANDARD
+                .decode(contents)
+                .expect("package contents")
+                == target_bytes
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_tree_package_rejects_special_files() {
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(source.path().join("included.txt"), b"included").expect("included");
+        let socket =
+            std::os::unix::net::UnixListener::bind(source.path().join("socket")).expect("socket");
+
+        let error = SourceArtifactTransfer::from_directory("source-1", source.path())
+            .expect_err("reject special file");
+
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
+        drop(socket);
     }
 }
