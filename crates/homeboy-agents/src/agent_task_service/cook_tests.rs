@@ -3018,6 +3018,75 @@ fn cook_persists_pending_identity_when_safety_attestation_times_out() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn split_identity_timeout_persists_legacy_lookup_pending_recipe_and_retry() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let provider_dir = tempfile::tempdir().expect("provider directory");
+        let provider = provider_dir.path().join("provider");
+        std::fs::write(&provider, "#!/bin/sh\nsleep 1\n").expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 25,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve_identity: Some(vec![
+                        provider.display().to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    attest_safety: Some(vec!["true".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            },
+        );
+        homeboy_core::defaults::save_config(&config).expect("save config");
+        let cook_id = "cook-split-identity-timeout";
+        let run_id = "cook-split-identity-timeout-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.attempt_dispatcher = None;
+        options.initial_run_id = run_id.to_string();
+        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "action": "lookup_pending", "kind": "provider", "handle": options.to_worktree,
+            "worktree_provider_id": "fixture",
+        });
+
+        let result = run_cook(options, UnusedExecutor).expect("Cook records split lookup timeout");
+        assert_eq!(result.value.status, "pre_execution_failure");
+        let record = agent_task_lifecycle::status(run_id).expect("durable timeout record");
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_lookup"],
+            "timed_out"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_id"],
+            "fixture"
+        );
+        let recipe = super::super::load_recipe(cook_id).expect("durable recipe");
+        assert_eq!(
+            recipe.attempts[0].plan.metadata["cook_provision"]["worktree_provider_id"],
+            "fixture"
+        );
+        let retry = agent_task_lifecycle::retry(run_id, Some("cook-split-identity-timeout-retry"))
+            .expect("split timeout remains retryable");
+        assert_eq!(retry.metadata["retry_of"], run_id);
+    });
+}
+
 #[test]
 fn reconstruction_restores_a_materialized_pending_workspace_from_the_durable_plan() {
     let workspace = tempfile::tempdir().expect("workspace");

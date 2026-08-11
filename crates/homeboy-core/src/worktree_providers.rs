@@ -486,7 +486,11 @@ pub fn resolve_apply_enabled_worktree_provider_identity_from_config(
             continue;
         }
         match (&provider.commands.resolve_identity, &provider.commands.attest_safety) {
-            (Some(_), Some(_)) => return resolve_apply_enabled_worktree_provider_identity_by_id_from_config(handle, &provider_id, config),
+            (Some(command), Some(_)) => {
+                if let Some(identity) = run_provider_identity_command(&provider_id, provider, command, handle)? {
+                    return Ok(identity);
+                }
+            }
             (None, None) => continue,
             _ => return Err(Error::validation_invalid_argument("worktree_providers.commands", format!("worktree provider `{provider_id}` must configure both resolve_identity and attest_safety"), Some(provider_id), None)),
         }
@@ -536,7 +540,18 @@ pub fn resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
         &provider.commands.resolve_identity,
         &provider.commands.attest_safety,
     ) {
-        let identity = run_provider_identity_command(provider_id, provider, command, handle)?;
+        let identity = run_provider_identity_command(provider_id, provider, command, handle)?
+            .ok_or_else(|| {
+                let mut error = Error::validation_invalid_argument(
+                    "to_worktree",
+                    format!("worktree handle `{handle}` was not returned by persisted provider `{provider_id}`"),
+                    Some(handle.to_string()),
+                    None,
+                );
+                error.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
+                error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+                error
+            })?;
         if identity.handle != handle {
             return Err(Error::validation_invalid_argument(
                 "to_worktree",
@@ -1322,13 +1337,16 @@ fn run_provider_identity_command(
     provider: &WorktreeProviderConfig,
     command: &[String],
     handle: &str,
-) -> Result<WorktreeProviderExactIdentity> {
+) -> Result<Option<WorktreeProviderExactIdentity>> {
     let command = command
         .iter()
         .map(|argument| argument.replace("{handle}", handle))
         .collect::<Vec<_>>();
     let (payload, latency_ms, budget_ms) =
         run_provider_split_command(provider_id, provider, &command, "resolve_identity")?;
+    if split_identity_not_owned(&payload) {
+        return Ok(None);
+    }
     let identity: WorktreeProviderExactIdentity = serde_json::from_value(payload).map_err(|error| Error::validation_invalid_argument("worktree_providers.commands.resolve_identity", format!("worktree provider `{provider_id}` returned an invalid identity envelope: {error}"), Some(provider_id.to_string()), None))?;
     if identity.schema != "homeboy/worktree-provider-identity/v1"
         || identity.provider_id != provider_id
@@ -1336,11 +1354,24 @@ fn run_provider_identity_command(
     {
         return Err(Error::validation_invalid_argument("worktree_providers.commands.resolve_identity", format!("worktree provider `{provider_id}` returned an unsupported or incomplete identity envelope"), Some(provider_id.to_string()), None));
     }
-    Ok(WorktreeProviderExactIdentity {
+    Ok(Some(WorktreeProviderExactIdentity {
         latency_ms,
         budget_ms,
         ..identity
-    })
+    }))
+}
+
+/// Versioned exact resolvers may explicitly decline a handle. This is distinct
+/// from malformed output: callers continue deterministic provider probing only
+/// for these typed ownership outcomes.
+fn split_identity_not_owned(payload: &Value) -> bool {
+    matches!(
+        payload.get("status").and_then(Value::as_str),
+        Some("not_found" | "not_owned")
+    ) || matches!(
+        payload.get("ownership").and_then(Value::as_str),
+        Some("not_owned")
+    )
 }
 
 fn run_provider_safety_command(
@@ -1400,6 +1431,11 @@ fn run_provider_split_command(
     if supervised.termination != crate::engine::command::SupervisedCommandTermination::Completed {
         let mut error = Error::validation_invalid_argument("to_worktree", format!("worktree provider `{provider_id}` {operation} command timed out after {elapsed_ms} ms (configured safety/identity budget: {} ms)", timeout.as_millis()), Some(provider_id.to_string()), None);
         error.retryable = Some(true);
+        // Preserve the established deferred-Cook contract so split resolver
+        // timeouts create the same durable lookup_pending state as legacy ones.
+        error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
+        error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+        error.details["worktree_provider_operation"] = Value::String(operation.to_string());
         error.details["worktree_provider_split_operation"] = Value::String(operation.to_string());
         error.details["worktree_provider_split"] = Value::String("timed_out".to_string());
         error.details["latency_ms"] = Value::from(elapsed_ms as u64);
@@ -4940,6 +4976,36 @@ mod tests {
         )
         .expect_err("configuration drift cannot select another provider");
         assert!(error.message.contains("no longer configured"));
+    }
+
+    #[test]
+    fn split_identity_probes_multiple_providers_until_one_owns_the_exact_handle() {
+        let split_provider = |script: &str| WorktreeProviderConfig {
+            commands: WorktreeProviderCommands {
+                resolve_identity: Some(vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    script.to_string(),
+                ]),
+                attest_safety: Some(vec!["true".to_string()]),
+                ..Default::default()
+            },
+            ..default_command_provider()
+        };
+        let mut config =
+            config_with_provider(split_provider("printf '%s' '{\"status\":\"not_owned\"}'"));
+        config.worktree_providers.insert(
+            "owner".to_string(),
+            split_provider(
+                "printf '%s' '{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"owner\",\"token\":\"owner-token\",\"handle\":\"fixture@branch\",\"path\":\"/tmp/owner\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}'",
+            ),
+        );
+
+        let identity =
+            resolve_apply_enabled_worktree_provider_identity_from_config("fixture@branch", &config)
+                .expect("the owning split provider resolves after a typed miss");
+        assert_eq!(identity.provider_id, "owner");
+        assert_eq!(identity.token, "owner-token");
     }
 
     fn config_with_provider(provider: WorktreeProviderConfig) -> HomeboyConfig {
