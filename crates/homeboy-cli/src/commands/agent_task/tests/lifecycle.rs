@@ -493,11 +493,8 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
         std::fs::write(
             &promotion_provider,
             format!(
-                "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '1\\n' >> {}\ngit -C {} apply {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '1\\n' >> {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/command-result/v3\",\"success\":false,\"status\":\"failed\",\"error\":{{\"code\":\"validation.invalid_argument\",\"message\":\"promotion request is invalid\",\"details\":{{\"field\":\"promotion_provider.stdin\"}}}}}}'\n",
                 promotion_count.display(),
-                workspace.path().display(),
-                patch.display(),
-                workspace.path().display(),
             ),
         )
         .expect("write deterministic promotion provider");
@@ -615,7 +612,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 cook_or_attempt_id: cook_id.to_string(),
                 preflight: false,
                 rearm: false,
-                full: true,
+                full: false,
             },
             executor.clone(),
             |_| Ok(None),
@@ -623,10 +620,18 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
         .expect("the same cook-continue advances the terminal attempt");
         assert_eq!(
             after.1, 1,
-            "the deterministic promotion fixture surfaces its declared gate failure"
+            "the rejected provider response surfaces its durable promotion failure"
         );
         assert_eq!(std::fs::read_to_string(&promotion_count).unwrap(), "1\n");
         assert_eq!(after.0["failure_context"]["phase"], "promotion");
+        assert_eq!(
+            after.0["failure_context"]["diagnostic"],
+            json!({
+                "code": "validation.invalid_argument",
+                "field": "promotion_provider.response.schema",
+                "message": "Invalid argument 'promotion_provider.response.schema': expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/command-result/v3"
+            })
+        );
         assert_ne!(after.0["status"], "observation_in_progress");
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
 
@@ -665,9 +670,44 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
         .expect("an explicit rearm may retry the failed continuation");
         assert_eq!(rearmed.1, 1);
         assert_eq!(
+            rearmed.0["failure_context"]["phase"], "promotion",
+            "the later promotion failure supersedes the controller failure from before rearm"
+        );
+        assert_eq!(
             std::fs::read_to_string(&promotion_count).unwrap(),
-            "1\n",
-            "explicit rearm resumes the durable promotion result without reapplying its provider side effect"
+            "1\n1\n",
+            "explicit rearm retries the failed provider boundary"
+        );
+        assert_eq!(
+            rearmed.0["failure_context"]["diagnostic"]["deepest_cause"],
+            json!({
+                "code": "validation.invalid_argument",
+                "field": "promotion_provider.response.schema",
+                "message": "Invalid argument 'promotion_provider.response.schema': expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/command-result/v3"
+            }),
+            "full output retains the bounded terminal diagnostic after rearm"
+        );
+        let (diagnosis, diagnosis_exit) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose preserves the terminal failure after rearm");
+        assert_eq!(diagnosis_exit, 0);
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "validation.invalid_argument"
+        );
+        assert_eq!(
+            diagnosis["root_cause"]["field"],
+            "promotion_provider.response.schema"
+        );
+        assert_eq!(
+            diagnosis["root_cause"]["message"],
+            "Invalid argument 'promotion_provider.response.schema': expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/command-result/v3"
+        );
+        assert_ne!(
+            diagnosis["root_cause"]["source"], "controller_failure",
+            "the later promotion terminal record must outrank the stale controller diagnostic"
         );
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
     });

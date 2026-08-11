@@ -508,12 +508,59 @@ fn promote_with_operation_claim(
 fn bounded_error_diagnostic(error: &Error) -> Value {
     let mut details = homeboy_core::redaction::redact_json(&error.details);
     bound_diagnostic_value(&mut details, 0);
+    let deepest_cause = deepest_typed_error(&details).unwrap_or_else(|| {
+        serde_json::json!({
+            "code": error.code.as_str(),
+            "field": details.get("field"),
+            "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(&error.message)),
+        })
+    });
     serde_json::json!({
         "status": "failed",
         "code": format!("{:?}", error.code),
         "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(&error.message)),
         "details": details,
+        "deepest_cause": deepest_cause,
     })
+}
+
+/// A failed nested Homeboy command result is more specific than the transport
+/// error that carried it. Keep only its typed routing fields in the projection;
+/// the enclosing bounded command evidence remains available to full readers.
+fn deepest_typed_error(value: &Value) -> Option<Value> {
+    causal_typed_error(value)
+}
+
+fn typed_error_at(value: &Value) -> Option<Value> {
+    let fields = value.as_object()?;
+    (fields.get("schema").and_then(Value::as_str) == Some("homeboy/command-result/v3")
+        && fields.get("success").and_then(Value::as_bool) == Some(false))
+    .then_some(())?;
+    let error = fields.get("error")?.as_object()?;
+    let code = error.get("code")?.as_str()?;
+    let message = error.get("message")?.as_str()?;
+    Some(serde_json::json!({
+        "code": code,
+        "field": error.get("details").and_then(|details| details.get("field")),
+        "message": truncate_diagnostic_text(message),
+    }))
+}
+
+/// Only an explicitly named `cause` is causal. Provider transcripts and sibling
+/// response envelopes are evidence, not a nested failure chain.
+fn causal_typed_error(value: &Value) -> Option<Value> {
+    let fields = value.as_object()?;
+    let cause = if typed_error_at(value).is_some() {
+        fields
+            .get("error")
+            .and_then(|error| error.get("details"))
+            .and_then(|details| details.get("cause"))
+    } else {
+        fields.get("cause")
+    };
+    cause
+        .and_then(causal_typed_error)
+        .or_else(|| typed_error_at(value))
 }
 
 fn bound_diagnostic_value(value: &mut Value, depth: usize) {
@@ -3156,6 +3203,12 @@ fn durable_cook_error_report(
             context.phase = "controller".to_string();
             context.reason_code = error.code.as_str().to_string();
             context.diagnostic = Some(bounded_error_diagnostic(&error));
+            if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+                agent_task_lifecycle::record_cook_controller_failure(
+                    &options.initial_run_id,
+                    context.diagnostic.as_ref().expect("controller diagnostic"),
+                )?;
+            }
         }
         return Ok(report);
     }
@@ -4277,7 +4330,7 @@ where
         )?;
         let mut promotion = match side_effects.promote(&options, &run_id) {
             Ok(report) => report,
-            Err(_error) => {
+            Err(error) => {
                 attempts.push(AgentTaskCookAttemptReport {
                     attempt,
                     run_id: run_id.clone(),
@@ -4287,6 +4340,10 @@ where
                     feedback: None,
                 });
                 let recovery = "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string();
+                agent_task_lifecycle::record_cook_controller_failure(
+                    &run_id,
+                    &bounded_error_diagnostic(&error),
+                )?;
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "policy_failure",
