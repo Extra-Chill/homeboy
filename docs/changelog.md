@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.335.4] - 2026-08-11
+
+### Changed
+- canonicalize provider workspace fixture
+
+### Fixed
+- reject zero artifact limit
+- persist resolver timeout failures safely
+- omit continuation after convergence
+- defer timed-out worktree resolution
+- report terminal Cook liveness
+- preserve exact Cook execution accounting
+
 ## [0.335.3] - 2026-08-11
 
 ### Fixed
