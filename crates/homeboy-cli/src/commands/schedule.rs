@@ -3,6 +3,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::core::daemon;
 use homeboy::core::error::{Error, Result};
 use homeboy::core::schedule::{
     self, Cadence, ExecCommand, NotifyPolicy, OverlapPolicy, Schedule, ScheduleRunOutcome,
@@ -129,8 +130,24 @@ pub struct ScheduleView {
     /// daemon reclaims it. Keep `due` truthful while making that condition
     /// explicit and recoverable.
     stale_running: bool,
+    daemon: ScheduleDaemonHealth,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovery_command: Option<String>,
+}
+
+/// Compact daemon facts relevant to schedule execution. This intentionally
+/// omits process candidates and job details from the full daemon report.
+#[derive(Serialize)]
+pub struct ScheduleDaemonHealth {
+    running: bool,
+    fresh: bool,
+    reachable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_ref: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -177,6 +194,7 @@ fn view(schedule: Schedule) -> ScheduleView {
         .map(|next| next.to_rfc3339())
         .or_else(|| Some("due now".to_string()));
     let due = state.is_due(&schedule, chrono::Utc::now());
+    let daemon = daemon_health();
     ScheduleView {
         schedule: ScheduleSummary {
             id: schedule.id.clone(),
@@ -193,9 +211,37 @@ fn view(schedule: Schedule) -> ScheduleView {
         next_run_at,
         due,
         stale_running,
-        // The daemon owns recovery classification. Its planner reads current
-        // status and selects the safe action instead of assuming a restart.
-        recovery_command: stale_running.then(|| "homeboy daemon recover --dry-run".to_string()),
+        recovery_command: stale_running
+            .then(|| daemon.recovery_command.clone())
+            .flatten(),
+        daemon,
+    }
+}
+
+fn daemon_health() -> ScheduleDaemonHealth {
+    match daemon::read_status() {
+        Ok(status) => {
+            let plan = daemon::recovery_actions::plan_recovery(&status);
+            let recovery_command = plan.steps.first().map(|step| step.command.clone());
+            ScheduleDaemonHealth {
+                running: status.running,
+                fresh: status.fresh,
+                reachable: status.reachable,
+                stale_reason: status.stale_reason,
+                recovery_ref: recovery_command
+                    .as_ref()
+                    .map(|_| "homeboy daemon status".to_string()),
+                recovery_command,
+            }
+        }
+        Err(error) => ScheduleDaemonHealth {
+            running: false,
+            fresh: false,
+            reachable: false,
+            stale_reason: Some(format!("daemon status unavailable: {error}")),
+            recovery_command: None,
+            recovery_ref: Some("homeboy daemon status".to_string()),
+        },
     }
 }
 
@@ -492,10 +538,13 @@ mod tests {
             let output = view(schedule);
             assert!(!output.due, "skip-overlap remains single-flight");
             assert!(output.stale_running);
-            assert_eq!(
-                output.recovery_command.as_deref(),
-                Some("homeboy daemon recover --dry-run")
-            );
+            assert!(!output.daemon.running);
+            assert!(!output.daemon.reachable);
+            assert_eq!(output.recovery_command, output.daemon.recovery_command);
+            let value = serde_json::to_value(output).expect("schedule view serializes");
+            assert_eq!(value["daemon"]["running"], false);
+            assert_eq!(value["daemon"]["reachable"], false);
+            assert!(value["daemon"].get("process_candidates").is_none());
         });
     }
 }
