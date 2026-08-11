@@ -61,6 +61,15 @@ pub struct ContextOutput {
 /// Detect local working directory context.
 /// Returns info about git root, matched components, and whether directory is managed.
 pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
+    let (output, _, status) = run_with_inventory(path)?;
+    Ok((output, status))
+}
+
+/// Detect local context and return the resolved inventory used for that
+/// detection. Callers that need both facts can reuse one consistent snapshot.
+pub fn run_with_inventory(
+    path: Option<&str>,
+) -> Result<(ContextOutput, Vec<component::Component>, i32)> {
     let cwd = match path {
         Some(p) => PathBuf::from(p),
         None => std::env::current_dir().map_err(|e| Error::internal_io(e.to_string(), None))?,
@@ -204,6 +213,7 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
             project: project_ctx,
             suggestion,
         },
+        all_local_components,
         0,
     ))
 }
@@ -570,6 +580,29 @@ mod tests {
                 Some(repo.canonicalize().unwrap().to_string_lossy().to_string())
             );
             assert_eq!(output.suggestion, None);
+        });
+    }
+
+    #[test]
+    fn context_snapshot_returns_the_inventory_used_for_matching() {
+        with_isolated_home(|home| {
+            let repo = home.path().join("registered-component");
+            std::fs::create_dir_all(&repo).expect("component dir");
+            init_git(&repo);
+            write_component_registration(home.path(), "registered-component", &repo);
+
+            let (output, inventory, status) =
+                run_with_inventory(Some(repo.to_str().expect("utf8 path")))
+                    .expect("context snapshot");
+
+            assert_eq!(status, 0);
+            assert_eq!(output.matched_components, vec!["registered-component"]);
+            assert!(
+                inventory
+                    .iter()
+                    .any(|component| component.id == "registered-component"),
+                "snapshot retains the inventory record used for matching"
+            );
         });
     }
 

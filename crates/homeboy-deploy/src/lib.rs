@@ -293,6 +293,25 @@ pub fn fetch_project_remote_versions(
     ))
 }
 
+/// Deadline-aware remote-version probe for interactive project status.
+pub fn fetch_project_remote_versions_with_deadline(
+    project_id: &str,
+    components: &[component::Component],
+    deadline: std::time::Instant,
+) -> Result<RemoteVersionProbeResult> {
+    let project = project::load(project_id)?;
+    let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
+    Ok(
+        version_overrides::fetch_remote_versions_for_project_with_deadline(
+            components,
+            Some(&project),
+            &base_path,
+            &ctx.client,
+            deadline,
+        ),
+    )
+}
+
 /// Deploy components across multiple projects.
 ///
 /// Reuses a validated prepared artifact or verified release asset across targets
