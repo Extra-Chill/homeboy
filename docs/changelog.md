@@ -4,6 +4,33 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.336.1] - 2026-08-11
+
+### Changed
+- order active retention fixture
+
+### Fixed
+- isolate standard temp roots
+- preserve active checkout remediation
+- clear inherited runtime temp from tests
+- apply hermetic test environment in ci
+- isolate nextest child environments
+- make retention ownership portable
+- retain absent cargo target fixture evidence
+- share automatic artifact retention admission
+- single-flight pressured artifact retention
+- report local cargo target self-checks
+- preserve complete daemon recovery plans
+- inherit managed cargo targets for gates
+- admit component output under capacity pressure
+- share cargo targets across compatible worktrees
+- declare shared cargo targets for gates
+- scale retention admission to filesystem
+- lease shared cargo targets for component scripts
+- retry without missing labels
+- admit cargo targets through bounded retention
+- Fix shadowed install update diagnostics
+
 ## [0.336.0] - 2026-08-11
 
 ### Added
