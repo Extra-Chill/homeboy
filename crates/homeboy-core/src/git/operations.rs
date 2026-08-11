@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::Duration;
 
 use crate::config::read_json_spec_to_string;
 use crate::error::{Error, Result};
@@ -63,6 +64,62 @@ pub fn get_repo_snapshot(path: &str) -> Result<RepoSnapshot> {
 
     Ok(RepoSnapshot {
         branch,
+        clean,
+        ahead,
+        behind,
+    })
+}
+
+/// Like [`get_repo_snapshot`], but bounds every local Git subprocess.
+///
+/// Status views use this so an unavailable filesystem, hook, or Git process
+/// degrades one component rather than holding the whole interactive command.
+pub fn get_repo_snapshot_with_timeout(path: &str, timeout: Duration) -> Result<RepoSnapshot> {
+    let root = Path::new(path);
+    let deadline = std::time::Instant::now() + timeout;
+    let remaining = || {
+        deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| Error::git_command_failed("status local Git deadline exhausted"))
+    };
+    let branch = super::run_git_with_env_timeout(
+        root,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        "status git branch",
+        &[],
+        remaining()?,
+    )?;
+    let clean = super::run_git_with_env_timeout(
+        root,
+        &["status", "--porcelain=v1"],
+        "status git worktree state",
+        &[],
+        remaining()?,
+    )?
+    .is_empty();
+    let upstream = super::run_git_with_env_timeout(
+        root,
+        &["rev-parse", "--abbrev-ref", "@{upstream}"],
+        "status git upstream",
+        &[],
+        remaining()?,
+    );
+    let (ahead, behind) = upstream
+        .ok()
+        .and_then(|_| {
+            super::run_git_with_env_timeout(
+                root,
+                &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+                "status git upstream drift",
+                &[],
+                remaining().ok()?,
+            )
+            .ok()
+        })
+        .map(|counts| parse_ahead_behind(&counts))
+        .unwrap_or((None, None));
+    Ok(RepoSnapshot {
+        branch: branch.trim().to_string(),
         clean,
         ahead,
         behind,

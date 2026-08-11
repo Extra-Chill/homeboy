@@ -1401,7 +1401,7 @@ fn test_exec_reports_required_path_diagnostics() {
 }
 
 #[test]
-fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
+fn test_exec_rejects_unreachable_ssh_runner_without_diagnostic_fallback() {
     homeboy_core::test_support::with_isolated_home(|_| {
         server::create(
             r#"{"id":"lab-server","host":"192.168.86.63","user":"user"}"#,
@@ -1456,11 +1456,7 @@ fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
         .expect_err("disconnected ssh runner needs daemon or diagnostic fallback");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("connected to a daemon"));
-        let tried = err.details["tried"].as_array().expect("tried details");
-        assert!(tried.iter().any(|detail| detail
-            .as_str()
-            .is_some_and(|detail| detail.contains("job metadata"))));
+        assert!(err.message.contains("SSH connectivity check failed"));
     });
 }
 

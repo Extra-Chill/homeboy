@@ -327,8 +327,9 @@ fn prepared_workspace_metadata_hydrates_execution_source_snapshot() {
             &updated.remote_path,
             Some(&runner_root.path().display().to_string()),
         );
+        let runner = crate::load("execution-provenance").expect("runner");
         crate::hydrate_prepared_workspace_source_snapshot(
-            "execution-provenance",
+            &runner,
             &updated.remote_path,
             &mut source_snapshot,
         )
