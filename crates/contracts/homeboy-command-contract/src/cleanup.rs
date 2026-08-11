@@ -141,8 +141,13 @@ pub struct CleanupArtifactsArgs {
     /// Sort artifact candidates before reporting or applying cleanup.
     #[arg(long, value_enum, default_value = "discovery")]
     pub sort: CleanupArtifactsSortArg,
-    /// Limit artifact candidates reported or removed after sorting.
-    #[arg(long, value_name = "N")]
+    /// Limit artifact candidates reported or removed after sorting. A positive
+    /// limit ensures a continuation always makes progress.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = parse_positive_usize
+    )]
     pub limit: Option<usize>,
     /// Only reclaim artifacts from worktrees whose branch is already merged
     /// into its upstream. Preserves in-progress cooks' build dirs.
@@ -164,6 +169,15 @@ pub enum CleanupArtifactsSortArg {
     #[default]
     Discovery,
     Size,
+}
+
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let limit = value.parse::<usize>().map_err(|error| error.to_string())?;
+    if limit == 0 {
+        Err("must be at least 1".to_string())
+    } else {
+        Ok(limit)
+    }
 }
 
 #[derive(Args, Debug, PartialEq, Eq)]
@@ -361,6 +375,23 @@ mod tests {
         };
         assert_eq!(args.limit, 3);
         assert_eq!(args.cursor.as_deref(), Some("prior-reference"));
+    }
+
+    #[test]
+    fn artifact_cleanup_rejects_zero_limit_before_emitting_a_continuation() {
+        let error = match CleanupParserTest::try_parse_from([
+            "cleanup",
+            "artifacts",
+            "--limit",
+            "0",
+            "--apply",
+        ]) {
+            Ok(_) => panic!("zero would produce a non-progressing continuation"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(error.to_string().contains("must be at least 1"));
     }
 
     #[test]
