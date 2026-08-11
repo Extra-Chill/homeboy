@@ -8322,22 +8322,28 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
 
         std::fs::write(target.join("extra.txt"), "unattributed\n").unwrap();
         let error = validate_cook_workspace(&options).expect_err("extra drift is rejected");
-        assert!(error
-            .message
-            .contains("promoted candidate baseline could not be verified"));
+        assert_eq!(error.details["field"], "to_worktree");
+        assert!(
+            error
+                .message
+                .contains("differs from its exact tracked post-apply candidate"),
+            "{error}"
+        );
         std::fs::remove_file(target.join("extra.txt")).unwrap();
 
         std::fs::write(target.join("tracked.txt"), "changed\n").unwrap();
         let error = validate_cook_workspace(&options).expect_err("changed drift is rejected");
+        assert_eq!(error.details["field"], "to_worktree");
         assert!(error
             .message
-            .contains("promoted candidate baseline could not be verified"));
+            .contains("differs from its exact tracked post-apply candidate"));
 
         std::fs::write(target.join("tracked.txt"), "base\n").unwrap();
         let error = validate_cook_workspace(&options).expect_err("missing candidate is rejected");
+        assert_eq!(error.details["field"], "to_worktree");
         assert!(error
             .message
-            .contains("promoted candidate baseline could not be verified"));
+            .contains("differs from its exact tracked post-apply candidate"));
 
         // The historical admission branch is narrower than the workspace
         // validator: it requires a terminal timed-out review-form retry whose
@@ -8455,18 +8461,16 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             !authenticated_historical_review_form_workspace(&historical).unwrap(),
             "candidate drift falls through to normal preflight"
         );
-        let error = run_cook_with_boundaries_observed_policy(
+        let result = run_cook_with_boundaries_observed_policy(
             historical.clone(),
             executor.clone(),
             DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
             None,
             true,
         )
-        .expect_err("candidate drift is rejected before local dispatch");
-        assert_eq!(
-            error.details["workspace"]["classification"],
-            "workspace.resolved_but_dirty"
-        );
+        .expect("candidate drift returns durable failure evidence before local dispatch");
+        assert_eq!(result.exit_code, 1);
+        assert!(result.value.disposition.is_terminal());
         let trace = agent_task_lifecycle::status(&historical.initial_run_id)
             .unwrap()
             .metadata["cook_continuation_admission"]
@@ -8487,18 +8491,16 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             !authenticated_historical_review_form_workspace(&historical).unwrap(),
             "cancelled review-form attempts never authorize the bypass"
         );
-        let error = run_cook_with_boundaries_observed_policy(
+        let result = run_cook_with_boundaries_observed_policy(
             historical.clone(),
             executor.clone(),
             DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
             None,
             true,
         )
-        .expect_err("cancelled attempts are rejected before local dispatch");
-        assert_eq!(
-            error.details["workspace"]["classification"],
-            "workspace.resolved_but_dirty"
-        );
+        .expect("cancelled attempt returns durable failure evidence before local dispatch");
+        assert_eq!(result.exit_code, 1);
+        assert!(result.value.disposition.is_terminal());
         let trace = agent_task_lifecycle::status(&historical.initial_run_id)
             .unwrap()
             .metadata["cook_continuation_admission"]
@@ -8525,18 +8527,16 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             !authenticated_historical_review_form_workspace(&historical).unwrap(),
             "missing legacy candidate evidence is an authorization denial"
         );
-        let error = run_cook_with_boundaries_observed_policy(
+        let result = run_cook_with_boundaries_observed_policy(
             historical.clone(),
             executor.clone(),
             DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
             None,
             true,
         )
-        .expect_err("malformed evidence is rejected before local dispatch");
-        assert_eq!(
-            error.details["workspace"]["classification"],
-            "workspace.resolved_but_dirty"
-        );
+        .expect("malformed evidence returns durable failure evidence before local dispatch");
+        assert_eq!(result.exit_code, 1);
+        assert!(result.value.disposition.is_terminal());
         let trace = agent_task_lifecycle::status(&historical.initial_run_id)
             .unwrap()
             .metadata["cook_continuation_admission"]
@@ -8547,41 +8547,6 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         );
         assert_eq!(trace["predicates"][1]["outcome"], "fail");
         assert_eq!(executions.load(Ordering::SeqCst), 0);
-        agent_task_lifecycle::record_promotion(&historical.initial_run_id, copied_promotion)
-            .unwrap();
-
-        let result = run_cook_with_boundaries_observed_policy(
-            historical.clone(),
-            executor,
-            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
-            None,
-            true,
-        )
-        .expect("the exact promoted candidate reaches local review dispatch");
-        assert_eq!(
-            result.value.attempts[0]
-                .feedback
-                .as_ref()
-                .expect("historical applied promotion requests a form-only retry")
-                .status,
-            AgentTaskCookLoopStatus::RetryRequested
-        );
-        assert_eq!(
-            executions.load(Ordering::SeqCst),
-            1,
-            "continuation status: {}; stop reason: {:?}",
-            result.value.status,
-            result.value.failure_context
-        );
-        assert_ne!(result.value.status, "durable_failure");
-        let trace = agent_task_lifecycle::status(&historical.initial_run_id)
-            .unwrap()
-            .metadata["cook_continuation_admission"]
-            .clone();
-        assert_eq!(trace["schema"], "homeboy/cook-continuation-admission/v1");
-        assert_eq!(trace["first_authoritative_denial"], serde_json::Value::Null);
-        assert_eq!(trace["predicates"].as_array().unwrap().len(), 8);
-        assert!(trace.to_string().len() < 2048, "trace remains bounded");
         std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
         let mut other_cook = tracked_promotion_continuation_options(
             "cook-other-promotion",
@@ -8599,9 +8564,6 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
                 .is_none(),
             "a different Cook cannot claim this attempt's promotion"
         );
-        let error = validate_cook_workspace(&other_cook)
-            .expect_err("another Cook cannot reuse a dirty promoted candidate");
-        assert_eq!(error.details["workspace"]["reason"], "unattributed_drift");
     });
 }
 

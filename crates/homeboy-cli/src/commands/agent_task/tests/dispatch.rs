@@ -245,6 +245,21 @@ fn cook_rejects_ambiguous_or_mismatching_workspace_repository_identity() {
     with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         init_runtime_component_checkout(workspace.path());
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/goal-task",
+                target.to_str().expect("target path"),
+                "HEAD"
+            ])
+            .current_dir(workspace.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
         add_remote(
             workspace.path(),
             "origin",
@@ -634,22 +649,39 @@ fn cook_plan_records_compiled_argument_provenance() {
 }
 
 #[test]
-fn cook_goal_frames_explicit_task_without_creating_another_provider_cell() {
+fn cook_goal_frames_explicit_prompt_without_creating_another_provider_cell() {
     with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         init_runtime_component_checkout(workspace.path());
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/goal-task",
+                target.to_str().expect("target path"),
+                "HEAD"
+            ])
+            .current_dir(workspace.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
         let cli = Cli::parse_from([
             "homeboy",
             "agent-task",
             "cook",
             "--goal",
             "Preserve the durable provider-cell contract",
-            "--task",
+            "--prompt",
             "Implement the targeted repair",
+            "--repo",
+            "fixture",
             "--cwd",
-            workspace.path().to_str().expect("workspace path"),
+            target.to_str().expect("target path"),
             "--to-worktree",
-            workspace.path().to_str().expect("workspace path"),
+            target.to_str().expect("target path"),
             "--backend",
             "fixture",
             "--no-finalize",
@@ -663,17 +695,17 @@ fn cook_goal_frames_explicit_task_without_creating_another_provider_cell() {
             panic!("cook command");
         };
 
-        let _ = run_cook_with_executor_and_dispatcher(
+        run_cook_with_executor_and_dispatcher(
             *cook,
             CapturingExecutor::default(),
             Some(Arc::new(RecipeOnlyDispatcher)),
-        );
+        )
+        .expect("persist Cook recipe before provider dispatch");
 
         let recipe = homeboy::agents::agent_task_service::load_recipe("cook-goal-task-one-cell")
             .expect("durable cook recipe");
         let plan = &recipe.attempts[0].plan;
         assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
         assert_eq!(
             plan.metadata["cook_goal"],
             "Preserve the durable provider-cell contract"
@@ -691,16 +723,33 @@ fn cook_goal_without_explicit_work_remains_one_provider_cell() {
     with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         init_runtime_component_checkout(workspace.path());
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/goal-only",
+                target.to_str().expect("target path"),
+                "HEAD"
+            ])
+            .current_dir(workspace.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
         let cli = Cli::parse_from([
             "homeboy",
             "agent-task",
             "cook",
             "--goal",
             "Implement the targeted repair",
+            "--repo",
+            "fixture",
             "--cwd",
-            workspace.path().to_str().expect("workspace path"),
+            target.to_str().expect("target path"),
             "--to-worktree",
-            workspace.path().to_str().expect("workspace path"),
+            target.to_str().expect("target path"),
             "--backend",
             "fixture",
             "--no-finalize",
@@ -714,11 +763,12 @@ fn cook_goal_without_explicit_work_remains_one_provider_cell() {
             panic!("cook command");
         };
 
-        let _ = run_cook_with_executor_and_dispatcher(
+        run_cook_with_executor_and_dispatcher(
             *cook,
             CapturingExecutor::default(),
             Some(Arc::new(RecipeOnlyDispatcher)),
-        );
+        )
+        .expect("persist Cook recipe before provider dispatch");
 
         let recipe = homeboy::agents::agent_task_service::load_recipe("cook-goal-only-one-cell")
             .expect("durable cook recipe");

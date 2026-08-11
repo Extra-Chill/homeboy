@@ -2372,9 +2372,9 @@ mod tests {
         );
         assert!(lines[0].contains("cook-10419"));
         let joined = lines.join("\n");
-        assert!(joined.contains("homeboy agent-task status cook-10419-attempt-1"));
-        assert!(joined.contains("homeboy agent-task logs cook-10419-attempt-1"));
-        assert!(joined.contains("homeboy agent-task cancel cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy --placement local agent-task status cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy --placement local agent-task logs cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy --placement local agent-task cancel cook-10419-attempt-1"));
     }
 
     #[test]
