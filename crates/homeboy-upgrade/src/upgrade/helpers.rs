@@ -165,6 +165,7 @@ pub fn run_upgrade_with_method(
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "active controller".to_string()),
     )?;
+    ensure_controller_upgrade_admission()?;
     let install_method = method_override.unwrap_or_else(detect_install_method);
 
     if install_method == InstallMethod::Unknown {
@@ -741,6 +742,54 @@ fn no_installable_release_error(selection: &InstallableSelection, target: Option
     ))
     .with_hint("Inspect what this platform can install with: homeboy upgrade --check")
     .with_hint("Build from source instead with: homeboy upgrade --method source --source-path <PATH>")
+}
+
+/// Reject only ownership that remains live or cannot be verified. Stale records
+/// keep their durable audit trail and pinned runtime without blocking a binary
+/// replacement or being silently reconciled.
+fn ensure_controller_upgrade_admission() -> Result<()> {
+    let admission = super::with_controller_upgrade_admission(|provider| {
+        provider.controller_upgrade_admission()
+    })?;
+    if admission.allows_controller_replacement() {
+        let unhealthy_records = ["malformed", "legacy", "conflicting"]
+            .into_iter()
+            .map(|key| admission.record_health[key].as_u64().unwrap_or(0))
+            .sum::<u64>();
+        if unhealthy_records != 0 {
+            homeboy_core::log_status!(
+                "upgrade",
+                "agent-task record health: {} malformed, {} legacy, {} conflicting (samples capped)",
+                admission.record_health["malformed"].as_u64().unwrap_or(0),
+                admission.record_health["legacy"].as_u64().unwrap_or(0),
+                admission.record_health["conflicting"].as_u64().unwrap_or(0),
+            );
+        }
+        return Ok(());
+    }
+
+    let commands = admission
+        .blockers
+        .iter()
+        .map(|blocker| blocker.recovery_command.clone())
+        .collect::<Vec<_>>();
+    let mut error = Error::validation_invalid_argument(
+        "controller_upgrade",
+        format!(
+            "refusing to replace the controller binary while durable orchestration ownership is live or unverified: {}",
+            admission
+                .blockers
+                .iter()
+                .map(|blocker| blocker.run_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None,
+        Some(commands),
+    );
+    error.details["controller_upgrade_admission"] = serde_json::to_value(admission)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    Err(error)
 }
 
 /// Upgrade only explicitly selected runners without promoting the controller.
