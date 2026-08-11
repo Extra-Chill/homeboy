@@ -211,9 +211,12 @@ pub fn command_run_id_label(command: &str) -> Option<&str> {
         if expect_value {
             return (!token.is_empty()).then_some(token);
         }
-        if token == "--run-id" {
+        if matches!(token, "--run-id" | "--record-run-id") {
             expect_value = true;
-        } else if let Some(value) = token.strip_prefix("--run-id=") {
+        } else if let Some(value) = token
+            .strip_prefix("--run-id=")
+            .or_else(|| token.strip_prefix("--record-run-id="))
+        {
             return (!value.is_empty()).then_some(value);
         }
     }
@@ -587,5 +590,13 @@ mod dedup_tests {
             Some("cook-99")
         );
         assert_eq!(command_run_id_label("homeboy bench sample"), None);
+        assert_eq!(
+            command_run_id_label("homeboy agent-task run-plan --record-run-id cook-100"),
+            Some("cook-100")
+        );
+        assert_eq!(
+            command_run_id_label("homeboy agent-task run-plan --record-run-id=cook-101"),
+            Some("cook-101")
+        );
     }
 }

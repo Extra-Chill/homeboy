@@ -3089,21 +3089,11 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         );
     }
 
-    let next = if mode == "apply" {
-        format!("homeboy cleanup artifacts --path {}", quote_arg(root))
+    if let Some(next) = payload.get("next_command").and_then(Value::as_str) {
+        lines.push(format!("Next safe command: {next}"));
     } else {
-        payload
-            .get("next_command")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| {
-                format!(
-                    "homeboy cleanup artifacts --path {} --apply",
-                    quote_arg(root)
-                )
-            })
-    };
-    lines.push(format!("Next safe command: {next}"));
+        lines.push("Cleanup complete: no eligible candidates remain.".to_string());
+    }
     lines.push(String::new());
 
     Some(lines.join("\n"))
@@ -4803,9 +4793,32 @@ mod tests {
         assert!(summary.contains("Mode: apply\n"));
         assert!(summary.contains("Remaining candidates: 0\n"));
         assert!(summary.contains("Reclaimed: 3.0 KiB\n"));
-        assert!(
-            summary.contains("Next safe command: homeboy cleanup artifacts --path /tmp/homeboy\n")
-        );
+        assert!(summary.contains("Cleanup complete: no eligible candidates remain.\n"));
+        assert!(!summary.contains("Next safe command:"));
+    }
+
+    #[test]
+    fn cleanup_artifacts_summary_keeps_bounded_continuation() {
+        let payload = json!({
+            "command": "cleanup.artifacts",
+            "mode": "apply",
+            "root": "/tmp/homeboy",
+            "candidate_count": 2,
+            "skipped_count": 0,
+            "applied_count": 2,
+            "remaining_count": 1,
+            "estimated_bytes": 4096,
+            "reclaimed_bytes": 3072,
+            "next_command": "homeboy cleanup artifacts --path /tmp/homeboy --limit 2 --apply",
+            "skipped": []
+        });
+
+        let summary = render_artifact_cleanup_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Remaining candidates: 1\n"));
+        assert!(summary.contains(
+            "Next safe command: homeboy cleanup artifacts --path /tmp/homeboy --limit 2 --apply\n"
+        ));
     }
 
     #[test]

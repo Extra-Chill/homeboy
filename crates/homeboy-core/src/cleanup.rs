@@ -383,8 +383,9 @@ pub struct ArtifactCleanupOutput {
     /// are what an operator watching free space actually gets back.
     pub estimated_allocated_bytes: u64,
     pub reclaimed_allocated_bytes: u64,
-    /// Replays the reviewed cleanup scope with mutation explicitly enabled.
-    pub next_command: String,
+    /// Replays the reviewed cleanup scope while eligible artifacts remain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
     pub summary: ArtifactCleanupSummary,
     pub worktrees: Vec<ArtifactCleanupWorktreeSummary>,
     pub candidates: Vec<ArtifactCleanupCandidate>,
@@ -958,7 +959,8 @@ fn cleanup_artifacts_in_worktrees(
     candidates
         .retain(|candidate| seen_artifacts.insert(canonical_or_owned(Path::new(&candidate.path))));
 
-    order_and_limit_candidates(&mut candidates, options.sort, options.limit);
+    let bounded_candidates =
+        order_and_limit_candidates(&mut candidates, options.sort, options.limit);
 
     let cleanup_run = options
         .apply
@@ -995,6 +997,10 @@ fn cleanup_artifacts_in_worktrees(
     let failure_count = failed.len();
     let (remaining_count, remaining_candidate_bytes) =
         remaining_candidate_totals(&candidates, options.apply);
+    let (bounded_remaining_count, bounded_remaining_bytes) =
+        remaining_candidate_totals(&bounded_candidates, false);
+    let remaining_count = remaining_count + bounded_remaining_count;
+    let remaining_candidate_bytes = remaining_candidate_bytes + bounded_remaining_bytes;
     let summary = cleanup_summary(
         &root,
         options.apply,
@@ -1018,7 +1024,7 @@ fn cleanup_artifacts_in_worktrees(
         reclaimed_bytes,
         estimated_allocated_bytes,
         reclaimed_allocated_bytes,
-        next_command: artifact_cleanup_apply_command(options),
+        next_command: (remaining_count > 0).then(|| artifact_cleanup_apply_command(options)),
         summary,
         worktrees: worktree_rows,
         candidates,
@@ -1169,7 +1175,7 @@ fn order_and_limit_candidates(
     candidates: &mut Vec<ArtifactCleanupCandidate>,
     sort: ArtifactCleanupSort,
     limit: Option<usize>,
-) {
+) -> Vec<ArtifactCleanupCandidate> {
     if sort == ArtifactCleanupSort::Size {
         candidates.sort_by(|left, right| {
             right
@@ -1184,9 +1190,10 @@ fn order_and_limit_candidates(
         });
     }
 
-    if let Some(limit) = limit {
-        candidates.truncate(limit);
-    }
+    limit
+        .filter(|&limit| candidates.len() > limit)
+        .map(|limit| candidates.split_off(limit))
+        .unwrap_or_default()
 }
 
 fn cleanup_summary(
@@ -2866,6 +2873,32 @@ mod tests {
     }
 
     #[test]
+    fn zero_candidate_dry_run_omits_continuation() {
+        let repo = git_repo();
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: false,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
+            merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
+        })
+        .expect("dry-run cleanup");
+
+        assert_eq!(output.candidate_count, 0);
+        assert_eq!(output.remaining_count, 0);
+        assert!(output.next_command.is_none());
+        assert!(serde_json::to_value(output)
+            .expect("serialize output")
+            .get("next_command")
+            .is_none());
+    }
+
+    #[test]
     fn dry_run_reports_artifact_candidates_across_worktrees() {
         let repo = git_repo();
         let sibling_parent = TempDir::new().expect("sibling parent");
@@ -2969,6 +3002,8 @@ mod tests {
         assert_eq!(paths, vec!["node_modules", "dist"]);
         assert_eq!(output.candidate_count, 2);
         assert_eq!(output.applied_count, 2);
+        assert_eq!(output.remaining_count, 1);
+        assert!(output.next_command.is_some());
         assert!(!repo.path().join("node_modules").exists());
         assert!(!repo.path().join("dist").exists());
         assert!(repo.path().join("target/debug/app").exists());
@@ -2995,6 +3030,8 @@ mod tests {
 
         assert_eq!(output.mode, "apply");
         assert_eq!(output.applied_count, 1);
+        assert_eq!(output.remaining_count, 0);
+        assert!(output.next_command.is_none());
         assert!(!repo.path().join("target").exists());
         assert_eq!(
             fs::read_to_string(repo.path().join("src/lib.rs")).expect("read source"),
@@ -3368,6 +3405,8 @@ mod tests {
         assert!(output.skipped.iter().any(|row| {
             row.relative_path == "target" && row.reason.contains("not merged into its upstream")
         }));
+        assert_eq!(output.remaining_count, 0);
+        assert!(output.next_command.is_none());
     }
 
     #[test]
