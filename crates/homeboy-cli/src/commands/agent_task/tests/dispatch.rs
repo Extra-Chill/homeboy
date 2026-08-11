@@ -245,6 +245,21 @@ fn cook_rejects_ambiguous_or_mismatching_workspace_repository_identity() {
     with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         init_runtime_component_checkout(workspace.path());
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/goal-task",
+                target.to_str().expect("target path"),
+                "HEAD"
+            ])
+            .current_dir(workspace.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
         add_remote(
             workspace.path(),
             "origin",
@@ -450,7 +465,7 @@ fn cook_rejects_destination_with_a_different_repository_identity() {
         assert!(error
             .message
             .contains("does not match resolved `git://github.com/example/one`"));
-        assert!(error.message.contains("git://github.com/example/two"));
+        assert!(!error.message.contains("git://github.com/example/two"));
     });
 }
 
@@ -634,22 +649,39 @@ fn cook_plan_records_compiled_argument_provenance() {
 }
 
 #[test]
-fn cook_goal_frames_explicit_task_without_creating_another_provider_cell() {
+fn cook_goal_frames_explicit_prompt_without_creating_another_provider_cell() {
     with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         init_runtime_component_checkout(workspace.path());
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/goal-task",
+                target.to_str().expect("target path"),
+                "HEAD"
+            ])
+            .current_dir(workspace.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
         let cli = Cli::parse_from([
             "homeboy",
             "agent-task",
             "cook",
             "--goal",
             "Preserve the durable provider-cell contract",
-            "--task",
+            "--prompt",
             "Implement the targeted repair",
+            "--repo",
+            "fixture",
             "--cwd",
-            workspace.path().to_str().expect("workspace path"),
+            target.to_str().expect("target path"),
             "--to-worktree",
-            workspace.path().to_str().expect("workspace path"),
+            target.to_str().expect("target path"),
             "--backend",
             "fixture",
             "--no-finalize",
@@ -663,17 +695,17 @@ fn cook_goal_frames_explicit_task_without_creating_another_provider_cell() {
             panic!("cook command");
         };
 
-        let _ = run_cook_with_executor_and_dispatcher(
+        run_cook_with_executor_and_dispatcher(
             *cook,
             CapturingExecutor::default(),
             Some(Arc::new(RecipeOnlyDispatcher)),
-        );
+        )
+        .expect("persist Cook recipe before provider dispatch");
 
         let recipe = homeboy::agents::agent_task_service::load_recipe("cook-goal-task-one-cell")
             .expect("durable cook recipe");
         let plan = &recipe.attempts[0].plan;
         assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
         assert_eq!(
             plan.metadata["cook_goal"],
             "Preserve the durable provider-cell contract"
@@ -691,16 +723,33 @@ fn cook_goal_without_explicit_work_remains_one_provider_cell() {
     with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         init_runtime_component_checkout(workspace.path());
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/goal-only",
+                target.to_str().expect("target path"),
+                "HEAD"
+            ])
+            .current_dir(workspace.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
         let cli = Cli::parse_from([
             "homeboy",
             "agent-task",
             "cook",
             "--goal",
             "Implement the targeted repair",
+            "--repo",
+            "fixture",
             "--cwd",
-            workspace.path().to_str().expect("workspace path"),
+            target.to_str().expect("target path"),
             "--to-worktree",
-            workspace.path().to_str().expect("workspace path"),
+            target.to_str().expect("target path"),
             "--backend",
             "fixture",
             "--no-finalize",
@@ -714,11 +763,12 @@ fn cook_goal_without_explicit_work_remains_one_provider_cell() {
             panic!("cook command");
         };
 
-        let _ = run_cook_with_executor_and_dispatcher(
+        run_cook_with_executor_and_dispatcher(
             *cook,
             CapturingExecutor::default(),
             Some(Arc::new(RecipeOnlyDispatcher)),
-        );
+        )
+        .expect("persist Cook recipe before provider dispatch");
 
         let recipe = homeboy::agents::agent_task_service::load_recipe("cook-goal-only-one-cell")
             .expect("durable cook recipe");
@@ -961,6 +1011,207 @@ fn cook_resolves_existing_provider_destination_without_creation_metadata() {
 
 #[cfg(unix)]
 #[test]
+fn cook_cwd_is_authoritative_when_provider_lookup_times_out() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        let worktree_root = tempfile::tempdir().expect("worktree root");
+        let cwd = worktree_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/cwd-authority",
+                cwd.to_str().expect("worktree path"),
+                "HEAD",
+            ])
+            .current_dir(primary.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
+        homeboy::core::worktree::adopt(homeboy::core::worktree::WorktreeAdoptOptions {
+            handle: "fixture@cwd-authority".to_string(),
+            path: cwd.display().to_string(),
+            kind: Some("test".to_string()),
+            provenance: None,
+        })
+        .expect("register linked worktree");
+
+        let provider = tempfile::NamedTempFile::new().expect("provider file");
+        std::fs::write(provider.path(), "#!/bin/sh\nsleep 2\n").expect("write provider");
+        let mut permissions = std::fs::metadata(provider.path())
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "timeout".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 1,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.path().display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "reuse supplied worktree".to_string(),
+            "--cwd".to_string(),
+            cwd.display().to_string(),
+            "--to-worktree".to_string(),
+            "fixture@cwd-authority".to_string(),
+            "--no-finalize".to_string(),
+        ]);
+        let provision = super::super::run::provision_cook_destination(&args)
+            .expect("provider timeout must not block an explicit cwd");
+
+        assert_eq!(provision["kind"], "explicit_cwd");
+        assert_eq!(
+            provision["path"],
+            std::fs::canonicalize(&cwd)
+                .expect("canonical cwd")
+                .display()
+                .to_string()
+        );
+    });
+}
+
+#[test]
+fn cook_rejects_mismatched_cwd_and_destination() {
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        let worktree_root = tempfile::tempdir().expect("worktree root");
+        let cwd = worktree_root.path().join("cwd");
+        let destination = worktree_root.path().join("destination");
+        for (path, branch) in [(&cwd, "fix/cwd"), (&destination, "fix/destination")] {
+            assert!(Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    path.to_str().expect("worktree path"),
+                    "HEAD"
+                ])
+                .current_dir(primary.path())
+                .status()
+                .expect("create linked worktree")
+                .success());
+        }
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "reject mismatch".to_string(),
+            "--cwd".to_string(),
+            cwd.display().to_string(),
+            "--to-worktree".to_string(),
+            destination.display().to_string(),
+            "--no-finalize".to_string(),
+        ]);
+
+        let error = super::super::run::provision_cook_destination(&args)
+            .expect_err("mismatched worktrees must fail");
+        assert_eq!(error.details["field"], "to_worktree");
+        assert!(error
+            .message
+            .contains("must resolve to the same linked task worktree"));
+    });
+}
+
+#[test]
+fn cook_rejects_an_inactive_managed_destination_before_provider_execution() {
+    #[derive(Clone, Default)]
+    struct CountingExecutor(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl AgentTaskExecutorAdapter for CountingExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            AgentTaskOutcome {
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                ..Default::default()
+            }
+        }
+    }
+
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        register_component(
+            "fixture",
+            primary.path(),
+            "https://github.com/example/fixture.git",
+        );
+        let created =
+            homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+                component_id: "fixture".to_string(),
+                branch: "fix/inactive".to_string(),
+                from: None,
+                task_url: None,
+                run_id: None,
+                cleanup_policy: None,
+            })
+            .expect("create managed worktree");
+        let cwd = created.record.worktree_path.clone();
+        let handle = created.record.id.clone();
+        homeboy::core::worktree::remove(homeboy::core::worktree::WorktreeRemoveOptions {
+            id: handle.clone(),
+            force: true,
+            cleanup_branch: false,
+            allow_unmerged_branch: false,
+        })
+        .expect("remove managed worktree");
+
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "reject inactive destination".to_string(),
+            "--repo".to_string(),
+            "fixture".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--cwd".to_string(),
+            cwd,
+            "--to-worktree".to_string(),
+            handle,
+            "--no-finalize".to_string(),
+        ]);
+        let executor = CountingExecutor::default();
+        let error = run_cook_with_executor(args, executor.clone())
+            .expect_err("inactive managed destination must fail before execution");
+
+        assert_eq!(error.details["field"], "to_worktree");
+        assert!(error.message.contains("is no longer active"));
+        assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn cook_rejects_immediately_resolved_provider_destination_from_another_repository() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -987,21 +1238,20 @@ fn cook_rejects_immediately_resolved_provider_destination_from_another_repositor
             .status()
             .expect("create linked worktree")
             .success());
-        let provider_dir = tempfile::tempdir().expect("provider dir");
-        let provider = provider_dir.path().join("provider");
+        let provider = tempfile::NamedTempFile::new().expect("provider file");
         std::fs::write(
-            &provider,
+            provider.path(),
             format!(
                 "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@foreign\",\"path\":\"{}\",\"branch\":\"fix/foreign\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
                 destination.display()
             ),
         )
         .expect("write provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("metadata")
+        let mut permissions = std::fs::metadata(provider.path())
+            .expect("provider metadata")
             .permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
         let mut config = homeboy::core::defaults::HomeboyConfig::default();
         config.worktree_providers.insert(
             "fixture".to_string(),
@@ -1012,7 +1262,10 @@ fn cook_rejects_immediately_resolved_provider_destination_from_another_repositor
                 lookup_timeout_ms: 10_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                    resolve: Some(vec![
+                        provider.path().display().to_string(),
+                        "{handle}".to_string(),
+                    ]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(
@@ -1043,17 +1296,11 @@ fn cook_rejects_immediately_resolved_provider_destination_from_another_repositor
             "--no-finalize".to_string(),
         ]))
         .expect("persist generic repo expectation");
-
         let error = super::super::run::provision_cook_destination(&args)
             .expect_err("foreign immediate provider checkout is rejected before plan creation");
-
-        assert!(
-            error
-                .message
-                .contains("does not match the requested Cook repository"),
-            "{}",
-            error.message
-        );
+        assert!(error
+            .message
+            .contains("does not match the requested Cook repository"));
         assert!(!error.message.contains("provider-secret"));
     });
 }

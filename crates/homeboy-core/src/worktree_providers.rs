@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::defaults::{
     self, HomeboyConfig, WorktreeProviderConfig, WorktreeProviderKind,
@@ -160,6 +161,40 @@ pub struct WorktreeProviderHandle {
 pub struct WorktreeProviderResolution {
     pub provider_id: String,
     pub worktree: WorktreeProviderHandle,
+}
+
+/// Exact provider identity, intentionally separate from mutable workspace
+/// safety. `token` is opaque to Homeboy and is the sole value accepted by a
+/// versioned provider safety command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeProviderExactIdentity {
+    pub schema: String,
+    pub provider_id: String,
+    pub token: String,
+    pub handle: String,
+    pub path: String,
+    pub branch: String,
+    pub primary: bool,
+    pub latency_ms: u128,
+    pub budget_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeProviderSafetyAttestation {
+    pub schema: String,
+    pub identity_token: String,
+    pub observed_at: String,
+    pub dirty: bool,
+    pub unpushed: bool,
+    pub fresh: bool,
+    pub latency_ms: u128,
+    pub budget_ms: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProviderSplitResolution {
+    pub identity: WorktreeProviderExactIdentity,
+    pub safety: WorktreeProviderSafetyAttestation,
 }
 
 /// Explicit destination inputs required to create a managed worktree without
@@ -412,6 +447,215 @@ pub fn resolve_apply_enabled_worktree_provider_by_id_from_config(
     })
 }
 
+/// Resolve exact identity then obtain current safety evidence. Providers that
+/// have not adopted the split commands continue through the established
+/// combined resolver, which is deliberately retained as a compatibility adapter.
+pub fn resolve_apply_enabled_worktree_provider_split_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderSplitResolution> {
+    let identity = resolve_apply_enabled_worktree_provider_identity_from_config(handle, config)?;
+    let safety = attest_apply_enabled_worktree_provider_safety_from_config(&identity, config)?;
+    if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "worktree provider safety attestation is not safe for mutation",
+            Some(handle.to_string()),
+            None,
+        ));
+    }
+    Ok(WorktreeProviderSplitResolution { identity, safety })
+}
+
+/// Resolve only an exact provider workspace identity. This operation performs
+/// no cleanliness or freshness assertion and is safe to persist before safety
+/// evidence becomes available.
+pub fn resolve_apply_enabled_worktree_provider_identity_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderExactIdentity> {
+    let mut provider_ids = config
+        .worktree_providers
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    for provider_id in provider_ids {
+        let provider = &config.worktree_providers[&provider_id];
+        if !provider.enabled || !provider.apply_enabled {
+            continue;
+        }
+        match (&provider.commands.resolve_identity, &provider.commands.attest_safety) {
+            (Some(command), Some(_)) => {
+                if let Some(identity) = run_provider_identity_command(&provider_id, provider, command, handle)? {
+                    return Ok(identity);
+                }
+            }
+            (None, None) => continue,
+            _ => return Err(Error::validation_invalid_argument("worktree_providers.commands", format!("worktree provider `{provider_id}` must configure both resolve_identity and attest_safety"), Some(provider_id), None)),
+        }
+    }
+    let started = std::time::Instant::now();
+    let resolution = resolve_apply_enabled_worktree_provider_from_config(handle, config, None)?;
+    let elapsed_ms = started.elapsed().as_millis();
+    let token = compatibility_identity_token(&resolution);
+    Ok(WorktreeProviderExactIdentity {
+        schema: "homeboy/worktree-provider-identity/v1".to_string(),
+        provider_id: resolution.provider_id.clone(),
+        token: token.clone(),
+        handle: resolution.worktree.handle.clone(),
+        path: resolution.worktree.path.clone(),
+        branch: resolution.worktree.branch.clone(),
+        primary: resolution.worktree.safety.primary,
+        latency_ms: elapsed_ms,
+        budget_ms: config.worktree_providers[&resolution.provider_id].lookup_timeout_ms as u128,
+    })
+}
+
+/// Re-resolve an exact identity only through the provider persisted by Cook.
+/// This prevents provider ordering or unrelated configuration changes from
+/// changing a durable lookup's authority during continuation.
+pub fn resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+    handle: &str,
+    provider_id: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderExactIdentity> {
+    let provider = config.worktree_providers.get(provider_id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "worktree_provider",
+            "persisted worktree provider is no longer configured",
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    if !provider.enabled || !provider.apply_enabled {
+        return Err(Error::validation_invalid_argument(
+            "worktree_provider",
+            "persisted worktree provider is no longer enabled and apply-enabled",
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    if let (Some(command), Some(_)) = (
+        &provider.commands.resolve_identity,
+        &provider.commands.attest_safety,
+    ) {
+        let identity = run_provider_identity_command(provider_id, provider, command, handle)?
+            .ok_or_else(|| {
+                let mut error = Error::validation_invalid_argument(
+                    "to_worktree",
+                    format!("worktree handle `{handle}` was not returned by persisted provider `{provider_id}`"),
+                    Some(handle.to_string()),
+                    None,
+                );
+                error.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
+                error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+                error
+            })?;
+        if identity.handle != handle {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "worktree provider identity did not resolve the declared exact handle",
+                Some(handle.to_string()),
+                None,
+            ));
+        }
+        return Ok(identity);
+    }
+    if provider.commands.resolve_identity.is_some() || provider.commands.attest_safety.is_some() {
+        return Err(Error::validation_invalid_argument("worktree_providers.commands", format!("worktree provider `{provider_id}` must configure both resolve_identity and attest_safety"), Some(provider_id.to_string()), None));
+    }
+    let started = std::time::Instant::now();
+    let resolution =
+        resolve_apply_enabled_worktree_provider_by_id_from_config(handle, provider_id, config)?;
+    let elapsed_ms = started.elapsed().as_millis();
+    let token = compatibility_identity_token(&resolution);
+    Ok(WorktreeProviderExactIdentity {
+        schema: "homeboy/worktree-provider-identity/v1".to_string(),
+        provider_id: resolution.provider_id.clone(),
+        token,
+        handle: resolution.worktree.handle.clone(),
+        path: resolution.worktree.path.clone(),
+        branch: resolution.worktree.branch.clone(),
+        primary: resolution.worktree.safety.primary,
+        latency_ms: elapsed_ms,
+        budget_ms: provider.lookup_timeout_ms as u128,
+    })
+}
+
+/// Attest safety for a previously persisted exact identity. A versioned
+/// provider receives only its opaque token; the compatibility adapter rechecks
+/// the same exact handle and rejects any identity drift.
+pub fn attest_apply_enabled_worktree_provider_safety_from_config(
+    identity: &WorktreeProviderExactIdentity,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderSafetyAttestation> {
+    let provider = config
+        .worktree_providers
+        .get(&identity.provider_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "worktree_provider",
+                "identity provider is no longer configured",
+                Some(identity.provider_id.clone()),
+                None,
+            )
+        })?;
+    if !provider.enabled || !provider.apply_enabled {
+        return Err(Error::validation_invalid_argument(
+            "worktree_provider",
+            "identity provider is no longer apply-enabled",
+            Some(identity.provider_id.clone()),
+            None,
+        ));
+    }
+    if let Some(command) = &provider.commands.attest_safety {
+        let safety =
+            run_provider_safety_command(&identity.provider_id, provider, command, &identity.token)?;
+        if safety.identity_token != identity.token {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "worktree provider safety evidence is bound to a different exact identity",
+                Some(identity.handle.clone()),
+                None,
+            ));
+        }
+        return Ok(safety);
+    }
+    let started = std::time::Instant::now();
+    let resolution = resolve_apply_enabled_worktree_provider_by_id_from_config(
+        &identity.handle,
+        &identity.provider_id,
+        config,
+    )?;
+    if resolution.provider_id != identity.provider_id
+        || compatibility_identity_token(&resolution) != identity.token
+    {
+        return Err(Error::validation_invalid_argument("to_worktree", "combined worktree provider safety evidence no longer matches the persisted exact identity", Some(identity.handle.clone()), None));
+    }
+    Ok(WorktreeProviderSafetyAttestation {
+        schema: "homeboy/worktree-provider-safety/v1".to_string(),
+        identity_token: identity.token.clone(),
+        observed_at: chrono::Utc::now().to_rfc3339(),
+        dirty: resolution.worktree.safety.dirty,
+        unpushed: resolution.worktree.safety.unpushed,
+        fresh: true,
+        latency_ms: started.elapsed().as_millis(),
+        budget_ms: provider.lookup_timeout_ms as u128,
+    })
+}
+
+fn compatibility_identity_token(resolution: &WorktreeProviderResolution) -> String {
+    let mut digest = Sha256::new();
+    digest.update(resolution.provider_id.as_bytes());
+    digest.update([0]);
+    digest.update(resolution.worktree.handle.as_bytes());
+    digest.update([0]);
+    digest.update(resolution.worktree.path.as_bytes());
+    digest.update([0]);
+    digest.update(resolution.worktree.branch.as_bytes());
+    format!("compat-v1:{:x}", digest.finalize())
+}
 /// Find the sole apply-enabled provider worktree owned by a tracker URL.
 /// Providers must map `task_url` to participate, preserving existing provider
 /// configurations that only support handle-based lookup.
@@ -1086,6 +1330,191 @@ fn run_provider_resolve_command(
         "resolve",
         &provider.commands.resolve_not_found_exit_codes,
     )
+}
+
+fn run_provider_identity_command(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+    handle: &str,
+) -> Result<Option<WorktreeProviderExactIdentity>> {
+    let command = command
+        .iter()
+        .map(|argument| argument.replace("{handle}", handle))
+        .collect::<Vec<_>>();
+    let (payload, latency_ms, budget_ms) =
+        run_provider_split_command(provider_id, provider, &command, "resolve_identity")?;
+    if split_identity_not_owned(&payload) {
+        return Ok(None);
+    }
+    let identity: WorktreeProviderExactIdentity = serde_json::from_value(payload).map_err(|error| Error::validation_invalid_argument("worktree_providers.commands.resolve_identity", format!("worktree provider `{provider_id}` returned an invalid identity envelope: {error}"), Some(provider_id.to_string()), None))?;
+    if identity.schema != "homeboy/worktree-provider-identity/v1"
+        || identity.provider_id != provider_id
+        || identity.token.trim().is_empty()
+    {
+        return Err(Error::validation_invalid_argument("worktree_providers.commands.resolve_identity", format!("worktree provider `{provider_id}` returned an unsupported or incomplete identity envelope"), Some(provider_id.to_string()), None));
+    }
+    validate_split_identity(provider_id, handle, &identity)?;
+    Ok(Some(WorktreeProviderExactIdentity {
+        latency_ms,
+        budget_ms,
+        ..identity
+    }))
+}
+
+/// Split identity output is provider input, not an authority bypass. Prove the
+/// exact requested handle names the claimed canonical linked checkout before it
+/// can be selected or persisted.
+fn validate_split_identity(
+    provider_id: &str,
+    requested_handle: &str,
+    identity: &WorktreeProviderExactIdentity,
+) -> Result<()> {
+    if identity.handle != requested_handle {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands.resolve_identity",
+            format!(
+                "worktree provider `{provider_id}` resolved requested handle `{requested_handle}` as different handle `{}`",
+                identity.handle
+            ),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    if identity.branch.trim().is_empty() || identity.primary {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands.resolve_identity",
+            format!("worktree provider `{provider_id}` returned unsafe linked-worktree metadata for `{requested_handle}`"),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    let path = std::path::Path::new(&identity.path);
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "worktree_providers.commands.resolve_identity",
+            format!("worktree provider `{provider_id}` returned an unresolvable checkout for `{requested_handle}`: {error}"),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    if canonical != path {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands.resolve_identity",
+            format!("worktree provider `{provider_id}` returned a non-canonical checkout path for `{requested_handle}`"),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    validate_task_worktree_root(&canonical, requested_handle)?;
+    if crate::git::current_branch(&canonical).as_deref() != Some(identity.branch.as_str()) {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands.resolve_identity",
+            format!("worktree provider `{provider_id}` branch metadata for `{requested_handle}` does not match the checkout branch"),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Versioned exact resolvers may explicitly decline a handle. This is distinct
+/// from malformed output: callers continue deterministic provider probing only
+/// for these typed ownership outcomes.
+fn split_identity_not_owned(payload: &Value) -> bool {
+    matches!(
+        payload.get("status").and_then(Value::as_str),
+        Some("not_found" | "not_owned")
+    ) || matches!(
+        payload.get("ownership").and_then(Value::as_str),
+        Some("not_owned")
+    )
+}
+
+fn run_provider_safety_command(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+    token: &str,
+) -> Result<WorktreeProviderSafetyAttestation> {
+    let command = command
+        .iter()
+        .map(|argument| argument.replace("{identity}", token))
+        .collect::<Vec<_>>();
+    let (payload, latency_ms, budget_ms) =
+        run_provider_split_command(provider_id, provider, &command, "attest_safety")?;
+    let safety: WorktreeProviderSafetyAttestation = serde_json::from_value(payload).map_err(|error| Error::validation_invalid_argument("worktree_providers.commands.attest_safety", format!("worktree provider `{provider_id}` returned an invalid safety envelope: {error}"), Some(provider_id.to_string()), None))?;
+    if safety.schema != "homeboy/worktree-provider-safety/v1"
+        || safety.identity_token.trim().is_empty()
+        || safety.observed_at.trim().is_empty()
+    {
+        return Err(Error::validation_invalid_argument("worktree_providers.commands.attest_safety", format!("worktree provider `{provider_id}` returned an unsupported or incomplete safety envelope"), Some(provider_id.to_string()), None));
+    }
+    Ok(WorktreeProviderSafetyAttestation {
+        latency_ms,
+        budget_ms,
+        ..safety
+    })
+}
+
+fn run_provider_split_command(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+    operation: &str,
+) -> Result<(Value, u128, u128)> {
+    let timeout = provider_lookup_timeout(provider)?;
+    let output_limit = provider_lookup_output_limit(provider)?;
+    let (program, args) = command.split_first().filter(|(program, _)| !program.trim().is_empty()).ok_or_else(|| Error::validation_invalid_argument("worktree_providers.commands", format!("worktree provider `{provider_id}` {operation} command must include an executable"), Some(provider_id.to_string()), None))?;
+    let mut process = Command::new(program);
+    process
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::engine::command::isolate_process_tree(&mut process);
+    let mut child = process.spawn().map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` {operation} command could not start: {error}"
+            ),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    let started = std::time::Instant::now();
+    let supervised = crate::engine::command::wait_with_bounded_output_supervised(&mut child, output_limit, timeout, Duration::from_millis(100), || false, |_, _| Ok(())).map_err(|error| Error::validation_invalid_argument("to_worktree", format!("worktree provider `{provider_id}` {operation} command could not be supervised: {error}"), Some(provider_id.to_string()), None))?;
+    let elapsed_ms = started.elapsed().as_millis();
+    if supervised.termination != crate::engine::command::SupervisedCommandTermination::Completed {
+        let mut error = Error::validation_invalid_argument("to_worktree", format!("worktree provider `{provider_id}` {operation} command timed out after {elapsed_ms} ms (configured safety/identity budget: {} ms)", timeout.as_millis()), Some(provider_id.to_string()), None);
+        error.retryable = Some(true);
+        // Preserve the established deferred-Cook contract so split resolver
+        // timeouts create the same durable lookup_pending state as legacy ones.
+        error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
+        error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+        error.details["worktree_provider_operation"] = Value::String(operation.to_string());
+        error.details["worktree_provider_split_operation"] = Value::String(operation.to_string());
+        error.details["worktree_provider_split"] = Value::String("timed_out".to_string());
+        error.details["latency_ms"] = Value::from(elapsed_ms as u64);
+        error.details["budget_ms"] = Value::from(timeout.as_millis() as u64);
+        return Err(error);
+    }
+    let output = supervised.output;
+    if output.capture.stdout.truncated {
+        return Err(Error::validation_invalid_argument("to_worktree", format!("worktree provider `{provider_id}` {operation} command output exceeded configured lookup_output_limit_bytes"), Some(provider_id.to_string()), None));
+    }
+    let output = output.into_output();
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument_with_evidence(
+            "to_worktree",
+            format!("worktree provider `{provider_id}` {operation} command failed"),
+            Some(provider_id.to_string()),
+            None,
+            Some(provider_command_evidence(command, &output)),
+        ));
+    }
+    let payload = serde_json::from_slice(&output.stdout).map_err(|error| Error::validation_invalid_argument("to_worktree", format!("worktree provider `{provider_id}` {operation} command returned invalid JSON: {error}"), Some(provider_id.to_string()), None))?;
+    Ok((payload, elapsed_ms, timeout.as_millis()))
 }
 
 fn run_provider_resolve_path_command(
@@ -4593,6 +5022,160 @@ mod tests {
         );
     }
 
+    #[test]
+    fn split_identity_survives_a_timed_out_safety_attestation() {
+        let (_root, workspace) = linked_workspace("branch");
+        let mut provider = default_command_provider();
+        provider.lookup_timeout_ms = 25;
+        provider.commands.resolve_identity = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"opaque-identity\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'", workspace.display()),
+        ]);
+        provider.commands.attest_safety = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "sleep 1; printf '%s' '{}'".to_string(),
+        ]);
+        let config = config_with_provider(provider);
+
+        let identity =
+            resolve_apply_enabled_worktree_provider_identity_from_config("fixture@branch", &config)
+                .expect("cheap exact identity is available");
+        let error = attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config)
+            .expect_err("bounded safety probe times out");
+
+        assert_eq!(identity.token, "opaque-identity");
+        assert_eq!(error.details["worktree_provider_split"], "timed_out");
+        assert_eq!(
+            error.details["worktree_provider_split_operation"],
+            "attest_safety"
+        );
+    }
+
+    #[test]
+    fn split_provider_rejects_safety_evidence_for_a_different_identity() {
+        let (_root, workspace) = linked_workspace("branch");
+        let mut provider = default_command_provider();
+        provider.commands.resolve_identity = Some(vec![
+            "sh".to_string(), "-c".to_string(),
+            format!("printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"opaque-identity\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'", workspace.display()),
+        ]);
+        provider.commands.attest_safety = Some(vec![
+            "sh".to_string(), "-c".to_string(),
+            "printf '%s' '{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"other\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":false,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}'".to_string(),
+        ]);
+        let error = resolve_apply_enabled_worktree_provider_split_from_config(
+            "fixture@branch",
+            &config_with_provider(provider),
+        )
+        .expect_err("mismatched evidence is fail-closed");
+        assert!(error.message.contains("different exact identity"));
+    }
+
+    #[test]
+    fn pinned_split_identity_ignores_provider_reordering_and_rejects_config_drift() {
+        let (_root, workspace) = linked_workspace("branch");
+        let split_provider = |provider_id: &str, token: &str| {
+            WorktreeProviderConfig {
+            commands: WorktreeProviderCommands {
+                resolve_identity: Some(vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    format!(
+                        "printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"{provider_id}\",\"token\":\"{token}\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'", workspace.display()
+                    ),
+                ]),
+                attest_safety: Some(vec!["true".to_string()]),
+                ..Default::default()
+            },
+            ..default_command_provider()
+        }
+        };
+        let mut config = config_with_provider(split_provider("fixture", "fixture-token"));
+        config.worktree_providers.insert(
+            "another".to_string(),
+            split_provider("another", "another-token"),
+        );
+
+        let identity = resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+            "fixture@branch",
+            "fixture",
+            &config,
+        )
+        .expect("persisted provider remains authoritative despite another provider");
+        assert_eq!(identity.provider_id, "fixture");
+        assert_eq!(identity.token, "fixture-token");
+
+        config.worktree_providers.remove("fixture");
+        let error = resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+            "fixture@branch",
+            "fixture",
+            &config,
+        )
+        .expect_err("configuration drift cannot select another provider");
+        assert!(error.message.contains("no longer configured"));
+    }
+
+    #[test]
+    fn split_identity_probes_multiple_providers_until_one_owns_the_exact_handle() {
+        let (_root, workspace) = linked_workspace("branch");
+        let split_provider = |script: &str| WorktreeProviderConfig {
+            commands: WorktreeProviderCommands {
+                resolve_identity: Some(vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    script.to_string(),
+                ]),
+                attest_safety: Some(vec!["true".to_string()]),
+                ..Default::default()
+            },
+            ..default_command_provider()
+        };
+        let mut config =
+            config_with_provider(split_provider("printf '%s' '{\"status\":\"not_owned\"}'"));
+        config.worktree_providers.insert(
+            "owner".to_string(),
+            split_provider(
+                &format!("printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"owner\",\"token\":\"owner-token\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'", workspace.display()),
+            ),
+        );
+
+        let identity =
+            resolve_apply_enabled_worktree_provider_identity_from_config("fixture@branch", &config)
+                .expect("the owning split provider resolves after a typed miss");
+        assert_eq!(identity.provider_id, "owner");
+        assert_eq!(identity.token, "owner-token");
+    }
+
+    #[test]
+    fn split_identity_rejects_a_different_clean_worktree_before_selection_or_restart() {
+        let (_root, workspace) = linked_workspace("branch");
+        let mut provider = default_command_provider();
+        provider.commands.resolve_identity = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"other-clean-worktree\",\"handle\":\"fixture@other\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'",
+                workspace.display()
+            ),
+        ]);
+        provider.commands.attest_safety = Some(vec!["true".to_string()]);
+        let config = config_with_provider(provider);
+
+        let initial =
+            resolve_apply_enabled_worktree_provider_identity_from_config("fixture@branch", &config)
+                .expect_err("a different clean worktree cannot be selected");
+        assert!(initial.message.contains("different handle"));
+        let restart = resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+            "fixture@branch",
+            "fixture",
+            &config,
+        )
+        .expect_err("a different clean worktree cannot replace pinned identity on restart");
+        assert!(restart.message.contains("different handle"));
+    }
+
     fn config_with_provider(provider: WorktreeProviderConfig) -> HomeboyConfig {
         let mut providers = HashMap::new();
         providers.insert("fixture".to_string(), provider);
@@ -4791,6 +5374,34 @@ mod tests {
             .output()
             .expect("initialize git repository");
         assert!(output.status.success());
+    }
+
+    fn linked_workspace(branch: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().expect("workspace root");
+        let source = root.path().join("source");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&source).expect("source directory");
+        git_init(&source, "main");
+        for args in [
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .output()
+                .expect("git command");
+            assert!(output.status.success());
+        }
+        let output = std::process::Command::new("git")
+            .args(["worktree", "add", "--quiet", "-b", branch])
+            .arg(&workspace)
+            .current_dir(&source)
+            .output()
+            .expect("create linked worktree");
+        assert!(output.status.success());
+        (root, workspace.canonicalize().expect("canonical workspace"))
     }
 
     #[cfg(unix)]
