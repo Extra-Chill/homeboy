@@ -22,7 +22,7 @@ pub use cargo_targets::{
     acquire_managed_cargo_target, acquire_shared_cargo_target, cleanup_shared_cargo_targets,
     shared_cargo_target_inventory, shared_cargo_target_root, shared_cargo_target_storage_status,
     CargoTargetCleanupOptions, CargoTargetCleanupOutput, CargoTargetStorageStatus,
-    SharedCargoTargetLease,
+    ManagedCargoTarget, SharedCargoTargetLease,
 };
 mod automatic_retention;
 pub use automatic_retention::{

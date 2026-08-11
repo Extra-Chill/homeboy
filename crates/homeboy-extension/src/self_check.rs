@@ -62,6 +62,18 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
     }
 
     let working_dir = source_path.to_string_lossy();
+    let explicit_cargo_target = std::env::var("CARGO_TARGET_DIR").ok();
+    let cargo_target = component
+        .managed_execution
+        .shared_cargo_target
+        .then(|| {
+            homeboy_core::cleanup::acquire_managed_cargo_target(
+                &format!("component:{}", component.id),
+                source_path,
+                explicit_cargo_target.as_deref(),
+            )
+        })
+        .transpose()?;
     let mut stdout = BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES);
     let mut stderr = BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES);
     let mut progress = if let Some(run_dir) = run_dir {
@@ -96,7 +108,12 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
         if let Some(progress) = progress.as_mut() {
             progress.start(index)?;
         }
-        let output = execute_self_check_command(command, &working_dir, passthrough);
+        let output = execute_self_check_command(
+            command,
+            &working_dir,
+            passthrough,
+            cargo_target.as_ref().map(|target| target.target_dir()),
+        );
         let stdout_artifact = if let Some(run_dir) = run_dir {
             write_command_artifact(run_dir, index, "stdout", &output.stdout.to_string_lossy())?
         } else {
@@ -143,8 +160,9 @@ fn execute_self_check_command(
     command: &str,
     working_dir: &str,
     passthrough: bool,
+    cargo_target: Option<&Path>,
 ) -> SelfCheckCommandOutput {
-    execute_local_self_check_command(command, working_dir, passthrough)
+    execute_local_self_check_command(command, working_dir, passthrough, cargo_target)
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +225,7 @@ fn execute_local_self_check_command(
     command: &str,
     working_dir: &str,
     passthrough: bool,
+    cargo_target: Option<&Path>,
 ) -> SelfCheckCommandOutput {
     #[cfg(windows)]
     let mut cmd = {
@@ -223,6 +242,10 @@ fn execute_local_self_check_command(
     };
 
     cmd.current_dir(working_dir);
+    if let Some(cargo_target) = cargo_target {
+        cmd.env("CARGO_TARGET_DIR", cargo_target);
+        cmd.env("HOMEBOY_CARGO_TARGET_RESOLUTION", "shared");
+    }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 

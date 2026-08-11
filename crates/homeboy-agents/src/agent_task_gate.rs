@@ -155,6 +155,10 @@ pub struct AgentTaskGateEnvironmentPolicy {
     /// Rust cache hydration follows the enclosing dependency-hydration policy.
     #[serde(default = "default_hydrate_dependencies")]
     pub hydrate_rust_cache: bool,
+    /// Explicitly lease a shared Cargo target for this gate. This declaration
+    /// is intentionally independent of the shell command text.
+    #[serde(default)]
+    pub shared_cargo_target: bool,
     /// Selected extension sources are copied under the isolated HOME. Gates
     /// never receive a writable path to the controller-owned source.
     #[serde(default)]
@@ -224,6 +228,7 @@ impl Default for AgentTaskGateEnvironmentPolicy {
             isolate_home: true,
             isolate_xdg: true,
             hydrate_rust_cache: true,
+            shared_cargo_target: false,
             extension_inputs: Vec::new(),
         }
     }
@@ -665,6 +670,14 @@ pub struct AgentTaskGateEnvironment {
     /// cache state rather than exposing a controller filesystem path to gates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rust_cache: Option<AgentTaskGateRustCacheEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_target: Option<AgentTaskGateCargoTargetEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateCargoTargetEvidence {
+    pub path: String,
+    pub resolution: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -755,6 +768,7 @@ impl AgentTaskGateEnvironment {
             && self.package_artifacts.is_empty()
             && self.extension_inputs.is_empty()
             && self.rust_cache.is_none()
+            && self.cargo_target.is_none()
     }
 
     pub(crate) fn replay_policy(&self) -> AgentTaskGateEnvironmentPolicy {
@@ -776,6 +790,7 @@ impl AgentTaskGateEnvironment {
                 .iter()
                 .any(|variable| XDG_ENV_VARS.contains(&variable.name.as_str())),
             hydrate_rust_cache: true,
+            shared_cargo_target: self.cargo_target.is_some(),
             extension_inputs: self
                 .extension_inputs
                 .iter()
@@ -1436,7 +1451,8 @@ pub(crate) fn run_gate_command_with_supervision(
     let (gate_environment, package_artifacts) =
         validate_package_artifacts(cwd, gate_environment, package_artifacts)?;
     let mut selected_environment = selected_gate_environment(&gate_environment, runtime_tmpdir)?;
-    selected_environment.configure_rust_cache(cwd, command)?;
+    selected_environment.configure_rust_cache(cwd)?;
+    selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
     if supervision.is_some() {
@@ -1600,7 +1616,8 @@ pub(crate) fn run_gate_command_with_timeout(
         validate_package_artifacts(cwd, gate_environment, package_artifacts)?;
     let mut selected_environment =
         selected_gate_environment(&gate_environment, Some(runtime_tmpdir))?;
-    selected_environment.configure_rust_cache(cwd, command)?;
+    selected_environment.configure_rust_cache(cwd)?;
+    selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
     homeboy_core::engine::command::isolate_process_tree(&mut process);
@@ -1669,6 +1686,7 @@ struct SelectedGateEnvironment {
     report: AgentTaskGateEnvironment,
     values: BTreeMap<String, String>,
     hydrate_rust_cache: bool,
+    _cargo_target: Option<homeboy_core::cleanup::ManagedCargoTarget>,
     _scratch: Option<tempfile::TempDir>,
 }
 
@@ -1683,9 +1701,8 @@ impl SelectedGateEnvironment {
         process.envs(&self.values);
     }
 
-    fn configure_rust_cache(&mut self, cwd: &Path, gate_command: &str) -> Result<()> {
+    fn configure_rust_cache(&mut self, cwd: &Path) -> Result<()> {
         if !self.hydrate_rust_cache
-            || !is_rust_gate(gate_command)
             || !cwd.join("Cargo.lock").is_file()
             || !cwd.join("rust-toolchain.toml").is_file()
         {
@@ -1799,14 +1816,32 @@ impl SelectedGateEnvironment {
         });
         Ok(())
     }
-}
 
-fn is_rust_gate(command: &str) -> bool {
-    ["cargo", "rustc", "rustfmt", "clippy"].iter().any(|tool| {
-        command
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-            .any(|word| word == *tool)
-    })
+    fn configure_cargo_target(&mut self, cwd: &Path, enabled: bool) -> Result<()> {
+        if !enabled {
+            return Ok(());
+        }
+        let explicit_target = self
+            .values
+            .get("CARGO_TARGET_DIR")
+            .cloned()
+            .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
+        let target = homeboy_core::cleanup::acquire_managed_cargo_target(
+            "agent-task-gate",
+            cwd,
+            explicit_target.as_deref(),
+        )?;
+        self.values.insert(
+            "CARGO_TARGET_DIR".to_string(),
+            target.target_dir().to_string_lossy().to_string(),
+        );
+        self.report.cargo_target = Some(AgentTaskGateCargoTargetEvidence {
+            path: target.target_dir().to_string_lossy().to_string(),
+            resolution: target.resolution().to_string(),
+        });
+        self._cargo_target = Some(target);
+        Ok(())
+    }
 }
 
 fn rust_cache_identity(cwd: &Path) -> Result<String> {
@@ -2171,6 +2206,7 @@ fn selected_gate_environment(
         report,
         values,
         hydrate_rust_cache: policy.hydrate_rust_cache,
+        _cargo_target: None,
         _scratch: scratch,
     })
 }
@@ -3099,6 +3135,35 @@ mod tests {
         assert_eq!(selected_counts.total, 1);
         assert_eq!(selected_counts.passed, 1);
         assert_eq!(selected_counts.failed, 0);
+    }
+
+    #[test]
+    fn declared_shared_cargo_target_is_reported_without_parsing_gate_shell_text() {
+        let temp = tempfile::tempdir().expect("gate fixture");
+        let mut policy = AgentTaskGateEnvironmentPolicy::default();
+        policy.shared_cargo_target = true;
+        // The test runner's required Cargo target is an ambient override. An
+        // explicit empty declaration clears it so this exercises the contract.
+        policy
+            .variables
+            .insert("CARGO_TARGET_DIR".to_string(), String::new());
+
+        let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            temp.path(),
+            1,
+            "test -n \"$CARGO_TARGET_DIR\"",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            &policy,
+            &[],
+        )
+        .expect("declared managed gate");
+
+        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+        let target = report.environment.cargo_target.expect("target evidence");
+        assert_eq!(target.resolution, "shared");
+        assert!(target.path.contains("cargo-target"));
     }
 
     /// Restores process-global environment variables when dropped.
@@ -4103,6 +4168,7 @@ mod tests {
             isolate_home: false,
             isolate_xdg: false,
             hydrate_rust_cache: true,
+            shared_cargo_target: false,
             extension_inputs: Vec::new(),
         };
         let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
@@ -4353,7 +4419,7 @@ mod tests {
                 let mut environment = selected_gate_environment(&policy, Some(runtime.path()))
                     .expect("first environment");
                 environment
-                    .configure_rust_cache(workspace.path(), "cargo test")
+                    .configure_rust_cache(workspace.path())
                     .expect("first hydration");
                 environment.report.rust_cache.expect("first evidence").state
             });
@@ -4361,7 +4427,7 @@ mod tests {
                 let mut environment = selected_gate_environment(&policy, Some(runtime.path()))
                     .expect("second environment");
                 environment
-                    .configure_rust_cache(workspace.path(), "cargo test")
+                    .configure_rust_cache(workspace.path())
                     .expect("second hydration");
                 environment
                     .report
@@ -4390,7 +4456,7 @@ mod tests {
         let mut repeated =
             selected_gate_environment(&policy, Some(runtime.path())).expect("repeat environment");
         repeated
-            .configure_rust_cache(workspace.path(), "cargo test")
+            .configure_rust_cache(workspace.path())
             .expect("cache hit");
         for name in ["CARGO_HOME", "RUSTUP_HOME"] {
             let value = repeated.values.get(name).expect("gate overlay path");

@@ -137,11 +137,24 @@ fn homeboy_manifest_preserves_shared_cargo_target_resolution_across_checkouts() 
             "Homeboy's manifest must not bypass the managed Cargo target"
         );
 
+        let primary = tempfile::tempdir().expect("primary checkout");
+        fs::write(primary.path().join("README"), "fixture\n").expect("fixture source");
+        init_git_repo(primary.path());
+        let worktree_guard = tempfile::tempdir().expect("worktree parent");
+        let worktree = worktree_guard.path().join("homeboy@task-worktree");
+        let output = Command::new("git")
+            .args(["worktree", "add", "--detach"])
+            .arg(&worktree)
+            .arg("HEAD")
+            .current_dir(primary.path())
+            .output()
+            .expect("create linked worktree");
+        assert!(output.status.success(), "git worktree add failed");
+
         let mut resolved_targets = Vec::new();
-        for checkout in ["homeboy@dmc-worktree", "homeboy@task-worktree"] {
-            let dir = tempfile::tempdir().expect("checkout dir");
+        for checkout in [primary.path(), worktree.as_path()] {
             let mut component = manifest.clone();
-            component.local_path = checkout.to_string();
+            component.local_path = checkout.to_string_lossy().to_string();
             component.extensions = None;
             // The test harness itself uses CARGO_TARGET_DIR; clear that ambient
             // caller override so this verifies the managed default.
@@ -157,13 +170,16 @@ fn homeboy_manifest_preserves_shared_cargo_target_resolution_across_checkouts() 
             });
 
             let output =
-                run_component_scripts(&component, ExtensionCapability::Test, dir.path(), false)
+                run_component_scripts(&component, ExtensionCapability::Test, checkout, false)
                     .expect("component script should run");
 
-            assert!(output.success, "build environment resolves for {checkout}");
-            resolved_targets.push(
-                fs::read_to_string(dir.path().join("cargo-target")).expect("resolved target"),
+            assert!(
+                output.success,
+                "build environment resolves for {}",
+                checkout.display()
             );
+            resolved_targets
+                .push(fs::read_to_string(checkout.join("cargo-target")).expect("resolved target"));
         }
 
         assert_eq!(resolved_targets[0], resolved_targets[1]);

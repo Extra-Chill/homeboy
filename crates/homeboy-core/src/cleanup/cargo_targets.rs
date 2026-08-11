@@ -155,7 +155,14 @@ pub fn acquire_managed_cargo_target(
         });
     }
 
-    let lease = acquire_shared_cargo_target(owner)?;
+    // A commit is a cache-compatibility boundary: separate checkouts at the
+    // same revision share output, while divergent worktrees never overwrite
+    // each other's Cargo fingerprints merely because their component IDs match.
+    let compatibility = source_path
+        .to_str()
+        .and_then(|path| crate::git::get_head_commit(path).ok())
+        .unwrap_or_else(|| "unversioned".to_string());
+    let lease = acquire_shared_cargo_target(&format!("{owner}:{compatibility}"))?;
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
         resolution: "shared",
