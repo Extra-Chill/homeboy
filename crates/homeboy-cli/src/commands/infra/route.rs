@@ -1997,6 +1997,11 @@ fn deferred_workload_input(
             .and_then(|context| serde_json::to_value(context).ok())
             .unwrap_or_else(|| serde_json::json!({ "severity": "unknown" })),
         test_requirements,
+        // The singleton worker replays this record from a stable root, long
+        // after this process is gone. The worktree the workload belongs to has
+        // to travel with the record rather than being inherited from whatever
+        // directory the replay happens to start in (#12081).
+        source_directory: Some(authoritative_lab_source_path(args)?.display().to_string()),
         job_overrides: lab_job_overrides(cli)?,
     })
 }

@@ -1032,6 +1032,7 @@ fn deferred_plan_persists_public_env_and_runner_secret_identity_without_plaintex
                 required_runtimes: ["homeboy".to_string()].into(),
                 required_capabilities: Default::default(),
             },
+            source_directory: None,
             job_overrides: runners::LabJobOverrides {
                 env: [
                     ("DB_SERVICE_HOST".to_string(), "db.fixture".to_string()),
@@ -1091,6 +1092,7 @@ fn deferred_status_redacts_all_settings_arguments() {
             required_runtimes: ["homeboy".to_string()].into(),
             required_capabilities: Default::default(),
         },
+        source_directory: None,
         job_overrides: Default::default(),
         state: homeboy::deferred_workload::DeferredWorkloadState::Deferred,
         created_at_ms: 0,
