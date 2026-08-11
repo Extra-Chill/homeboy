@@ -184,20 +184,34 @@ pub(super) fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathB
 }
 
 fn active_homeboy_checkout_hint() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
-    let working_dir = std::env::current_dir().ok()?;
-    let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
-    let checkout = source_checkout_from_binary_path(&executable).or_else(|| {
-        source_checkout_from_managed_target(&executable, &working_dir, cargo_target_dir.as_deref())
-    })?;
-    if !checkout.join("Cargo.toml").is_file()
-        || !checkout.join("src/main.rs").is_file()
-        || !is_canonical_git_root(&checkout)
-    {
-        return None;
-    }
-    validate_homeboy_build_identity(&checkout, &crate::build_identity::current()).ok()?;
-    Some(checkout)
+    let owned_checkout = (|| {
+        let executable = std::env::current_exe().ok()?;
+        let working_dir = std::env::current_dir().ok()?;
+        let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+        let checkout = source_checkout_from_binary_path(&executable).or_else(|| {
+            source_checkout_from_managed_target(
+                &executable,
+                &working_dir,
+                cargo_target_dir.as_deref(),
+            )
+        })?;
+        if !checkout.join("Cargo.toml").is_file()
+            || !checkout.join("src/main.rs").is_file()
+            || !is_canonical_git_root(&checkout)
+        {
+            return None;
+        }
+        validate_homeboy_build_identity(&checkout, &crate::build_identity::current()).ok()?;
+        Some(checkout)
+    })();
+    owned_checkout.or_else(|| {
+        let working_dir = std::env::current_dir().ok()?;
+        working_dir.ancestors().find_map(|candidate| {
+            (is_canonical_git_root(candidate)
+                && cargo_manifest_package_is_homeboy(&candidate.join("Cargo.toml")).ok()?)
+            .then(|| candidate.to_path_buf())
+        })
+    })
 }
 
 fn is_canonical_git_root(path: &Path) -> bool {
