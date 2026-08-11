@@ -4898,6 +4898,51 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             ));
         }
         PathBuf::from(record.path())
+    } else if let Some(expected) = options
+        .initial_plan
+        .metadata
+        .pointer("/cook_provision/workspace_identity")
+    {
+        let expected: homeboy_core::worktree_providers::WorktreeProviderExactIdentity =
+            serde_json::from_value(expected.clone()).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "cook_provision.workspace_identity",
+                    format!("persisted Cook workspace identity is invalid: {error}"),
+                    None,
+                    None,
+                )
+            })?;
+        let config = homeboy_core::defaults::load_config();
+        let identity = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+            &options.to_worktree,
+            &expected.provider_id,
+            &config,
+        )?;
+        if expected.schema != identity.schema
+            || expected.provider_id != identity.provider_id
+            || expected.token != identity.token
+            || expected.handle != identity.handle
+            || expected.path != identity.path
+            || expected.branch != identity.branch
+            || expected.primary != identity.primary
+        {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "provider exact identity no longer matches the durable Cook identity",
+                Some(options.to_worktree.clone()),
+                None,
+            ));
+        }
+        let safety = homeboy_core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config)?;
+        if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "provider safety attestation is not current and safe for Cook execution",
+                Some(options.to_worktree.clone()),
+                None,
+            ));
+        }
+        PathBuf::from(identity.path)
     } else {
         homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
             &options.to_worktree,

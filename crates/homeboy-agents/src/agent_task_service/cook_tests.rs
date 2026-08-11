@@ -3018,6 +3018,155 @@ fn cook_persists_pending_identity_when_safety_attestation_times_out() {
     });
 }
 
+#[test]
+fn reconstruction_restores_a_materialized_pending_workspace_from_the_durable_plan() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let mut options = batch_cook_options(
+        "cook-materialized-restart",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    let mut persisted = options.initial_plan.clone();
+    persisted.tasks[0].workspace.root = Some(workspace.display().to_string());
+    persisted.tasks[0].metadata["cook_workspace_identity"] = serde_json::json!({
+        "canonical_path": workspace,
+        "device": 1,
+        "inode": 1,
+    });
+    persisted.metadata["cook_provision"] = serde_json::json!({
+        "action": "existing",
+        "workspace_identity": {
+            "schema": "homeboy/worktree-provider-identity/v1",
+            "provider_id": "split-only",
+            "token": "opaque",
+            "handle": options.to_worktree,
+            "path": workspace,
+            "branch": "branch",
+            "primary": false,
+            "latency_ms": 1,
+            "budget_ms": 10
+        }
+    });
+
+    rebind_baseline_continuation_workspace(&mut options, &persisted)
+        .expect("reconstruct materialized workspace");
+
+    assert_eq!(
+        options.source_worktree_path.as_deref(),
+        Some(workspace.as_path())
+    );
+    assert!(persisted.tasks[0]
+        .metadata
+        .get("cook_workspace_identity")
+        .is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn split_only_provider_revalidates_before_dispatch_without_legacy_commands() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let root = tempfile::tempdir().expect("workspace root");
+        let source = root.path().join("source");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&source).expect("source directory");
+        assert!(Command::new("git")
+            .args(["init", "--quiet", "-b", "main"])
+            .current_dir(&source)
+            .status()
+            .expect("git init")
+            .success());
+        for args in [
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .status()
+                .expect("git config")
+                .success());
+        }
+        std::fs::write(source.join("tracked.txt"), "base\n").expect("write base");
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&source)
+            .status()
+            .expect("git add")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "base"])
+            .current_dir(&source)
+            .status()
+            .expect("git commit")
+            .success());
+        assert!(Command::new("git")
+            .args(["worktree", "add", "--quiet", "-b", "split-only"])
+            .arg(&workspace)
+            .current_dir(&source)
+            .status()
+            .expect("git worktree add")
+            .success());
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let provider_dir = tempfile::tempdir().expect("provider directory");
+        let provider = provider_dir.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nif test \"$1\" = safety; then printf '%s' '{{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"opaque\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":false,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}}'; else printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"opaque\",\"handle\":\"fixture@split-only\",\"path\":\"{}\",\"branch\":\"split-only\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'; fi\n",
+                workspace.display()
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve_identity: Some(vec![
+                        provider.display().to_string(),
+                        "identity".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    attest_safety: Some(vec![
+                        provider.display().to_string(),
+                        "safety".to_string(),
+                        "{identity}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            },
+        );
+        homeboy_core::defaults::save_config(&config).expect("save config");
+        let mut options =
+            batch_cook_options("split-only", Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.to_worktree = "fixture@split-only".to_string();
+        options.source_worktree_path = Some(workspace.clone());
+        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "action": "existing",
+            "workspace_identity": { "schema": "homeboy/worktree-provider-identity/v1", "provider_id": "fixture", "token": "opaque", "handle": "fixture@split-only", "path": workspace, "branch": "split-only", "primary": false, "latency_ms": 0, "budget_ms": 0 }
+        });
+
+        validate_cook_workspace(&options)
+            .expect("split-only provider passes mandatory dispatch revalidation");
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
