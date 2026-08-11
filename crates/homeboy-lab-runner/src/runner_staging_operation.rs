@@ -77,14 +77,15 @@ pub struct SourcePackageSymlinkVerdict {
     pub size_bytes: u64,
 }
 
-/// Normalizes Windows and Unix separator forms before applying the v2 lexical
-/// containment policy. V1 packages do not admit symlinks.
+/// Applies the producing platform's separator contract before the v2 lexical
+/// containment policy. Unix keeps backslashes literal; Windows serializes
+/// separators as `/`. V1 packages do not admit symlinks.
 pub fn source_package_symlink_verdict(
     link_path: &str,
     target: &str,
 ) -> Result<SourcePackageSymlinkVerdict> {
-    let link_path = link_path.replace('\\', "/");
-    let target = target.replace('\\', "/");
+    let link_path = source_package_path_text(link_path);
+    let target = source_package_path_text(target);
     if target.is_empty() {
         return Err(Error::validation_invalid_argument(
             "source_package",
@@ -137,6 +138,17 @@ pub fn source_package_symlink_verdict(
         sha256: format!("sha256:{:x}", Sha256::digest(target.as_bytes())),
         target,
     })
+}
+
+fn source_package_path_text(value: &str) -> String {
+    #[cfg(windows)]
+    {
+        value.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        value.to_string()
+    }
 }
 
 #[cfg(unix)]
@@ -446,9 +458,9 @@ impl SourceArtifactTransfer {
                     let path = &path[1..];
                     (metadata.starts_with(b"120000 ") && std::str::from_utf8(path).is_ok()).then(
                         || {
-                            std::str::from_utf8(path)
-                                .expect("validated UTF-8")
-                                .replace('\\', "/")
+                            source_package_path_text(
+                                std::str::from_utf8(path).expect("validated UTF-8"),
+                            )
                         },
                     )
                 })
@@ -1529,13 +1541,48 @@ pub(crate) mod tests_support {
     fn symlink_verdict_normalizes_windows_separators_and_rejects_windows_escape() {
         let verdict = source_package_symlink_verdict("links\\tool", "..\\shared\\tool")
             .expect("normalized target");
-        assert_eq!(verdict.target, "../shared/tool");
-        assert_eq!(verdict.size_bytes, "../shared/tool".len() as u64);
+        #[cfg(windows)]
+        let expected_target = "../shared/tool";
+        #[cfg(not(windows))]
+        let expected_target = "..\\shared\\tool";
+        assert_eq!(verdict.target, expected_target);
+        assert_eq!(verdict.size_bytes, expected_target.len() as u64);
         assert_eq!(
             verdict.sha256,
-            format!("sha256:{:x}", Sha256::digest(b"../shared/tool"))
+            format!("sha256:{:x}", Sha256::digest(expected_target.as_bytes()))
         );
+        #[cfg(windows)]
         assert!(source_package_symlink_verdict("links/tool", "..\\..\\outside").is_err());
+        #[cfg(not(windows))]
+        assert!(source_package_symlink_verdict("links/tool", "/outside").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_backslash_link_cannot_authorize_an_untracked_slash_link() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(source.path().join("file"), b"safe").expect("file");
+        symlink("file", source.path().join("link\\literal")).expect("tracked literal");
+        std::fs::create_dir(source.path().join("link")).expect("untracked parent");
+        symlink("/outside/secret", source.path().join("link/literal")).expect("untracked slash");
+        for args in [
+            ["init"].as_slice(),
+            ["add", "file", "link\\literal"].as_slice(),
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(source.path())
+                .status()
+                .expect("git")
+                .success());
+        }
+
+        let error = SourceArtifactTransfer::from_directory("source-1", source.path())
+            .expect_err("backslash package path is not portable");
+        assert!(error.message.contains("unsafe, duplicate, or oversized"));
+        assert!(!error.message.contains("/outside/secret"));
     }
 
     #[test]
