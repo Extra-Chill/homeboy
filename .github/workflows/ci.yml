@@ -223,7 +223,7 @@ jobs:
     needs: [pr-state, ci-capacity-admission]
     if: ${{ needs.pr-state.outputs.active == 'true' }}
     # Includes the jq-portable exact shard partitioning fix from homeboy-action#372.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@09e0147899b2a084c8e328bccdcb713f1d60db95
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@8f90f5c37f703240c8b0f4327845ac8c89fb2b08
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
