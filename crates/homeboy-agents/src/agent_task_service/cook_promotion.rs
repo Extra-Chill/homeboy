@@ -2765,7 +2765,11 @@ fn cook_failure_context(
     let provider_executions_consumed = recipe
         .attempts
         .iter()
-        .filter_map(|attempt| agent_task_lifecycle::status(&attempt.run_id).ok())
+        // Recipe entries are historical attempt identities. `status` resolves a
+        // Cook ID alias to its latest attempt, which can count that later
+        // provider execution again when an earlier preflight failure used the
+        // Cook ID as its run ID.
+        .filter_map(|attempt| agent_task_lifecycle::exact_record(&attempt.run_id).ok())
         .map(|record| {
             record.metadata["provider_executions_consumed"]
                 .as_u64()

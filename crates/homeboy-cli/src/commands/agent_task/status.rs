@@ -3453,12 +3453,22 @@ fn bounded_value(value: &Value) -> Value {
 /// An absent or unparseable state is non-terminal: a record this build does not
 /// understand keeps its prior reading rather than being asserted as finished.
 fn record_state_is_terminal(record: &Value) -> bool {
-    record
-        .get("state")
-        .and_then(|state| {
-            serde_json::from_value::<agent_task_lifecycle::AgentTaskRunState>(state.clone()).ok()
-        })
-        .is_some_and(agent_task_lifecycle::AgentTaskRunState::is_terminal)
+    let lifecycle_state_is_terminal = |state: Option<&Value>| {
+        state
+            .and_then(|state| {
+                serde_json::from_value::<agent_task_lifecycle::AgentTaskRunState>(state.clone())
+                    .ok()
+            })
+            .is_some_and(agent_task_lifecycle::AgentTaskRunState::is_terminal)
+    };
+
+    lifecycle_state_is_terminal(record.get("state"))
+        // A terminal Cook projects its controller status over the child run
+        // state. Older controllers used a status such as `pre_execution_failure`,
+        // which is not an AgentTaskRunState; the retained child state remains
+        // authoritative for terminal liveness.
+        || (record.pointer("/cook/phase").and_then(Value::as_str) == Some("terminal")
+            && lifecycle_state_is_terminal(record.get("child_run_state")))
 }
 
 fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateState) -> Value {
@@ -5683,6 +5693,39 @@ mod tests {
         );
         assert_eq!(unknown["status"], "active");
         assert!(!record_state_is_terminal(&json!({ "tasks": [] })));
+    }
+
+    #[test]
+    fn terminal_cook_pre_execution_failure_keeps_terminal_liveness_after_projection() {
+        // v0.335.0 persisted this controller failure as a failed child run.
+        // Status replaces that child state with the Cook's terminal detail, an
+        // arbitrary controller label that cannot parse as AgentTaskRunState.
+        let mut record = json!({
+            "run_id": "agent-task-pre-execution-compatibility",
+            "state": "failed",
+            "tasks": [{ "task_id": "cook", "state": "failed" }],
+            "provider_handles": [],
+            "metadata": {
+                "pre_execution_failure": {
+                    "phase": "controller_admission",
+                    "provider_executions_consumed": 0
+                },
+                "cook_progress": {
+                    "phase": "terminal",
+                    "detail": "pre_execution_failure",
+                    "terminal_success": false,
+                    "exit_code": 1
+                }
+            }
+        });
+
+        project_owning_cook_terminal_status(&mut record);
+        let summary = compact_status_summary(&record, "agent-task-pre-execution-compatibility");
+
+        assert_eq!(summary["state"], "pre_execution_failure");
+        assert_eq!(summary["child_run_state"], "failed");
+        assert_eq!(summary["liveness"]["status"], "terminal");
+        assert_eq!(summary["liveness"]["provider_boundary"]["status"], "absent");
     }
 
     #[test]

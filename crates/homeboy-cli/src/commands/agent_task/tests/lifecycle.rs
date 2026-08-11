@@ -2659,7 +2659,21 @@ fn run_plan_fails_fast_when_required_secret_env_is_missing() {
                 .as_str()
                 .is_some_and(|hint| hint.contains("runner-required secret env contracts"))));
         assert!(!error.to_string().contains("secret-value"));
-        assert!(lifecycle_status("run-plan-missing-secret").is_err());
+        let failed = lifecycle_status("run-plan-missing-secret")
+            .expect("pre-execution failure remains inspectable");
+        assert_eq!(failed.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            failed.metadata["pre_execution_failure"]["phase"],
+            "prepare_plan_for_execution"
+        );
+        assert_eq!(
+            failed.metadata["pre_execution_failure"]["failure_code"],
+            "secret_env"
+        );
+        assert_eq!(
+            failed.metadata["pre_execution_failure"]["provider_executions_consumed"],
+            0
+        );
     });
 }
 
