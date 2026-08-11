@@ -296,9 +296,10 @@ pub mod gate {
 /// Durable run lifecycle: submit, run-record state, log/artifact loaders.
 pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
-        aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run,
-        cook_attempt_run_id, cook_index, cook_index_exists, cook_terminal_notification_outcome,
-        durable_local_read, exact_durable_local_read, exact_record,
+        aggregate_source, artifacts, cancel, cancel_run, claim_cook_operation,
+        claim_next_queued_run, complete_cook_operation, cook_attempt_run_id, cook_index,
+        cook_index_exists, cook_terminal_notification_outcome, durable_local_read,
+        exact_durable_local_read, exact_record, fail_cook_operation,
         fail_detached_cook_handoff_parent, has_accepted_runner_handoff,
         invalidate_cook_finalization_for_dependency, list_records, load_controller_plan, load_plan,
         logs, mark_resuming, mark_running, materialize_recovered_patch_artifact,
@@ -326,7 +327,7 @@ pub mod lifecycle {
         AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
         AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunStatus,
         AgentTaskRunTask, AgentTaskRunnerProbe, AgentTaskRunnerProbePlan, AgentTaskStatusOptions,
-        AgentTaskStatusOutcome, ControllerRuntimePruneResult, DetachedLabRunRecord,
+        AgentTaskStatusOutcome, ClaimOutcome, ControllerRuntimePruneResult, DetachedLabRunRecord,
         LabOffloadProxyPlan, RunnerPinnedRuntime, RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT,
         RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL, RUNNER_PROBE_SKIPPED_NOT_RUNNING,
     };

@@ -9,6 +9,7 @@ use homeboy::core::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Barrier;
 
 use crate::cli_surface::{Cli, Commands};
 
@@ -23,6 +24,31 @@ struct RecoverableRunnerDispatcher {
 struct CountingCookDispatcher {
     prepared: AtomicUsize,
     dispatched: AtomicUsize,
+}
+
+static RETRY_RUN_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug)]
+struct RetryRunDispatcher;
+
+impl AgentTaskCookAttemptDispatcher for RetryRunDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(json!({ "kind": "retry-run-dispatcher" }))
+    }
+
+    fn prepare_for_cook(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn dispatch_attempt(
+        &self,
+        _plan: AgentTaskPlan,
+        _run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        RETRY_RUN_DISPATCHES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl AgentTaskCookAttemptDispatcher for CountingCookDispatcher {
@@ -493,11 +519,8 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
         std::fs::write(
             &promotion_provider,
             format!(
-                "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '1\\n' >> {}\ngit -C {} apply {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '1\\n' >> {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/command-result/v3\",\"success\":false,\"status\":\"failed\",\"error\":{{\"code\":\"validation.invalid_argument\",\"message\":\"promotion request is invalid\",\"details\":{{\"field\":\"promotion_provider.stdin\"}}}}}}'\n",
                 promotion_count.display(),
-                workspace.path().display(),
-                patch.display(),
-                workspace.path().display(),
             ),
         )
         .expect("write deterministic promotion provider");
@@ -615,7 +638,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 cook_or_attempt_id: cook_id.to_string(),
                 preflight: false,
                 rearm: false,
-                full: true,
+                full: false,
             },
             executor.clone(),
             |_| Ok(None),
@@ -623,10 +646,18 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
         .expect("the same cook-continue advances the terminal attempt");
         assert_eq!(
             after.1, 1,
-            "the deterministic promotion fixture surfaces its declared gate failure"
+            "the rejected provider response surfaces its durable promotion failure"
         );
         assert_eq!(std::fs::read_to_string(&promotion_count).unwrap(), "1\n");
         assert_eq!(after.0["failure_context"]["phase"], "promotion");
+        assert_eq!(
+            after.0["failure_context"]["diagnostic"],
+            json!({
+                "code": "validation.invalid_argument",
+                "field": "promotion_provider.response.schema",
+                "message": "Invalid argument 'promotion_provider.response.schema': expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/command-result/v3"
+            })
+        );
         assert_ne!(after.0["status"], "observation_in_progress");
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
 
@@ -665,9 +696,44 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
         .expect("an explicit rearm may retry the failed continuation");
         assert_eq!(rearmed.1, 1);
         assert_eq!(
+            rearmed.0["failure_context"]["phase"], "promotion",
+            "the later promotion failure supersedes the controller failure from before rearm"
+        );
+        assert_eq!(
             std::fs::read_to_string(&promotion_count).unwrap(),
-            "1\n",
-            "explicit rearm resumes the durable promotion result without reapplying its provider side effect"
+            "1\n1\n",
+            "explicit rearm retries the failed provider boundary"
+        );
+        assert_eq!(
+            rearmed.0["failure_context"]["diagnostic"]["deepest_cause"],
+            json!({
+                "code": "validation.invalid_argument",
+                "field": "promotion_provider.response.schema",
+                "message": "Invalid argument 'promotion_provider.response.schema': expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/command-result/v3"
+            }),
+            "full output retains the bounded terminal diagnostic after rearm"
+        );
+        let (diagnosis, diagnosis_exit) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose preserves the terminal failure after rearm");
+        assert_eq!(diagnosis_exit, 0);
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "validation.invalid_argument"
+        );
+        assert_eq!(
+            diagnosis["root_cause"]["field"],
+            "promotion_provider.response.schema"
+        );
+        assert_eq!(
+            diagnosis["root_cause"]["message"],
+            "Invalid argument 'promotion_provider.response.schema': expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/command-result/v3"
+        );
+        assert_ne!(
+            diagnosis["root_cause"]["source"], "controller_failure",
+            "the later promotion terminal record must outrank the stale controller diagnostic"
         );
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
     });
@@ -2619,7 +2685,21 @@ fn run_plan_fails_fast_when_required_secret_env_is_missing() {
                 .as_str()
                 .is_some_and(|hint| hint.contains("runner-required secret env contracts"))));
         assert!(!error.to_string().contains("secret-value"));
-        assert!(lifecycle_status("run-plan-missing-secret").is_err());
+        let failed = lifecycle_status("run-plan-missing-secret")
+            .expect("pre-execution failure remains inspectable");
+        assert_eq!(failed.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            failed.metadata["pre_execution_failure"]["phase"],
+            "prepare_plan_for_execution"
+        );
+        assert_eq!(
+            failed.metadata["pre_execution_failure"]["failure_code"],
+            "secret_env"
+        );
+        assert_eq!(
+            failed.metadata["pre_execution_failure"]["provider_executions_consumed"],
+            0
+        );
     });
 }
 
@@ -2756,6 +2836,178 @@ fn retry_command_submits_new_queued_run() {
         assert_eq!(record.run_id, "run-retry-cli");
         assert_eq!(record.state, AgentTaskRunState::Queued);
         assert_eq!(record.metadata["retry_of"], json!("run-retry-source"));
+    });
+}
+
+#[test]
+fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
+    with_temp_home(|| {
+        RETRY_RUN_DISPATCHES.store(0, Ordering::SeqCst);
+        let cook_id = "cook-retry-run";
+        let source_run_id = "cook-retry-run-attempt-1";
+        let plan = test_plan();
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: source_run_id.to_string(),
+            initial_plan: plan.clone(),
+            to_worktree: "fixture@retry-run".to_string(),
+            source_worktree_path: None,
+            provider_command: None,
+            provider_invocation: None,
+            gates: Default::default(),
+            max_attempts: 2,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Cook retry run".to_string(),
+            commit_message: "Cook retry run".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: None,
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: Some(Arc::new(RetryRunDispatcher)),
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist immutable Cook recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(source_run_id))
+            .expect("persist source Cook attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, source_run_id)
+            .expect("bind source attempt to Cook");
+        agent_task_lifecycle::record_pre_execution_failure(
+            source_run_id,
+            &plan,
+            "provider_execution",
+            &Error::internal_unexpected("provider interrupted").with_retryable(true),
+        )
+        .expect("terminalize retryable source attempt");
+
+        let executor = CountingCookExecutor::default();
+        let (value, _exit_code) = retry_with(
+            RetryArgs {
+                run_id: source_run_id.to_string(),
+                new_run_id: None,
+                run: true,
+                force: false,
+            },
+            executor.clone(),
+            |_| Ok(Some(Arc::new(RetryRunDispatcher))),
+        )
+        .expect("retry --run resumes the Cook lifecycle");
+
+        let replacement = agent_task_lifecycle::status(&format!("{cook_id}-attempt-2-retry"))
+            .expect("read executed replacement");
+        let recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
+            .expect("read immutable Cook recipe");
+        assert_ne!(value["status"], "accepted_unscheduled");
+        assert_eq!(RETRY_RUN_DISPATCHES.load(Ordering::SeqCst), 1);
+        assert_eq!(replacement.state, AgentTaskRunState::Queued);
+        assert_eq!(replacement.metadata["retry_of"], source_run_id);
+        assert_eq!(replacement.metadata["cook_id"], cook_id);
+        assert_eq!(replacement.metadata["cook_attempt"], 2);
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[0].run_id, source_run_id);
+        assert_eq!(recipe.attempts[1].run_id, replacement.run_id);
+        assert_eq!(
+            agent_task_lifecycle::cook_index(cook_id)
+                .expect("read Cook index")
+                .latest_run_id,
+            replacement.run_id
+        );
+    });
+}
+
+#[test]
+fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once() {
+    with_temp_home(|| {
+        RETRY_RUN_DISPATCHES.store(0, Ordering::SeqCst);
+        let cook_id = "cook-retry-run-competing";
+        let source_run_id = "cook-retry-run-competing-attempt-1";
+        let plan = test_plan();
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: source_run_id.to_string(),
+            initial_plan: plan.clone(),
+            to_worktree: "fixture@retry-run-competing".to_string(),
+            source_worktree_path: None,
+            provider_command: None,
+            provider_invocation: None,
+            gates: Default::default(),
+            max_attempts: 2,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Competing Cook retry run".to_string(),
+            commit_message: "Competing Cook retry run".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: None,
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: Some(Arc::new(RetryRunDispatcher)),
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist immutable Cook recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(source_run_id))
+            .expect("persist source Cook attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, source_run_id)
+            .expect("bind source attempt to Cook");
+        agent_task_lifecycle::record_pre_execution_failure(
+            source_run_id,
+            &plan,
+            "provider_execution",
+            &Error::internal_unexpected("provider interrupted").with_retryable(true),
+        )
+        .expect("terminalize retryable source attempt");
+
+        let replacement =
+            homeboy::agents::agent_task_service::retry(source_run_id, None, false, false)
+                .expect("reserve one queued replacement");
+        let barrier = Arc::new(Barrier::new(2));
+        let consumers = (0..2)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let run_id = replacement.record.run_id.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    super::super::run::consume_queued_cook_retry_with(
+                        CookContinueArgs {
+                            cook_or_attempt_id: run_id,
+                            preflight: false,
+                            rearm: false,
+                            full: false,
+                        },
+                        CountingCookExecutor::default(),
+                        |_| Ok(Some(Arc::new(RetryRunDispatcher))),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        for consumer in consumers {
+            consumer
+                .join()
+                .expect("retry consumer joins")
+                .expect("retry consumer converges");
+        }
+
+        assert_eq!(RETRY_RUN_DISPATCHES.load(Ordering::SeqCst), 1);
+        let record = agent_task_lifecycle::status(&replacement.record.run_id)
+            .expect("read replacement record");
+        assert_eq!(record.metadata["retry_of"], source_run_id);
+        assert_eq!(record.metadata["cook_id"], cook_id);
+        assert_eq!(record.metadata["cook_attempt"], 2);
+        assert_eq!(
+            record.metadata["cook_operation_claims"][0]["operation_key"],
+            format!("retry-run:{}", replacement.record.run_id)
+        );
     });
 }
 

@@ -360,6 +360,58 @@ pub fn resolve_apply_enabled_worktree_provider_from_config(
     )
 }
 
+/// Resolve a workspace through one previously selected apply-enabled provider.
+/// Durable callers use this when the provider identity is part of their recipe.
+pub fn resolve_apply_enabled_worktree_provider_by_id_from_config(
+    handle: &str,
+    provider_id: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderResolution> {
+    let provider = config.worktree_providers.get(provider_id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "worktree_provider",
+            "timed-out worktree provider is no longer configured",
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    if !provider.enabled || !provider.apply_enabled {
+        return Err(Error::validation_invalid_argument(
+            "worktree_provider",
+            "timed-out worktree provider is no longer enabled and apply-enabled",
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    let worktrees = if let Some(command) = provider.commands.resolve.as_ref() {
+        run_provider_resolve_command(provider_id, provider, command, handle)?
+    } else if let Some(command) = provider.commands.list.as_ref() {
+        run_provider_list_command(provider_id, provider, command)?
+    } else {
+        return Err(Error::validation_invalid_argument(
+            "worktree_provider",
+            "timed-out worktree provider has no resolve or list command",
+            Some(provider_id.to_string()),
+            None,
+        ));
+    };
+    let worktree = worktrees.into_iter().find(|item| item.handle == handle).ok_or_else(|| {
+        let mut error = Error::validation_invalid_argument(
+            "to_worktree",
+            format!("worktree handle `{handle}` was not returned by timed-out provider `{provider_id}`"),
+            Some(handle.to_string()),
+            None,
+        );
+        error.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
+        error
+    })?;
+    validate_provider_handle(provider_id, &worktree, None, None)?;
+    Ok(WorktreeProviderResolution {
+        provider_id: provider_id.to_string(),
+        worktree,
+    })
+}
+
 /// Find the sole apply-enabled provider worktree owned by a tracker URL.
 /// Providers must map `task_url` to participate, preserving existing provider
 /// configurations that only support handle-based lookup.
@@ -1146,7 +1198,7 @@ fn run_provider_lookup_command(
     })?;
     let elapsed_ms = started.elapsed().as_millis();
     if output.termination != crate::engine::command::SupervisedCommandTermination::Completed {
-        return Err(Error::validation_invalid_argument(
+        let mut error = Error::validation_invalid_argument(
             "to_worktree",
             format!(
                 "worktree provider `{provider_id}` {operation} command timed out after {elapsed_ms} ms (configured lookup_timeout_ms: {})",
@@ -1157,7 +1209,16 @@ fn run_provider_lookup_command(
                 "Refresh or repair the configured workspace provider, then retry the operation."
                     .to_string(),
             ]),
-        ));
+        );
+        // A bounded read-only probe cannot establish that an exact handle is
+        // invalid. Preserve that distinction for durable callers instead of
+        // turning provider latency into an input error.
+        error.retryable = Some(true);
+        error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
+        error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+        error.details["worktree_provider_operation"] = Value::String(operation.to_string());
+        error.details["lookup_timeout_ms"] = Value::from(timeout.as_millis() as u64);
+        return Err(error);
     }
     let output = output.output;
     if output.capture.stdout.truncated {
@@ -1207,6 +1268,28 @@ fn run_provider_lookup_command(
             None,
         )
     })?;
+    if let Some(attribution) = provider_failed_lookup_timeout_attribution(&value) {
+        let mut error = Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` {operation} command completed with a retryable git command timeout"
+            ),
+            Some(provider_id.to_string()),
+            Some(vec![
+                "Refresh or repair the configured workspace provider, then retry the operation."
+                    .to_string(),
+            ]),
+        );
+        error.retryable = Some(true);
+        error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
+        error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+        error.details["worktree_provider_operation"] = Value::String(operation.to_string());
+        // Provider output can contain credentials and arbitrary diagnostics.
+        // Persist only this fixed, redacted timeout classification.
+        error.details["provider_timeout_attribution"] =
+            serde_json::to_value(attribution).expect("fixed timeout attribution serializes");
+        return Err(error);
+    }
     let mapping = provider.list_result_mapping.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "worktree_providers.list_result_mapping",
@@ -1218,6 +1301,28 @@ fn run_provider_lookup_command(
         )
     })?;
     map_provider_list_result(provider_id, mapping, &value)
+}
+
+#[derive(Serialize)]
+struct ProviderLookupTimeoutAttribution {
+    error_code: &'static str,
+}
+
+/// A command can finish successfully while its provider reports a failed lookup.
+/// Treat only this explicit failure envelope as retryable; payload metadata is
+/// provider-owned data rather than a causal error signal.
+fn provider_failed_lookup_timeout_attribution(
+    value: &Value,
+) -> Option<ProviderLookupTimeoutAttribution> {
+    let failed = matches!(
+        value.get("status").and_then(Value::as_str),
+        Some("failed" | "error")
+    );
+    let timed_out =
+        value.pointer("/error/code").and_then(Value::as_str) == Some("git_command_timeout");
+    (failed && timed_out).then_some(ProviderLookupTimeoutAttribution {
+        error_code: "git_command_timeout",
+    })
 }
 
 fn provider_lookup_timeout(provider: &WorktreeProviderConfig) -> Result<Duration> {
@@ -1703,6 +1808,85 @@ pub fn validate_task_worktree_root(path: &std::path::Path, handle: &str) -> Resu
         ));
     }
     Ok(())
+}
+
+/// Verify a resolved linked worktree belongs to Cook's durable repository
+/// expectation without exposing provider-owned remote URLs in failures.
+pub fn validate_task_worktree_repository_identity(
+    path: &std::path::Path,
+    expected_remote: Option<&str>,
+    expected_repository_name: Option<&str>,
+) -> Result<()> {
+    if expected_remote.is_none() && expected_repository_name.is_none() {
+        return Ok(());
+    }
+    let Some(git_root) = crate::git::repo_root(path) else {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook destination is not a Git checkout bound to the resolved repository identity",
+            Some(path.display().to_string()),
+            None,
+        ));
+    };
+    let identities = crate::git::output_optional(&git_root, &["remote"])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|remote| crate::git::remote_url(&git_root, remote))
+        .filter_map(|remote| canonical_remote_identity(&remote))
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(expected) = expected_remote {
+        if identities.len() == 1 && identities.contains(expected) {
+            return Ok(());
+        }
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!("Cook destination repository identity does not match resolved `{expected}`"),
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    let expected = expected_repository_name.expect("repository expectation exists");
+    if identities.len() == 1
+        && identities.iter().any(|identity| {
+            identity
+                .strip_prefix("git://")
+                .and_then(|identity| identity.rsplit('/').next())
+                == Some(expected)
+        })
+    {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "to_worktree",
+        "Cook destination repository does not match the requested Cook repository",
+        Some(path.display().to_string()),
+        None,
+    ))
+}
+
+fn canonical_remote_identity(remote_url: &str) -> Option<String> {
+    let remote_url = remote_url.trim();
+    let (host, path) = if let Some((_, rest)) = remote_url.split_once("://") {
+        let (authority, path) = rest.split_once('/')?;
+        (authority.rsplit('@').next()?, path)
+    } else {
+        let (authority, path) = remote_url.split_once(':')?;
+        (authority.rsplit('@').next()?, path)
+    };
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    (!host.is_empty()
+        && path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .count()
+            >= 2)
+        .then(|| {
+            format!(
+                "git://{}/{}",
+                host.to_ascii_lowercase(),
+                path.to_ascii_lowercase()
+            )
+        })
 }
 
 fn trusted_unpushed_destination_matches(
@@ -3541,6 +3725,82 @@ mod tests {
 
         assert!(error.message.contains("timed out"));
         assert!(error.message.contains("configured lookup_timeout_ms: 25"));
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(error.details["worktree_provider_lookup"], "timed_out");
+        assert_eq!(error.details["worktree_provider_operation"], "list");
+    }
+
+    #[test]
+    fn failed_provider_timeout_envelope_is_retryable_and_redacted() {
+        let script = fake_list_provider_script(json!({
+            "status": "failed",
+            "error": {
+                "code": "git_command_timeout",
+                "access_token": "provider-secret-must-not-persist"
+            }
+        }));
+        let error = resolve_worktree_provider_handle_from_config(
+            "fixture@cook-target",
+            &config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![script, "{handle}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            }),
+        )
+        .expect_err("explicit failed timeout remains retryable");
+
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(error.details["worktree_provider_lookup"], "timed_out");
+        assert_eq!(error.details["worktree_provider_operation"], "resolve");
+        assert_eq!(
+            error.details["provider_timeout_attribution"],
+            json!({ "error_code": "git_command_timeout" })
+        );
+        assert!(!error
+            .details
+            .to_string()
+            .contains("provider-secret-must-not-persist"));
+    }
+
+    #[test]
+    fn successful_payload_timeout_metadata_does_not_classify_a_timeout() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let script = fake_list_provider_script(json!({
+            "status": "completed",
+            "metadata": { "error": { "code": "git_command_timeout" } },
+            "worktrees": [{
+                "handle": "fixture@cook-target",
+                "path": workspace.path(),
+                "branch": "cook-target",
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            }]
+        }));
+        let resolved = resolve_worktree_provider_handle_from_config(
+            "fixture@cook-target",
+            &config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![script, "{handle}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            }),
+        )
+        .expect("successful payload metadata is not an error envelope");
+
+        assert_eq!(resolved.handle, "fixture@cook-target");
     }
 
     #[test]

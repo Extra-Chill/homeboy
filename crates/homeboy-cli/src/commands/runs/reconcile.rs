@@ -782,7 +782,7 @@ mod tests {
             id: "run-1".to_string(),
             kind: "bench".to_string(),
             component_id: Some("homeboy".to_string()),
-            started_at: "2026-07-12T00:00:00Z".to_string(),
+            started_at: chrono::Utc::now().to_rfc3339(),
             finished_at: None,
             status: "running".to_string(),
             command: Some("homeboy bench".to_string()),
