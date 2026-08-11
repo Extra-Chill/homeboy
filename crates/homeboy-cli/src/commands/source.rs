@@ -72,6 +72,9 @@ mod tests {
 
         assert_eq!(exit_code, 0);
         assert!(output.source_package.valid);
+        assert!(output.source_package.accepted.is_some());
+        assert!(output.source_package.partial.is_none());
+        assert!(output.source_package.blocked.is_empty());
         assert_eq!(
             before,
             std::fs::read_dir(source.path())
