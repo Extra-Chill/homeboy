@@ -1750,7 +1750,7 @@ fn ensure_runtime_tmp_dir() -> Result<PathBuf> {
     let preflight = crate::capacity::preflight_capacity(
         &runtime_dir,
         "runtime temporary storage",
-        crate::capacity::CapacityReserve::configured(),
+        crate::capacity::CapacityReserve::configured_for_path(&runtime_dir),
     );
     if preflight.status != crate::capacity::CapacityStatus::Ok {
         crate::cleanup::run_automatic_runtime_temp_retention()?;
@@ -1758,7 +1758,7 @@ fn ensure_runtime_tmp_dir() -> Result<PathBuf> {
     crate::capacity::preflight_capacity(
         &runtime_dir,
         "runtime temporary storage",
-        crate::capacity::CapacityReserve::configured(),
+        crate::capacity::CapacityReserve::configured_for_path(&runtime_dir),
     )
     .into_result()?;
     Ok(runtime_dir)

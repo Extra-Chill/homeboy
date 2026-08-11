@@ -193,7 +193,9 @@ fn view(schedule: Schedule) -> ScheduleView {
         next_run_at,
         due,
         stale_running,
-        recovery_command: stale_running.then(|| "homeboy daemon start".to_string()),
+        // The daemon owns recovery classification. Its planner reads current
+        // status and selects the safe action instead of assuming a restart.
+        recovery_command: stale_running.then(|| "homeboy daemon recover --dry-run".to_string()),
     }
 }
 
@@ -451,6 +453,11 @@ mod tests {
     #[test]
     fn stale_running_marker_is_visible_with_a_recovery_command() {
         homeboy::core::test_support::with_isolated_home(|_| {
+            let daemon = homeboy::core::daemon::read_status().expect("read isolated daemon status");
+            assert!(
+                !daemon.running,
+                "fixture has no daemon to reclaim the stale marker"
+            );
             let schedule = Schedule {
                 id: "stale-marker".to_string(),
                 command: Some(vec!["triage".to_string()]),
@@ -487,7 +494,7 @@ mod tests {
             assert!(output.stale_running);
             assert_eq!(
                 output.recovery_command.as_deref(),
-                Some("homeboy daemon start")
+                Some("homeboy daemon recover --dry-run")
             );
         });
     }

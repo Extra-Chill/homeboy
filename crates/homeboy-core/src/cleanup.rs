@@ -130,15 +130,28 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    if !roots.iter().any(|root| {
-        below_reconstructable_reserve(root, retention.reconstructable_artifact_reserve_bytes)
-    }) {
+    let pressured: Vec<_> = roots
+        .iter()
+        .filter_map(|root| {
+            let reserve = crate::capacity::filesystem_relative_reserve_bytes(
+                retention.reconstructable_artifact_reserve_bytes,
+                disk_budget(
+                    root,
+                    "managed worktree",
+                    "worktree capacity is not measurable on this platform",
+                )
+                .total_bytes,
+            );
+            below_reconstructable_reserve(root, reserve).then(|| (root, reserve))
+        })
+        .collect();
+    if pressured.is_empty() {
         return Ok(());
     }
 
     run_automatic_artifact_retention_in(&roots, &retention, SystemTime::now())?;
 
-    for root in roots {
+    for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
             &root,
             "managed worktree",
@@ -146,13 +159,13 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
         );
         if budget
             .available_bytes
-            .is_some_and(|available| available < retention.reconstructable_artifact_reserve_bytes)
+            .is_some_and(|available| available < reserve_bytes)
         {
             return Err(reconstructable_admission_error(
                 &root,
                 budget.available_bytes,
                 budget.available_inodes,
-                retention.reconstructable_artifact_reserve_bytes,
+                reserve_bytes,
             ));
         }
     }
