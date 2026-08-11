@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
@@ -178,12 +179,41 @@ where
             Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
         > + Copy,
 {
+    continue_cook_with_queued_execution(args, executor, reconstruct_dispatcher, false)
+}
+
+/// `retry --run` owns a fresh queued replacement attempt. It may dispatch that
+/// attempt through the immutable Cook recipe; ordinary `cook-continue` remains
+/// observation-only until the attempt becomes terminal.
+fn continue_cook_with_queued_execution<E, F>(
+    args: CookContinueArgs,
+    executor: E,
+    reconstruct_dispatcher: F,
+    execute_queued_attempt: bool,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: Fn(
+            &Value,
+        ) -> homeboy::core::Result<
+            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+        > + Copy,
+{
     let recipe =
         agent_task_service::load_recipe(&args.cook_or_attempt_id).or_else(|cook_error| {
             agent_task_service::load_recipe_for_attempt(&args.cook_or_attempt_id)?.ok_or(cook_error)
         })?;
     let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
     let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
+    if execute_queued_attempt && record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
+        return dispatch_queued_cook_retry(
+            &recipe,
+            &run_id,
+            args.full,
+            executor,
+            reconstruct_dispatcher,
+        );
+    }
     if !record.state.is_terminal() {
         return Ok((cook_continuation_status(&recipe.cook_id, &record), 0));
     }
@@ -284,6 +314,104 @@ where
         super::status::compact_cook_report(value, args.full),
         result.exit_code,
     ))
+}
+
+#[cfg(test)]
+pub(crate) fn consume_queued_cook_retry_with<E, F>(
+    args: CookContinueArgs,
+    executor: E,
+    reconstruct_dispatcher: F,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: Fn(
+            &Value,
+        ) -> homeboy::core::Result<
+            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+        > + Copy,
+{
+    continue_cook_with_queued_execution(args, executor, reconstruct_dispatcher, true)
+}
+
+/// A retry reservation creates a queued record before its external dispatch.
+/// Claim that effect separately so competing `retry --run` consumers converge
+/// on one dispatcher invocation.
+fn dispatch_queued_cook_retry<E, F>(
+    recipe: &homeboy::agents::agent_task_service::AgentTaskCookRecipe,
+    run_id: &str,
+    full: bool,
+    executor: E,
+    reconstruct_dispatcher: F,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: Fn(
+            &Value,
+        ) -> homeboy::core::Result<
+            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+        > + Copy,
+{
+    let operation_key = format!("retry-run:{run_id}");
+    match agent_task_lifecycle::claim_cook_operation(
+        run_id,
+        &operation_key,
+        Duration::from_secs(30),
+    )? {
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
+        | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
+            let record = agent_task_lifecycle::status(run_id)?;
+            Ok((cook_continuation_status(&recipe.cook_id, &record), 0))
+        }
+        agent_task_lifecycle::ClaimOutcome::Acquired => {
+            let dispatched: CmdResult<Value> = (|| {
+                let dispatcher =
+                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
+                let attempt = recipe
+                    .attempts
+                    .iter()
+                    .find(|attempt| attempt.run_id == run_id)
+                    .ok_or_else(|| {
+                        homeboy::core::Error::validation_invalid_argument(
+                            "cook_or_attempt_id",
+                            "selected attempt is absent from its durable Cook recipe",
+                            Some(run_id.to_string()),
+                            None,
+                        )
+                    })?;
+                let mut options =
+                    agent_task_service::reconstruct_options_with_dispatcher(recipe, dispatcher)?;
+                options.initial_run_id = attempt.run_id.clone();
+                options.initial_plan = attempt.plan.clone();
+                agent_task_service::authorize_cook_continue_route(&options)?;
+                let result = agent_task_service::run_cook(options, executor)?;
+                let value = cook_report_with_continuation(
+                    serde_json::to_value(result.value).unwrap_or(Value::Null),
+                );
+                Ok((
+                    super::status::compact_cook_report(value, full),
+                    result.exit_code,
+                ))
+            })();
+            match dispatched {
+                Ok((value, exit_code)) => {
+                    agent_task_lifecycle::complete_cook_operation(
+                        run_id,
+                        &operation_key,
+                        serde_json::json!({ "exit_code": exit_code }),
+                    )?;
+                    Ok((value, exit_code))
+                }
+                Err(error) => {
+                    agent_task_lifecycle::fail_cook_operation(
+                        run_id,
+                        &operation_key,
+                        serde_json::json!({ "error": error.message.clone() }),
+                    )?;
+                    Err(error)
+                }
+            }
+        }
+    }
 }
 
 /// Probe the continuation admission boundary without claiming a continuation or
@@ -2090,6 +2218,26 @@ where
 }
 
 pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
+    retry_with(
+        args,
+        ExtensionProviderAgentTaskExecutor::discover(),
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+    )
+}
+
+pub(super) fn retry_with<E, F>(
+    args: RetryArgs,
+    executor: E,
+    reconstruct_dispatcher: F,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: Fn(
+            &Value,
+        ) -> homeboy::core::Result<
+            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+        > + Copy,
+{
     let result = agent_task_service::retry(
         &args.run_id,
         args.new_run_id.as_deref(),
@@ -2098,18 +2246,19 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
     )?;
     if result.run {
         if result.record.metadata["cook_id"].is_string() {
-            return continue_cook(CookContinueArgs {
-                cook_or_attempt_id: result.record.run_id,
-                preflight: false,
-                rearm: false,
-                full: false,
-            });
+            return continue_cook_with_queued_execution(
+                CookContinueArgs {
+                    cook_or_attempt_id: result.record.run_id,
+                    preflight: false,
+                    rearm: false,
+                    full: false,
+                },
+                executor,
+                reconstruct_dispatcher,
+                true,
+            );
         }
-        return run_submitted_with_executor(
-            result.record.run_id,
-            None,
-            ExtensionProviderAgentTaskExecutor::discover(),
-        );
+        return run_submitted_with_executor(result.record.run_id, None, executor);
     }
     Ok((
         serde_json::to_value(result.record).unwrap_or(Value::Null),
