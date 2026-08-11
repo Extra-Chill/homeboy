@@ -1354,11 +1354,68 @@ fn run_provider_identity_command(
     {
         return Err(Error::validation_invalid_argument("worktree_providers.commands.resolve_identity", format!("worktree provider `{provider_id}` returned an unsupported or incomplete identity envelope"), Some(provider_id.to_string()), None));
     }
+    validate_split_identity(provider_id, handle, &identity)?;
     Ok(Some(WorktreeProviderExactIdentity {
         latency_ms,
         budget_ms,
         ..identity
     }))
+}
+
+/// Split identity output is provider input, not an authority bypass. Prove the
+/// exact requested handle names the claimed canonical linked checkout before it
+/// can be selected or persisted.
+fn validate_split_identity(
+    provider_id: &str,
+    requested_handle: &str,
+    identity: &WorktreeProviderExactIdentity,
+) -> Result<()> {
+    if identity.handle != requested_handle {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands.resolve_identity",
+            format!(
+                "worktree provider `{provider_id}` resolved requested handle `{requested_handle}` as different handle `{}`",
+                identity.handle
+            ),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    if identity.branch.trim().is_empty() || identity.primary {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands.resolve_identity",
+            format!("worktree provider `{provider_id}` returned unsafe linked-worktree metadata for `{requested_handle}`"),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    let path = std::path::Path::new(&identity.path);
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "worktree_providers.commands.resolve_identity",
+            format!("worktree provider `{provider_id}` returned an unresolvable checkout for `{requested_handle}`: {error}"),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    if canonical != path {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands.resolve_identity",
+            format!("worktree provider `{provider_id}` returned a non-canonical checkout path for `{requested_handle}`"),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    validate_task_worktree_root(&canonical, requested_handle)?;
+    if crate::git::current_branch(&canonical).as_deref() != Some(identity.branch.as_str()) {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands.resolve_identity",
+            format!("worktree provider `{provider_id}` branch metadata for `{requested_handle}` does not match the checkout branch"),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// Versioned exact resolvers may explicitly decline a handle. This is distinct
@@ -4888,12 +4945,13 @@ mod tests {
 
     #[test]
     fn split_identity_survives_a_timed_out_safety_attestation() {
+        let (_root, workspace) = linked_workspace("branch");
         let mut provider = default_command_provider();
         provider.lookup_timeout_ms = 25;
         provider.commands.resolve_identity = Some(vec![
             "sh".to_string(),
             "-c".to_string(),
-            "printf '%s' '{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"opaque-identity\",\"handle\":\"fixture@branch\",\"path\":\"/tmp/fixture\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}'".to_string(),
+            format!("printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"opaque-identity\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'", workspace.display()),
         ]);
         provider.commands.attest_safety = Some(vec![
             "sh".to_string(),
@@ -4918,10 +4976,11 @@ mod tests {
 
     #[test]
     fn split_provider_rejects_safety_evidence_for_a_different_identity() {
+        let (_root, workspace) = linked_workspace("branch");
         let mut provider = default_command_provider();
         provider.commands.resolve_identity = Some(vec![
             "sh".to_string(), "-c".to_string(),
-            "printf '%s' '{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"opaque-identity\",\"handle\":\"fixture@branch\",\"path\":\"/tmp/fixture\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}'".to_string(),
+            format!("printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"opaque-identity\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'", workspace.display()),
         ]);
         provider.commands.attest_safety = Some(vec![
             "sh".to_string(), "-c".to_string(),
@@ -4937,6 +4996,7 @@ mod tests {
 
     #[test]
     fn pinned_split_identity_ignores_provider_reordering_and_rejects_config_drift() {
+        let (_root, workspace) = linked_workspace("branch");
         let split_provider = |provider_id: &str, token: &str| {
             WorktreeProviderConfig {
             commands: WorktreeProviderCommands {
@@ -4944,7 +5004,7 @@ mod tests {
                     "sh".to_string(),
                     "-c".to_string(),
                     format!(
-                        "printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"{provider_id}\",\"token\":\"{token}\",\"handle\":\"fixture@branch\",\"path\":\"/tmp/{provider_id}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'"
+                        "printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"{provider_id}\",\"token\":\"{token}\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'", workspace.display()
                     ),
                 ]),
                 attest_safety: Some(vec!["true".to_string()]),
@@ -4980,6 +5040,7 @@ mod tests {
 
     #[test]
     fn split_identity_probes_multiple_providers_until_one_owns_the_exact_handle() {
+        let (_root, workspace) = linked_workspace("branch");
         let split_provider = |script: &str| WorktreeProviderConfig {
             commands: WorktreeProviderCommands {
                 resolve_identity: Some(vec![
@@ -4997,7 +5058,7 @@ mod tests {
         config.worktree_providers.insert(
             "owner".to_string(),
             split_provider(
-                "printf '%s' '{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"owner\",\"token\":\"owner-token\",\"handle\":\"fixture@branch\",\"path\":\"/tmp/owner\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}'",
+                &format!("printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"owner\",\"token\":\"owner-token\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'", workspace.display()),
             ),
         );
 
@@ -5006,6 +5067,34 @@ mod tests {
                 .expect("the owning split provider resolves after a typed miss");
         assert_eq!(identity.provider_id, "owner");
         assert_eq!(identity.token, "owner-token");
+    }
+
+    #[test]
+    fn split_identity_rejects_a_different_clean_worktree_before_selection_or_restart() {
+        let (_root, workspace) = linked_workspace("branch");
+        let mut provider = default_command_provider();
+        provider.commands.resolve_identity = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"other-clean-worktree\",\"handle\":\"fixture@other\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'",
+                workspace.display()
+            ),
+        ]);
+        provider.commands.attest_safety = Some(vec!["true".to_string()]);
+        let config = config_with_provider(provider);
+
+        let initial =
+            resolve_apply_enabled_worktree_provider_identity_from_config("fixture@branch", &config)
+                .expect_err("a different clean worktree cannot be selected");
+        assert!(initial.message.contains("different handle"));
+        let restart = resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+            "fixture@branch",
+            "fixture",
+            &config,
+        )
+        .expect_err("a different clean worktree cannot replace pinned identity on restart");
+        assert!(restart.message.contains("different handle"));
     }
 
     fn config_with_provider(provider: WorktreeProviderConfig) -> HomeboyConfig {
@@ -5206,6 +5295,34 @@ mod tests {
             .output()
             .expect("initialize git repository");
         assert!(output.status.success());
+    }
+
+    fn linked_workspace(branch: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().expect("workspace root");
+        let source = root.path().join("source");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&source).expect("source directory");
+        git_init(&source, "main");
+        for args in [
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .output()
+                .expect("git command");
+            assert!(output.status.success());
+        }
+        let output = std::process::Command::new("git")
+            .args(["worktree", "add", "--quiet", "-b", branch])
+            .arg(&workspace)
+            .current_dir(&source)
+            .output()
+            .expect("create linked worktree");
+        assert!(output.status.success());
+        (root, workspace.canonicalize().expect("canonical workspace"))
     }
 
     #[cfg(unix)]
