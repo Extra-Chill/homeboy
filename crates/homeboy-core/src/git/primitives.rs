@@ -474,6 +474,19 @@ pub fn get_git_root(path: &str) -> Result<String> {
     .map(|s| s.trim().to_string())
 }
 
+/// Resolve a repository root without allowing Git to outlive an interactive
+/// caller's deadline.
+pub fn get_git_root_with_timeout(path: &str, timeout: Duration) -> Result<String> {
+    run_git_with_env_timeout(
+        Path::new(path),
+        &["rev-parse", "--show-toplevel"],
+        "git root",
+        &[],
+        timeout,
+    )
+    .map(|root| root.trim().to_string())
+}
+
 /// Normalize a path into a directory suitable for probing git provenance.
 ///
 /// Git commands need a directory to run inside; when the caller hands us a file
@@ -568,7 +581,18 @@ mod tests {
     fn bounded_git_command_terminates_hung_child_process_group() {
         let dir = tempfile::tempdir().expect("tempdir");
         git(dir.path(), &["init", "-q"]);
-        git(dir.path(), &["config", "alias.hang", "!sleep 10"]);
+        let child_pid = dir.path().join("hung-child.pid");
+        git(
+            dir.path(),
+            &[
+                "config",
+                "alias.hang",
+                &format!(
+                    "!sh -c 'sleep 10 & echo $! > {}; wait'",
+                    child_pid.display()
+                ),
+            ],
+        );
 
         let started = Instant::now();
         let err = run_git_with_env_timeout(
@@ -584,6 +608,15 @@ mod tests {
         assert!(err.details["stderr"]
             .as_str()
             .is_some_and(|detail| detail.contains("timed out")));
+        let pid: i32 = std::fs::read_to_string(&child_pid)
+            .expect("hung child records its pid")
+            .trim()
+            .parse()
+            .expect("numeric pid");
+        assert!(
+            unsafe { libc::kill(pid, 0) } != 0,
+            "timeout must terminate every subprocess in the Git process group"
+        );
     }
 
     #[test]
