@@ -95,6 +95,7 @@ fn trace_failure_records_child_cleanup_context() {
         stdout: String::new(),
         stderr: "Homeboy interrupted by signal 15".to_string(),
         timed_out: false,
+        cargo_target: None,
         child_resource: Some(
             homeboy_core::engine::resource::ExtensionChildResourceSummary {
                 child: homeboy_core::engine::resource::ChildProcessIdentity {

@@ -90,6 +90,33 @@ pub struct SharedCargoTargetLease {
     _lock: File,
 }
 
+/// The Cargo target selected for a managed child process. Holding this value
+/// keeps a shared-store lease alive until that child exits.
+pub struct ManagedCargoTarget {
+    target_dir: PathBuf,
+    resolution: &'static str,
+    owner: String,
+    _lease: Option<SharedCargoTargetLease>,
+}
+
+impl ManagedCargoTarget {
+    pub fn target_dir(&self) -> &Path {
+        &self.target_dir
+    }
+
+    pub fn resolution(&self) -> &'static str {
+        self.resolution
+    }
+
+    pub fn evidence(&self) -> homeboy_engine_primitives::cargo_target::CargoTargetEvidence {
+        homeboy_engine_primitives::cargo_target::CargoTargetEvidence {
+            path: self.target_dir.to_string_lossy().to_string(),
+            resolution: self.resolution.to_string(),
+            owner: self.owner.clone(),
+        }
+    }
+}
+
 impl SharedCargoTargetLease {
     pub fn target_dir(&self) -> &Path {
         &self.target_dir
@@ -111,6 +138,81 @@ pub fn acquire_shared_cargo_target(owner: &str) -> Result<SharedCargoTargetLease
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
     acquire_shared_cargo_target_in(&root, owner, SystemTime::now())
+}
+
+/// Resolve Cargo output for an explicit managed-execution declaration.
+///
+/// An explicit caller target is authoritative, including a relative target
+/// used to intentionally keep output in the checkout. Otherwise this acquires
+/// a stable shared-store lease for the complete child lifetime.
+pub fn acquire_managed_cargo_target(
+    owner: &str,
+    source_path: &Path,
+    explicit_target: Option<&str>,
+) -> Result<ManagedCargoTarget> {
+    if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
+        let target_dir = PathBuf::from(target);
+        let target_dir = if target_dir.is_absolute() {
+            target_dir
+        } else {
+            source_path.join(target_dir)
+        };
+        return Ok(ManagedCargoTarget {
+            target_dir,
+            resolution: "local",
+            owner: owner.to_string(),
+            _lease: None,
+        });
+    }
+
+    let compatibility = cargo_target_repository_identity(source_path);
+    let lease = acquire_shared_cargo_target(&format!("{owner}:{compatibility}"))?;
+    Ok(ManagedCargoTarget {
+        target_dir: lease.target_dir().to_path_buf(),
+        resolution: "shared",
+        owner: owner.to_string(),
+        _lease: Some(lease),
+    })
+}
+
+/// Cargo itself separates compatible crate fingerprints inside one target
+/// directory. The store key therefore identifies the repository rather than a
+/// checkout path or current HEAD, allowing divergent worktrees to reuse it.
+fn cargo_target_repository_identity(source_path: &Path) -> String {
+    let remote = crate::git::resolve_default_remote(source_path);
+    let remote_url = std::process::Command::new("git")
+        .args(["config", "--get", &format!("remote.{remote}.url")])
+        .current_dir(source_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(remote_url) = remote_url {
+        return remote_url;
+    }
+
+    let common_dir = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(source_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty());
+    common_dir
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                source_path.join(path)
+            }
+        })
+        .and_then(|path| fs::canonicalize(path).ok())
+        .unwrap_or_else(|| source_path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Resolve the one shared Cargo store used by producers, cleanup, and reports.

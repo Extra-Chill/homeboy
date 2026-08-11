@@ -104,6 +104,7 @@ pub fn from_main_workflow_with_ci_context(
             test_scope: result.test_scope,
             summary: result.summary,
             raw_output: result.raw_output,
+            cargo_target: result.cargo_target,
             ci_context,
             extension_phase_timings: result.extension_phase_timings,
             actionable: None,
@@ -137,6 +138,7 @@ pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i
             test_scope: None,
             summary: None,
             raw_output: None,
+            cargo_target: None,
             ci_context: None,
             extension_phase_timings: Vec::new(),
             actionable: None,
@@ -182,6 +184,7 @@ pub fn from_auto_fix_drift_workflow(
             test_scope: None,
             summary: None,
             raw_output: None,
+            cargo_target: None,
             ci_context: None,
             extension_phase_timings: Vec::new(),
             actionable: None,
@@ -328,6 +331,7 @@ mod tests {
             summary: None,
             raw_output: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: None,
         }
     }
 
@@ -351,6 +355,7 @@ mod tests {
             summary: None,
             raw_output: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: None,
         }
     }
 
@@ -374,6 +379,7 @@ mod tests {
             summary: None,
             raw_output: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: None,
         }
     }
 

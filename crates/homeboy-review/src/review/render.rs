@@ -691,6 +691,8 @@ mod tests {
             producer_summaries: Vec::new(),
             summary: None,
             self_check_capture: None,
+            // This review fixture did not execute Cargo, so it has no target evidence.
+            cargo_target: None,
             ci_context: None,
             extension_phase_timings: Vec::new(),
             actionable: None,
@@ -726,6 +728,8 @@ mod tests {
             test_scope: None,
             summary: None,
             raw_output: None,
+            // This review fixture did not execute Cargo, so it has no target evidence.
+            cargo_target: None,
             ci_context: None,
             extension_phase_timings: Vec::new(),
             actionable: None,
