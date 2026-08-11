@@ -325,6 +325,11 @@ pub fn route_after_parse_with_provenance(
     // durable record (#11597, #11599) and how an explicitly local run acquired
     // a Lab handoff it could not later recover (#11600).
     let route_runner_id = generic_route_runner_id(cli, lab_command.as_ref(), &inferred_runner_id);
+    if lab_command.is_none()
+        || (route_runner_id.is_none() && cli.placement != homeboy::cli_surface::Placement::Lab)
+    {
+        return Ok(None);
+    }
     let run_handoff = if lab_command.is_some() && route_runner_id.is_some() {
         materialize_agent_task_run_handoff(cli, &normalized_args)?
     } else {
