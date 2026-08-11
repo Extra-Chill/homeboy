@@ -5149,61 +5149,15 @@ fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions)
 }
 
 fn validate_pending_cook_repository_identity(plan: &AgentTaskPlan, target: &Path) -> Result<()> {
-    let Some(expected) = plan
-        .metadata
-        .pointer("/cook_repository_identity/remote_identity")
-        .and_then(Value::as_str)
-    else {
-        return Ok(());
-    };
-    let Some(git_root) = homeboy_core::git::repo_root(target) else {
-        return Err(Error::validation_invalid_argument(
-            "to_worktree",
-            "Cook destination is not a Git checkout bound to the resolved repository identity",
-            Some(target.display().to_string()),
-            None,
-        ));
-    };
-    let identities = homeboy_core::git::output_optional(&git_root, &["remote"])
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|remote| homeboy_core::git::remote_url(&git_root, remote))
-        .filter_map(|remote| canonical_remote_identity(&remote))
-        .collect::<std::collections::BTreeSet<_>>();
-    if identities.len() == 1 && identities.contains(expected) {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-        "to_worktree",
-        format!("Cook destination repository identity does not match resolved `{expected}`"),
-        Some(target.display().to_string()),
-        None,
-    ))
-}
-
-fn canonical_remote_identity(remote_url: &str) -> Option<String> {
-    let remote_url = remote_url.trim();
-    let (host, path) = if let Some((_, rest)) = remote_url.split_once("://") {
-        let (authority, path) = rest.split_once('/')?;
-        (authority.rsplit('@').next()?, path)
-    } else {
-        let (authority, path) = remote_url.split_once(':')?;
-        (authority.rsplit('@').next()?, path)
-    };
-    let path = path.trim_matches('/').trim_end_matches(".git");
-    (!host.is_empty()
-        && path
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .count()
-            >= 2)
-        .then(|| {
-            format!(
-                "git://{}/{}",
-                host.to_ascii_lowercase(),
-                path.to_ascii_lowercase()
-            )
-        })
+    homeboy_core::worktree_providers::validate_task_worktree_repository_identity(
+        target,
+        plan.metadata
+            .pointer("/cook_repository_identity/remote_identity")
+            .and_then(Value::as_str),
+        plan.metadata
+            .pointer("/cook_repository_identity/repository_name")
+            .and_then(Value::as_str),
+    )
 }
 
 /// The normal configured-provider preflight rejects every dirty destination. A

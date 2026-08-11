@@ -2239,6 +2239,85 @@ pub fn validate_task_worktree_root(path: &std::path::Path, handle: &str) -> Resu
     Ok(())
 }
 
+/// Verify a resolved linked worktree belongs to Cook's durable repository
+/// expectation without exposing provider-owned remote URLs in failures.
+pub fn validate_task_worktree_repository_identity(
+    path: &std::path::Path,
+    expected_remote: Option<&str>,
+    expected_repository_name: Option<&str>,
+) -> Result<()> {
+    if expected_remote.is_none() && expected_repository_name.is_none() {
+        return Ok(());
+    }
+    let Some(git_root) = crate::git::repo_root(path) else {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook destination is not a Git checkout bound to the resolved repository identity",
+            Some(path.display().to_string()),
+            None,
+        ));
+    };
+    let identities = crate::git::output_optional(&git_root, &["remote"])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|remote| crate::git::remote_url(&git_root, remote))
+        .filter_map(|remote| canonical_remote_identity(&remote))
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(expected) = expected_remote {
+        if identities.len() == 1 && identities.contains(expected) {
+            return Ok(());
+        }
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!("Cook destination repository identity does not match resolved `{expected}`"),
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    let expected = expected_repository_name.expect("repository expectation exists");
+    if identities.len() == 1
+        && identities.iter().any(|identity| {
+            identity
+                .strip_prefix("git://")
+                .and_then(|identity| identity.rsplit('/').next())
+                == Some(expected)
+        })
+    {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "to_worktree",
+        "Cook destination repository does not match the requested Cook repository",
+        Some(path.display().to_string()),
+        None,
+    ))
+}
+
+fn canonical_remote_identity(remote_url: &str) -> Option<String> {
+    let remote_url = remote_url.trim();
+    let (host, path) = if let Some((_, rest)) = remote_url.split_once("://") {
+        let (authority, path) = rest.split_once('/')?;
+        (authority.rsplit('@').next()?, path)
+    } else {
+        let (authority, path) = remote_url.split_once(':')?;
+        (authority.rsplit('@').next()?, path)
+    };
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    (!host.is_empty()
+        && path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .count()
+            >= 2)
+        .then(|| {
+            format!(
+                "git://{}/{}",
+                host.to_ascii_lowercase(),
+                path.to_ascii_lowercase()
+            )
+        })
+}
+
 fn trusted_unpushed_destination_matches(
     path: &std::path::Path,
     trusted: Option<&TrustedUnpushedWorktree>,
