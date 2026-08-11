@@ -538,8 +538,9 @@ pub struct AgentTaskCookArgs {
     /// through that same configured provider. An explicit --workspace or --cwd
     /// Git checkout can infer --repo when its remote maps to exactly one
     /// configured component; an explicit --repo must match that checkout. When
-    /// paired with --cwd, this must name the same existing local or registered
-    /// linked task worktree; --cwd remains the Cook workspace authority.
+    /// paired with --cwd, this must name the same existing local or active
+    /// registered linked task worktree; --cwd remains the Cook workspace
+    /// authority.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
     #[arg(

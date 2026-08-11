@@ -1014,6 +1014,80 @@ fn cook_rejects_mismatched_cwd_and_destination() {
     });
 }
 
+#[test]
+fn cook_rejects_an_inactive_managed_destination_before_provider_execution() {
+    #[derive(Clone, Default)]
+    struct CountingExecutor(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl AgentTaskExecutorAdapter for CountingExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            AgentTaskOutcome {
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                ..Default::default()
+            }
+        }
+    }
+
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        register_component(
+            "fixture",
+            primary.path(),
+            "https://github.com/example/fixture.git",
+        );
+        let created =
+            homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+                component_id: "fixture".to_string(),
+                branch: "fix/inactive".to_string(),
+                from: None,
+                task_url: None,
+                run_id: None,
+                cleanup_policy: None,
+            })
+            .expect("create managed worktree");
+        let cwd = created.record.worktree_path.clone();
+        let handle = created.record.id.clone();
+        homeboy::core::worktree::remove(homeboy::core::worktree::WorktreeRemoveOptions {
+            id: handle.clone(),
+            force: true,
+            cleanup_branch: false,
+            allow_unmerged_branch: false,
+        })
+        .expect("remove managed worktree");
+
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "reject inactive destination".to_string(),
+            "--repo".to_string(),
+            "fixture".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--cwd".to_string(),
+            cwd,
+            "--to-worktree".to_string(),
+            handle,
+            "--no-finalize".to_string(),
+        ]);
+        let executor = CountingExecutor::default();
+        let error = run_cook_with_executor(args, executor.clone())
+            .expect_err("inactive managed destination must fail before execution");
+
+        assert_eq!(error.details["field"], "to_worktree");
+        assert!(error.message.contains("is no longer active"));
+        assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn cook_does_not_collapse_provider_lookup_failures_into_missing_destination_metadata() {

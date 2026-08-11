@@ -637,6 +637,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     })?;
     if let Some(cwd) = args.dispatch.cwd.as_deref() {
         let cwd = Path::new(cwd);
+        ensure_active_managed_cook_destination(to_worktree)?;
         homeboy::core::worktree_providers::validate_task_worktree_root(cwd, to_worktree)?;
         let path = std::fs::canonicalize(cwd).map_err(|error| {
             homeboy::core::Error::internal_io(error.to_string(), Some(cwd.display().to_string()))
@@ -774,6 +775,25 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     })
 }
 
+fn ensure_active_managed_cook_destination(to_worktree: &str) -> homeboy::core::Result<()> {
+    let Some(record) = homeboy::core::worktree::resolve_workspace_ref_if_present(to_worktree)?
+    else {
+        return Ok(());
+    };
+    if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "Homeboy workspace `{}` is no longer active",
+                record.handle()
+            ),
+            Some(to_worktree.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// An explicit CWD is the Cook workspace authority. A co-supplied destination
 /// can only name that same existing worktree; never consult a provider merely
 /// to rediscover a path the operator already supplied.
@@ -786,6 +806,7 @@ fn validate_cook_cwd_destination_identity(
     } else if let Some(record) =
         homeboy::core::worktree::resolve_workspace_ref_if_present(to_worktree)?
     {
+        ensure_active_managed_cook_destination(to_worktree)?;
         std::fs::canonicalize(record.path())
     } else {
         return Err(homeboy::core::Error::validation_invalid_argument(
