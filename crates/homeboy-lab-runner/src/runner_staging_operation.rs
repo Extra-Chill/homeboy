@@ -2151,6 +2151,25 @@ pub(crate) mod tests_support {
 
     #[cfg(unix)]
     #[test]
+    fn source_package_check_refuses_exclusions_past_the_deterministic_bound() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(source.path().join("file"), b"safe").expect("file");
+        for index in 0..=MAX_SOURCE_PACKAGE_EXCLUSIONS {
+            symlink("/outside", source.path().join(format!("link-{index:04}"))).expect("link");
+        }
+
+        let verdict = scan_source_package(source.path()).verdict;
+
+        assert!(!verdict.valid);
+        assert!(verdict.accepted.is_none());
+        assert_eq!(verdict.blocked.len(), 1);
+        assert!(verdict.blocked[0].message.contains("exclusion bound"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn source_package_check_stops_at_the_first_nested_over_limit_entry() {
         let source = tempfile::tempdir().expect("source");
         let nested = source.path().join("a");
