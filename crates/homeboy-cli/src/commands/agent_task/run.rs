@@ -691,6 +691,22 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
                 .get("worktree_provider_lookup")
                 .and_then(Value::as_str)
                 == Some("not_found") => {}
+        Err(error)
+            if error
+                .details
+                .get("worktree_provider_lookup")
+                .and_then(Value::as_str)
+                == Some("timed_out") =>
+        {
+            // The lookup is bounded, but a timeout says nothing about whether
+            // this exact handle exists. Carry only the declared handle into
+            // Cook; durable materialization retries the same exact lookup.
+            return Ok(serde_json::json!({
+                "action": "lookup_pending",
+                "kind": "provider",
+                "handle": to_worktree,
+            }));
+        }
         Err(error) => return Err(error),
     }
 
@@ -1747,29 +1763,24 @@ pub(crate) fn compile_cook_plan(
     args: &AgentTaskCookArgs,
     provision: Value,
 ) -> homeboy::core::Result<AgentTaskPlan> {
+    let pending_lookup = provision.get("action").and_then(Value::as_str) == Some("lookup_pending");
     let workspace = provision
         .get("path")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            homeboy::core::Error::internal_unexpected(
-                "Cook destination provisioning did not return a task worktree path".to_string(),
-            )
-        })?
-        .to_string();
+        .map(str::to_string);
+    if workspace.is_none() && !pending_lookup {
+        return Err(homeboy::core::Error::internal_unexpected(
+            "Cook destination provisioning did not return a task worktree path".to_string(),
+        ));
+    }
     let mut dispatch = dispatch_args_for_cook(args);
     // Cook providers always receive the declared task checkout. `--cwd` is a
     // dispatch input, never authority to replace the writable Cook workspace.
     dispatch.cwd = None;
-    dispatch.workspace = Some(workspace);
-    validate_cook_destination_identity(
-        args,
-        Path::new(
-            dispatch
-                .workspace
-                .as_deref()
-                .expect("Cook workspace is set"),
-        ),
-    )?;
+    dispatch.workspace = workspace.clone();
+    if let Some(workspace) = workspace.as_deref() {
+        validate_cook_destination_identity(args, Path::new(workspace))?;
+    }
     let mut request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
@@ -1793,6 +1804,9 @@ pub(crate) fn compile_cook_plan(
         plan.metadata["cook_repository_identity"] = identity.clone();
     }
     for task in &mut plan.tasks {
+        if pending_lookup {
+            continue;
+        }
         let root = task.workspace.root.as_deref().ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
                 "workspace",
