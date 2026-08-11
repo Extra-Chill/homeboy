@@ -57,7 +57,8 @@ use self_artifacts::{homeboy_source_checkout, self_temp_artifact_candidates};
 
 const ARTIFACT_DIR_REMOVE_ATTEMPTS: usize = 3;
 const ARTIFACT_DIR_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
-const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[("target", "rust_target")];
+const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] =
+    &[("target", "rust_target"), (".cargo-target", "rust_target")];
 const SECONDS_PER_DAY: u64 = 86_400;
 const AUTOMATIC_ARTIFACT_AGE_POLICY: u64 = u64::MAX;
 
@@ -520,26 +521,30 @@ impl ActiveWorktrees {
     }
 }
 
-/// Whether a Cargo build currently owns `worktree`'s target directory.
+/// Whether a Cargo build currently owns one of `worktree`'s target directories.
 ///
-/// Cargo holds an exclusive advisory lock on `target/<profile>/.cargo-lock` for
-/// the duration of a build and releases it on completion, so probing that lock
-/// answers "is something building here right now" for ANY checkout — managed,
-/// unmanaged, or mid-rebase. Registry state cannot: it only describes checkouts
-/// Homeboy created (#9481).
+/// Cargo holds an exclusive advisory lock on `<target>/<profile>/.cargo-lock`
+/// for the duration of a build and releases it on completion, so probing every
+/// declared local Rust target answers "is something building here right now" for
+/// ANY checkout — managed, unmanaged, or mid-rebase. Registry state cannot: it
+/// only describes checkouts Homeboy created (#9481).
 ///
 /// Deliberately fail-open. An unreadable or absent lock means "no evidence of a
 /// build", never "definitely safe to delete" — the registry and age gates still
 /// apply on top of this.
 fn cargo_build_lock_is_held(worktree: &Path) -> bool {
-    let target = worktree.join("target");
-    let Ok(entries) = fs::read_dir(&target) else {
-        return false;
-    };
-    entries
-        .flatten()
-        .map(|entry| entry.path().join(".cargo-lock"))
-        .any(|lock| path_lock_is_held(&lock))
+    BUILTIN_ARTIFACT_PATHS
+        .iter()
+        .filter(|(_, kind)| *kind == "rust_target")
+        .any(|(relative_path, _)| {
+            fs::read_dir(worktree.join(relative_path))
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path().join(".cargo-lock"))
+                .any(|lock| path_lock_is_held(&lock))
+        })
 }
 
 /// Probe one advisory lock without blocking.
@@ -1912,6 +1917,18 @@ mod tests {
             assert!(cargo_build_lock_is_held(dir.path()));
         }
 
+        #[test]
+        fn a_held_cargo_target_lock_is_an_active_build() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let profile = dir.path().join(".cargo-target/debug");
+            std::fs::create_dir_all(&profile).expect("Cargo target profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+
+            assert!(cargo_build_lock_is_held(dir.path()));
+        }
+
         /// Releasing must clear the signal, or a finished build would pin the
         /// target as undeletable forever.
         #[test]
@@ -2066,7 +2083,7 @@ mod tests {
 
             let declarations = artifact_declarations(tmp.path()).expect("declarations");
 
-            assert_eq!(declarations.len(), 1);
+            assert_eq!(declarations.len(), 2);
             assert_eq!(declarations[0].relative_path, "target");
             assert_eq!(declarations[0].kind, "rust_target");
             assert_eq!(
@@ -2076,6 +2093,8 @@ mod tests {
             assert_eq!(declarations[0].category, LEGACY_ARTIFACT_CATEGORY);
             assert!(declarations[0].reconstructable);
             assert!(declarations[0].liveness_protected);
+            assert_eq!(declarations[1].relative_path, ".cargo-target");
+            assert_eq!(declarations[1].kind, "rust_target");
         });
     }
 
@@ -2145,6 +2164,79 @@ mod tests {
             fs::read_to_string(repo.path().join("src/lib.rs")).expect("source remains"),
             "changed source"
         );
+    }
+
+    #[test]
+    fn artifact_cleanup_reclaims_idle_cargo_target_alongside_target() {
+        let repo = repo_with_ignored_artifacts();
+        write_file(&repo.path().join("target/debug/app"), "target artifact");
+        write_file(
+            &repo.path().join(".cargo-target/debug/app"),
+            "Cargo target artifact",
+        );
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            ..Default::default()
+        })
+        .expect("cleanup idle Cargo targets");
+
+        assert_eq!(output.applied_count, 2);
+        assert!(!repo.path().join("target").exists());
+        assert!(!repo.path().join(".cargo-target").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_cleanup_keeps_cargo_target_with_active_cargo_lock() {
+        use std::os::unix::io::AsRawFd;
+
+        let repo = repo_with_ignored_artifacts();
+        let lock_path = repo.path().join(".cargo-target/debug/.cargo-lock");
+        write_file(&lock_path, "");
+        let lock = fs::File::open(&lock_path).expect("open Cargo lock");
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "test must hold the Cargo lock"
+        );
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            ..Default::default()
+        })
+        .expect("cleanup active Cargo target");
+
+        assert_eq!(output.applied_count, 0);
+        assert!(repo.path().join(".cargo-target").exists());
+        assert!(output
+            .skipped
+            .iter()
+            .any(|row| row.relative_path == ".cargo-target" && row.reason.contains("active")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_cleanup_unlinks_cargo_target_symlink_without_following_it() {
+        let repo = repo_with_ignored_artifacts();
+        let external = TempDir::new().expect("external artifact");
+        write_file(&external.path().join("debug/app"), "external artifact");
+        std::os::unix::fs::symlink(external.path(), repo.path().join(".cargo-target"))
+            .expect("link external artifact");
+        write_file(&repo.path().join(".git/info/exclude"), "/.cargo-target\n");
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            ..Default::default()
+        })
+        .expect("cleanup Cargo target symlink");
+
+        assert_eq!(output.applied_count, 1);
+        assert!(!repo.path().join(".cargo-target").exists());
+        assert!(external.path().join("debug/app").exists());
     }
 
     #[test]
@@ -3609,7 +3701,7 @@ mod tests {
         write_file(&repo.path().join("scope.marker"), "{}");
         write_file(
             &repo.path().join(".gitignore"),
-            "deps/\npackaged/\ntarget/\n",
+            "deps/\npackaged/\ntarget/\n.cargo-target/\n",
         );
         git(
             repo.path(),
