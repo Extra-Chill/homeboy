@@ -4,6 +4,51 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.336.0] - 2026-08-11
+
+### Added
+- report ignored link exclusions
+- split worktree identity and safety attestation
+- add sealed package check
+
+### Changed
+- align refreshed candidate contracts
+- accept durable detached cook handoff
+- cover exclusion bound
+- consume fixed shard aggregation
+
+### Fixed
+- preserve Cook cwd authority in reverse handoff
+- gate legacy scanner path on Unix
+- preserve Cook timeout and identity contracts
+- resolve self artifacts from shared targets
+- validate managed cwd continuations
+- validate immediate Cook provider repository
+- reject inactive cwd worktree handles
+- compile sealed staging on Windows
+- preserve non-Unix target reclaimability
+- validate split worktree identity claims
+- make sealed extraction retry safe
+- restore durable runtime contracts
+- traverse sealed sources by descriptor
+- probe split worktree providers by ownership
+- preserve repo-only Cook compatibility
+- probe Cargo locks without path races
+- pin split worktree attestation identity
+- halt blocked package scans
+- bind repo-only Cook workspace identity
+- harden sealed source package scanning
+- protect cross-target Cargo builds
+- keep unadmitted commands local
+- preserve explicit cwd authority
+- preserve safe sealed package symlinks
+- reclaim local Cargo target caches
+- bound status latency
+- execute Cook retries exactly once
+- preserve Cook controller diagnostics
+- preserve admitted Lab placement
+- restore post-integration contracts
+
 ## [0.335.4] - 2026-08-11
 
 ### Changed
