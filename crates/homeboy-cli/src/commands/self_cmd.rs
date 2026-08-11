@@ -414,10 +414,8 @@ mod tests {
             report
                 .get("lab_handoff_capabilities")
                 .expect("self identity still advertises lab_handoff_capabilities"),
-            &serde_json::to_value(
-                homeboy_lab_runner_contract::required_lab_handoff_capabilities()
-            )
-            .expect("capabilities serialize")
+            &serde_json::to_value(homeboy_lab_runner_contract::required_lab_handoff_capabilities())
+                .expect("capabilities serialize")
         );
     }
 }

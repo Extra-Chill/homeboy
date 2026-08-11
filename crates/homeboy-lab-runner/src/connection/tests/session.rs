@@ -609,12 +609,14 @@ fn unknown_ids_and_future_versions_are_preserved() {
         .daemon_recovery_capabilities
         .expect("forward-compatible list parses");
     assert_eq!(advertised.len(), 2);
-    assert!(homeboy_lab_runner_contract::daemon_recovery_capability_negotiated(
-        Some(advertised.as_slice()),
-        homeboy_lab_runner_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-        || Err("the scrape must not run when a typed list is present".to_string()),
-    )
-    .expect("negotiation succeeds"));
+    assert!(
+        homeboy_lab_runner_contract::daemon_recovery_capability_negotiated(
+            Some(advertised.as_slice()),
+            homeboy_lab_runner_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+            || Err("the scrape must not run when a typed list is present".to_string()),
+        )
+        .expect("negotiation succeeds")
+    );
 }
 
 /// The drift this issue is about: the envelope and the parser are written in

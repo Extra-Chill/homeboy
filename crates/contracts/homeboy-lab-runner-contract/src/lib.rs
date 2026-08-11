@@ -993,15 +993,12 @@ mod daemon_recovery_capability_tests {
         assert!(options.contains("--replacement-operation-id"));
         assert!(options.contains("--addr"));
 
-        let prose = declared_long_options(
-            "Options:\n    --confirm-no-daemon-owner after inspection\n",
-        );
+        let prose =
+            declared_long_options("Options:\n    --confirm-no-daemon-owner after inspection\n");
         assert!(!prose.contains("--confirm-no-daemon-owner"));
         assert!(prose.is_empty());
 
-        let examples = declared_long_options(
-            "Examples:\n    --confirm-no-daemon-owner\n",
-        );
+        let examples = declared_long_options("Examples:\n    --confirm-no-daemon-owner\n");
         assert!(examples.is_empty());
 
         let lowercase = declared_long_options("options:\n    --confirm-no-daemon-owner\n");
