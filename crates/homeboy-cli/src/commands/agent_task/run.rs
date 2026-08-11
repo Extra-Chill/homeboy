@@ -763,6 +763,22 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "--to-worktree is required before provisioning a Cook destination".to_string(),
         ])
     })?;
+    if let Some(cwd) = args.dispatch.cwd.as_deref() {
+        let cwd = Path::new(cwd);
+        ensure_active_managed_cook_destination(to_worktree)?;
+        homeboy::core::worktree_providers::validate_task_worktree_root(cwd, to_worktree)?;
+        let path = std::fs::canonicalize(cwd).map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(cwd.display().to_string()))
+        })?;
+        validate_cook_destination_identity(args, &path)?;
+        validate_cook_cwd_destination_identity(&path, to_worktree)?;
+        return Ok(serde_json::json!({
+            "action": "existing",
+            "kind": "explicit_cwd",
+            "handle": to_worktree,
+            "path": path,
+        }));
+    }
     let direct_path = Path::new(to_worktree);
     if direct_path.is_dir() {
         homeboy::core::worktree_providers::validate_task_worktree_root(direct_path, to_worktree)?;
@@ -893,6 +909,61 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "branch": provision.resolution.worktree.branch,
         })
     })
+}
+
+fn ensure_active_managed_cook_destination(to_worktree: &str) -> homeboy::core::Result<()> {
+    let Some(record) = homeboy::core::worktree::resolve_workspace_ref_if_present(to_worktree)?
+    else {
+        return Ok(());
+    };
+    if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "Homeboy workspace `{}` is no longer active",
+                record.handle()
+            ),
+            Some(to_worktree.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// An explicit CWD is the Cook workspace authority. A co-supplied destination
+/// can only name that same existing worktree; never consult a provider merely
+/// to rediscover a path the operator already supplied.
+fn validate_cook_cwd_destination_identity(
+    cwd: &Path,
+    to_worktree: &str,
+) -> homeboy::core::Result<()> {
+    let destination = if Path::new(to_worktree).is_dir() {
+        std::fs::canonicalize(to_worktree)
+    } else if let Some(record) =
+        homeboy::core::worktree::resolve_workspace_ref_if_present(to_worktree)?
+    {
+        ensure_active_managed_cook_destination(to_worktree)?;
+        std::fs::canonicalize(record.path())
+    } else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            "--cwd requires --to-worktree to name the same existing local or registered worktree",
+            Some(to_worktree.to_string()),
+            None,
+        ));
+    }
+    .map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(to_worktree.to_string()))
+    })?;
+    if destination != cwd {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            "--cwd and --to-worktree must resolve to the same linked task worktree",
+            Some(to_worktree.to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn resolve_cook_destination(
@@ -1939,8 +2010,8 @@ pub(crate) fn compile_cook_plan(
         ));
     }
     let mut dispatch = dispatch_args_for_cook(args);
-    // Cook providers always receive the declared task checkout. `--cwd` is a
-    // dispatch input, never authority to replace the writable Cook workspace.
+    // Provisioning makes an explicit --cwd authoritative, otherwise this is the
+    // resolved managed destination. Pass that exact linked worktree downstream.
     dispatch.cwd = None;
     dispatch.workspace = workspace.clone();
     if let Some(workspace) = workspace.as_deref() {
@@ -2311,9 +2382,9 @@ mod tests {
         );
         assert!(lines[0].contains("cook-10419"));
         let joined = lines.join("\n");
-        assert!(joined.contains("homeboy agent-task status cook-10419-attempt-1"));
-        assert!(joined.contains("homeboy agent-task logs cook-10419-attempt-1"));
-        assert!(joined.contains("homeboy agent-task cancel cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy --placement local agent-task status cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy --placement local agent-task logs cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy --placement local agent-task cancel cook-10419-attempt-1"));
     }
 
     #[test]
