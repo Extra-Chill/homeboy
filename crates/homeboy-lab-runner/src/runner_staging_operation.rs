@@ -31,6 +31,391 @@ pub const RUNNER_SOURCE_ARTIFACT_SCHEMA: &str = "homeboy/runner-source-artifact/
 pub const MAX_SOURCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_ENTRIES: usize = 1024;
 pub const MAX_SOURCE_PACKAGE_FILE_BYTES: u64 = 1024 * 1024;
+pub const MAX_SOURCE_PACKAGE_EXCLUSIONS: usize = 1024;
+pub const SOURCE_PACKAGE_CHECK_SCHEMA: &str = "homeboy/source-package-check/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageExclusion {
+    pub kind: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageFailure {
+    pub kind: String,
+    pub path: String,
+    pub message: String,
+}
+
+/// Read-only, deterministic result of applying the sealed source-package policy.
+///
+/// The accepted package identity is present only for a stageable result. A
+/// blocked result has partial diagnostics without a package identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageCheckVerdict {
+    pub schema: String,
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<SourcePackageAccepted>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<SourcePackagePartial>,
+    pub excluded: Vec<SourcePackageExclusion>,
+    pub blocked: Vec<SourcePackageFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageAccepted {
+    pub package_format: String,
+    pub file_count: usize,
+    pub bytes: u64,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackagePartial {
+    pub file_count: usize,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "The scanner verdict is the public read-only surface."
+)]
+pub struct SourcePackageScan {
+    pub verdict: SourcePackageCheckVerdict,
+    payloads: BTreeMap<String, SourcePackagePayload>,
+}
+
+/// Apply the same source policy as sealed Lab staging without creating a
+/// transfer, artifact, workspace, run, job, or connection.
+#[allow(
+    unreachable_code,
+    reason = "The finalized sealed builder is the scanner authority."
+)]
+pub fn scan_source_package(root: &Path) -> SourcePackageScan {
+    // `from_directory` is the sealed package scanner/builder. Reuse its output
+    // so this read-only surface cannot drift from staging's v1/v2 identity.
+    match SourceArtifactTransfer::from_directory_with_exclusions("source-package-check", root) {
+        Ok((transfer, excluded)) => {
+            let file_count = transfer.package.entries.len();
+            let bytes = transfer
+                .package
+                .entries
+                .iter()
+                .map(|entry| entry.size_bytes)
+                .sum();
+            return SourcePackageScan {
+                verdict: SourcePackageCheckVerdict {
+                    schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
+                    valid: true,
+                    accepted: Some(SourcePackageAccepted {
+                        package_format: transfer.package.format,
+                        file_count,
+                        bytes,
+                        digest: transfer.sha256,
+                    }),
+                    partial: None,
+                    excluded,
+                    blocked: Vec::new(),
+                },
+                payloads: BTreeMap::new(),
+            };
+        }
+        Err(error) => {
+            return SourcePackageScan {
+                verdict: SourcePackageCheckVerdict {
+                    schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
+                    valid: false,
+                    accepted: None,
+                    partial: Some(SourcePackagePartial {
+                        file_count: 0,
+                        bytes: 0,
+                    }),
+                    excluded: Vec::new(),
+                    blocked: vec![SourcePackageFailure {
+                        kind: "source_package".to_string(),
+                        path: root.display().to_string(),
+                        message: error.message,
+                    }],
+                },
+                payloads: BTreeMap::new(),
+            };
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        #[allow(unreachable_code)]
+        fn failure(kind: &str, path: &Path, message: impl Into<String>) -> SourcePackageFailure {
+            SourcePackageFailure {
+                kind: kind.to_string(),
+                path: path.display().to_string(),
+                message: message.into(),
+            }
+        }
+
+        fn tracked_symlinks(root: &Path) -> Result<BTreeSet<String>> {
+            let output = match Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["ls-files", "--stage", "-z", "--", "."])
+                .output()
+            {
+                Ok(output) => output,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(BTreeSet::new())
+                }
+                Err(error) => {
+                    return Err(Error::internal_io(
+                        error.to_string(),
+                        Some(root.display().to_string()),
+                    ))
+                }
+            };
+            if !output.status.success() {
+                if String::from_utf8_lossy(&output.stderr).contains("not a git repository") {
+                    return Ok(BTreeSet::new());
+                }
+                return Err(Error::validation_invalid_argument(
+                    "source_path",
+                    "could not read Git tracking metadata for source package",
+                    Some(root.display().to_string()),
+                    None,
+                ));
+            }
+            Ok(output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|record| !record.is_empty())
+                .filter_map(|record| {
+                    let separator = record.iter().position(|byte| *byte == b'\t')?;
+                    let (metadata, path) = record.split_at(separator);
+                    let path = &path[1..];
+                    (metadata.starts_with(b"120000 ") && std::str::from_utf8(path).is_ok()).then(
+                        || {
+                            std::str::from_utf8(path)
+                                .expect("validated UTF-8")
+                                .replace('\\', "/")
+                        },
+                    )
+                })
+                .collect())
+        }
+
+        fn collect(
+            root: &Path,
+            directory: &Path,
+            tracked_links: &BTreeSet<String>,
+            payloads: &mut BTreeMap<String, SourcePackagePayload>,
+            exclusions: &mut Vec<SourcePackageExclusion>,
+            failures: &mut Vec<SourcePackageFailure>,
+        ) -> bool {
+            let entries = match fs::read_dir(directory) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    failures.push(failure(
+                        "unreadable_directory",
+                        directory,
+                        error.to_string(),
+                    ));
+                    return false;
+                }
+            };
+            let mut entries = match entries.collect::<std::result::Result<Vec<_>, _>>() {
+                Ok(entries) => entries,
+                Err(error) => {
+                    failures.push(failure(
+                        "unreadable_directory",
+                        directory,
+                        error.to_string(),
+                    ));
+                    return false;
+                }
+            };
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                if path.strip_prefix(root).expect("walk remains under root") == Path::new(".git") {
+                    continue;
+                }
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        failures.push(failure("unreadable_entry", &path, error.to_string()));
+                        return false;
+                    }
+                };
+                if metadata.file_type().is_symlink() {
+                    let relative = path.strip_prefix(root).expect("walk remains under root");
+                    let relative = relative.to_string_lossy().replace('\\', "/");
+                    if !tracked_links.contains(&relative) {
+                        exclusions.push(SourcePackageExclusion {
+                            kind: "untracked_symlink".to_string(),
+                            path: path.display().to_string(),
+                        });
+                        continue;
+                    }
+                    let target = match fs::read_link(&path)
+                        .map_err(|error| {
+                            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                        })
+                        .and_then(|target| {
+                            target.into_os_string().into_string().map_err(|_| {
+                                Error::validation_invalid_argument(
+                                    "source_path",
+                                    "tracked source symlink target must be valid UTF-8 text",
+                                    Some(path.display().to_string()),
+                                    None,
+                                )
+                            })
+                        })
+                        .and_then(|target| source_package_symlink_verdict(&relative, &target))
+                    {
+                        Ok(verdict) => verdict,
+                        Err(_error) => {
+                            failures.push(failure(
+                            "tracked_symlink",
+                            &path,
+                            "tracked source symlink must have a relative target contained within the source root",
+                        ));
+                            return false;
+                        }
+                    };
+                    payloads.insert(
+                        relative,
+                        SourcePackagePayload::Symlink {
+                            target: target.target,
+                        },
+                    );
+                    if payloads.len() > MAX_SOURCE_PACKAGE_ENTRIES
+                        || payloads
+                            .values()
+                            .map(SourcePackagePayload::size_bytes)
+                            .sum::<u64>()
+                            > MAX_SOURCE_ARTIFACT_BYTES
+                    {
+                        failures.push(failure(
+                            "package_too_large",
+                            root,
+                            "source package exceeds configured entry or total size bounds",
+                        ));
+                        return false;
+                    }
+                    continue;
+                }
+                if metadata.is_dir() {
+                    if !collect(root, &path, tracked_links, payloads, exclusions, failures) {
+                        return false;
+                    }
+                    continue;
+                }
+                if !metadata.is_file() {
+                    failures.push(failure(
+                        "special_file",
+                        &path,
+                        "source package accepts only regular files and directories",
+                    ));
+                    return false;
+                }
+                let bytes = match read_regular_file_nofollow(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        failures.push(failure("unreadable_file", &path, error.to_string()));
+                        return false;
+                    }
+                };
+                let relative = path.strip_prefix(root).expect("walk remains under root");
+                payloads.insert(
+                    relative.to_string_lossy().replace('\\', "/"),
+                    SourcePackagePayload::File {
+                        content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    },
+                );
+                if payloads.len() > MAX_SOURCE_PACKAGE_ENTRIES
+                    || payloads
+                        .values()
+                        .map(SourcePackagePayload::size_bytes)
+                        .sum::<u64>()
+                        > MAX_SOURCE_ARTIFACT_BYTES
+                {
+                    failures.push(failure(
+                        "package_too_large",
+                        root,
+                        "source package exceeds configured entry or total size bounds",
+                    ));
+                    return false;
+                }
+            }
+            true
+        }
+
+        let mut payloads = BTreeMap::new();
+        let mut exclusions = Vec::new();
+        let mut failures = Vec::new();
+        match fs::symlink_metadata(root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                match tracked_symlinks(root) {
+                    Ok(tracked_links) => {
+                        collect(
+                            root,
+                            root,
+                            &tracked_links,
+                            &mut payloads,
+                            &mut exclusions,
+                            &mut failures,
+                        );
+                    }
+                    Err(error) => failures.push(failure("tracking_metadata", root, error.message)),
+                }
+            }
+            Ok(_) => failures.push(failure(
+                "invalid_root",
+                root,
+                "source package root must be a readable non-symlink directory",
+            )),
+            Err(error) => failures.push(failure("unreadable_root", root, error.to_string())),
+        }
+        if failures.is_empty() && payloads.is_empty() {
+            failures.push(failure(
+                "empty_root",
+                root,
+                "source package root must contain at least one regular file",
+            ));
+        }
+        let file_count = payloads.len();
+        let bytes = payloads
+            .values()
+            .map(SourcePackagePayload::size_bytes)
+            .sum();
+        let accepted = failures.is_empty().then(|| {
+            let package = source_package_bytes(&payloads);
+            SourcePackageAccepted {
+                package_format: source_package_format(&payloads).to_string(),
+                file_count,
+                bytes,
+                digest: format!("sha256:{:x}", Sha256::digest(&package)),
+            }
+        });
+        SourcePackageScan {
+            verdict: SourcePackageCheckVerdict {
+                schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
+                valid: failures.is_empty(),
+                accepted,
+                partial: (!failures.is_empty())
+                    .then_some(SourcePackagePartial { file_count, bytes }),
+                excluded: exclusions,
+                blocked: failures,
+            },
+            payloads,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +452,52 @@ impl SourcePackageEntryKind {
 enum SourcePackagePayload {
     File { content_base64: String },
     Symlink { target: String },
+}
+
+impl SourcePackagePayload {
+    fn size_bytes(&self) -> u64 {
+        match self {
+            Self::File { content_base64 } => base64::engine::general_purpose::STANDARD
+                .decode(content_base64)
+                .expect("scanner produced base64")
+                .len() as u64,
+            Self::Symlink { target } => target.len() as u64,
+        }
+    }
+}
+
+fn source_package_format(payloads: &BTreeMap<String, SourcePackagePayload>) -> &'static str {
+    if payloads
+        .values()
+        .any(|payload| matches!(payload, SourcePackagePayload::Symlink { .. }))
+    {
+        "homeboy/source-package-json/v2"
+    } else {
+        "homeboy/source-package-json/v1"
+    }
+}
+
+fn source_package_bytes(payloads: &BTreeMap<String, SourcePackagePayload>) -> Vec<u8> {
+    if source_package_format(payloads) == "homeboy/source-package-json/v2" {
+        serde_json::to_vec(payloads)
+    } else {
+        serde_json::to_vec(
+            &payloads
+                .iter()
+                .map(|(path, payload)| match payload {
+                    SourcePackagePayload::File { content_base64 } => (path, content_base64),
+                    SourcePackagePayload::Symlink { .. } => unreachable!("v1 has no links"),
+                })
+                .collect::<BTreeMap<_, _>>(),
+        )
+    }
+    .expect("source package serializes")
+}
+
+#[cfg(unix)]
+fn read_regular_file_nofollow(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
 }
 
 /// The portable v2 representation of a tracked source symlink. Consumers that
@@ -399,6 +830,13 @@ impl SourceArtifactTransfer {
     /// manifest. Git-indexed, lexically in-tree symlinks retain their target
     /// text in v2; untracked links are omitted without reading their targets.
     pub fn from_directory(artifact_id: impl Into<String>, root: &Path) -> Result<Self> {
+        Self::from_directory_with_exclusions(artifact_id, root).map(|(transfer, _)| transfer)
+    }
+
+    fn from_directory_with_exclusions(
+        artifact_id: impl Into<String>,
+        root: &Path,
+    ) -> Result<(Self, Vec<SourcePackageExclusion>)> {
         #[cfg(not(unix))]
         {
             let _ = artifact_id;
@@ -475,6 +913,7 @@ impl SourceArtifactTransfer {
                 relative_directory: &str,
                 tracked_links: &BTreeSet<String>,
                 entries: &mut BTreeMap<String, SourcePackagePayload>,
+                exclusions: &mut Vec<SourcePackageExclusion>,
             ) -> Result<()> {
                 for name in source_directory::directory_entries(directory)? {
                     let name_text = name.to_str().ok_or_else(|| {
@@ -498,6 +937,18 @@ impl SourceArtifactTransfer {
                     match mode & libc::S_IFMT {
                         libc::S_IFLNK => {
                             if !tracked_links.contains(&relative) {
+                                if exclusions.len() >= MAX_SOURCE_PACKAGE_EXCLUSIONS {
+                                    return Err(Error::validation_invalid_argument(
+                                        "source_path",
+                                        "source package exceeds configured exclusion bound",
+                                        Some(relative),
+                                        None,
+                                    ));
+                                }
+                                exclusions.push(SourcePackageExclusion {
+                                    kind: "untracked_symlink".to_string(),
+                                    path: relative,
+                                });
                                 continue;
                             }
                             let target = source_directory::read_link_at(directory, &name)?;
@@ -527,7 +978,7 @@ impl SourceArtifactTransfer {
                         }
                         libc::S_IFDIR => {
                             let child = source_directory::open_directory_at(directory, &name)?;
-                            collect(&child, &relative, tracked_links, entries)?;
+                            collect(&child, &relative, tracked_links, entries, exclusions)?;
                         }
                         libc::S_IFREG => {
                             let bytes = source_directory::read_regular_file_at(directory, &name)?;
@@ -591,8 +1042,15 @@ impl SourceArtifactTransfer {
             #[cfg(unix)]
             let tracked_links = tracked_symlinks(&root_directory)?;
             let mut payloads = BTreeMap::new();
+            let mut exclusions = Vec::new();
             #[cfg(unix)]
-            collect(&root_directory, "", &tracked_links, &mut payloads)?;
+            collect(
+                &root_directory,
+                "",
+                &tracked_links,
+                &mut payloads,
+                &mut exclusions,
+            )?;
             if payloads.is_empty() {
                 return Err(Error::validation_invalid_argument(
                     "source_path",
@@ -680,7 +1138,7 @@ impl SourceArtifactTransfer {
                 },
             };
             transfer.decode_verified()?;
-            Ok(transfer)
+            Ok((transfer, exclusions))
         }
     }
 
@@ -1426,11 +1884,22 @@ pub(crate) mod tests_support {
                 .success());
         }
 
+        let check = scan_source_package(source.path()).verdict;
         let first =
             SourceArtifactTransfer::from_directory("source-1", source.path()).expect("pack");
         let second =
             SourceArtifactTransfer::from_directory("source-1", source.path()).expect("repack");
         assert_eq!(first, second);
+        assert!(check.valid);
+        assert_eq!(
+            check.accepted.as_ref().expect("accepted").package_format,
+            "homeboy/source-package-json/v2"
+        );
+        assert_eq!(
+            check.accepted.as_ref().expect("accepted").digest,
+            first.sha256
+        );
+        assert_eq!(check.excluded[0].kind, "untracked_symlink");
         assert_eq!(first.package.schema, "homeboy/source-package-manifest/v2");
         assert_eq!(
             first
@@ -1471,6 +1940,10 @@ pub(crate) mod tests_support {
             }
             let error = SourceArtifactTransfer::from_directory("source-1", source.path())
                 .expect_err("unsafe link");
+            let check = scan_source_package(source.path()).verdict;
+            assert!(!check.valid);
+            assert!(check.accepted.is_none());
+            assert_eq!(check.blocked.len(), 1);
             assert!(error.message.contains("relative target contained"));
         }
     }
@@ -1488,6 +1961,9 @@ pub(crate) mod tests_support {
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         let error = SourceArtifactTransfer::from_directory("source-1", source.path())
             .expect_err("special file");
+        let check = scan_source_package(source.path()).verdict;
+        assert!(!check.valid);
+        assert_eq!(check.blocked.len(), 1);
         assert!(error.message.contains("regular files and directories"));
     }
 
@@ -1618,5 +2094,111 @@ pub(crate) mod tests_support {
         let error = submit_remote_runner_staging(&mut incompatible, &envelope).expect_err("refuse");
         assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
         assert_eq!(incompatible.calls, 0);
+    }
+
+    #[test]
+    fn source_package_check_omits_ignored_injected_symlinks() {
+        let source = tempfile::tempdir().expect("source");
+        let external = tempfile::NamedTempFile::new().expect("external");
+        std::fs::write(source.path().join("source.txt"), b"source").expect("source");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), source.path().join("AGENTS.md")).expect("link");
+
+        let first = scan_source_package(source.path());
+        let second = scan_source_package(source.path());
+
+        assert_eq!(first.verdict, second.verdict);
+        #[cfg(unix)]
+        {
+            assert!(first.verdict.valid);
+            assert_eq!(first.verdict.excluded[0].kind, "untracked_symlink");
+            let transfer = SourceArtifactTransfer::from_directory("source-1", source.path())
+                .expect("staging omits the same symlink");
+            assert_eq!(
+                first.verdict.accepted.expect("accepted").digest,
+                transfer.sha256
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_package_check_exclusions_are_lexical_bounded_and_never_read_targets() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(source.path().join("file"), b"safe").expect("file");
+        symlink("/outside/first-secret", source.path().join("a-link")).expect("first link");
+        symlink("/outside/second-secret", source.path().join("z-link")).expect("second link");
+
+        let first = scan_source_package(source.path()).verdict;
+        let second = scan_source_package(source.path()).verdict;
+        let transfer = SourceArtifactTransfer::from_directory("source-1", source.path())
+            .expect("staging package");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .excluded
+                .iter()
+                .map(|entry| (entry.path.as_str(), entry.kind.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("a-link", "untracked_symlink"),
+                ("z-link", "untracked_symlink")
+            ]
+        );
+        assert!(
+            !String::from_utf8(transfer.decode_verified().expect("package"))
+                .expect("json")
+                .contains("/outside/")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_package_check_refuses_exclusions_past_the_deterministic_bound() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(source.path().join("file"), b"safe").expect("file");
+        for index in 0..=MAX_SOURCE_PACKAGE_EXCLUSIONS {
+            symlink("/outside", source.path().join(format!("link-{index:04}"))).expect("link");
+        }
+
+        let verdict = scan_source_package(source.path()).verdict;
+
+        assert!(!verdict.valid);
+        assert!(verdict.accepted.is_none());
+        assert_eq!(verdict.blocked.len(), 1);
+        assert!(verdict.blocked[0].message.contains("exclusion bound"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_package_check_stops_at_the_first_nested_over_limit_entry() {
+        let source = tempfile::tempdir().expect("source");
+        let nested = source.path().join("a");
+        std::fs::create_dir(&nested).expect("nested");
+        for index in 0..=MAX_SOURCE_PACKAGE_ENTRIES {
+            std::fs::write(nested.join(format!("{index:04}")), b"").expect("file");
+        }
+        std::os::unix::fs::symlink("outside", source.path().join("z-link")).expect("link");
+
+        let verdict = scan_source_package(source.path()).verdict;
+
+        assert!(!verdict.valid);
+        assert!(verdict.accepted.is_none());
+        assert_eq!(verdict.blocked.len(), 1);
+        assert_eq!(verdict.blocked[0].kind, "source_package");
+        assert!(verdict.excluded.is_empty());
+        assert!(SourceArtifactTransfer::from_directory("source-1", source.path()).is_err());
+        assert_eq!(
+            verdict.partial,
+            Some(SourcePackagePartial {
+                file_count: 0,
+                bytes: 0,
+            })
+        );
     }
 }
