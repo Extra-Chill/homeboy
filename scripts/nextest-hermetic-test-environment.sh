@@ -10,4 +10,5 @@ unset CARGO_TARGET_DIR
 # owns its runtime root, so inheriting the controller's makes fixture state land
 # outside each test's isolated home.
 unset HOMEBOY_RUNTIME_TMPDIR
+unset TMPDIR TMP TEMP
 exec "$@"
