@@ -222,15 +222,13 @@ fn daemon_health() -> ScheduleDaemonHealth {
     match daemon::read_status() {
         Ok(status) => {
             let plan = daemon::recovery_actions::plan_recovery(&status);
-            let recovery_command = plan.steps.first().map(|step| step.command.clone());
+            let (recovery_command, recovery_ref) = recovery_projection(&plan);
             ScheduleDaemonHealth {
                 running: status.running,
                 fresh: status.fresh,
                 reachable: status.reachable,
                 stale_reason: status.stale_reason,
-                recovery_ref: recovery_command
-                    .as_ref()
-                    .map(|_| "homeboy daemon status".to_string()),
+                recovery_ref,
                 recovery_command,
             }
         }
@@ -243,6 +241,21 @@ fn daemon_health() -> ScheduleDaemonHealth {
             recovery_ref: Some("homeboy daemon status".to_string()),
         },
     }
+}
+
+/// The recovery planner owns step ordering and required confirmations. A
+/// schedule view must never advertise only the first mutation of that plan.
+fn recovery_projection(
+    plan: &daemon::recovery_actions::DaemonRecoveryPlan,
+) -> (Option<String>, Option<String>) {
+    (!plan.steps.is_empty())
+        .then(|| {
+            (
+                "homeboy daemon recover --dry-run".to_string(),
+                "homeboy daemon status".to_string(),
+            )
+        })
+        .unzip()
 }
 
 /// Build the declared step sequence.
@@ -546,5 +559,23 @@ mod tests {
             assert_eq!(value["daemon"]["reachable"], false);
             assert!(value["daemon"].get("process_candidates").is_none());
         });
+    }
+
+    #[test]
+    fn multi_step_daemon_recovery_uses_the_canonical_planner() {
+        let plan = daemon::recovery_actions::DaemonRecoveryPlan {
+            steps: vec![
+                daemon::DaemonRepairStep::text("daemon_stop", "homeboy daemon stop"),
+                daemon::DaemonRepairStep::text("daemon_start", "homeboy daemon start"),
+            ],
+            reason: "restart stale daemon".to_string(),
+            required_confirmations: Vec::new(),
+            executable: true,
+        };
+
+        let (command, reference) = recovery_projection(&plan);
+        assert_eq!(command.as_deref(), Some("homeboy daemon recover --dry-run"));
+        assert_eq!(reference.as_deref(), Some("homeboy daemon status"));
+        assert_ne!(command.as_deref(), Some("homeboy daemon stop"));
     }
 }
