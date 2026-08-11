@@ -82,6 +82,13 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
             Some("homeboy@fix-issue-11225-homeboy")
         );
         assert_eq!(derived.head.as_deref(), Some("fix/issue-11225-homeboy"));
+        assert_eq!(
+            derived
+                .repository_identity
+                .as_ref()
+                .expect("repo expectation")["repository_name"],
+            "homeboy"
+        );
 
         let suffixed = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
             "homeboy".to_string(),
@@ -211,9 +218,9 @@ fn repo_only_cook_persists_configured_repository_identity_for_deferred_lookup() 
 }
 
 #[test]
-fn repo_only_cook_rejects_component_without_a_canonical_repository_identity() {
+fn repo_only_cook_without_registered_component_persists_requested_repository_expectation() {
     with_isolated_home(|_| {
-        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
@@ -225,10 +232,11 @@ fn repo_only_cook_rejects_component_without_a_canonical_repository_identity() {
             "fixture@unidentified".to_string(),
             "--no-finalize".to_string(),
         ]))
-        .expect_err("repo-only Cook must establish an identity before deferred lookup");
+        .expect("repo-only Cook remains compatible without component registration");
 
-        assert_eq!(error.details["field"], "repo");
-        assert!(!error.message.contains("git://"));
+        let identity = args.repository_identity.expect("repository expectation");
+        assert_eq!(identity["repository_name"], "unidentified");
+        assert_eq!(identity["provenance"], "--repo:requested-repository");
     });
 }
 

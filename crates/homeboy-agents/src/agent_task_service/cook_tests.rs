@@ -3267,8 +3267,8 @@ fn pending_repo_only_lookup_rejects_provider_workspace_from_another_repository()
             "worktree_provider_id": "fixture",
         });
         options.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
-            "slug": "expected", "remote_identity": "git://example.com/expected",
-            "provenance": "--repo:configured-component",
+            "slug": "expected", "repository_name": "expected",
+            "provenance": "--repo:requested-repository",
         });
 
         let result = run_cook(options, UnusedExecutor).expect("Cook records identity failure");

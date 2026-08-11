@@ -879,8 +879,8 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
 }
 
 /// A repo-only Cook has no local checkout to attest before a deferred provider
-/// lookup. Bind its configured repository identity into the durable recipe so
-/// the returned provider workspace still has to prove the requested ownership.
+/// lookup. Prefer configured remote identity; otherwise retain a normalized
+/// repository name that the resolved checkout must prove through its remote.
 fn bind_cook_repository_identity_from_config(
     args: &mut AgentTaskCookArgs,
 ) -> homeboy::core::Result<()> {
@@ -889,28 +889,36 @@ fn bind_cook_repository_identity_from_config(
     };
     let component = homeboy::core::component::registered()?
         .into_iter()
-        .find(|component| component.id == repo)
-        .ok_or_else(|| repository_identity_unavailable_error(repo))?;
-    let remote_identity = component
-        .remote_url
-        .as_deref()
-        .and_then(canonical_remote_identity)
-        .ok_or_else(|| repository_identity_unavailable_error(repo))?;
-    args.repository_identity = Some(serde_json::json!({
-        "slug": component.id,
-        "remote_identity": remote_identity,
-        "provenance": "--repo:configured-component",
-    }));
+        .find(|component| component.id == repo);
+    args.repository_identity = Some(
+        match component
+            .as_ref()
+            .and_then(|component| component.remote_url.as_deref())
+            .and_then(canonical_remote_identity)
+        {
+            Some(remote_identity) => serde_json::json!({
+                "slug": repo,
+                "remote_identity": remote_identity,
+                "provenance": "--repo:configured-component",
+            }),
+            None => serde_json::json!({
+                "slug": repo,
+                "repository_name": normalize_repository_name(repo),
+                "provenance": "--repo:requested-repository",
+            }),
+        },
+    );
     Ok(())
 }
 
-fn repository_identity_unavailable_error(repo: &str) -> homeboy::core::Error {
-    homeboy::core::Error::validation_invalid_argument(
-        "repo",
-        "Cook requires the selected configured component to declare a canonical repository identity before deferred workspace lookup",
-        Some(repo.to_string()),
-        None,
-    )
+fn normalize_repository_name(repository: &str) -> String {
+    repository
+        .trim()
+        .trim_end_matches(".git")
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 fn require_explicit_cook_repo(args: &AgentTaskCookArgs, reason: &str) -> homeboy::core::Result<()> {

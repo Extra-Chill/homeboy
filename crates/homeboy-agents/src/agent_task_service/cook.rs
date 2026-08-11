@@ -4992,13 +4992,17 @@ fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions)
 }
 
 fn validate_pending_cook_repository_identity(plan: &AgentTaskPlan, target: &Path) -> Result<()> {
-    let Some(expected) = plan
+    let expected_remote = plan
         .metadata
         .pointer("/cook_repository_identity/remote_identity")
-        .and_then(Value::as_str)
-    else {
+        .and_then(Value::as_str);
+    let expected_repository_name = plan
+        .metadata
+        .pointer("/cook_repository_identity/repository_name")
+        .and_then(Value::as_str);
+    if expected_remote.is_none() && expected_repository_name.is_none() {
         return Ok(());
-    };
+    }
     let Some(git_root) = homeboy_core::git::repo_root(target) else {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
@@ -5013,15 +5017,35 @@ fn validate_pending_cook_repository_identity(plan: &AgentTaskPlan, target: &Path
         .filter_map(|remote| homeboy_core::git::remote_url(&git_root, remote))
         .filter_map(|remote| canonical_remote_identity(&remote))
         .collect::<std::collections::BTreeSet<_>>();
-    if identities.len() == 1 && identities.contains(expected) {
+    if let Some(expected) = expected_remote {
+        if identities.len() == 1 && identities.contains(expected) {
+            return Ok(());
+        }
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!("Cook destination repository identity does not match resolved `{expected}`"),
+            Some(target.display().to_string()),
+            None,
+        ));
+    }
+    let expected = expected_repository_name.expect("repository expectation exists");
+    if identities.len() == 1
+        && identities.iter().any(|identity| {
+            repository_name_from_canonical_remote_identity(identity) == Some(expected)
+        })
+    {
         return Ok(());
     }
     Err(Error::validation_invalid_argument(
         "to_worktree",
-        format!("Cook destination repository identity does not match resolved `{expected}`"),
+        "Cook destination repository does not match the requested Cook repository",
         Some(target.display().to_string()),
         None,
     ))
+}
+
+fn repository_name_from_canonical_remote_identity(identity: &str) -> Option<&str> {
+    identity.strip_prefix("git://")?.rsplit('/').next()
 }
 
 fn canonical_remote_identity(remote_url: &str) -> Option<String> {
