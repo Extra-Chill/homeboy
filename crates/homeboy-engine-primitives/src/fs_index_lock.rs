@@ -68,6 +68,40 @@ pub struct FsIndexLock {
 }
 
 impl FsIndexLock {
+    /// Try to acquire the lock without waiting. `None` means a live owner
+    /// already holds it.
+    pub fn try_acquire_in(dir: &Path, config: FsIndexLockConfig) -> Result<Option<Self>> {
+        fs::create_dir_all(dir).map_err(|e| {
+            Error::internal_unexpected(format!(
+                "Failed to create {} directory: {}",
+                config.subject, e
+            ))
+        })?;
+        let path = dir.join(config.name);
+        match fs::create_dir(&path) {
+            Ok(()) => Ok(Some(Self { path, config })),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                remove_if_stale(&path, config)?;
+                match fs::create_dir(&path) {
+                    Ok(()) => Ok(Some(Self { path, config })),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+                    Err(e) => Err(Error::internal_unexpected(format!(
+                        "Failed to acquire {} lock {}: {}",
+                        config.subject,
+                        path.display(),
+                        e
+                    ))),
+                }
+            }
+            Err(e) => Err(Error::internal_unexpected(format!(
+                "Failed to acquire {} lock {}: {}",
+                config.subject,
+                path.display(),
+                e
+            ))),
+        }
+    }
+
     /// Create `dir` if needed, then block until the lock inside it is held or
     /// `config.attempts` is exhausted.
     pub fn acquire_in(dir: &Path, config: FsIndexLockConfig) -> Result<Self> {
@@ -197,6 +231,82 @@ mod tests {
         assert!(
             message.contains("Timed out acquiring rig lease lock"),
             "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn nonblocking_acquisition_reports_a_live_owner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().to_path_buf();
+        let _held = FsIndexLock::try_acquire_in(&dir, fast("rig lease"))
+            .expect("first acquire")
+            .expect("first owner");
+
+        assert!(FsIndexLock::try_acquire_in(&dir, fast("rig lease"))
+            .expect("second acquire")
+            .is_none());
+    }
+
+    #[test]
+    fn child_holds_lock_until_released() {
+        let Ok(directory) = std::env::var("HOMEBOY_FS_INDEX_LOCK_CHILD_DIRECTORY") else {
+            return;
+        };
+        let ready = PathBuf::from(
+            std::env::var("HOMEBOY_FS_INDEX_LOCK_CHILD_READY").expect("child ready path"),
+        );
+        let release = PathBuf::from(
+            std::env::var("HOMEBOY_FS_INDEX_LOCK_CHILD_RELEASE").expect("child release path"),
+        );
+        let _lock = FsIndexLock::try_acquire_in(Path::new(&directory), fast("test lock"))
+            .expect("child acquire")
+            .expect("child owns lock");
+        fs::write(&ready, b"ready").expect("signal readiness");
+        for _ in 0..1_000 {
+            if release.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("parent did not release child lock");
+    }
+
+    #[test]
+    fn lock_contention_is_enforced_across_processes() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let ready = temporary.path().join("ready");
+        let release = temporary.path().join("release");
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "fs_index_lock::tests::child_holds_lock_until_released",
+                    "--nocapture",
+                ])
+                .env("HOMEBOY_FS_INDEX_LOCK_CHILD_DIRECTORY", temporary.path())
+                .env("HOMEBOY_FS_INDEX_LOCK_CHILD_READY", &ready)
+                .env("HOMEBOY_FS_INDEX_LOCK_CHILD_RELEASE", &release)
+                .spawn()
+                .expect("spawn child lock holder");
+        for _ in 0..500 {
+            if ready.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "child lock holder did not become ready");
+        assert!(
+            FsIndexLock::try_acquire_in(temporary.path(), fast("test lock"))
+                .expect("contended acquisition")
+                .is_none()
+        );
+
+        fs::write(&release, b"release").expect("release child");
+        assert!(child.wait().expect("wait for child").success());
+        assert!(
+            FsIndexLock::try_acquire_in(temporary.path(), fast("test lock"))
+                .expect("post-release acquisition")
+                .is_some()
         );
     }
 

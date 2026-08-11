@@ -484,6 +484,11 @@ fn execute_build_component(
         .unwrap_or_default();
     let build_cmd = command_with_args(&build_cmd, &build_args);
 
+    // Every directly-owned component build reaches this executor, including
+    // dependency and artifact-input rebuilds. Admit its declared reconstructable
+    // output before either a pre-build hook or the build command can allocate.
+    homeboy_core::cleanup::admit_reconstructable_artifact_work(vec![validated_path.clone()])?;
+
     // Run pre-build script if extension provides one
     if let Some((exit_code, stderr)) = run_pre_build_scripts(build_context)? {
         if exit_code != 0 {
@@ -883,6 +888,36 @@ mod tests {
         finish_build_run_dir(&failure, false);
         assert!(failure_path.exists());
         std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
+    }
+
+    #[test]
+    fn component_build_refuses_before_scripts_when_adaptive_reserve_is_unmet() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("component root");
+            let initialized = std::process::Command::new("git")
+                .args(["init", "--quiet", root.path().to_str().expect("utf8 root")])
+                .status()
+                .expect("start git");
+            assert!(initialized.success(), "initialize component repository");
+            homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
+                retention: homeboy_core::defaults::RetentionConfig {
+                    reconstructable_artifact_reserve_bytes: u64::MAX,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("save pressure policy");
+            let component: Component = serde_json::from_value(serde_json::json!({
+                "id": "pressure-fixture",
+                "local_path": root.path(),
+                "scripts": { "build": ["false"] },
+            }))
+            .expect("component");
+
+            let error = execute_build_component(&component, None)
+                .expect_err("capacity admission must run before the build script");
+            assert!(error.is_storage_exhausted());
+        });
     }
 
     #[test]

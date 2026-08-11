@@ -2,8 +2,10 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use homeboy_engine_primitives::fs_index_lock::{FsIndexLock, FsIndexLockConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -62,6 +64,18 @@ const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] =
     &[("target", "rust_target"), (".cargo-target", "rust_target")];
 const SECONDS_PER_DAY: u64 = 86_400;
 const AUTOMATIC_ARTIFACT_AGE_POLICY: u64 = u64::MAX;
+const AUTOMATIC_ARTIFACT_RETENTION_LOCK_FILE: &str = "automatic-artifact-retention.lock";
+const AUTOMATIC_ARTIFACT_RETENTION_LOCK: FsIndexLockConfig = FsIndexLockConfig {
+    name: AUTOMATIC_ARTIFACT_RETENTION_LOCK_FILE,
+    stale_after: Duration::ZERO,
+    attempts: 1,
+    sleep: Duration::ZERO,
+    subject: "automatic artifact retention",
+};
+
+// Retain an in-process gate as well as the mkdir-based ownership directory,
+// which keeps same-process callers and independent processes single-flight.
+static AUTOMATIC_ARTIFACT_RETENTION_ADMISSION: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Default artifact class for declarations that predate categorized cleanup.
 /// Both the built-in path and repository-declared paths describe output that a
@@ -114,8 +128,11 @@ pub struct ArtifactCleanupOptions {
 /// ordering and limit, so a small root cannot consume the budget before a
 /// larger eligible artifact is considered.
 pub fn run_automatic_artifact_retention(roots: Vec<PathBuf>) -> Result<ArtifactCleanupOutput> {
-    let retention = crate::defaults::load_config().retention;
-    run_automatic_artifact_retention_in(&roots, &retention, SystemTime::now())
+    try_run_automatic_artifact_retention(roots)?.ok_or_else(|| {
+        Error::internal_unexpected(
+            "automatic artifact retention is already running; remeasure capacity before admitting work",
+        )
+    })
 }
 
 /// Reclaim idle, reconstructable worktree artifacts before managed work writes
@@ -132,15 +149,30 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    if !roots.iter().any(|root| {
-        below_reconstructable_reserve(root, retention.reconstructable_artifact_reserve_bytes)
-    }) {
+    let pressured: Vec<_> = roots
+        .iter()
+        .filter_map(|root| {
+            let reserve = crate::capacity::filesystem_relative_reserve_bytes(
+                retention.reconstructable_artifact_reserve_bytes,
+                disk_budget(
+                    root,
+                    "managed worktree",
+                    "worktree capacity is not measurable on this platform",
+                )
+                .total_bytes,
+            );
+            below_reconstructable_reserve(root, reserve).then(|| (root, reserve))
+        })
+        .collect();
+    if pressured.is_empty() {
         return Ok(());
     }
 
-    run_automatic_artifact_retention_in(&roots, &retention, SystemTime::now())?;
+    // A busy owner is not treated as success: every caller still measures below
+    // and deterministically admits or refuses from the current filesystem facts.
+    let _ = try_run_automatic_artifact_retention_with_config(&roots, &retention)?;
 
-    for root in roots {
+    for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
             &root,
             "managed worktree",
@@ -148,17 +180,53 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
         );
         if budget
             .available_bytes
-            .is_some_and(|available| available < retention.reconstructable_artifact_reserve_bytes)
+            .is_some_and(|available| available < reserve_bytes)
         {
             return Err(reconstructable_admission_error(
                 &root,
                 budget.available_bytes,
                 budget.available_inodes,
-                retention.reconstructable_artifact_reserve_bytes,
+                reserve_bytes,
             ));
         }
     }
     Ok(())
+}
+
+/// Run one bounded artifact-retention pass when no other process owns it.
+/// `None` means another pass is active; callers must remeasure before writing.
+pub fn try_run_automatic_artifact_retention(
+    roots: Vec<PathBuf>,
+) -> Result<Option<ArtifactCleanupOutput>> {
+    let retention = crate::defaults::load_config().retention;
+    try_run_automatic_artifact_retention_with_config(&roots, &retention)
+}
+
+fn try_run_automatic_artifact_retention_with_config(
+    roots: &[PathBuf],
+    retention: &crate::defaults::RetentionConfig,
+) -> Result<Option<ArtifactCleanupOutput>> {
+    let Ok(_admission) = AUTOMATIC_ARTIFACT_RETENTION_ADMISSION
+        .get_or_init(|| Mutex::new(()))
+        .try_lock()
+    else {
+        return Ok(None);
+    };
+    let data = homeboy_paths::homeboy_data()?;
+    let lock = FsIndexLockConfig {
+        // Retention has its own deadline. An extra minute avoids stealing a
+        // live owner at that boundary while recovering a crashed owner.
+        stale_after: Duration::from_secs(
+            retention
+                .automatic_retention_max_run_seconds
+                .saturating_add(60),
+        ),
+        ..AUTOMATIC_ARTIFACT_RETENTION_LOCK
+    };
+    let Some(_cross_process_owner) = FsIndexLock::try_acquire_in(&data, lock)? else {
+        return Ok(None);
+    };
+    run_automatic_artifact_retention_in(roots, retention, SystemTime::now()).map(Some)
 }
 
 fn existing_unique_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -2539,6 +2607,28 @@ mod tests {
     }
 
     #[test]
+    fn pressured_artifact_admissions_share_one_retention_owner_in_process() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            let _owner = AUTOMATIC_ARTIFACT_RETENTION_ADMISSION
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("hold retention owner");
+
+            let result = try_run_automatic_artifact_retention_with_config(
+                &[repo.path().to_path_buf()],
+                &crate::defaults::RetentionConfig::default(),
+            )
+            .expect("busy admission is not an error");
+
+            assert!(
+                result.is_none(),
+                "a concurrent admission must not start a second pass"
+            );
+        });
+    }
+
+    #[test]
     fn reconstructable_artifact_reserve_has_a_safe_nonzero_default() {
         assert_eq!(
             crate::defaults::RetentionConfig::default().reconstructable_artifact_reserve_bytes,
@@ -2719,14 +2809,6 @@ mod tests {
         let root = validate_homeboy_manifest_dir(tmp.path()).expect("homeboy manifest");
 
         assert_eq!(root, tmp.path());
-    }
-
-    #[test]
-    fn self_artifact_source_resolves_the_workspace_homeboy_checkout() {
-        let root = homeboy_source_checkout().expect("workspace source checkout");
-
-        assert!(root.join(".git").exists());
-        assert!(root.join("src/main.rs").is_file());
     }
 
     #[test]

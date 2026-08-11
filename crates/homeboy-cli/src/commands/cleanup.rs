@@ -1549,13 +1549,17 @@ fn automatic_retention() -> CmdResult<Value> {
             "reason": "no controller-accessible registered workspace roots",
         })
     } else {
-        match cleanup::run_automatic_artifact_retention(roots) {
-            Ok(output) => serde_json::to_value(output).map_err(|error| {
+        match cleanup::try_run_automatic_artifact_retention(roots) {
+            Ok(Some(output)) => serde_json::to_value(output).map_err(|error| {
                 homeboy::core::Error::internal_json(
                     error.to_string(),
                     Some("serialize automatic artifact retention".to_string()),
                 )
             })?,
+            Ok(None) => serde_json::json!({
+                "status": "busy",
+                "reason": "automatic artifact retention is already running",
+            }),
             Err(error) => serde_json::json!({ "status": "retained", "reason": error.message }),
         }
     };
