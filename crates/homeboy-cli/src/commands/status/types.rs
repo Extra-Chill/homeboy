@@ -3,7 +3,7 @@
 
 use homeboy_upgrade::controller_staleness::ControllerStaleness;
 use serde::Serialize;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::Args;
 
@@ -176,6 +176,10 @@ pub struct StatusOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub timings: Vec<StatusTiming>,
     pub clean: usize,
+    /// Present when the bounded default status view omitted work rather than
+    /// making callers wait past its interactive latency contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<StatusPartial>,
     /// Freshness of the `homeboy` binary that produced this report, relative to
     /// the latest published release.
     ///
@@ -185,6 +189,15 @@ pub struct StatusOutput {
     /// triage its own issue tracker unnoticed (#11483). Costs one cached file
     /// read; see [`homeboy_upgrade::controller_staleness`].
     pub controller: ControllerStaleness,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatusPartial {
+    pub reason: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub omitted_components: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub degraded_components: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -324,6 +337,8 @@ pub struct ProjectDashboardOutput {
     pub summary: ProjectDashboardSummary,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub timings: Vec<StatusTiming>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<StatusPartial>,
     /// Freshness of the `homeboy` binary that produced this dashboard. See
     /// [`StatusOutput::controller`].
     pub controller: ControllerStaleness,
@@ -333,14 +348,17 @@ pub(super) struct StatusTimer {
     enabled: bool,
     phase_started: Instant,
     timings: Vec<StatusTiming>,
+    deadline: Instant,
 }
 
 impl StatusTimer {
     pub(super) fn new(enabled: bool) -> Self {
+        let budget = Duration::from_secs(30);
         Self {
             enabled,
             phase_started: Instant::now(),
             timings: Vec::new(),
+            deadline: Instant::now() + budget,
         }
     }
 
@@ -363,6 +381,28 @@ impl StatusTimer {
 
     pub(super) fn into_timings(self) -> Vec<StatusTiming> {
         self.timings
+    }
+
+    pub(super) fn expired(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+
+    pub(super) fn remaining(&self) -> Option<Duration> {
+        self.deadline.checked_duration_since(Instant::now())
+    }
+
+    pub(super) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_budget(enabled: bool, budget: Duration) -> Self {
+        Self {
+            enabled,
+            phase_started: Instant::now(),
+            timings: Vec::new(),
+            deadline: Instant::now() + budget,
+        }
     }
 }
 

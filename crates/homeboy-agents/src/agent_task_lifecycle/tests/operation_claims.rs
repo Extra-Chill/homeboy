@@ -100,19 +100,42 @@ fn completing_twice_keeps_the_first_result() {
 }
 
 #[test]
-fn expired_lease_is_reclaimable_by_a_new_pass() {
+fn live_owner_retains_claim_after_nominal_lease_expiry() {
     with_isolated_home(|_| {
         seed_run("op-claim-4");
-        // A zero-length lease is immediately expired, modelling a crashed
-        // controller whose lease elapsed before it recorded a result.
+        // A provider/Cook lifecycle can exceed its operation lease. Model the
+        // old deadline deterministically: a second consumer must not dispatch
+        // while the original process still owns the claim.
         assert_eq!(
             claim_cook_operation("op-claim-4", "promote:def", Duration::from_secs(0))
                 .expect("first claim"),
             ClaimOutcome::Acquired
         );
-        // The next pass finds the expired lease and reclaims it.
         assert_eq!(
-            claim_cook_operation("op-claim-4", "promote:def", LEASE).expect("reclaim"),
+            claim_cook_operation("op-claim-4", "promote:def", LEASE)
+                .expect("live owner retains expired claim"),
+            ClaimOutcome::LeaseHeld
+        );
+        assert!(operation_lease_is_active("op-claim-4", "promote:def")
+            .expect("live owner remains active after nominal expiry"));
+    });
+}
+
+#[test]
+fn expired_claim_is_recoverable_after_its_owner_is_stale() {
+    with_isolated_home(|_| {
+        seed_run("op-claim-expired-stale-owner");
+        let key = "retry:attempt-2";
+        claim_cook_operation("op-claim-expired-stale-owner", key, Duration::from_secs(0))
+            .expect("reserve expired claim");
+        rewrite_record_for_test("op-claim-expired-stale-owner", |record| {
+            record.metadata["cook_operation_claims"][0]["owner_pid"] = json!(u32::MAX);
+        })
+        .expect("write stale owner");
+
+        assert_eq!(
+            claim_cook_operation("op-claim-expired-stale-owner", key, LEASE)
+                .expect("recover stale expired claim"),
             ClaimOutcome::Acquired
         );
     });

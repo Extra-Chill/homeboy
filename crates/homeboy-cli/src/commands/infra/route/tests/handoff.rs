@@ -644,6 +644,55 @@ fn default_placement_provider_discovery_stays_local_despite_connected_default_ru
 }
 
 #[test]
+fn route_reuses_the_admitted_lab_runner_without_a_second_readiness_lookup() {
+    homeboy::core::resource_policy_context::reset_captured_context_for_test();
+    homeboy::core::resource_policy_context::capture_context(
+        homeboy::core::resource_policy_context::ResourcePolicyContext {
+            command: "review lint".to_string(),
+            severity: "hot".to_string(),
+            local_override: false,
+            warned: true,
+            message: None,
+            runner_selection:
+                homeboy::core::resource_policy_context::ResourcePolicyRunnerSelection {
+                    runner_id: Some("admitted-lab".to_string()),
+                    available_runner_ids: vec!["admitted-lab".to_string()],
+                    readiness_state: "connected_ready".to_string(),
+                    readiness_reasons: Vec::new(),
+                    remediation_commands: Vec::new(),
+                    reason: "default_lab_runner".to_string(),
+                },
+            host: homeboy::core::resource_policy_context::ResourcePolicyHostSnapshot {
+                load_severity: "hot".to_string(),
+                load_one: None,
+                load_five: None,
+                load_fifteen: None,
+                cpu_count: 1,
+                memory_severity: None,
+                memory_used_percent: None,
+                memory_available_mb: None,
+                memory_total_mb: None,
+                relevant_process_count: 0,
+                process_severity: "ok".to_string(),
+                active_rig_lease_count: 0,
+                rig_lease_severity: "ok".to_string(),
+                rig_lease_concurrency_limit: None,
+            },
+        },
+    );
+    let cli = Cli::parse_from(["homeboy", "review", "lint", "--path", "."]);
+    let command = lab_offload_command(&cli.command)
+        .expect("Lab route contract resolves")
+        .expect("review lint is portable");
+
+    assert_eq!(
+        admitted_lab_runner_id(&cli, Some(&command)),
+        Some(Some("admitted-lab".to_string()))
+    );
+    homeboy::core::resource_policy_context::reset_captured_context_for_test();
+}
+
+#[test]
 fn agent_task_controller_run_from_spec_supports_lab_placement_runner_routing() {
     let cli = Cli::parse_from([
         "homeboy",
