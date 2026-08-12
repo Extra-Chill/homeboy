@@ -1967,12 +1967,16 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
             cache.join("rustup").display().to_string(),
         ),
     ]);
+    // The host rustup proxy refuses to run after CARGO_HOME is isolated unless
+    // the proxy itself lives under that new home. Seed the cache with a real
+    // file rather than inheriting the host home into controller-owned state.
+    let rustup_proxy = prepare_rustup_proxy(cache)?;
     let rustup = run_rust_cache_command(
         cwd,
         cache,
         &environment,
         "install_toolchain",
-        Path::new("rustup"),
+        &rustup_proxy,
         &["toolchain", "install"],
         timeout,
     )?;
@@ -1982,7 +1986,7 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
         cache,
         &environment,
         "resolve_toolchain_cargo",
-        Path::new("rustup"),
+        &rustup_proxy,
         &["which", "cargo"],
         timeout,
     )?;
@@ -2018,6 +2022,44 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
         timeout,
     )?;
     Ok(relative.to_path_buf())
+}
+
+fn prepare_rustup_proxy(cache: &Path) -> Result<PathBuf> {
+    let host_path = std::env::var_os("PATH").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "PATH",
+            "unavailable for Rust gate cache hydration",
+            None,
+            None,
+        )
+    })?;
+    let source = std::env::split_paths(&host_path)
+        .map(|directory| directory.join("rustup"))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "rustup",
+                "unavailable for Rust gate cache hydration",
+                None,
+                None,
+            )
+        })?;
+    let destination = cache.join("cargo/bin/rustup");
+    fs::create_dir_all(destination.parent().expect("rustup proxy has a parent")).map_err(
+        |error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("prepare isolated Rust gate cache rustup proxy".to_string()),
+            )
+        },
+    )?;
+    fs::copy(&source, &destination).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("prepare isolated Rust gate cache rustup proxy".to_string()),
+        )
+    })?;
+    Ok(destination)
 }
 
 fn run_rust_cache_command(
@@ -4548,7 +4590,7 @@ mod tests {
         fs::write(
             &rustup,
             format!(
-                "#!/bin/sh\nif test \"$1\" = toolchain; then\n  /bin/mkdir -p \"$CARGO_HOME/registry\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin\"\n  /bin/cp \"{}\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\n  printf '%s\\n' rustup >> \"$CARGO_HOME/registry/hydration.log\"\nelif test \"$1\" = which; then\n  printf '%s\\n' \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\nfi\n/bin/sleep 0.1\n",
+                "#!/bin/sh\ntest \"$0\" = \"$CARGO_HOME/bin/rustup\"\nif test \"$1\" = toolchain; then\n  /bin/mkdir -p \"$CARGO_HOME/registry\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin\"\n  /bin/cp \"{}\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\n  printf '%s\\n' rustup >> \"$CARGO_HOME/registry/hydration.log\"\nelif test \"$1\" = which; then\n  printf '%s\\n' \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\nfi\n/bin/sleep 0.1\n",
                 direct_cargo.display()
             ),
         )
