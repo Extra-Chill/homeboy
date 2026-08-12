@@ -3531,7 +3531,7 @@ mod tests {
         let timeout = bin.join("timeout");
         std::fs::write(
             &timeout,
-            "#!/bin/sh\nwhile [ \"$1\" = -s ] || [ \"$1\" = --signal ]; do shift; shift; done\nshift\nshift\nPATH=\"$HOMEBOY_ORIGINAL_PATH\"\nexport PATH\nexec cargo \"$@\"\n",
+            "#!/bin/sh\nwhile [ \"$1\" = -s ] || [ \"$1\" = --signal ]; do shift; shift; done\nshift\nshift\nHOME=\"$HOMEBOY_ORIGINAL_HOME\"\nPATH=\"$HOMEBOY_ORIGINAL_PATH\"\nexport HOME PATH\nexec cargo \"$@\"\n",
         )
         .expect("timeout wrapper");
         let mut permissions = std::fs::metadata(&timeout)
@@ -3542,7 +3542,8 @@ mod tests {
         let target = temp.path().join("target");
         let command = |timeout_options: &str, filter: &str| {
             format!(
-                "RUSTFLAGS=\"-D warnings\" HOMEBOY_ORIGINAL_PATH='{}' CARGO_TARGET_DIR='{}' PATH='{}' timeout {timeout_options} 30 cargo --quiet test {filter} -- --exact",
+                "RUSTFLAGS=\"-D warnings\" HOMEBOY_ORIGINAL_HOME='{}' HOMEBOY_ORIGINAL_PATH='{}' CARGO_TARGET_DIR='{}' PATH='{}' timeout {timeout_options} 30 cargo --quiet test {filter} -- --exact",
+                std::env::var("HOME").expect("host HOME"),
                 std::env::var("PATH").expect("host PATH"),
                 target.display(),
                 bin.display(),
