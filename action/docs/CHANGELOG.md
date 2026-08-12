@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.25] - 2026-08-12
+
+### Changed
+- scope the differential audit to changed files
+
 ## [2.11.24] - 2026-08-12
 
 ### Changed
