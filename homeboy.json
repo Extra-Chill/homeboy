@@ -1831,9 +1831,12 @@
   },
   "hooks": {},
   "id": "homeboy",
+  "managed_execution": {
+    "shared_cargo_target": true
+  },
   "scripts": {
     "build": [
-      "CARGO_TARGET_DIR=target cargo build --release"
+      "cargo build --release"
     ]
   },
   "version_targets": [

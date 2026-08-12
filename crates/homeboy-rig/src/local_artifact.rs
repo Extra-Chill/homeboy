@@ -143,12 +143,10 @@ pub(crate) fn read_registrations(
         File::open(manifest_path).map_err(|error| manifest_io_error(manifest_path, error))?;
     let manifest = read_manifest(&mut file, run_id)?;
     let mut validated = Vec::with_capacity(manifest.artifacts.len());
-    for artifact in manifest.artifacts {
+    for mut artifact in manifest.artifacts {
         validate_kind(&artifact.kind)?;
         let (canonical, artifact_type) = safe_artifact_path(Path::new(&artifact.path))?;
-        if canonical.display().to_string() != artifact.path
-            || artifact_type != artifact.artifact_type
-        {
+        if artifact_type != artifact.artifact_type {
             return Err(Error::validation_invalid_argument(
                 "artifact_manifest",
                 "rig artifact registration entry does not match its canonical path and type",
@@ -156,6 +154,7 @@ pub(crate) fn read_registrations(
                 None,
             ));
         }
+        artifact.path = canonical.display().to_string();
         if validated.iter().any(|existing: &RegisteredLocalArtifact| {
             existing.kind == artifact.kind && existing.path == artifact.path
         }) {

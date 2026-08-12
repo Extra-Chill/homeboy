@@ -15,11 +15,23 @@
 
 use crate::upgrade;
 use homeboy_core::update_check_cache;
+use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 const CACHE_FILENAME: &str = "update_check.json";
 const CHECK_INTERVAL_SECS: u64 = 86400;
 const ENV_VAR_DISABLE: &str = "HOMEBOY_NO_UPDATE_CHECK";
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShadowedInstall {
+    path: PathBuf,
+    version: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateCheckCache {
@@ -133,6 +145,125 @@ fn print_hint(latest: &str, checked_at: Option<u64>) {
     }
 }
 
+/// Find a newer `homeboy` executable which is visible later in PATH than the
+/// binary running this process. Canonical paths collapse Homebrew-style
+/// symlinks and duplicate PATH entries before they are probed.
+fn newer_shadowed_install_with<C, P>(
+    path_entries: impl IntoIterator<Item = PathBuf>,
+    active_binary: &Path,
+    active_version: &str,
+    mut canonicalize: C,
+    mut probe_version: P,
+) -> Option<ShadowedInstall>
+where
+    C: FnMut(&Path) -> Option<PathBuf>,
+    P: FnMut(&Path) -> Option<String>,
+{
+    let active_binary = canonicalize(active_binary)?;
+    let active_version = parse_version(active_version)?;
+    let mut seen = HashSet::new();
+
+    for entry in path_entries {
+        let candidate = entry.join("homeboy");
+        let Some(canonical) = canonicalize(&candidate) else {
+            continue;
+        };
+        if canonical == active_binary || !seen.insert(canonical) {
+            continue;
+        }
+
+        let Some(version) = probe_version(&candidate).and_then(|version| parse_version(&version))
+        else {
+            continue;
+        };
+        if version > active_version {
+            return Some(ShadowedInstall {
+                path: candidate,
+                version: version.to_string(),
+            });
+        }
+    }
+
+    None
+}
+
+fn parse_version(value: &str) -> Option<Version> {
+    value.split_whitespace().find_map(|word| {
+        Version::parse(word.trim_start_matches('v'))
+            .ok()
+            .or_else(|| Version::parse(word.trim_start_matches('v').trim_end_matches(',')).ok())
+    })
+}
+
+fn probe_version(path: &Path) -> Option<String> {
+    let mut child = Command::new(path)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) if status.success() => {
+                return child
+                    .wait_with_output()
+                    .ok()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).to_string());
+            }
+            Some(_) => return None,
+            None => {}
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn print_shadowed_install_hint() -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let Ok(active_binary) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(shadowed) = newer_shadowed_install_with(
+        std::env::split_paths(&path),
+        &active_binary,
+        upgrade::current_version(),
+        |path| std::fs::canonicalize(path).ok(),
+        probe_version,
+    ) else {
+        return false;
+    };
+    let Some(directory) = shadowed.path.parent() else {
+        return false;
+    };
+
+    homeboy_core::log_status!(
+        "update",
+        "PATH shadowing: executing `{}` ({}); newer `{}` ({}) is later on PATH. Use `PATH={}:$PATH homeboy ...` or `{}` explicitly.",
+        active_binary.display(),
+        upgrade::current_version(),
+        shadowed.path.display(),
+        shadowed.version,
+        shell_quote(directory),
+        shell_quote(&shadowed.path),
+    );
+    true
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!(
+        "'{}'",
+        path.display().to_string().replace('\'', "'\\\"'\\\"'")
+    )
+}
+
 /// Refresh the daily cache and emit the update hint.
 ///
 /// The cached `latest_version` is whatever [`upgrade::check_for_updates`]
@@ -147,7 +278,9 @@ pub fn run_startup_check() {
         return;
     }
 
-    let mut already_printed = false;
+    // Shadowing is the actionable update diagnosis. Do not follow it with the
+    // generic hint that describes only the older executing binary as current.
+    let mut already_printed = print_shadowed_install_hint();
     let cached = read_cache();
 
     if let Some(ref cache) = cached {
@@ -310,5 +443,92 @@ mod tests {
 
             std::env::remove_var(ENV_VAR_DISABLE);
         });
+    }
+
+    #[test]
+    fn shadowed_path_install_reports_a_later_newer_binary() {
+        let active = PathBuf::from("/opt/homebrew/bin/homeboy");
+        let shadowed = newer_shadowed_install_with(
+            [
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/Users/chris/.cargo/bin"),
+            ],
+            &active,
+            "0.286.5",
+            |path| Some(path.to_path_buf()),
+            |path| match path.to_string_lossy().as_ref() {
+                "/Users/chris/.cargo/bin/homeboy" => Some("homeboy 0.335.0".to_string()),
+                _ => None,
+            },
+        )
+        .expect("newer later PATH entry is reported");
+
+        assert_eq!(
+            shadowed.path,
+            PathBuf::from("/Users/chris/.cargo/bin/homeboy")
+        );
+        assert_eq!(shadowed.version, "0.335.0");
+    }
+
+    #[test]
+    fn shadowed_path_ignores_single_install_and_same_file_aliases() {
+        let active = PathBuf::from("/opt/homebrew/bin/homeboy");
+        let mut probes = 0;
+        let shadowed = newer_shadowed_install_with(
+            [
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin"),
+            ],
+            &active,
+            "0.286.5",
+            |path| {
+                (path == Path::new("/opt/homebrew/bin/homeboy")
+                    || path == Path::new("/usr/local/bin/homeboy"))
+                .then(|| active.clone())
+            },
+            |_| {
+                probes += 1;
+                Some("homeboy 0.335.0".to_string())
+            },
+        );
+
+        assert!(shadowed.is_none());
+        assert_eq!(probes, 0, "aliases of the running file are never probed");
+    }
+
+    #[test]
+    fn shadowed_path_ignores_older_or_unparseable_versions() {
+        let active = PathBuf::from("/opt/homebrew/bin/homeboy");
+        let shadowed = newer_shadowed_install_with(
+            [PathBuf::from("/Users/chris/.cargo/bin")],
+            &active,
+            "0.335.0",
+            |path| Some(path.to_path_buf()),
+            |_| Some("homeboy development-build".to_string()),
+        );
+
+        assert!(shadowed.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_kills_a_slow_path_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = directory.path().join("homeboy");
+        std::fs::write(&binary, "#!/bin/sh\nexec sleep 1\n").expect("slow binary fixture");
+        let mut permissions = std::fs::metadata(&binary)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).expect("make fixture executable");
+
+        let started = Instant::now();
+        assert!(probe_version(&binary).is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(750),
+            "version probe must respect its bounded deadline"
+        );
     }
 }

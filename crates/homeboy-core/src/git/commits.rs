@@ -4,6 +4,8 @@ use serde::Serialize;
 
 use crate::engine::command;
 use crate::error::Result;
+use std::path::Path;
+use std::time::Duration;
 
 // Docs file patterns for categorizing commits
 const DOCS_FILE_EXTENSIONS: [&str; 1] = [".md"];
@@ -351,6 +353,31 @@ pub fn get_latest_tag_any_with_prefix(
                 .map(|version| (tag.to_string(), version))
         })
         .max_by(|(_, a), (_, b)| a.cmp(b))
+        .map(|(tag, _)| tag))
+}
+
+/// Bounded equivalent of [`get_latest_tag_any_with_prefix`] for interactive
+/// status operations.
+pub fn get_latest_tag_any_with_prefix_with_timeout(
+    path: &str,
+    tag_prefix: Option<&str>,
+    timeout: Duration,
+) -> Result<Option<String>> {
+    let tags = super::run_git_with_env_timeout(
+        Path::new(path),
+        &["tag", "--sort=-v:refname", "--list"],
+        "status git latest tag",
+        &[],
+        timeout,
+    )?;
+    Ok(tags
+        .lines()
+        .filter_map(|tag| {
+            let tag = tag.trim();
+            exact_release_version_from_tag(tag, tag_prefix)
+                .map(|version| (tag.to_string(), version))
+        })
+        .max_by(|(_, left), (_, right)| left.cmp(right))
         .map(|(tag, _)| tag))
 }
 

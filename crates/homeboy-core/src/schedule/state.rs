@@ -11,6 +11,11 @@ use crate::paths;
 
 use super::types::Schedule;
 
+/// A `running` marker older than this was left by a process that did not
+/// record its outcome. It must be surfaced to an operator rather than silently
+/// treated as an active overlap forever.
+pub const STALE_RUN_RECLAIM_SECS: i64 = 6 * 60 * 60;
+
 /// The outcome of the most recent run, and enough context to decide whether
 /// the next one is worth reporting.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -42,6 +47,22 @@ pub struct ScheduleState {
 }
 
 impl ScheduleState {
+    /// Whether an in-flight marker is old enough to be reclaimed safely.
+    pub fn is_stale_running(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.running
+            && self
+                .started_at
+                .as_deref()
+                .and_then(|started| chrono::DateTime::parse_from_rfc3339(started).ok())
+                .map(|started| {
+                    (now - started.with_timezone(&chrono::Utc)).num_seconds()
+                        > STALE_RUN_RECLAIM_SECS
+                })
+                // A running marker with no start time cannot be aged, and would
+                // otherwise block the schedule forever.
+                .unwrap_or(true)
+    }
+
     /// Whether `schedule` is due at `now`, given this state.
     ///
     /// Uses the recorded start time rather than completion so a long run does
@@ -194,6 +215,26 @@ mod tests {
             ..schedule()
         };
         assert!(state.is_due(&allow, chrono::Utc::now()));
+    }
+
+    #[test]
+    fn stale_running_markers_are_distinguished_from_live_runs() {
+        let now = chrono::Utc::now();
+        let stale = ScheduleState {
+            running: true,
+            started_at: Some(
+                (now - chrono::Duration::seconds(STALE_RUN_RECLAIM_SECS + 1)).to_rfc3339(),
+            ),
+            ..Default::default()
+        };
+        let live = ScheduleState {
+            running: true,
+            started_at: Some((now - chrono::Duration::minutes(5)).to_rfc3339()),
+            ..Default::default()
+        };
+
+        assert!(stale.is_stale_running(now));
+        assert!(!live.is_stale_running(now));
     }
 
     /// Cadence is measured from the previous start, so a run that takes longer

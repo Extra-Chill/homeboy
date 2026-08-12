@@ -21,7 +21,8 @@ use homeboy_core::{Error, Result};
 use crate::direct_lab_handoff::DirectLabHandoffReceipt;
 use crate::runner_staging_operation::{
     RemoteRunnerStagingEnvelope, RemoteRunnerStagingReceipt, RemoteRunnerStagingTransport,
-    RunnerSourceArtifact, RunnerStagingArtifacts, REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY,
+    RunnerSourceArtifact, RunnerStagingArtifacts, SourcePackageEntryKind,
+    REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY, REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY,
     REMOTE_RUNNER_STAGING_CAPABILITY, REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA,
 };
 use crate::{broker_submit_token_for_runner, RunnerSession, RunnerTunnelMode};
@@ -75,17 +76,52 @@ pub fn extract_staged_source_artifact(
     destination: impl AsRef<Path>,
 ) -> Result<PathBuf> {
     let package = read_staged_source_artifact(store_path, artifact)?;
-    let files: BTreeMap<String, String> = serde_json::from_slice(&package).map_err(|error| {
-        Error::validation_invalid_argument("source_package", error.to_string(), None, None)
-    })?;
+    artifact.package.validate(&package)?;
+    let files: BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&package).map_err(|error| {
+            Error::validation_invalid_argument("source_package", error.to_string(), None, None)
+        })?;
     let root = destination.as_ref().join(&artifact.package.extraction_root);
-    fs::create_dir_all(&root)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
-    for entry in &artifact.package.entries {
-        let encoded = files.get(&entry.path).ok_or_else(|| {
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(extraction_conflict(&root)),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            fs::create_dir_all(&root).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(root.display().to_string()))
+            })?
+        }
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(root.display().to_string()),
+            ))
+        }
+    }
+    for entry in artifact
+        .package
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == SourcePackageEntryKind::File)
+    {
+        let value = files.get(&entry.path).ok_or_else(|| {
             Error::validation_invalid_argument(
                 "source_package",
                 "source package entry is missing",
+                Some(entry.path.clone()),
+                None,
+            )
+        })?;
+        let encoded = if artifact.package.schema == "homeboy/source-package-manifest/v1" {
+            value.as_str()
+        } else {
+            value
+                .get("content_base64")
+                .and_then(serde_json::Value::as_str)
+        }
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "source_package",
+                "source package file payload is invalid",
                 Some(entry.path.clone()),
                 None,
             )
@@ -111,16 +147,116 @@ pub fn extract_staged_source_artifact(
             ));
         }
         let path = root.join(&entry.path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-            })?;
+        ensure_extraction_parent(&root, &entry.path)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(extraction_conflict(&path)),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(path.display().to_string()),
+                ))
+            }
         }
         fs::write(&path, bytes).map_err(|error| {
             Error::internal_io(error.to_string(), Some(path.display().to_string()))
         })?;
     }
+    for entry in artifact
+        .package
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == SourcePackageEntryKind::Symlink)
+    {
+        #[cfg(not(unix))]
+        return Err(Error::validation_invalid_argument(
+            "source_package",
+            "source package symlinks require a Unix runner",
+            Some(entry.path.clone()),
+            None,
+        ));
+        #[cfg(unix)]
+        {
+            let target = files
+                .get(&entry.path)
+                .and_then(|value| value.get("target"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "source_package",
+                        "source package symlink payload is invalid",
+                        Some(entry.path.clone()),
+                        None,
+                    )
+                })?;
+            let path = root.join(&entry.path);
+            ensure_extraction_parent(&root, &entry.path)?;
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let existing = fs::read_link(&path).map_err(|error| {
+                        Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                    })?;
+                    if existing != Path::new(target) {
+                        fs::remove_file(&path).map_err(|error| {
+                            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                        })?;
+                        std::os::unix::fs::symlink(target, &path).map_err(|error| {
+                            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                        })?;
+                    }
+                }
+                Ok(_) => return Err(extraction_conflict(&path)),
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    std::os::unix::fs::symlink(target, &path).map_err(|error| {
+                        Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                    })?;
+                }
+                Err(error) => {
+                    return Err(Error::internal_io(
+                        error.to_string(),
+                        Some(path.display().to_string()),
+                    ))
+                }
+            }
+        }
+    }
     Ok(root)
+}
+
+fn extraction_conflict(path: &Path) -> Error {
+    Error::validation_invalid_argument(
+        "source_package",
+        "source package extraction entry conflicts with an existing non-symlink type",
+        Some(path.display().to_string()),
+        None,
+    )
+}
+
+fn ensure_extraction_parent(root: &Path, entry_path: &str) -> Result<()> {
+    let mut parent = root.to_path_buf();
+    for component in entry_path
+        .split('/')
+        .take(entry_path.split('/').count().saturating_sub(1))
+    {
+        parent.push(component);
+        match fs::symlink_metadata(&parent) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(extraction_conflict(&parent)),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                fs::create_dir(&parent).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+                })?
+            }
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(parent.display().to_string()),
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,10 +674,10 @@ impl<M: RunnerStagingMaterializer> RemoteRunnerStagingTransport for RunnerStagin
     }
     fn supports_capability(&self, capability: &str) -> bool {
         self.compatible
-            && matches!(
+            && (matches!(
                 capability,
                 REMOTE_RUNNER_STAGING_CAPABILITY | REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY
-            )
+            ) || (cfg!(unix) && capability == REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY))
     }
     fn stage_durable(
         &mut self,
@@ -770,10 +906,14 @@ struct ProductionStagingProvider;
 
 impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionStagingProvider {
     fn capabilities(&self, _runner_id: &str) -> Result<Vec<String>> {
-        Ok(vec![
+        let mut capabilities = vec![
             REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
             REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
-        ])
+        ];
+        if cfg!(unix) {
+            capabilities.push(REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY.to_string());
+        }
+        Ok(capabilities)
     }
 
     fn stage(
@@ -863,6 +1003,7 @@ pub fn register_runner_staging_provider() {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
+    use std::process::Command;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Barrier, Mutex,
@@ -1021,6 +1162,77 @@ mod tests {
             homeboy_core::ErrorCode::ValidationInvalidArgument
         );
         assert_eq!(restarted.store.materializer.calls, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_materializes_tracked_safe_and_unresolved_symlinks_as_target_text() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let source_root = temp.path().join("source");
+        fs::create_dir_all(source_root.join("nested")).expect("source");
+        fs::write(source_root.join("nested/file"), b"safe").expect("file");
+        symlink("nested/file", source_root.join("file-link")).expect("file link");
+        symlink("missing", source_root.join("missing-link")).expect("missing link");
+        for args in [["init"].as_slice(), ["add", "."].as_slice()] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&source_root)
+                .status()
+                .expect("git")
+                .success());
+        }
+        let transfer = crate::runner_staging_operation::SourceArtifactTransfer::from_directory(
+            "source-1",
+            &source_root,
+        )
+        .expect("package");
+        let artifact = transfer.descriptor();
+        let store = temp.path().join("staging.json");
+        let artifact_path = temp
+            .path()
+            .join("source-artifacts")
+            .join(&artifact.artifact_id);
+        fs::create_dir_all(artifact_path.parent().expect("parent")).expect("artifact parent");
+        fs::write(
+            &artifact_path,
+            transfer.decode_verified().expect("verified"),
+        )
+        .expect("artifact");
+
+        let extracted =
+            extract_staged_source_artifact(&store, &artifact, temp.path().join("extract"))
+                .expect("extract");
+        assert_eq!(
+            fs::read_link(extracted.join("file-link")).expect("file target"),
+            Path::new("nested/file")
+        );
+        assert_eq!(
+            fs::read_link(extracted.join("missing-link")).expect("missing target"),
+            Path::new("missing")
+        );
+        assert_eq!(
+            fs::read(extracted.join("file-link")).expect("linked file"),
+            b"safe"
+        );
+        let retried =
+            extract_staged_source_artifact(&store, &artifact, temp.path().join("extract"))
+                .expect("idempotent retry");
+        assert_eq!(retried, extracted);
+        fs::remove_file(extracted.join("file-link")).expect("replace link");
+        symlink("wrong", extracted.join("file-link")).expect("wrong link");
+        extract_staged_source_artifact(&store, &artifact, temp.path().join("extract"))
+            .expect("recreate changed link");
+        assert_eq!(
+            fs::read_link(extracted.join("file-link")).expect("recreated target"),
+            Path::new("nested/file")
+        );
+        fs::remove_file(extracted.join("missing-link")).expect("remove link");
+        fs::write(extracted.join("missing-link"), b"conflict").expect("conflicting file");
+        assert!(
+            extract_staged_source_artifact(&store, &artifact, temp.path().join("extract")).is_err()
+        );
     }
 
     #[test]
