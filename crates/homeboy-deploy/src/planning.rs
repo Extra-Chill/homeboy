@@ -695,10 +695,11 @@ where
     buckets
 }
 
-/// A component skipped during loading because a required extension is not installed.
+/// A component skipped during loading because this host cannot resolve it —
+/// an uninstalled extension, an unresolvable artifact, or an absent local checkout.
 ///
 /// Carries the human-readable reason so check-mode output can report
-/// `skipped: missing extension <id>` per component instead of aborting.
+/// `skipped: <reason>` per component instead of aborting the whole pass.
 pub(super) struct ExtensionSkippedComponent {
     pub id: String,
     pub reason: String,
@@ -708,8 +709,9 @@ pub(super) struct ExtensionSkippedComponent {
 pub(super) struct LoadedComponents {
     pub deployable: Vec<Component>,
     pub skipped: Vec<String>,
-    /// Components skipped because a required extension is missing. Only populated
-    /// in check mode; otherwise a missing extension is a hard error.
+    /// Components skipped because this host cannot resolve them (missing
+    /// extension, unresolvable artifact, or absent local checkout). Only
+    /// populated in check mode; every other mode treats these as hard errors.
     pub extension_skipped: Vec<ExtensionSkippedComponent>,
 }
 
@@ -720,9 +722,11 @@ pub(super) struct LoadedComponents {
 /// Returns an actionable error with install instructions when extensions are missing,
 /// rather than silently skipping the component.
 ///
-/// In `check` mode (read-only diff), a component requiring an uninstalled extension is
+/// In `check` mode (read-only diff), a component this host cannot resolve — an
+/// uninstalled extension, an unresolvable artifact, or an absent local checkout — is
 /// *not* a hard error: it is skipped, recorded in `extension_skipped`, and reported so
-/// operators can see the project-wide diff without installing every build toolchain.
+/// operators can see the project-wide diff without installing every build toolchain
+/// or holding a checkout of every component.
 ///
 /// Returns both the deployable components and the IDs of skipped (non-deployable) ones,
 /// so callers can produce accurate error messages.
@@ -754,6 +758,32 @@ pub(super) fn load_project_components_with_projection(
         // unrelated components — a missing extension on an unrequested component
         // should not block deploying the ones you asked for.
         let is_requested = requested_ids.is_empty() || requested_ids.contains(&attachment.id);
+
+        // A component whose local checkout is absent cannot be resolved from
+        // disk, and `resolve_project_component` fails closed on it so a real
+        // deploy never reads from a path that does not exist. In check mode that
+        // hard failure aborted the entire read-only pass, hiding the status of
+        // every other component (#12214). Report it as a scoped skip instead —
+        // the same skip-and-warn contract a missing extension already uses
+        // (#4587). Only applies when this loader would actually read the
+        // checkout: a projected source replaces it.
+        if check && projected_component(project, &attachment.id, projection).is_none() {
+            let findings = project::component_local_path_findings(project, &attachment.id);
+            if !findings.is_empty() {
+                let reason = findings.join("; ");
+                homeboy_core::log_status!(
+                    "deploy",
+                    "Skipping '{}' in check mode: {}",
+                    attachment.id,
+                    reason
+                );
+                extension_skipped.push(ExtensionSkippedComponent {
+                    id: attachment.id.clone(),
+                    reason,
+                });
+                continue;
+            }
+        }
 
         let mut loaded = resolve_project_component(
             project,
@@ -884,6 +914,23 @@ pub(super) fn load_project_components_with_projection(
     })
 }
 
+/// The prepared-projection source for a component, when one exists.
+///
+/// A projected source is a caller-supplied materialization that stands in for
+/// the attachment's on-disk checkout, so callers that would otherwise read
+/// `local_path` must consult this first.
+pub(super) fn projected_component<'a>(
+    project: &Project,
+    component_id: &str,
+    projection: Option<&'a super::types::PreparedDeployProjection>,
+) -> Option<&'a Component> {
+    let projection = projection?;
+    projection
+        .components
+        .get(&format!("{}:{component_id}", project.id))
+        .or_else(|| projection.components.get(component_id))
+}
+
 pub(super) fn resolve_project_component(
     project: &Project,
     component_id: &str,
@@ -891,12 +938,7 @@ pub(super) fn resolve_project_component(
     projection: Option<&super::types::PreparedDeployProjection>,
 ) -> Result<Component> {
     let snapshot_key = format!("{}:{component_id}", project.id);
-    let Some(source) = projection.and_then(|projection| {
-        projection
-            .components
-            .get(&snapshot_key)
-            .or_else(|| projection.components.get(component_id))
-    }) else {
+    let Some(source) = projected_component(project, component_id, projection) else {
         return project::resolve_project_component_with_standalone_snapshot(
             project,
             component_id,
