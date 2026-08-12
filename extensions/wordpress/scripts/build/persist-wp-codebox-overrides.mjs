@@ -2,7 +2,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const manifestPath = path.resolve(process.argv[2] || path.join(process.cwd(), 'wordpress.json'));
+// Usage: persist-wp-codebox-overrides.mjs [--machine <file>] <manifest>
+//
+// Default (manifest) mode rewrites the `default` of the wp_codebox_bin /
+// wp_codebox_core_module settings in a wordpress.json-style manifest.
+//
+// `--machine <file>` instead writes the resolved override values to a flat,
+// machine-scoped JSON file ({ wp_codebox_bin?, wp_codebox_core_module? })
+// WITHOUT touching the tracked manifest. Setup uses this mode so that running
+// it in a linked, git-managed extension source checkout never dirties
+// wordpress.json with machine-local absolute paths.
+
+const argv = process.argv.slice(2);
+const machineIndex = argv.indexOf('--machine');
+let machineFile = '';
+if (machineIndex >= 0) {
+	machineFile = path.resolve(argv[machineIndex + 1]);
+	argv.splice(machineIndex, 2);
+}
+const manifestPath = path.resolve(argv[0] || path.join(process.cwd(), 'wordpress.json'));
 const env = process.env;
 
 const overrides = {
@@ -26,7 +44,6 @@ if (!Array.isArray(manifest.settings)) {
 	fail(`Manifest does not declare settings: ${manifestPath}`);
 }
 
-let changed = false;
 for (const [id, value] of Object.entries(overrides)) {
 	if (!value) {
 		continue;
@@ -35,6 +52,30 @@ for (const [id, value] of Object.entries(overrides)) {
 	if (!setting) {
 		fail(`Manifest is missing setting ${id}: ${manifestPath}`);
 	}
+}
+
+if (machineFile) {
+	const machineOverrides = {};
+	for (const [id, value] of Object.entries(overrides)) {
+		if (value) {
+			machineOverrides[id] = value;
+		}
+	}
+	if (Object.keys(machineOverrides).length > 0) {
+		fs.mkdirSync(path.dirname(machineFile), { recursive: true });
+		const tmpFile = `${machineFile}.tmp`;
+		fs.writeFileSync(tmpFile, `${JSON.stringify(machineOverrides, null, 2)}\n`);
+		fs.renameSync(tmpFile, machineFile);
+	}
+	process.exit(0);
+}
+
+let changed = false;
+for (const [id, value] of Object.entries(overrides)) {
+	if (!value) {
+		continue;
+	}
+	const setting = manifest.settings.find((entry) => entry && entry.id === id);
 	if (setting.default !== value) {
 		setting.default = value;
 		changed = true;

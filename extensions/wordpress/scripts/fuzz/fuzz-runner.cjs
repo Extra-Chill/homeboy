@@ -319,9 +319,7 @@ function installedExtensionSettingDefaults(env) {
 			}
 			defaults[setting.id] = setting.default;
 		}
-		return defaults;
-	}
-	if (settings && typeof settings === 'object') {
+	} else if (settings && typeof settings === 'object') {
 		for (const [id, setting] of Object.entries(settings)) {
 			const value = setting && typeof setting === 'object' && Object.hasOwn(setting, 'default') ? setting.default : undefined;
 			if (value !== undefined && value !== '') {
@@ -329,7 +327,32 @@ function installedExtensionSettingDefaults(env) {
 			}
 		}
 	}
+	// Machine-scoped overrides persisted by setup into the untracked cache
+	// install root (not the tracked manifest) carry the same precedence the
+	// manifest default used to provide.
+	for (const [id, value] of Object.entries(readMachineOverrides(env))) {
+		if (value) {
+			defaults[id] = value;
+		}
+	}
 	return defaults;
+}
+
+function readMachineOverrides(env) {
+	const installRoot = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+	const overrideFile = path.join(installRoot, 'wp-codebox-overrides.json');
+	try {
+		const parsed = JSON.parse(fs.readFileSync(overrideFile, 'utf8'));
+		if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+			return {
+				wp_codebox_bin: typeof parsed.wp_codebox_bin === 'string' ? parsed.wp_codebox_bin : '',
+				wp_codebox_core_module: typeof parsed.wp_codebox_core_module === 'string' ? parsed.wp_codebox_core_module : '',
+			};
+		}
+	} catch {
+		// Missing or malformed machine override files contribute nothing.
+	}
+	return {};
 }
 
 function readInstalledExtensionManifest(env) {

@@ -69,6 +69,10 @@ homeboy_wp_codebox_resolve_bin() {
     if [ -n "$bin" ]; then
         candidates+=("$bin")
     fi
+    bin="$(homeboy_wp_codebox_machine_override wp_codebox_bin || true)"
+    if [ -n "$bin" ]; then
+        candidates+=("$bin")
+    fi
     if [ -n "${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}" ]; then
         candidates+=("$HOMEBOY_SETTINGS_WP_CODEBOX_BIN")
     fi
@@ -146,6 +150,25 @@ homeboy_wp_codebox_global_cli_candidates() {
 
 homeboy_wp_codebox_managed_install_root() {
     printf '%s\n' "${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+}
+
+# Machine-scoped override file written by setup (scripts/build/setup.sh) into
+# the untracked cache install root. Setup persists the wp_codebox_bin /
+# wp_codebox_core_module values it resolved for this machine here instead of
+# rewriting the tracked wordpress.json manifest. The resolver consumes this file
+# at the same precedence the manifest default used to provide.
+homeboy_wp_codebox_machine_override_file() {
+    printf '%s\n' "$(homeboy_wp_codebox_managed_install_root)/wp-codebox-overrides.json"
+}
+
+homeboy_wp_codebox_machine_override() {
+    local field="$1"
+    local override_file
+
+    override_file="$(homeboy_wp_codebox_machine_override_file)"
+    [ -f "${override_file}" ] || return 1
+
+    jq -r --arg field "${field}" '.[$field] // empty' "${override_file}" 2>/dev/null | head -n 1
 }
 
 homeboy_wp_codebox_managed_cli_candidates() {
