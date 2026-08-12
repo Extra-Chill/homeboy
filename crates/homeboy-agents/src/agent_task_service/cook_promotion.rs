@@ -2839,6 +2839,10 @@ fn cook_failure_context(
         .as_ref()
         .and_then(|record| record.metadata.get("cook_continuation_admission"))
         .cloned();
+    let controller_diagnostic = record
+        .as_ref()
+        .and_then(|record| record.metadata.get("cook_controller_failure"))
+        .cloned();
     let (phase, reason_code, diagnostic) = if blocking_claim.is_some() {
         (
             "promotion".to_string(),
@@ -2881,6 +2885,17 @@ fn cook_failure_context(
             "finalization".to_string(),
             "finalization_incomplete".to_string(),
             None,
+        )
+    } else if let Some(diagnostic) = controller_diagnostic {
+        (
+            "controller".to_string(),
+            diagnostic
+                .pointer("/deepest_cause/code")
+                .or_else(|| diagnostic.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("controller_failure")
+                .to_string(),
+            Some(diagnostic),
         )
     } else {
         (

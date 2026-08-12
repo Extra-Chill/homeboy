@@ -116,6 +116,13 @@ pub struct VerifyGateArgs {
         action = clap::ArgAction::Set
     )]
     pub isolate_gate_xdg: bool,
+    /// Override the component's declared shared Cargo target policy for
+    /// deterministic gates. Omit to inherit the repository component policy.
+    #[arg(long = "gate-shared-cargo-target", action = clap::ArgAction::SetTrue, conflicts_with = "no_gate_shared_cargo_target")]
+    pub gate_shared_cargo_target: bool,
+    /// Explicitly keep deterministic gate Cargo output local to its workspace.
+    #[arg(long = "no-gate-shared-cargo-target", action = clap::ArgAction::SetTrue)]
+    pub no_gate_shared_cargo_target: bool,
 }
 impl VerifyGateArgs {
     pub fn has_deterministic_gate(&self) -> bool {
@@ -153,6 +160,10 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                 isolate_home: args.isolate_gate_home,
                 isolate_xdg: args.isolate_gate_xdg,
                 hydrate_rust_cache: true,
+                shared_cargo_target: args
+                    .gate_shared_cargo_target
+                    .then_some(true)
+                    .or_else(|| args.no_gate_shared_cargo_target.then_some(false)),
                 extension_inputs: args.gate_extension_inputs,
             },
             gate_toolchains: args
@@ -537,7 +548,10 @@ pub struct AgentTaskCookArgs {
     /// omitted, --repo plus --task-url derives an issue-owned destination
     /// through that same configured provider. An explicit --workspace or --cwd
     /// Git checkout can infer --repo when its remote maps to exactly one
-    /// configured component; an explicit --repo must match that checkout.
+    /// configured component; an explicit --repo must match that checkout. When
+    /// paired with --cwd, this must name the same existing local or active
+    /// registered linked task worktree; --cwd remains the Cook workspace
+    /// authority.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
     #[arg(

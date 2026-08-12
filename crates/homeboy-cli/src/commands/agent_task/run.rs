@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
@@ -178,12 +179,41 @@ where
             Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
         > + Copy,
 {
+    continue_cook_with_queued_execution(args, executor, reconstruct_dispatcher, false)
+}
+
+/// `retry --run` owns a fresh queued replacement attempt. It may dispatch that
+/// attempt through the immutable Cook recipe; ordinary `cook-continue` remains
+/// observation-only until the attempt becomes terminal.
+fn continue_cook_with_queued_execution<E, F>(
+    args: CookContinueArgs,
+    executor: E,
+    reconstruct_dispatcher: F,
+    execute_queued_attempt: bool,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: Fn(
+            &Value,
+        ) -> homeboy::core::Result<
+            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+        > + Copy,
+{
     let recipe =
         agent_task_service::load_recipe(&args.cook_or_attempt_id).or_else(|cook_error| {
             agent_task_service::load_recipe_for_attempt(&args.cook_or_attempt_id)?.ok_or(cook_error)
         })?;
     let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
     let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
+    if execute_queued_attempt && record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
+        return dispatch_queued_cook_retry(
+            &recipe,
+            &run_id,
+            args.full,
+            executor,
+            reconstruct_dispatcher,
+        );
+    }
     if !record.state.is_terminal() {
         return Ok((cook_continuation_status(&recipe.cook_id, &record), 0));
     }
@@ -284,6 +314,104 @@ where
         super::status::compact_cook_report(value, args.full),
         result.exit_code,
     ))
+}
+
+#[cfg(test)]
+pub(crate) fn consume_queued_cook_retry_with<E, F>(
+    args: CookContinueArgs,
+    executor: E,
+    reconstruct_dispatcher: F,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: Fn(
+            &Value,
+        ) -> homeboy::core::Result<
+            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+        > + Copy,
+{
+    continue_cook_with_queued_execution(args, executor, reconstruct_dispatcher, true)
+}
+
+/// A retry reservation creates a queued record before its external dispatch.
+/// Claim that effect separately so competing `retry --run` consumers converge
+/// on one dispatcher invocation.
+fn dispatch_queued_cook_retry<E, F>(
+    recipe: &homeboy::agents::agent_task_service::AgentTaskCookRecipe,
+    run_id: &str,
+    full: bool,
+    executor: E,
+    reconstruct_dispatcher: F,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: Fn(
+            &Value,
+        ) -> homeboy::core::Result<
+            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+        > + Copy,
+{
+    let operation_key = format!("retry-run:{run_id}");
+    match agent_task_lifecycle::claim_cook_operation(
+        run_id,
+        &operation_key,
+        Duration::from_secs(30),
+    )? {
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
+        | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
+            let record = agent_task_lifecycle::status(run_id)?;
+            Ok((cook_continuation_status(&recipe.cook_id, &record), 0))
+        }
+        agent_task_lifecycle::ClaimOutcome::Acquired => {
+            let dispatched: CmdResult<Value> = (|| {
+                let dispatcher =
+                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
+                let attempt = recipe
+                    .attempts
+                    .iter()
+                    .find(|attempt| attempt.run_id == run_id)
+                    .ok_or_else(|| {
+                        homeboy::core::Error::validation_invalid_argument(
+                            "cook_or_attempt_id",
+                            "selected attempt is absent from its durable Cook recipe",
+                            Some(run_id.to_string()),
+                            None,
+                        )
+                    })?;
+                let mut options =
+                    agent_task_service::reconstruct_options_with_dispatcher(recipe, dispatcher)?;
+                options.initial_run_id = attempt.run_id.clone();
+                options.initial_plan = attempt.plan.clone();
+                agent_task_service::authorize_cook_continue_route(&options)?;
+                let result = agent_task_service::run_cook(options, executor)?;
+                let value = cook_report_with_continuation(
+                    serde_json::to_value(result.value).unwrap_or(Value::Null),
+                );
+                Ok((
+                    super::status::compact_cook_report(value, full),
+                    result.exit_code,
+                ))
+            })();
+            match dispatched {
+                Ok((value, exit_code)) => {
+                    agent_task_lifecycle::complete_cook_operation(
+                        run_id,
+                        &operation_key,
+                        serde_json::json!({ "exit_code": exit_code }),
+                    )?;
+                    Ok((value, exit_code))
+                }
+                Err(error) => {
+                    agent_task_lifecycle::fail_cook_operation(
+                        run_id,
+                        &operation_key,
+                        serde_json::json!({ "error": error.message.clone() }),
+                    )?;
+                    Err(error)
+                }
+            }
+        }
+    }
 }
 
 /// Probe the continuation admission boundary without claiming a continuation or
@@ -635,6 +763,22 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "--to-worktree is required before provisioning a Cook destination".to_string(),
         ])
     })?;
+    if let Some(cwd) = args.dispatch.cwd.as_deref() {
+        let cwd = Path::new(cwd);
+        ensure_active_managed_cook_destination(to_worktree)?;
+        homeboy::core::worktree_providers::validate_task_worktree_root(cwd, to_worktree)?;
+        let path = std::fs::canonicalize(cwd).map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(cwd.display().to_string()))
+        })?;
+        validate_cook_destination_identity(args, &path)?;
+        validate_cook_cwd_destination_identity(&path, to_worktree)?;
+        return Ok(serde_json::json!({
+            "action": "existing",
+            "kind": "explicit_cwd",
+            "handle": to_worktree,
+            "path": path,
+        }));
+    }
     let direct_path = Path::new(to_worktree);
     if direct_path.is_dir() {
         homeboy::core::worktree_providers::validate_task_worktree_root(direct_path, to_worktree)?;
@@ -671,19 +815,27 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     }
 
     let config = defaults::load_config();
-    match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
-        to_worktree,
-        &config,
-        None,
-    ) {
-        Ok(resolution) => {
+    match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(to_worktree, &config) {
+        Ok(identity) => {
             homeboy::core::worktree_providers::validate_task_worktree_root(
-                Path::new(&resolution.worktree.path),
+                Path::new(&identity.path),
                 to_worktree,
             )?;
-            return Ok(
-                serde_json::json!({ "action": "existing", "kind": "provider", "provider": resolution.provider_id, "handle": resolution.worktree.handle, "path": resolution.worktree.path, "branch": resolution.worktree.branch }),
-            );
+            validate_cook_destination_identity(args, Path::new(&identity.path))?;
+            match homeboy::core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config) {
+                Ok(safety) if safety.fresh && !safety.dirty && !safety.unpushed && !identity.primary => return Ok(serde_json::json!({
+                    "action": "existing", "kind": "provider", "provider": identity.provider_id, "handle": identity.handle, "path": identity.path, "branch": identity.branch,
+                    "workspace_identity": identity, "workspace_safety": safety,
+                })),
+                Ok(_) => return Err(homeboy::core::Error::validation_invalid_argument("to_worktree", "worktree provider safety attestation is not safe for mutation", Some(to_worktree.to_string()), None)),
+                Err(error) if error.details["worktree_provider_split"] == "timed_out" => return Ok(serde_json::json!({
+                    "action": "attestation_pending", "kind": "provider", "provider": identity.provider_id, "handle": identity.handle, "path": identity.path, "branch": identity.branch,
+                    "worktree_provider_id": identity.provider_id,
+                    "workspace_identity": identity,
+                    "workspace_safety": { "state": "timed_out", "latency_ms": error.details["latency_ms"], "budget_ms": error.details["budget_ms"] },
+                })),
+                Err(error) => return Err(error),
+            }
         }
         Err(error)
             if error
@@ -691,6 +843,33 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
                 .get("worktree_provider_lookup")
                 .and_then(Value::as_str)
                 == Some("not_found") => {}
+        Err(error)
+            if error
+                .details
+                .get("worktree_provider_lookup")
+                .and_then(Value::as_str)
+                == Some("timed_out") =>
+        {
+            // The lookup is bounded, but a timeout says nothing about whether
+            // this exact handle exists. Carry only the declared handle into
+            // Cook; durable materialization retries the same exact provider.
+            let provider_id = error
+                .details
+                .get("worktree_provider_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    homeboy::core::Error::internal_unexpected(
+                        "timed-out worktree provider lookup omitted its provider identity"
+                            .to_string(),
+                    )
+                })?;
+            return Ok(serde_json::json!({
+                "action": "lookup_pending",
+                "kind": "provider",
+                "handle": to_worktree,
+                "worktree_provider_id": provider_id,
+            }));
+        }
         Err(error) => return Err(error),
     }
 
@@ -730,6 +909,61 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "branch": provision.resolution.worktree.branch,
         })
     })
+}
+
+fn ensure_active_managed_cook_destination(to_worktree: &str) -> homeboy::core::Result<()> {
+    let Some(record) = homeboy::core::worktree::resolve_workspace_ref_if_present(to_worktree)?
+    else {
+        return Ok(());
+    };
+    if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "Homeboy workspace `{}` is no longer active",
+                record.handle()
+            ),
+            Some(to_worktree.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// An explicit CWD is the Cook workspace authority. A co-supplied destination
+/// can only name that same existing worktree; never consult a provider merely
+/// to rediscover a path the operator already supplied.
+fn validate_cook_cwd_destination_identity(
+    cwd: &Path,
+    to_worktree: &str,
+) -> homeboy::core::Result<()> {
+    let destination = if Path::new(to_worktree).is_dir() {
+        std::fs::canonicalize(to_worktree)
+    } else if let Some(record) =
+        homeboy::core::worktree::resolve_workspace_ref_if_present(to_worktree)?
+    {
+        ensure_active_managed_cook_destination(to_worktree)?;
+        std::fs::canonicalize(record.path())
+    } else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            "--cwd requires --to-worktree to name the same existing local or registered worktree",
+            Some(to_worktree.to_string()),
+            None,
+        ));
+    }
+    .map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(to_worktree.to_string()))
+    })?;
+    if destination != cwd {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            "--cwd and --to-worktree must resolve to the same linked task worktree",
+            Some(to_worktree.to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn resolve_cook_destination(
@@ -798,7 +1032,7 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
                 "the supplied workspace is not a Git checkout with a configured repository remote",
             );
         }
-        return Ok(());
+        return bind_cook_repository_identity_from_config(args);
     }
 
     let source_remotes = source_identities
@@ -849,6 +1083,49 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
         "provenance": selected.provenance,
     }));
     Ok(())
+}
+
+/// A repo-only Cook has no local checkout to attest before a deferred provider
+/// lookup. Prefer configured remote identity; otherwise retain a normalized
+/// repository name that the resolved checkout must prove through its remote.
+fn bind_cook_repository_identity_from_config(
+    args: &mut AgentTaskCookArgs,
+) -> homeboy::core::Result<()> {
+    let Some(repo) = args.dispatch.repo.as_deref() else {
+        return Ok(());
+    };
+    let component = homeboy::core::component::registered()?
+        .into_iter()
+        .find(|component| component.id == repo);
+    args.repository_identity = Some(
+        match component
+            .as_ref()
+            .and_then(|component| component.remote_url.as_deref())
+            .and_then(canonical_remote_identity)
+        {
+            Some(remote_identity) => serde_json::json!({
+                "slug": repo,
+                "remote_identity": remote_identity,
+                "provenance": "--repo:configured-component",
+            }),
+            None => serde_json::json!({
+                "slug": repo,
+                "repository_name": normalize_repository_name(repo),
+                "provenance": "--repo:requested-repository",
+            }),
+        },
+    );
+    Ok(())
+}
+
+fn normalize_repository_name(repository: &str) -> String {
+    repository
+        .trim()
+        .trim_end_matches(".git")
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 fn require_explicit_cook_repo(args: &AgentTaskCookArgs, reason: &str) -> homeboy::core::Result<()> {
@@ -975,44 +1252,16 @@ fn validate_cook_destination_identity(
     args: &AgentTaskCookArgs,
     destination: &Path,
 ) -> homeboy::core::Result<()> {
-    let Some(expected) = args
-        .repository_identity
-        .as_ref()
-        .and_then(|identity| identity.get("remote_identity"))
-        .and_then(Value::as_str)
-    else {
-        return Ok(());
-    };
-    let Some(git_root) = homeboy::core::git::repo_root(destination) else {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "to_worktree",
-            "Cook destination is not a Git checkout bound to the resolved repository identity",
-            Some(destination.display().to_string()),
-            None,
-        ));
-    };
-    let identities = homeboy::core::git::output_optional(&git_root, &["remote"])
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|remote| homeboy::core::git::remote_url(&git_root, remote))
-        .filter_map(|remote| canonical_remote_identity(&remote))
-        .collect::<std::collections::BTreeSet<_>>();
-    if identities.len() == 1 && identities.contains(expected) {
-        return Ok(());
-    }
-    Err(homeboy::core::Error::validation_invalid_argument(
-        "to_worktree",
-        format!(
-            "Cook destination repository identity does not match resolved `{expected}`; destination identities: {}",
-            if identities.is_empty() {
-                "unresolved".to_string()
-            } else {
-                identities.into_iter().collect::<Vec<_>>().join(", ")
-            }
-        ),
-        Some(destination.display().to_string()),
-        None,
-    ))
+    let identity = args.repository_identity.as_ref();
+    homeboy::core::worktree_providers::validate_task_worktree_repository_identity(
+        destination,
+        identity
+            .and_then(|identity| identity.get("remote_identity"))
+            .and_then(Value::as_str),
+        identity
+            .and_then(|identity| identity.get("repository_name"))
+            .and_then(Value::as_str),
+    )
 }
 
 fn repository_identity_error(
@@ -1747,29 +1996,27 @@ pub(crate) fn compile_cook_plan(
     args: &AgentTaskCookArgs,
     provision: Value,
 ) -> homeboy::core::Result<AgentTaskPlan> {
+    let pending_lookup = matches!(
+        provision.get("action").and_then(Value::as_str),
+        Some("lookup_pending" | "attestation_pending")
+    );
     let workspace = provision
         .get("path")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            homeboy::core::Error::internal_unexpected(
-                "Cook destination provisioning did not return a task worktree path".to_string(),
-            )
-        })?
-        .to_string();
+        .map(str::to_string);
+    if workspace.is_none() && !pending_lookup {
+        return Err(homeboy::core::Error::internal_unexpected(
+            "Cook destination provisioning did not return a task worktree path".to_string(),
+        ));
+    }
     let mut dispatch = dispatch_args_for_cook(args);
-    // Cook providers always receive the declared task checkout. `--cwd` is a
-    // dispatch input, never authority to replace the writable Cook workspace.
+    // Provisioning makes an explicit --cwd authoritative, otherwise this is the
+    // resolved managed destination. Pass that exact linked worktree downstream.
     dispatch.cwd = None;
-    dispatch.workspace = Some(workspace);
-    validate_cook_destination_identity(
-        args,
-        Path::new(
-            dispatch
-                .workspace
-                .as_deref()
-                .expect("Cook workspace is set"),
-        ),
-    )?;
+    dispatch.workspace = workspace.clone();
+    if let Some(workspace) = workspace.as_deref() {
+        validate_cook_destination_identity(args, Path::new(workspace))?;
+    }
     let mut request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
@@ -1793,6 +2040,9 @@ pub(crate) fn compile_cook_plan(
         plan.metadata["cook_repository_identity"] = identity.clone();
     }
     for task in &mut plan.tasks {
+        if pending_lookup {
+            continue;
+        }
         let root = task.workspace.root.as_deref().ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
                 "workspace",
@@ -2065,6 +2315,26 @@ where
 }
 
 pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
+    retry_with(
+        args,
+        ExtensionProviderAgentTaskExecutor::discover(),
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+    )
+}
+
+pub(super) fn retry_with<E, F>(
+    args: RetryArgs,
+    executor: E,
+    reconstruct_dispatcher: F,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: Fn(
+            &Value,
+        ) -> homeboy::core::Result<
+            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+        > + Copy,
+{
     let result = agent_task_service::retry(
         &args.run_id,
         args.new_run_id.as_deref(),
@@ -2073,18 +2343,19 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
     )?;
     if result.run {
         if result.record.metadata["cook_id"].is_string() {
-            return continue_cook(CookContinueArgs {
-                cook_or_attempt_id: result.record.run_id,
-                preflight: false,
-                rearm: false,
-                full: false,
-            });
+            return continue_cook_with_queued_execution(
+                CookContinueArgs {
+                    cook_or_attempt_id: result.record.run_id,
+                    preflight: false,
+                    rearm: false,
+                    full: false,
+                },
+                executor,
+                reconstruct_dispatcher,
+                true,
+            );
         }
-        return run_submitted_with_executor(
-            result.record.run_id,
-            None,
-            ExtensionProviderAgentTaskExecutor::discover(),
-        );
+        return run_submitted_with_executor(result.record.run_id, None, executor);
     }
     Ok((
         serde_json::to_value(result.record).unwrap_or(Value::Null),
@@ -2111,9 +2382,9 @@ mod tests {
         );
         assert!(lines[0].contains("cook-10419"));
         let joined = lines.join("\n");
-        assert!(joined.contains("homeboy agent-task status cook-10419-attempt-1"));
-        assert!(joined.contains("homeboy agent-task logs cook-10419-attempt-1"));
-        assert!(joined.contains("homeboy agent-task cancel cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy --placement local agent-task status cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy --placement local agent-task logs cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy --placement local agent-task cancel cook-10419-attempt-1"));
     }
 
     #[test]

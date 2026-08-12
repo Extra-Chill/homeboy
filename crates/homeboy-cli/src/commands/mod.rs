@@ -270,6 +270,7 @@ pub(crate) mod runs_summary;
 pub mod schedule;
 pub mod self_cmd;
 pub mod server;
+pub mod source;
 pub mod ssh;
 pub mod stack;
 pub mod status;

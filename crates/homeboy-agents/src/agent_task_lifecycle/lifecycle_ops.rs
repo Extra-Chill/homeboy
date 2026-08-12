@@ -1719,6 +1719,38 @@ pub fn record_cook_progress(
     record_cook_progress_with_activity(run_id, phase, attempt, detail, None)
 }
 
+/// Retain a redacted, bounded controller failure independently of continuation
+/// claim transitions. Claims describe ownership; they must not replace cause.
+pub fn record_cook_controller_failure(
+    run_id: &str,
+    diagnostic: &Value,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let diagnostic = diagnostic.clone();
+    let record = store::mutate_record(&run_id, |record| {
+        record
+            .ensure_metadata_object()
+            .insert("cook_controller_failure".to_string(), diagnostic);
+        true
+    })?;
+    record.ok_or_else(|| Error::internal_unexpected("Cook controller failure record was unchanged"))
+}
+
+/// A successful explicit rearm starts a new continuation pass. Its prior
+/// controller failure remains in the failed continuation artifact, but must not
+/// be presented as the cause of a later terminal promotion or finalization.
+pub fn clear_cook_controller_failure(run_id: &str) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        record
+            .ensure_metadata_object()
+            .remove("cook_controller_failure")
+            .is_some()
+    })?;
+    let _ = record;
+    Ok(())
+}
+
 /// Persist Cook phase together with a sample of what the provider is doing.
 ///
 /// The activity sample is written into the same record as the phase so

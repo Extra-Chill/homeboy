@@ -129,41 +129,100 @@ fn component_config_env_is_available_to_component_scripts_and_extra_env_wins() {
 
 #[test]
 fn homeboy_manifest_preserves_shared_cargo_target_resolution_across_checkouts() {
-    let manifest = homeboy_manifest();
-    assert!(
-        !manifest.env.contains_key("CARGO_TARGET_DIR"),
-        "Homeboy's manifest must not bypass the caller-selected shared Cargo target"
+    with_isolated_home(|_| {
+        let manifest = homeboy_manifest();
+        assert!(manifest.managed_execution.shared_cargo_target);
+        assert!(
+            !manifest.env.contains_key("CARGO_TARGET_DIR"),
+            "Homeboy's manifest must not bypass the managed Cargo target"
+        );
+
+        let primary = tempfile::tempdir().expect("primary checkout");
+        fs::write(primary.path().join("README"), "fixture\n").expect("fixture source");
+        init_git_repo(primary.path());
+        let worktree_guard = tempfile::tempdir().expect("worktree parent");
+        let worktree = worktree_guard.path().join("homeboy@task-worktree");
+        let output = Command::new("git")
+            .args(["worktree", "add", "--detach"])
+            .arg(&worktree)
+            .arg("HEAD")
+            .current_dir(primary.path())
+            .output()
+            .expect("create linked worktree");
+        assert!(output.status.success(), "git worktree add failed");
+        fs::write(primary.path().join("README"), "divergent fixture\n")
+            .expect("change primary checkout");
+        let output = Command::new("git")
+            .args(["add", "README"])
+            .current_dir(primary.path())
+            .output()
+            .expect("stage divergent fixture");
+        assert!(output.status.success());
+        let output = Command::new("git")
+            .args(["commit", "-qm", "diverge primary checkout"])
+            .current_dir(primary.path())
+            .output()
+            .expect("commit divergent fixture");
+        assert!(output.status.success());
+
+        let mut resolved_targets = Vec::new();
+        for checkout in [primary.path(), worktree.as_path()] {
+            let mut component = manifest.clone();
+            component.local_path = checkout.to_string_lossy().to_string();
+            component.extensions = None;
+            // The test harness itself uses CARGO_TARGET_DIR; clear that ambient
+            // caller override so this verifies the managed default.
+            component
+                .env
+                .insert("CARGO_TARGET_DIR".to_string(), String::new());
+            component.scripts = Some(ComponentScriptsConfig {
+                test: vec![
+                    "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\" > cargo-target"
+                        .to_string(),
+                ],
+                ..Default::default()
+            });
+
+            let output =
+                run_component_scripts(&component, ExtensionCapability::Test, checkout, false)
+                    .expect("component script should run");
+
+            assert!(
+                output.success,
+                "build environment resolves for {}",
+                checkout.display()
+            );
+            resolved_targets
+                .push(fs::read_to_string(checkout.join("cargo-target")).expect("resolved target"));
+        }
+
+        assert_eq!(resolved_targets[0], resolved_targets[1]);
+        assert!(resolved_targets[0].starts_with("shared:"));
+    });
+}
+
+#[test]
+fn managed_cargo_target_preserves_explicit_absolute_override_and_reports_local() {
+    let dir = tempfile::tempdir().expect("checkout dir");
+    let mut component = script_component(
+        dir.path(),
+        "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\" > cargo-target",
+    );
+    component.managed_execution.shared_cargo_target = true;
+    let caller_target = PathBuf::from("/shared/homeboy/cargo-target");
+    component.env.insert(
+        "CARGO_TARGET_DIR".to_string(),
+        caller_target.to_string_lossy().to_string(),
     );
 
-    let caller_target = PathBuf::from("/shared/homeboy/cargo-target");
-    for checkout in [
-        "/workspace/homeboy",
-        "/workspace/homeboy@dmc-worktree",
-        "/workspace/homeboy@task-worktree",
-    ] {
-        let dir = tempfile::tempdir().expect("checkout dir");
-        let mut component = manifest.clone();
-        component.local_path = checkout.to_string();
-        component.scripts = Some(ComponentScriptsConfig {
-            test: vec!["printf '%s' \"$CARGO_TARGET_DIR\" > cargo-target".to_string()],
-            ..Default::default()
-        });
-        component.env.insert(
-            "CARGO_TARGET_DIR".to_string(),
-            caller_target.to_string_lossy().to_string(),
-        );
+    let output = run_component_scripts(&component, ExtensionCapability::Test, dir.path(), false)
+        .expect("component script should run");
 
-        let output =
-            run_component_scripts(&component, ExtensionCapability::Test, dir.path(), false)
-                .expect("component script should run");
-
-        assert!(output.success, "build environment resolves for {checkout}");
-        assert_eq!(
-            fs::read_to_string(dir.path().join("cargo-target")).expect("resolved target"),
-            caller_target.to_string_lossy(),
-            "explicit caller target must be preserved for {checkout}"
-        );
-    }
+    assert!(output.success);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("cargo-target")).expect("resolved target"),
+        format!("local:{}", caller_target.display())
+    );
 }
 
 #[test]

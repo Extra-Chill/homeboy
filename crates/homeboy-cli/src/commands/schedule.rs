@@ -3,6 +3,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::core::daemon;
 use homeboy::core::error::{Error, Result};
 use homeboy::core::schedule::{
     self, Cadence, ExecCommand, NotifyPolicy, OverlapPolicy, Schedule, ScheduleRunOutcome,
@@ -125,6 +126,28 @@ pub struct ScheduleView {
     #[serde(skip_serializing_if = "Option::is_none")]
     next_run_at: Option<String>,
     due: bool,
+    /// A stale overlap marker blocks a skip-on-overlap schedule until the
+    /// daemon reclaims it. Keep `due` truthful while making that condition
+    /// explicit and recoverable.
+    stale_running: bool,
+    daemon: ScheduleDaemonHealth,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_command: Option<String>,
+}
+
+/// Compact daemon facts relevant to schedule execution. This intentionally
+/// omits process candidates and job details from the full daemon report.
+#[derive(Serialize)]
+pub struct ScheduleDaemonHealth {
+    running: bool,
+    fresh: bool,
+    reachable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_ref: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -153,11 +176,25 @@ pub struct TickReport {
 
 fn view(schedule: Schedule) -> ScheduleView {
     let state = schedule::load_state(&schedule.id);
+    let now = chrono::Utc::now();
+    let stale_running = state.running
+        && state
+            .started_at
+            .as_deref()
+            .and_then(|started| chrono::DateTime::parse_from_rfc3339(started).ok())
+            .map(|started| {
+                (now - started.with_timezone(&chrono::Utc)).num_seconds()
+                    > homeboy::core::schedule::ticker::STALE_RUN_RECLAIM_SECS
+            })
+            // An unaged running marker is equally unrecoverable without a
+            // daemon restart, so surface the same deterministic action.
+            .unwrap_or(true);
     let next_run_at = state
         .next_run_at(&schedule)
         .map(|next| next.to_rfc3339())
         .or_else(|| Some("due now".to_string()));
     let due = state.is_due(&schedule, chrono::Utc::now());
+    let daemon = daemon_health();
     ScheduleView {
         schedule: ScheduleSummary {
             id: schedule.id.clone(),
@@ -173,7 +210,52 @@ fn view(schedule: Schedule) -> ScheduleView {
         state,
         next_run_at,
         due,
+        stale_running,
+        recovery_command: stale_running
+            .then(|| daemon.recovery_command.clone())
+            .flatten(),
+        daemon,
     }
+}
+
+fn daemon_health() -> ScheduleDaemonHealth {
+    match daemon::read_status() {
+        Ok(status) => {
+            let plan = daemon::recovery_actions::plan_recovery(&status);
+            let (recovery_command, recovery_ref) = recovery_projection(&plan);
+            ScheduleDaemonHealth {
+                running: status.running,
+                fresh: status.fresh,
+                reachable: status.reachable,
+                stale_reason: status.stale_reason,
+                recovery_ref,
+                recovery_command,
+            }
+        }
+        Err(error) => ScheduleDaemonHealth {
+            running: false,
+            fresh: false,
+            reachable: false,
+            stale_reason: Some(format!("daemon status unavailable: {error}")),
+            recovery_command: None,
+            recovery_ref: Some("homeboy daemon status".to_string()),
+        },
+    }
+}
+
+/// The recovery planner owns step ordering and required confirmations. A
+/// schedule view must never advertise only the first mutation of that plan.
+fn recovery_projection(
+    plan: &daemon::recovery_actions::DaemonRecoveryPlan,
+) -> (Option<String>, Option<String>) {
+    (!plan.steps.is_empty())
+        .then(|| {
+            (
+                "homeboy daemon recover --dry-run".to_string(),
+                "homeboy daemon status".to_string(),
+            )
+        })
+        .unzip()
 }
 
 /// Build the declared step sequence.
@@ -425,5 +507,75 @@ mod tests {
     fn rejects_unbalanced_quotes_and_empty_commands() {
         assert!(split_command(r#"deploy "unclosed"#).is_err());
         assert!(split_command("   ").is_err());
+    }
+
+    #[test]
+    fn stale_running_marker_is_visible_with_a_recovery_command() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let daemon = homeboy::core::daemon::read_status().expect("read isolated daemon status");
+            assert!(
+                !daemon.running,
+                "fixture has no daemon to reclaim the stale marker"
+            );
+            let schedule = Schedule {
+                id: "stale-marker".to_string(),
+                command: Some(vec!["triage".to_string()]),
+                exec: None,
+                steps: Vec::new(),
+                every: Cadence::from_seconds(3_600).expect("cadence"),
+                notify_on: NotifyPolicy::default(),
+                on_overlap: OverlapPolicy::Skip,
+                notification_transport: None,
+                notification_route: None,
+                jitter_seconds: None,
+                enabled: true,
+                description: None,
+                aliases: Vec::new(),
+            };
+            schedule::save_state(
+                &schedule.id,
+                &ScheduleState {
+                    running: true,
+                    started_at: Some(
+                        (chrono::Utc::now()
+                            - chrono::Duration::seconds(
+                                homeboy::core::schedule::ticker::STALE_RUN_RECLAIM_SECS + 1,
+                            ))
+                        .to_rfc3339(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .expect("save stale state");
+
+            let output = view(schedule);
+            assert!(!output.due, "skip-overlap remains single-flight");
+            assert!(output.stale_running);
+            assert!(!output.daemon.running);
+            assert!(!output.daemon.reachable);
+            assert_eq!(output.recovery_command, output.daemon.recovery_command);
+            let value = serde_json::to_value(output).expect("schedule view serializes");
+            assert_eq!(value["daemon"]["running"], false);
+            assert_eq!(value["daemon"]["reachable"], false);
+            assert!(value["daemon"].get("process_candidates").is_none());
+        });
+    }
+
+    #[test]
+    fn multi_step_daemon_recovery_uses_the_canonical_planner() {
+        let plan = daemon::recovery_actions::DaemonRecoveryPlan {
+            steps: vec![
+                daemon::DaemonRepairStep::text("daemon_stop", "homeboy daemon stop"),
+                daemon::DaemonRepairStep::text("daemon_start", "homeboy daemon start"),
+            ],
+            reason: "restart stale daemon".to_string(),
+            required_confirmations: Vec::new(),
+            executable: true,
+        };
+
+        let (command, reference) = recovery_projection(&plan);
+        assert_eq!(command.as_deref(), Some("homeboy daemon recover --dry-run"));
+        assert_eq!(reference.as_deref(), Some("homeboy daemon status"));
+        assert_ne!(command.as_deref(), Some("homeboy daemon stop"));
     }
 }

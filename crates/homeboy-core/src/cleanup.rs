@@ -2,8 +2,10 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use homeboy_engine_primitives::fs_index_lock::{FsIndexLock, FsIndexLockConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -19,9 +21,10 @@ use crate::{git, Error, Result};
 
 mod cargo_targets;
 pub use cargo_targets::{
-    acquire_shared_cargo_target, cleanup_shared_cargo_targets, shared_cargo_target_inventory,
-    shared_cargo_target_root, shared_cargo_target_storage_status, CargoTargetCleanupOptions,
-    CargoTargetCleanupOutput, CargoTargetStorageStatus, SharedCargoTargetLease,
+    acquire_managed_cargo_target, acquire_shared_cargo_target, cleanup_shared_cargo_targets,
+    shared_cargo_target_inventory, shared_cargo_target_root, shared_cargo_target_storage_status,
+    CargoTargetCleanupOptions, CargoTargetCleanupOutput, CargoTargetStorageStatus,
+    ManagedCargoTarget, SharedCargoTargetLease,
 };
 mod automatic_retention;
 pub use automatic_retention::{
@@ -57,9 +60,22 @@ use self_artifacts::{homeboy_source_checkout, self_temp_artifact_candidates};
 
 const ARTIFACT_DIR_REMOVE_ATTEMPTS: usize = 3;
 const ARTIFACT_DIR_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
-const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[("target", "rust_target")];
+const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] =
+    &[("target", "rust_target"), (".cargo-target", "rust_target")];
 const SECONDS_PER_DAY: u64 = 86_400;
 const AUTOMATIC_ARTIFACT_AGE_POLICY: u64 = u64::MAX;
+const AUTOMATIC_ARTIFACT_RETENTION_LOCK_FILE: &str = "automatic-artifact-retention.lock";
+const AUTOMATIC_ARTIFACT_RETENTION_LOCK: FsIndexLockConfig = FsIndexLockConfig {
+    name: AUTOMATIC_ARTIFACT_RETENTION_LOCK_FILE,
+    stale_after: Duration::ZERO,
+    attempts: 1,
+    sleep: Duration::ZERO,
+    subject: "automatic artifact retention",
+};
+
+// Retain an in-process gate as well as the mkdir-based ownership directory,
+// which keeps same-process callers and independent processes single-flight.
+static AUTOMATIC_ARTIFACT_RETENTION_ADMISSION: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Default artifact class for declarations that predate categorized cleanup.
 /// Both the built-in path and repository-declared paths describe output that a
@@ -112,8 +128,11 @@ pub struct ArtifactCleanupOptions {
 /// ordering and limit, so a small root cannot consume the budget before a
 /// larger eligible artifact is considered.
 pub fn run_automatic_artifact_retention(roots: Vec<PathBuf>) -> Result<ArtifactCleanupOutput> {
-    let retention = crate::defaults::load_config().retention;
-    run_automatic_artifact_retention_in(&roots, &retention, SystemTime::now())
+    try_run_automatic_artifact_retention(roots)?.ok_or_else(|| {
+        Error::internal_unexpected(
+            "automatic artifact retention is already running; remeasure capacity before admitting work",
+        )
+    })
 }
 
 /// Reclaim idle, reconstructable worktree artifacts before managed work writes
@@ -130,15 +149,30 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    if !roots.iter().any(|root| {
-        below_reconstructable_reserve(root, retention.reconstructable_artifact_reserve_bytes)
-    }) {
+    let pressured: Vec<_> = roots
+        .iter()
+        .filter_map(|root| {
+            let reserve = crate::capacity::filesystem_relative_reserve_bytes(
+                retention.reconstructable_artifact_reserve_bytes,
+                disk_budget(
+                    root,
+                    "managed worktree",
+                    "worktree capacity is not measurable on this platform",
+                )
+                .total_bytes,
+            );
+            below_reconstructable_reserve(root, reserve).then(|| (root, reserve))
+        })
+        .collect();
+    if pressured.is_empty() {
         return Ok(());
     }
 
-    run_automatic_artifact_retention_in(&roots, &retention, SystemTime::now())?;
+    // A busy owner is not treated as success: every caller still measures below
+    // and deterministically admits or refuses from the current filesystem facts.
+    let _ = try_run_automatic_artifact_retention_with_config(&roots, &retention)?;
 
-    for root in roots {
+    for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
             &root,
             "managed worktree",
@@ -146,17 +180,53 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
         );
         if budget
             .available_bytes
-            .is_some_and(|available| available < retention.reconstructable_artifact_reserve_bytes)
+            .is_some_and(|available| available < reserve_bytes)
         {
             return Err(reconstructable_admission_error(
                 &root,
                 budget.available_bytes,
                 budget.available_inodes,
-                retention.reconstructable_artifact_reserve_bytes,
+                reserve_bytes,
             ));
         }
     }
     Ok(())
+}
+
+/// Run one bounded artifact-retention pass when no other process owns it.
+/// `None` means another pass is active; callers must remeasure before writing.
+pub fn try_run_automatic_artifact_retention(
+    roots: Vec<PathBuf>,
+) -> Result<Option<ArtifactCleanupOutput>> {
+    let retention = crate::defaults::load_config().retention;
+    try_run_automatic_artifact_retention_with_config(&roots, &retention)
+}
+
+fn try_run_automatic_artifact_retention_with_config(
+    roots: &[PathBuf],
+    retention: &crate::defaults::RetentionConfig,
+) -> Result<Option<ArtifactCleanupOutput>> {
+    let Ok(_admission) = AUTOMATIC_ARTIFACT_RETENTION_ADMISSION
+        .get_or_init(|| Mutex::new(()))
+        .try_lock()
+    else {
+        return Ok(None);
+    };
+    let data = homeboy_paths::homeboy_data()?;
+    let lock = FsIndexLockConfig {
+        // Retention has its own deadline. An extra minute avoids stealing a
+        // live owner at that boundary while recovering a crashed owner.
+        stale_after: Duration::from_secs(
+            retention
+                .automatic_retention_max_run_seconds
+                .saturating_add(60),
+        ),
+        ..AUTOMATIC_ARTIFACT_RETENTION_LOCK
+    };
+    let Some(_cross_process_owner) = FsIndexLock::try_acquire_in(&data, lock)? else {
+        return Ok(None);
+    };
+    run_automatic_artifact_retention_in(roots, retention, SystemTime::now()).map(Some)
 }
 
 fn existing_unique_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -316,8 +386,9 @@ pub struct ArtifactCleanupOutput {
     /// are what an operator watching free space actually gets back.
     pub estimated_allocated_bytes: u64,
     pub reclaimed_allocated_bytes: u64,
-    /// Replays the reviewed cleanup scope with mutation explicitly enabled.
-    pub next_command: String,
+    /// Replays the reviewed cleanup scope while eligible artifacts remain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
     pub summary: ArtifactCleanupSummary,
     pub worktrees: Vec<ArtifactCleanupWorktreeSummary>,
     pub candidates: Vec<ArtifactCleanupCandidate>,
@@ -520,26 +591,133 @@ impl ActiveWorktrees {
     }
 }
 
-/// Whether a Cargo build currently owns `worktree`'s target directory.
+/// Whether a Cargo build currently owns one of `worktree`'s target directories.
 ///
-/// Cargo holds an exclusive advisory lock on `target/<profile>/.cargo-lock` for
-/// the duration of a build and releases it on completion, so probing that lock
-/// answers "is something building here right now" for ANY checkout — managed,
-/// unmanaged, or mid-rebase. Registry state cannot: it only describes checkouts
-/// Homeboy created (#9481).
+/// Cargo holds an exclusive advisory lock on `<target>/<profile>/.cargo-lock`
+/// for the duration of a build and releases it on completion, so probing every
+/// declared local Rust target answers "is something building here right now" for
+/// ANY checkout — managed, unmanaged, or mid-rebase. Registry state cannot: it
+/// only describes checkouts Homeboy created (#9481).
 ///
 /// Deliberately fail-open. An unreadable or absent lock means "no evidence of a
 /// build", never "definitely safe to delete" — the registry and age gates still
 /// apply on top of this.
 fn cargo_build_lock_is_held(worktree: &Path) -> bool {
-    let target = worktree.join("target");
-    let Ok(entries) = fs::read_dir(&target) else {
+    BUILTIN_ARTIFACT_PATHS
+        .iter()
+        .filter(|(_, kind)| *kind == "rust_target")
+        .any(|(relative_path, _)| cargo_target_lock_is_held(&worktree.join(relative_path)))
+}
+
+/// Probe direct `<target>/<profile>` and cross-target
+/// `<target>/<triple>/<profile>` Cargo layouts through no-follow descriptors.
+#[cfg(unix)]
+fn cargo_target_lock_is_held(target: &Path) -> bool {
+    let Some(target) = open_directory(target) else {
         return false;
     };
-    entries
-        .flatten()
-        .map(|entry| entry.path().join(".cargo-lock"))
-        .any(|lock| path_lock_is_held(&lock))
+    directory_has_held_cargo_lock(&target, 2)
+}
+
+/// Platforms without descriptor-relative no-follow traversal preserve the
+/// established fail-open contract: no lock probe means no active-build evidence.
+#[cfg(not(unix))]
+fn cargo_target_lock_is_held(_target: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn directory_has_held_cargo_lock(target: &fs::File, remaining_depth: u8) -> bool {
+    lock_in_directory_is_held(target)
+        || (remaining_depth > 0
+            && directory_has_child(target, |child| {
+                directory_has_held_cargo_lock(&child, remaining_depth - 1)
+            }))
+}
+
+#[cfg(unix)]
+fn open_directory(path: &Path) -> Option<fs::File> {
+    use std::ffi::CString;
+    use std::os::unix::io::FromRawFd;
+
+    let path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    (fd >= 0).then(|| unsafe { fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn directory_has_child(target: &fs::File, mut inspect: impl FnMut(fs::File) -> bool) -> bool {
+    use std::ffi::CStr;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let duplicate = unsafe { libc::dup(target.as_raw_fd()) };
+    if duplicate < 0 {
+        return false;
+    }
+    let directory = unsafe { libc::fdopendir(duplicate) };
+    if directory.is_null() {
+        unsafe {
+            libc::close(duplicate);
+        }
+        return false;
+    }
+    let mut held = false;
+    loop {
+        let entry = unsafe { libc::readdir(directory) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let fd = unsafe {
+            libc::openat(
+                target.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 && inspect(unsafe { fs::File::from_raw_fd(fd) }) {
+            held = true;
+            break;
+        }
+    }
+    unsafe {
+        libc::closedir(directory);
+    }
+    held
+}
+
+#[cfg(unix)]
+fn lock_in_directory_is_held(target: &fs::File) -> bool {
+    use std::ffi::CStr;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let lock = CStr::from_bytes_with_nul(b".cargo-lock\0").expect("static Cargo lock name");
+    let fd = unsafe {
+        libc::openat(
+            target.as_raw_fd(),
+            lock.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    let lock = unsafe { fs::File::from_raw_fd(fd) };
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(lock.as_raw_fd(), metadata.as_mut_ptr()) } != 0
+        || unsafe { metadata.assume_init().st_mode & libc::S_IFMT } != libc::S_IFREG
+    {
+        return false;
+    }
+    path_lock_is_held(&lock)
 }
 
 /// Probe one advisory lock without blocking.
@@ -547,13 +725,10 @@ fn cargo_build_lock_is_held(worktree: &Path) -> bool {
 /// Acquiring it proves no build holds it; the lock is released immediately so
 /// this never delays a build that starts during the probe.
 #[cfg(unix)]
-fn path_lock_is_held(lock: &Path) -> bool {
+fn path_lock_is_held(lock: &fs::File) -> bool {
     use std::os::unix::io::AsRawFd;
 
-    let Ok(file) = fs::File::open(lock) else {
-        return false;
-    };
-    let fd = file.as_raw_fd();
+    let fd = lock.as_raw_fd();
     let acquired = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if acquired == 0 {
         unsafe {
@@ -564,11 +739,6 @@ fn path_lock_is_held(lock: &Path) -> bool {
     // EWOULDBLOCK is the only answer that means "someone else holds it".
     // Any other errno is an unusable probe, which must not read as active.
     io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
-}
-
-#[cfg(not(unix))]
-fn path_lock_is_held(_lock: &Path) -> bool {
-    false
 }
 
 impl Default for ActiveWorktrees {
@@ -891,7 +1061,8 @@ fn cleanup_artifacts_in_worktrees(
     candidates
         .retain(|candidate| seen_artifacts.insert(canonical_or_owned(Path::new(&candidate.path))));
 
-    order_and_limit_candidates(&mut candidates, options.sort, options.limit);
+    let bounded_candidates =
+        order_and_limit_candidates(&mut candidates, options.sort, options.limit);
 
     let cleanup_run = options
         .apply
@@ -928,6 +1099,10 @@ fn cleanup_artifacts_in_worktrees(
     let failure_count = failed.len();
     let (remaining_count, remaining_candidate_bytes) =
         remaining_candidate_totals(&candidates, options.apply);
+    let (bounded_remaining_count, bounded_remaining_bytes) =
+        remaining_candidate_totals(&bounded_candidates, false);
+    let remaining_count = remaining_count + bounded_remaining_count;
+    let remaining_candidate_bytes = remaining_candidate_bytes + bounded_remaining_bytes;
     let summary = cleanup_summary(
         &root,
         options.apply,
@@ -951,7 +1126,7 @@ fn cleanup_artifacts_in_worktrees(
         reclaimed_bytes,
         estimated_allocated_bytes,
         reclaimed_allocated_bytes,
-        next_command: artifact_cleanup_apply_command(options),
+        next_command: (remaining_count > 0).then(|| artifact_cleanup_apply_command(options)),
         summary,
         worktrees: worktree_rows,
         candidates,
@@ -1102,7 +1277,7 @@ fn order_and_limit_candidates(
     candidates: &mut Vec<ArtifactCleanupCandidate>,
     sort: ArtifactCleanupSort,
     limit: Option<usize>,
-) {
+) -> Vec<ArtifactCleanupCandidate> {
     if sort == ArtifactCleanupSort::Size {
         candidates.sort_by(|left, right| {
             right
@@ -1117,9 +1292,10 @@ fn order_and_limit_candidates(
         });
     }
 
-    if let Some(limit) = limit {
-        candidates.truncate(limit);
-    }
+    limit
+        .filter(|&limit| candidates.len() > limit)
+        .map(|limit| candidates.split_off(limit))
+        .unwrap_or_default()
 }
 
 fn cleanup_summary(
@@ -1912,6 +2088,62 @@ mod tests {
             assert!(cargo_build_lock_is_held(dir.path()));
         }
 
+        #[test]
+        fn a_held_cargo_target_lock_is_an_active_build() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let profile = dir.path().join(".cargo-target/debug");
+            std::fs::create_dir_all(&profile).expect("Cargo target profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+
+            assert!(cargo_build_lock_is_held(dir.path()));
+        }
+
+        #[test]
+        fn a_held_cross_target_cargo_lock_is_an_active_build() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let profile = dir.path().join("target/aarch64-apple-darwin/release");
+            std::fs::create_dir_all(&profile).expect("cross-target profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+
+            assert!(cargo_build_lock_is_held(dir.path()));
+        }
+
+        #[test]
+        fn a_symlinked_cargo_target_is_not_traversed() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let external = tempfile::tempdir().expect("external target");
+            let profile = external.path().join("debug");
+            std::fs::create_dir_all(&profile).expect("external profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+            std::os::unix::fs::symlink(external.path(), dir.path().join(".cargo-target"))
+                .expect("link external target");
+
+            assert!(!cargo_build_lock_is_held(dir.path()));
+        }
+
+        #[test]
+        fn a_symlinked_cross_target_directory_is_not_traversed() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let external = tempfile::tempdir().expect("external target");
+            let profile = external.path().join("release");
+            std::fs::create_dir_all(&profile).expect("external profile dir");
+            let lock = profile.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("Cargo lock");
+            let _held = hold(&lock);
+            let target = dir.path().join("target");
+            std::fs::create_dir(&target).expect("target dir");
+            std::os::unix::fs::symlink(&external, target.join("aarch64-apple-darwin"))
+                .expect("link external cross-target directory");
+
+            assert!(!cargo_build_lock_is_held(dir.path()));
+        }
+
         /// Releasing must clear the signal, or a finished build would pin the
         /// target as undeletable forever.
         #[test]
@@ -1987,6 +2219,20 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::defaults::{WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind};
+
+    #[cfg(not(unix))]
+    #[test]
+    fn an_existing_cargo_target_is_idle_without_supported_lock_probing() {
+        let dir = TempDir::new().expect("worktree");
+        std::fs::create_dir_all(dir.path().join(".cargo-target/debug"))
+            .expect("Cargo target profile dir");
+
+        assert!(!cargo_build_lock_is_held(dir.path()));
+        assert_eq!(
+            ActiveWorktrees::default().liveness(dir.path()),
+            LIVENESS_IDLE
+        );
+    }
 
     #[test]
     fn safe_artifact_paths_are_repo_relative() {
@@ -2066,7 +2312,7 @@ mod tests {
 
             let declarations = artifact_declarations(tmp.path()).expect("declarations");
 
-            assert_eq!(declarations.len(), 1);
+            assert_eq!(declarations.len(), 2);
             assert_eq!(declarations[0].relative_path, "target");
             assert_eq!(declarations[0].kind, "rust_target");
             assert_eq!(
@@ -2076,6 +2322,8 @@ mod tests {
             assert_eq!(declarations[0].category, LEGACY_ARTIFACT_CATEGORY);
             assert!(declarations[0].reconstructable);
             assert!(declarations[0].liveness_protected);
+            assert_eq!(declarations[1].relative_path, ".cargo-target");
+            assert_eq!(declarations[1].kind, "rust_target");
         });
     }
 
@@ -2134,17 +2382,95 @@ mod tests {
     fn worktree_artifact_cleanup_removes_rebuildable_output_and_preserves_source() {
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "artifact");
+        write_file(
+            &repo.path().join(".cargo-target/debug/app"),
+            "Cargo artifact",
+        );
         write_file(&repo.path().join("src/lib.rs"), "changed source");
 
         let output = cleanup_worktree_artifacts(repo.path()).expect("cleanup worktree artifacts");
 
         assert_eq!(output.worktree_count, 1);
-        assert_eq!(output.applied_count, 1);
+        assert_eq!(output.applied_count, 2);
         assert!(!repo.path().join("target").exists());
+        assert!(!repo.path().join(".cargo-target").exists());
         assert_eq!(
             fs::read_to_string(repo.path().join("src/lib.rs")).expect("source remains"),
             "changed source"
         );
+    }
+
+    #[test]
+    fn artifact_cleanup_reclaims_idle_cargo_target_alongside_target() {
+        let repo = repo_with_ignored_artifacts();
+        write_file(&repo.path().join("target/debug/app"), "target artifact");
+        write_file(
+            &repo.path().join(".cargo-target/debug/app"),
+            "Cargo target artifact",
+        );
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            ..Default::default()
+        })
+        .expect("cleanup idle Cargo targets");
+
+        assert_eq!(output.applied_count, 2);
+        assert!(!repo.path().join("target").exists());
+        assert!(!repo.path().join(".cargo-target").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_cleanup_keeps_cargo_target_with_active_cargo_lock() {
+        use std::os::unix::io::AsRawFd;
+
+        let repo = repo_with_ignored_artifacts();
+        let lock_path = repo.path().join(".cargo-target/debug/.cargo-lock");
+        write_file(&lock_path, "");
+        let lock = fs::File::open(&lock_path).expect("open Cargo lock");
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "test must hold the Cargo lock"
+        );
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            ..Default::default()
+        })
+        .expect("cleanup active Cargo target");
+
+        assert_eq!(output.applied_count, 0);
+        assert!(repo.path().join(".cargo-target").exists());
+        assert!(output
+            .skipped
+            .iter()
+            .any(|row| row.relative_path == ".cargo-target" && row.reason.contains("active")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_cleanup_unlinks_cargo_target_symlink_without_following_it() {
+        let repo = repo_with_ignored_artifacts();
+        let external = TempDir::new().expect("external artifact");
+        write_file(&external.path().join("debug/app"), "external artifact");
+        std::os::unix::fs::symlink(external.path(), repo.path().join(".cargo-target"))
+            .expect("link external artifact");
+        write_file(&repo.path().join(".git/info/exclude"), "/.cargo-target\n");
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            ..Default::default()
+        })
+        .expect("cleanup Cargo target symlink");
+
+        assert_eq!(output.applied_count, 1);
+        assert!(!repo.path().join(".cargo-target").exists());
+        assert!(external.path().join("debug/app").exists());
     }
 
     #[test]
@@ -2175,6 +2501,36 @@ mod tests {
             assert_eq!(output.applied_count, 1);
             assert!(!large.path().join("target").exists());
             assert!(small.path().join("target").exists());
+        });
+    }
+
+    #[test]
+    fn automatic_artifact_retention_reclaims_idle_cargo_target() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = repo_with_ignored_artifacts();
+            write_file(
+                &repo.path().join(".cargo-target/debug/app"),
+                "Cargo artifact",
+            );
+            let retention = crate::defaults::RetentionConfig {
+                reconstructable_artifact_days: 0,
+                ..Default::default()
+            };
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                retention: retention.clone(),
+                ..Default::default()
+            })
+            .expect("save retention");
+
+            let output = run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                SystemTime::now(),
+            )
+            .expect("automatic retention");
+
+            assert_eq!(output.applied_count, 1);
+            assert!(!repo.path().join(".cargo-target").exists());
         });
     }
 
@@ -2247,6 +2603,28 @@ mod tests {
             assert!(error.is_storage_exhausted());
             assert_eq!(error.details["reserve_bytes"], u64::MAX);
             assert!(repo.path().join("target/debug/app").exists());
+        });
+    }
+
+    #[test]
+    fn pressured_artifact_admissions_share_one_retention_owner_in_process() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            let _owner = AUTOMATIC_ARTIFACT_RETENTION_ADMISSION
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("hold retention owner");
+
+            let result = try_run_automatic_artifact_retention_with_config(
+                &[repo.path().to_path_buf()],
+                &crate::defaults::RetentionConfig::default(),
+            )
+            .expect("busy admission is not an error");
+
+            assert!(
+                result.is_none(),
+                "a concurrent admission must not start a second pass"
+            );
         });
     }
 
@@ -2424,19 +2802,13 @@ mod tests {
             "[package]\nname = \"homeboy\"\n",
         )
         .expect("write manifest");
+        fs::create_dir(tmp.path().join("src")).expect("source directory");
+        fs::write(tmp.path().join("src/main.rs"), "fn main() {}\n").expect("binary source");
         init_git_repository(tmp.path());
 
         let root = validate_homeboy_manifest_dir(tmp.path()).expect("homeboy manifest");
 
         assert_eq!(root, tmp.path());
-    }
-
-    #[test]
-    fn self_artifact_source_resolves_the_workspace_homeboy_checkout() {
-        let root = homeboy_source_checkout().expect("workspace source checkout");
-
-        assert!(root.join(".git").exists());
-        assert!(root.join("src/main.rs").is_file());
     }
 
     #[test]
@@ -2777,6 +3149,32 @@ mod tests {
     }
 
     #[test]
+    fn zero_candidate_dry_run_omits_continuation() {
+        let repo = git_repo();
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: false,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
+            merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
+        })
+        .expect("dry-run cleanup");
+
+        assert_eq!(output.candidate_count, 0);
+        assert_eq!(output.remaining_count, 0);
+        assert!(output.next_command.is_none());
+        assert!(serde_json::to_value(output)
+            .expect("serialize output")
+            .get("next_command")
+            .is_none());
+    }
+
+    #[test]
     fn dry_run_reports_artifact_candidates_across_worktrees() {
         let repo = git_repo();
         let sibling_parent = TempDir::new().expect("sibling parent");
@@ -2880,6 +3278,8 @@ mod tests {
         assert_eq!(paths, vec!["node_modules", "dist"]);
         assert_eq!(output.candidate_count, 2);
         assert_eq!(output.applied_count, 2);
+        assert_eq!(output.remaining_count, 1);
+        assert!(output.next_command.is_some());
         assert!(!repo.path().join("node_modules").exists());
         assert!(!repo.path().join("dist").exists());
         assert!(repo.path().join("target/debug/app").exists());
@@ -2906,6 +3306,8 @@ mod tests {
 
         assert_eq!(output.mode, "apply");
         assert_eq!(output.applied_count, 1);
+        assert_eq!(output.remaining_count, 0);
+        assert!(output.next_command.is_none());
         assert!(!repo.path().join("target").exists());
         assert_eq!(
             fs::read_to_string(repo.path().join("src/lib.rs")).expect("read source"),
@@ -3279,6 +3681,8 @@ mod tests {
         assert!(output.skipped.iter().any(|row| {
             row.relative_path == "target" && row.reason.contains("not merged into its upstream")
         }));
+        assert_eq!(output.remaining_count, 0);
+        assert!(output.next_command.is_none());
     }
 
     #[test]
@@ -3353,7 +3757,7 @@ mod tests {
         );
         write_file(
             &repo.path().join(".gitignore"),
-            "target/\nnode_modules/\ndist/\n",
+            "target/\n.cargo-target/\nnode_modules/\ndist/\n",
         );
         git(
             repo.path(),
@@ -3609,7 +4013,7 @@ mod tests {
         write_file(&repo.path().join("scope.marker"), "{}");
         write_file(
             &repo.path().join(".gitignore"),
-            "deps/\npackaged/\ntarget/\n",
+            "deps/\npackaged/\ntarget/\n.cargo-target/\n",
         );
         git(
             repo.path(),

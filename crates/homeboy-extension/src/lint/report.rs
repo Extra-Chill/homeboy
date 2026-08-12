@@ -77,6 +77,7 @@ pub fn from_main_workflow_with_ci_context(
             producer_summaries: result.producer_summaries,
             summary: result.summary,
             self_check_capture: result.self_check_capture,
+            cargo_target: result.cargo_target,
             ci_context,
             extension_phase_timings: result.extension_phase_timings,
             actionable: None,
@@ -211,6 +212,7 @@ pub fn from_lint_fix(component_label: String, run: LintFixInput) -> (LintCommand
             producer_summaries: Vec::new(),
             summary: None,
             self_check_capture: None,
+            cargo_target: None,
             ci_context: None,
             extension_phase_timings: Vec::new(),
             actionable: None,
@@ -297,11 +299,20 @@ mod tests {
             summary: None,
             self_check_capture: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: Some(homeboy_core::CargoTargetEvidence {
+                path: "/shared/cargo-target".to_string(),
+                resolution: "shared".to_string(),
+                owner: "component:fixture".to_string(),
+            }),
         };
 
         let (output, exit_code) = from_main_workflow(result);
 
         assert_eq!(exit_code, 1);
+        assert_eq!(
+            serde_json::to_value(&output).expect("lint output serializes")["cargo_target"]["owner"],
+            "component:fixture"
+        );
         assert_eq!(
             output.phase.summary,
             "lint phase failed with 2 finding(s) across phpcs passed: 0, eslint failed: 1, phpstan failed: 1"
@@ -330,6 +341,7 @@ mod tests {
             summary: None,
             self_check_capture: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: None,
         };
 
         let (output, exit_code) = from_main_workflow(result);
@@ -362,6 +374,7 @@ mod tests {
             summary: None,
             self_check_capture: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: None,
         };
 
         let (output, exit_code) = from_main_workflow(result);
@@ -392,6 +405,7 @@ mod tests {
             summary: None,
             self_check_capture: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: None,
         };
 
         let (output, exit_code) = from_main_workflow(result);
@@ -428,6 +442,7 @@ mod tests {
             summary: None,
             self_check_capture: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: None,
         };
 
         let (output, exit_code) = from_main_workflow(result);
