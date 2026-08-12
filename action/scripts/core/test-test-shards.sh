@@ -124,6 +124,32 @@ TEST_INVENTORY_FILE="${tmp}/base-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/ba
 [ "$(jq -r .plan_digest "${tmp}/one.json")" != "$(jq -r .plan_digest "${tmp}/base-plan.json")" ] || { printf 'FAIL: candidate and baseline inventories must produce distinct plans\n'; exit 1; }
 printf 'PASS: deterministic duration-balanced plan has exact membership\n'
 
+# The shape production actually emits. `cargo nextest list` enumerates tests
+# without running them, so the Rust extension's inventory carries NO duration_ms
+# on any test and LPT falls back to the shared default -- i.e. equal-count
+# partitioning. Every existing plan fixture above carries durations, so the one
+# path CI always takes was untested (homeboy#11751 W1-7).
+jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:"runner-a",workspace_fingerprint:"workspace-a",inventory_fingerprint:"durationless-a",tests:[range(0; 40) | {id:("test-" + tostring)}]}' > "${tmp}/durationless-inventory.json"
+TEST_INVENTORY_FILE="${tmp}/durationless-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/durationless-plan.json" TEST_SHARD_COUNT=4 bash "${ROOT}/scripts/core/shard-tests.sh" plan
+jq -e '[.shards[].tests | length] | (unique | length) == 1 and .[0] == 10' "${tmp}/durationless-plan.json" >/dev/null || {
+  printf 'FAIL: an inventory without durations must partition into equal counts\n'; exit 1; }
+jq -e '[.shards[].tests[]] | (length == 40) and ((unique | length) == 40)' "${tmp}/durationless-plan.json" >/dev/null || {
+  printf 'FAIL: durationless partitioning lost or duplicated tests\n'; exit 1; }
+# Determinism matters more than balance here: the manifest fingerprints that
+# gate shard replay are computed from membership.
+TEST_INVENTORY_FILE="${tmp}/durationless-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/durationless-plan-2.json" TEST_SHARD_COUNT=4 bash "${ROOT}/scripts/core/shard-tests.sh" plan
+[ "$(jq -r .plan_digest "${tmp}/durationless-plan.json")" = "$(jq -r .plan_digest "${tmp}/durationless-plan-2.json")" ] || {
+  printf 'FAIL: durationless partitioning is not deterministic\n'; exit 1; }
+printf 'PASS: an inventory without durations partitions into deterministic equal counts\n'
+
+# Forward compatibility: if a producer ever does emit durations, weight must beat
+# count, so the LPT path is not quietly dead code.
+jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:"runner-a",workspace_fingerprint:"workspace-a",inventory_fingerprint:"weighted-a",tests:[{id:"heavy",duration_ms:10000},{id:"light-1",duration_ms:100},{id:"light-2",duration_ms:100},{id:"light-3",duration_ms:100}]}' > "${tmp}/weighted-inventory.json"
+TEST_INVENTORY_FILE="${tmp}/weighted-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/weighted-plan.json" TEST_SHARD_COUNT=2 bash "${ROOT}/scripts/core/shard-tests.sh" plan
+jq -e '[.shards[] | select(.tests == ["heavy"])] | length == 1' "${tmp}/weighted-plan.json" >/dev/null || {
+  printf 'FAIL: a duration-bearing inventory must isolate the heavy test rather than split by count\n'; exit 1; }
+printf 'PASS: duration-bearing inventories still balance by weight, not count\n'
+
 plan_digest="$(jq -r .plan_digest "${tmp}/one.json")"
 inventory_digest="$(jq -r .inventory_digest "${tmp}/one.json")"
 shard_manifest="${tmp}/shard-1.json"

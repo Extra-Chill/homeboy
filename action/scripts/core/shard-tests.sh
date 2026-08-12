@@ -9,6 +9,24 @@ source "${SCRIPT_DIR}/lib.sh"
 fail() { echo "::error::$1" >&2; exit 1; }
 digest() { printf '%s' "$1" | shasum -a 256 | awk '{print $1}'; }
 
+# Partitioning is longest-processing-time bin packing over `duration_ms`.
+#
+# In production every test weighs the same. `duration_ms` is OPTIONAL in
+# homeboy/test-inventory/v1 and no shipped producer emits it -- the Rust
+# extension's `test-shard-inventory.py` builds its inventory from
+# `cargo nextest list`, which enumerates tests without running them and so has no
+# timings to report. Nothing sets TEST_SHARD_UNKNOWN_DURATION_MS either, so every
+# test takes the 60000 default and LPT degenerates to equal-count partitioning.
+#
+# That is fine, and measuring it is why this comment exists rather than a fix.
+# Across recent Extra-Chill/homeboy runs the four shards average 9.0-9.3 min --
+# a 3% spread, and that still included per-shard compilation. Real timings could
+# not recover more than a rounding error, so feeding them in is not worth the
+# artifact plumbing it would take to carry durations between runs.
+#
+# The LPT path stays because it is correct and already covered: an inventory that
+# does carry durations is balanced by weight, so a future producer can supply
+# them without a rewrite. See homeboy#11751 W1-7.
 plan() {
   local inventory="${TEST_INVENTORY_FILE:?TEST_INVENTORY_FILE is required}"
   local output="${TEST_SHARD_PLAN_FILE:?TEST_SHARD_PLAN_FILE is required}"
