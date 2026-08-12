@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.341.3] - 2026-08-12
+
+### Changed
+- Preserve provider lifecycle for fanout worktrees
+- repin Test to homeboy-action v2.11.23
+
+### Fixed
+- retain recovery verification evidence
+- fail blocked recovery outcomes
+- reuse the canonical release asset for exact tag refs
+- report absent component checkouts in project-wide deploy --check
+
 ## [0.341.2] - 2026-08-12
 
 ### Changed
