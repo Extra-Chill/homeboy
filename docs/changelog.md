@@ -4,6 +4,26 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.339.0] - 2026-08-12
+
+### Added
+- execute extension readiness commands
+- add extension-owned recipe providers
+
+### Changed
+- pin the dereferenced v2.11.21 commit, not the annotated tag object
+- repin Test reconciliation to homeboy-action v2.11.21
+- centralize run artifact loading
+- absorb report projections
+- absorb passive observation
+
+### Fixed
+- bound startup discovery probes
+- retry transient path lookup timeouts
+- persist exec attempts before handoff
+- capture tunnel ownership before readiness
+- use hydrated Rust toolchain
+
 ## [0.338.0] - 2026-08-12
 
 ### Fixed
