@@ -31,6 +31,39 @@ pub const fn supports_process_tree_isolation() -> bool {
     cfg!(unix)
 }
 
+/// Whether a PID still names a process that can execute work.
+///
+/// Linux retains an exited process as a zombie until its parent reaps it, and
+/// `kill(pid, 0)` still succeeds during that interval. Zombies cannot execute
+/// work, so lifecycle supervision and descendant cleanup treat them as exited.
+pub fn process_is_running(pid: u32) -> bool {
+    if pid > i32::MAX as u32 {
+        return false;
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(state) = linux_process_state(pid) {
+        return state != 'Z';
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as libc::pid_t, 0) == 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        pid == std::process::id()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(')')?;
+    fields.split_whitespace().next()?.chars().next()
+}
+
 /// Keeps an isolated child tree owned by the controller that spawned it.
 ///
 /// On Unix, a small guard process watches a pipe whose write end is held only
@@ -1463,7 +1496,10 @@ mod tests {
             .trim()
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
-        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+        assert!(
+            !process_is_running(descendant_pid as u32),
+            "cancellation left descendant {descendant_pid} runnable"
+        );
     }
 
     #[cfg(unix)]
@@ -1512,7 +1548,7 @@ mod tests {
             );
         }
         for _ in 0..100 {
-            if unsafe { libc::kill(descendant_pid, 0) } != 0 {
+            if !process_is_running(descendant_pid as u32) {
                 return;
             }
             thread::sleep(Duration::from_millis(10));
@@ -1554,7 +1590,10 @@ mod tests {
             .trim()
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
-        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+        assert!(
+            !process_is_running(descendant_pid as u32),
+            "completed parent left descendant {descendant_pid} runnable"
+        );
     }
 
     #[cfg(unix)]
@@ -1593,6 +1632,9 @@ mod tests {
             .trim()
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
-        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+        assert!(
+            !process_is_running(descendant_pid as u32),
+            "cancellable wait left descendant {descendant_pid} runnable"
+        );
     }
 }

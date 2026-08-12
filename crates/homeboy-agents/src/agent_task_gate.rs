@@ -1355,7 +1355,10 @@ mod baseline_tests {
             .trim()
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
-        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+        assert!(
+            !homeboy_engine_primitives::command::process_is_running(descendant_pid as u32),
+            "bounded baseline gate left descendant {descendant_pid} runnable"
+        );
     }
 }
 
@@ -5207,7 +5210,10 @@ mod tests {
             .trim()
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
-        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+        assert!(
+            !homeboy_engine_primitives::command::process_is_running(descendant_pid as u32),
+            "toolchain preflight left descendant {descendant_pid} runnable"
+        );
     }
 
     #[cfg(unix)]
