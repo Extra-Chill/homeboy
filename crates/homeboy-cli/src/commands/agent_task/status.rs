@@ -1308,11 +1308,11 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let root_cause = ranked_reasons
         .first()
         .cloned()
-        .map(collected_diagnostic_value);
+        .map(|item| collected_diagnostic_value_with_details(item, args.full));
     let diagnostic_chain = ranked_reasons
         .into_iter()
         .take(FAILURE_REASON_LIMIT)
-        .map(collected_diagnostic_value)
+        .map(|item| collected_diagnostic_value_with_details(item, args.full))
         .collect::<Vec<_>>();
 
     let missing_artifacts = aggregate
@@ -3398,7 +3398,11 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             class: cause.get("code")?.as_str()?.to_string(),
             message: cause.get("message")?.as_str()?.to_string(),
             source: "terminal_operation_failure".to_string(),
-            data: json!({ "field": cause.get("field") }),
+            data: diagnostic.get("details").cloned().unwrap_or_else(|| {
+                json!({
+                    "field": cause.get("field"),
+                })
+            }),
         });
     }
     let diagnostic = record.metadata.get("cook_controller_failure")?;
@@ -3411,7 +3415,11 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
         class: cause.get("code")?.as_str()?.to_string(),
         message: cause.get("message")?.as_str()?.to_string(),
         source: "controller_failure".to_string(),
-        data: json!({ "field": cause.get("field") }),
+        data: diagnostic.get("details").cloned().unwrap_or_else(|| {
+            json!({
+                "field": cause.get("field"),
+            })
+        }),
     })
 }
 
@@ -4148,6 +4156,13 @@ fn evidence_is_test(kind: &str, uri: &str) -> bool {
 }
 
 fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
+    collected_diagnostic_value_with_details(item, false)
+}
+
+fn collected_diagnostic_value_with_details(
+    item: CollectedDiagnostic,
+    include_details: bool,
+) -> Value {
     let owner = diagnostic_owner(&item.class, &item.source);
     let mut value = json!({
         "task_id": item.task_id,
@@ -4156,7 +4171,9 @@ fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
         "source": item.source,
         "owner": owner,
     });
-    if let Some(details) = policy_denial_details(&item.data) {
+    if include_details && !item.data.is_null() {
+        value["details"] = bounded_diagnostic_value(&item.data);
+    } else if let Some(details) = policy_denial_details(&item.data) {
         value["details"] = details;
     }
     if let Some(field) = item.data.get("field").filter(|field| !field.is_null()) {

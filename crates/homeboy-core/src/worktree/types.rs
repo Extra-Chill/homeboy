@@ -621,6 +621,7 @@ pub struct WorktreeQueueCreateRow {
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeQueueCreateStatus {
     Queued,
+    WouldCreate,
     ActiveLockHolder,
     Created,
     Failed,

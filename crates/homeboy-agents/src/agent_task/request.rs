@@ -239,6 +239,32 @@ impl std::ops::Deref for AgentTaskExecutorRequest {
 }
 
 impl AgentTaskRequest {
+    /// Declare that a controller, rather than the provider attempt, owns remote
+    /// publication. This is a deliberate request contract, not an inference
+    /// from the attempt workspace's blocked push remote.
+    pub fn controller_owns_publication(&mut self) {
+        if !self.metadata.is_object() {
+            self.metadata = Value::Object(Default::default());
+        }
+        self.metadata["publication"] = serde_json::json!({
+            "capability": "unavailable",
+            "owner": "controller",
+            "status": "not_attempted"
+        });
+    }
+
+    pub fn publication_is_controller_owned(&self) -> bool {
+        self.metadata
+            .pointer("/publication/owner")
+            .and_then(Value::as_str)
+            == Some("controller")
+            && self
+                .metadata
+                .pointer("/publication/capability")
+                .and_then(Value::as_str)
+                == Some("unavailable")
+    }
+
     pub fn capability_requirements(&self) -> Result<AgentTaskCapabilityRequirements, String> {
         let mut requirements = super::capabilities::requirements_from_metadata(
             &self.metadata,

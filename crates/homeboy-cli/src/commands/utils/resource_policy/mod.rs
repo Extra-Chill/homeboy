@@ -96,11 +96,17 @@ pub fn resource_policy_context_from_evaluation(
     resources: &DoctorOutput,
     warning: Option<&ResourcePolicyWarning>,
     local_override: bool,
+    auto_local_capacity_fallback: bool,
     lab_readiness: Option<&LabRunnerReadiness>,
     runner_hosted: bool,
 ) -> ResourcePolicyContext {
-    let runner_selection =
-        runner_selection_context(command, local_override, lab_readiness, runner_hosted);
+    let runner_selection = runner_selection_context(
+        command,
+        local_override,
+        auto_local_capacity_fallback,
+        lab_readiness,
+        runner_hosted,
+    );
     ResourcePolicyContext {
         command: command.label.to_string(),
         severity: severity_str(resources.recommendation).to_string(),
@@ -139,6 +145,7 @@ pub fn resource_policy_context_to_json(context: &ResourcePolicyContext) -> serde
 fn runner_selection_context(
     command: HotCommand,
     local_override: bool,
+    auto_local_capacity_fallback: bool,
     lab_readiness: Option<&LabRunnerReadiness>,
     runner_hosted: bool,
 ) -> ResourcePolicyRunnerSelection {
@@ -160,6 +167,17 @@ fn runner_selection_context(
             readiness_reasons: Vec::new(),
             remediation_commands: Vec::new(),
             reason: "placement_local_override".to_string(),
+        };
+    }
+    if auto_local_capacity_fallback {
+        let readiness = lab_readiness.expect("capacity fallback requires Lab readiness evidence");
+        return ResourcePolicyRunnerSelection {
+            runner_id: None,
+            available_runner_ids: readiness.available_runner_ids.clone(),
+            readiness_state: readiness.state.as_str().to_string(),
+            readiness_reasons: readiness.reasons.clone(),
+            remediation_commands: readiness.remediation_commands.clone(),
+            reason: "local_capacity_fallback".to_string(),
         };
     }
     if command.lab_offload_supported {
@@ -349,6 +367,42 @@ pub fn admits_warm_runner_coordination(
         })
 }
 
+/// Permit automatic controller execution only when Lab is disconnected and the
+/// local host has measured headroom. This is intentionally narrower than an
+/// explicit `--placement local`: missing load observations and every non-load
+/// pressure signal fail closed.
+pub fn admits_auto_local_capacity_fallback(
+    command: HotCommand,
+    resources: &DoctorOutput,
+    lab_readiness: Option<&LabRunnerReadiness>,
+    placement: crate::cli_surface::Placement,
+) -> bool {
+    const WARM_LOAD_RATIO: f64 = 0.75;
+
+    if !command.lab_offload_supported || placement != crate::cli_surface::Placement::Auto {
+        return false;
+    }
+    let Some(readiness) = lab_readiness else {
+        return false;
+    };
+    if readiness.state != crate::runner::runners::LabRunnerReadinessState::Disconnected {
+        return false;
+    }
+    let (Some(one), Some(five)) = (resources.load.one, resources.load.five) else {
+        return false;
+    };
+    let cpus = resources.load.cpu_count.max(1) as f64;
+
+    one / cpus < WARM_LOAD_RATIO
+        && five / cpus < WARM_LOAD_RATIO
+        && resources
+            .memory
+            .as_ref()
+            .is_none_or(|memory| memory.recommendation == ResourceRecommendation::Ok)
+        && resources.processes.recommendation == ResourceRecommendation::Ok
+        && resources.rig_leases.recommendation == ResourceRecommendation::Ok
+}
+
 pub fn non_interactive_preflight_error(
     warning: &ResourcePolicyWarning,
     local_override: bool,
@@ -478,6 +532,16 @@ mod tests {
             available_runner_ids: vec!["homeboy-lab".to_string()],
             reasons: Vec::new(),
             remediation_commands: Vec::new(),
+        }
+    }
+
+    fn disconnected_lab() -> LabRunnerReadiness {
+        LabRunnerReadiness {
+            state: crate::runner::runners::LabRunnerReadinessState::Disconnected,
+            selected_runner_id: Some("homeboy-lab".to_string()),
+            available_runner_ids: Vec::new(),
+            reasons: vec!["runner is disconnected".to_string()],
+            remediation_commands: vec!["homeboy runner reconnect homeboy-lab".to_string()],
         }
     }
 
@@ -1238,6 +1302,79 @@ mod tests {
     }
 
     #[test]
+    fn disconnected_lab_allows_auto_placement_on_healthy_multicore_local_capacity() {
+        let mut local = resources(ResourceRecommendation::Hot);
+        local.load.one = Some(7.7);
+        local.load.five = Some(7.5);
+        local.load.cpu_count = 18;
+        let disconnected = disconnected_lab();
+
+        assert!(admits_auto_local_capacity_fallback(
+            lab_supported_hot("agent-task cook/run-plan/retry --run"),
+            &local,
+            Some(&disconnected),
+            crate::cli_surface::Placement::Auto,
+        ));
+        let context = resource_policy_context_from_evaluation(
+            lab_supported_hot("agent-task cook/run-plan/retry --run"),
+            &local,
+            None,
+            false,
+            true,
+            Some(&disconnected),
+            false,
+        );
+        assert_eq!(context.runner_selection.reason, "local_capacity_fallback");
+        assert_eq!(context.runner_selection.readiness_state, "disconnected");
+        assert_eq!(context.host.load_one, Some(7.7));
+        assert_eq!(context.host.cpu_count, 18);
+    }
+
+    #[test]
+    fn disconnected_lab_refuses_auto_placement_when_local_capacity_is_saturated() {
+        let mut local = resources(ResourceRecommendation::Hot);
+        local.load.one = Some(27.0);
+        local.load.five = Some(18.0);
+        local.load.cpu_count = 18;
+
+        assert!(!admits_auto_local_capacity_fallback(
+            lab_supported_hot("agent-task cook/run-plan/retry --run"),
+            &local,
+            Some(&disconnected_lab()),
+            crate::cli_surface::Placement::Auto,
+        ));
+    }
+
+    #[test]
+    fn auto_capacity_fallback_preserves_lab_only_and_lab_capacity_safety() {
+        let mut local = resources(ResourceRecommendation::Hot);
+        local.load.one = Some(7.7);
+        local.load.five = Some(7.5);
+        local.load.cpu_count = 18;
+        let command = lab_supported_hot("agent-task cook/run-plan/retry --run");
+        let capacity_blocked = LabRunnerReadiness {
+            state: crate::runner::runners::LabRunnerReadinessState::CapacityBlocked,
+            selected_runner_id: Some("homeboy-lab".to_string()),
+            available_runner_ids: Vec::new(),
+            reasons: vec!["capacity_reached".to_string()],
+            remediation_commands: vec!["homeboy runner status homeboy-lab".to_string()],
+        };
+
+        assert!(!admits_auto_local_capacity_fallback(
+            command,
+            &local,
+            Some(&disconnected_lab()),
+            crate::cli_surface::Placement::Lab,
+        ));
+        assert!(!admits_auto_local_capacity_fallback(
+            command,
+            &local,
+            Some(&capacity_blocked),
+            crate::cli_surface::Placement::Auto,
+        ));
+    }
+
+    #[test]
     fn non_interactive_local_only_refusal_includes_local_hot_rerun_command() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
@@ -1474,6 +1611,7 @@ mod tests {
             &resources,
             Some(&warning),
             false,
+            false,
             Some(&ready_lab()),
             false,
         );
@@ -1517,6 +1655,7 @@ mod tests {
             &resources,
             Some(&warning),
             true,
+            false,
             Some(&ready_lab()),
             false,
         );
@@ -1537,6 +1676,7 @@ mod tests {
             lab_supported_hot("bench"),
             &resources,
             None,
+            false,
             false,
             None,
             false,
@@ -1564,6 +1704,7 @@ mod tests {
             &resources,
             None,
             false,
+            false,
             None,
             false,
         );
@@ -1583,6 +1724,7 @@ mod tests {
             lab_supported_hot("bench"),
             &resources,
             Some(&warning),
+            false,
             false,
             Some(&ready_lab()),
             false,

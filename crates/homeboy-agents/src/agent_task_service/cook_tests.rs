@@ -2515,6 +2515,23 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     );
     assert!(request.instructions.contains("reviewer-facing PR dossier"));
     assert!(request.instructions.contains("A successful response"));
+    assert_eq!(
+        request.metadata["publication"],
+        serde_json::json!({
+            "capability": "unavailable",
+            "owner": "controller",
+            "status": "not_attempted"
+        })
+    );
+    assert!(request
+        .instructions
+        .contains("non-publishable attempt workspace"));
+    assert!(request
+        .instructions
+        .contains("do not push, create a pull request"));
+    assert!(request
+        .instructions
+        .contains("controller-owned publication"));
 
     project_initial_finalizing_review_form_contract(&mut options);
     assert_eq!(
@@ -9577,6 +9594,43 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             );
         }
         assert!(backend.committed && backend.pushed && backend.created);
+    });
+}
+
+#[test]
+fn cook_finalization_adopts_validated_review_form_used_for_when_option_is_empty() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-empty-used-for-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(
+            "cook-empty-used-for",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.initial_run_id = run_id.to_string();
+        options.ai_used_for.clear();
+        let plan = options.initial_plan.clone();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::record_cook_attempt(&options.cook_id, 1, run_id).unwrap();
+        seed_review_form_aggregate(run_id, &plan);
+        let promotion = promotion_with_existing_path(run_id, target.path());
+
+        let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("finalization options");
+        assert_eq!(finalization.ai_used_for, test_review_form().used_for);
+        assert_eq!(
+            finalization.review_dossier.ai_assistance.used_for,
+            test_review_form().used_for
+        );
+
+        options.ai_used_for = "Operator-authored disclosure.".to_string();
+        let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("finalization options with override");
+        assert_eq!(finalization.ai_used_for, "Operator-authored disclosure.");
+        assert_eq!(
+            finalization.review_dossier.ai_assistance.used_for,
+            "Operator-authored disclosure."
+        );
     });
 }
 

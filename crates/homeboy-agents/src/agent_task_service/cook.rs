@@ -776,6 +776,7 @@ fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookSe
     }
 
     for request in &mut options.initial_plan.tasks {
+        request.controller_owns_publication();
         request.output_declarations.retain(|declaration| {
             declaration.name != crate::agent_task_review_dossier::AI_REVIEW_FORM_OUTPUT_KEY
         });
@@ -785,6 +786,14 @@ fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookSe
         if !request.instructions.contains("reviewer-facing PR dossier") {
             request.instructions.push_str(
                 "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), optional structured `verification` entries (exact command plus total/passed/failed/ignored counts), and `used_for` (a concise reflection of the process used). Homeboy links verification entries to durable candidate gate evidence. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
+            );
+        }
+        if !request
+            .instructions
+            .contains("controller-owned publication")
+        {
+            request.instructions.push_str(
+                "\n\nThis is a non-publishable attempt workspace. controller-owned publication is not attempted by this provider: produce the commit or patch and reviewer-facing dossier, but do not push, create a pull request, release, or deploy. Homeboy's controller finalization handles any authorized publication after this attempt.",
             );
         }
     }

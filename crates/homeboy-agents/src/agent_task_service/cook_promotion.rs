@@ -1332,6 +1332,14 @@ pub(crate) fn cook_finalization_options(
         })?;
     let mut review_dossier = cook_review_dossier(options, promotion, successful_run_id)?;
     review_dossier.overrides = overrides;
+    // A non-empty option is an explicit operator disclosure. Otherwise retain
+    // the validated review form's process statement as durable PR provenance.
+    let ai_used_for = if options.ai_used_for.trim().is_empty() {
+        review_dossier.ai_assistance.used_for.clone()
+    } else {
+        options.ai_used_for.clone()
+    };
+    review_dossier.ai_assistance.used_for = ai_used_for.clone();
     let targeted_checks_run = review_dossier
         .how_to_test
         .iter()
@@ -1387,7 +1395,7 @@ pub(crate) fn cook_finalization_options(
                 .ok()
                 .map(|record| record.lifecycle),
         },
-        ai_used_for: options.ai_used_for.clone(),
+        ai_used_for,
         review_dossier,
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: false,
@@ -2377,15 +2385,22 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
             )
         })?;
     let model = outcome.selected_model();
-    if let (Some(planned_model), Some(model)) = (task.executor.model(), model) {
-        if planned_model != model {
-            return Err(Error::validation_invalid_argument(
-                "provider_model",
-                "Cook lineage plan model conflicts with the concrete executed model",
-                Some(run_id.to_string()),
-                None,
-            ));
-        }
+    let requested_model = outcome.metadata["model_identity"]["requested"].as_str();
+    let resolved_model = outcome.metadata["model_identity"]["resolved"].as_str();
+    let provider_reported_model = outcome.metadata["model_identity"]["provider_reported"]
+        .as_str();
+    if model.is_none()
+        && provider_reported_model.is_none()
+        && requested_model.zip(resolved_model).is_some_and(|(requested, resolved)| {
+            requested != resolved
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            "provider_model",
+            "Cook lineage has unresolved requested and resolved model disagreement without a provider-reported executed model",
+            Some(run_id.to_string()),
+            None,
+        ));
     }
     if task.executor.backend.trim().is_empty() {
         return Err(Error::validation_invalid_argument(

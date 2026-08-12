@@ -491,12 +491,24 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
         let handle = worktree_handle(&options.repo, branch);
 
         if options.dry_run {
-            rows.push(queue_row(
-                branch,
-                handle,
-                command,
-                WorktreeQueueCreateStatus::Queued,
-            ));
+            match planned_create_path(&options.repo, branch, &options.from) {
+                Ok(path) => {
+                    let mut row = queue_row(
+                        branch,
+                        handle,
+                        command,
+                        WorktreeQueueCreateStatus::WouldCreate,
+                    );
+                    row.path = Some(path);
+                    rows.push(row);
+                }
+                Err(error) => {
+                    let mut row =
+                        queue_row(branch, handle, command, WorktreeQueueCreateStatus::Failed);
+                    row.error = Some(error.message);
+                    rows.push(row);
+                }
+            }
             continue;
         }
 
@@ -538,6 +550,44 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
         dry_run: options.dry_run,
         rows,
     })
+}
+
+/// Validate a prospective native worktree creation and return the exact path
+/// that `create` will use, without creating a branch, checkout, or record.
+pub fn planned_create_path(repo: &str, branch: &str, from: &str) -> Result<String> {
+    let target = component::resolve_target(TargetSpec {
+        component_id: Some(repo),
+        path_override: None,
+        project: None,
+        capability: None,
+        allow_synthetic: false,
+        accept_bare_directory: false,
+        ..TargetSpec::default()
+    })?;
+    let source_checkout = queue_ops::source_checkout_for_worktree(&target)?;
+    git::run_git(
+        &source_checkout,
+        &["rev-parse", "--verify", &format!("{from}^{{commit}}")],
+        "git rev-parse --verify",
+    )?;
+    let parent = source_checkout.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "source checkout has no parent: {}",
+            source_checkout.display()
+        ))
+    })?;
+    let path = parent.join(handle_for_branch(&target.component_id, branch));
+    if path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "branch",
+            "Task worktree path already exists",
+            Some(path.display().to_string()),
+            Some(vec![
+                "Use a unique branch name or remove the existing task worktree".to_string(),
+            ]),
+        ));
+    }
+    Ok(path.display().to_string())
 }
 
 use queue_ops::*;

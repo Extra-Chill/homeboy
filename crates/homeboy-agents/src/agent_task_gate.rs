@@ -679,6 +679,16 @@ pub struct AgentTaskGateCargoTargetEvidence {
     pub path: String,
     pub resolution: String,
     pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_before: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_after: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1467,6 +1477,7 @@ pub(crate) fn run_gate_command_with_supervision(
         }
         homeboy_core::engine::command::isolate_process_tree(&mut process);
     }
+    let target_started = Instant::now();
     let mut child = process.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1568,6 +1579,7 @@ pub(crate) fn run_gate_command_with_supervision(
     let failure_evidence = (exit_code != 0)
         .then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr, test_result.as_ref()));
 
+    selected_environment.finish_cargo_target(target_started.elapsed())?;
     let mut report = AgentTaskGateReport::new(
         format!("gate-{index}"),
         command_vec,
@@ -1622,6 +1634,7 @@ pub(crate) fn run_gate_command_with_timeout(
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
     homeboy_core::engine::command::isolate_process_tree(&mut process);
+    let target_started = Instant::now();
     let mut child = process.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1659,6 +1672,7 @@ pub(crate) fn run_gate_command_with_timeout(
     let exit_code = effective_gate_exit_code(runner_exit_code, test_result.as_ref());
     let failure_evidence = (exit_code != 0)
         .then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr, test_result.as_ref()));
+    selected_environment.finish_cargo_target(target_started.elapsed())?;
     let mut report = AgentTaskGateReport::new(
         format!("gate-{index}"),
         command_vec,
@@ -1868,6 +1882,15 @@ impl SelectedGateEnvironment {
             cwd,
             explicit_target.as_deref(),
         )?;
+        // Store sizing is evidence only. A concurrent gate may update the
+        // shared target while this observation walks it.
+        let bytes_before = target.size_bytes().ok();
+        // The managed store identity is repository-scoped. Cargo separates all
+        // source, feature, profile, target, and toolchain fingerprints within it.
+        let identity = (target.resolution() == "shared")
+            .then(|| target.target_dir().file_name())
+            .flatten()
+            .map(|name| name.to_string_lossy().to_string());
         self.values.insert(
             "CARGO_TARGET_DIR".to_string(),
             target.target_dir().to_string_lossy().to_string(),
@@ -1876,8 +1899,23 @@ impl SelectedGateEnvironment {
             path: target.target_dir().to_string_lossy().to_string(),
             resolution: target.resolution().to_string(),
             owner: target.evidence().owner,
+            identity,
+            state: bytes_before.map(|bytes| if bytes == 0 { "miss" } else { "hit" }.to_string()),
+            bytes_before,
+            bytes_after: None,
+            elapsed_ms: None,
         });
         self._cargo_target = Some(target);
+        Ok(())
+    }
+
+    fn finish_cargo_target(&mut self, elapsed: Duration) -> Result<()> {
+        let (Some(target), Some(evidence)) = (&self._cargo_target, &mut self.report.cargo_target)
+        else {
+            return Ok(());
+        };
+        evidence.bytes_after = target.size_bytes().ok();
+        evidence.elapsed_ms = Some(elapsed.as_millis());
         Ok(())
     }
 }
@@ -1967,12 +2005,16 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
             cache.join("rustup").display().to_string(),
         ),
     ]);
+    // The host rustup proxy refuses to run after CARGO_HOME is isolated unless
+    // the proxy itself lives under that new home. Seed the cache with a real
+    // file rather than inheriting the host home into controller-owned state.
+    let rustup_proxy = prepare_rustup_proxy(cache)?;
     let rustup = run_rust_cache_command(
         cwd,
         cache,
         &environment,
         "install_toolchain",
-        Path::new("rustup"),
+        &rustup_proxy,
         &["toolchain", "install"],
         timeout,
     )?;
@@ -1982,7 +2024,7 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
         cache,
         &environment,
         "resolve_toolchain_cargo",
-        Path::new("rustup"),
+        &rustup_proxy,
         &["which", "cargo"],
         timeout,
     )?;
@@ -2018,6 +2060,44 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
         timeout,
     )?;
     Ok(relative.to_path_buf())
+}
+
+fn prepare_rustup_proxy(cache: &Path) -> Result<PathBuf> {
+    let host_path = std::env::var_os("PATH").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "PATH",
+            "unavailable for Rust gate cache hydration",
+            None,
+            None,
+        )
+    })?;
+    let source = std::env::split_paths(&host_path)
+        .map(|directory| directory.join("rustup"))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "rustup",
+                "unavailable for Rust gate cache hydration",
+                None,
+                None,
+            )
+        })?;
+    let destination = cache.join("cargo/bin/rustup");
+    fs::create_dir_all(destination.parent().expect("rustup proxy has a parent")).map_err(
+        |error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("prepare isolated Rust gate cache rustup proxy".to_string()),
+            )
+        },
+    )?;
+    fs::copy(&source, &destination).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("prepare isolated Rust gate cache rustup proxy".to_string()),
+        )
+    })?;
+    Ok(destination)
 }
 
 fn run_rust_cache_command(
@@ -3319,6 +3399,115 @@ mod tests {
         });
     }
 
+    #[test]
+    fn shared_cargo_target_reports_miss_then_hit_and_metrics() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("gate fixture");
+            let mut policy = AgentTaskGateEnvironmentPolicy::default();
+            policy.shared_cargo_target = Some(true);
+            policy
+                .variables
+                .insert("CARGO_TARGET_DIR".to_string(), String::new());
+
+            let first = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                temp.path(),
+                1,
+                "printf artifact > \"$CARGO_TARGET_DIR/artifact\"",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                &policy,
+                &[],
+            )
+            .expect("first managed gate");
+            let first = first
+                .environment
+                .cargo_target
+                .expect("first target evidence");
+            assert_eq!(first.state.as_deref(), Some("miss"));
+            assert_eq!(first.bytes_before, Some(0));
+            assert!(first.bytes_after.expect("target bytes") > 0);
+            assert!(first.elapsed_ms.is_some());
+
+            let second = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                temp.path(),
+                2,
+                "printf artifact > \"$CARGO_TARGET_DIR/artifact\"",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                &policy,
+                &[],
+            )
+            .expect("reused managed gate");
+            let second = second
+                .environment
+                .cargo_target
+                .expect("second target evidence");
+            assert_eq!(second.state.as_deref(), Some("hit"));
+            assert_eq!(first.identity, second.identity);
+            assert_eq!(first.path, second.path);
+        });
+    }
+
+    #[test]
+    fn concurrent_shared_cargo_target_gates_reuse_one_live_store() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("gate fixture");
+            let barrier = std::sync::Barrier::new(2);
+            let reports = std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    barrier.wait();
+                    run_shared_target_fixture_gate(temp.path(), 1)
+                });
+                let second = scope.spawn(|| {
+                    barrier.wait();
+                    run_shared_target_fixture_gate(temp.path(), 2)
+                });
+                [
+                    first.join().expect("first gate thread"),
+                    second.join().expect("second gate thread"),
+                ]
+            });
+
+            let first = reports[0]
+                .as_ref()
+                .expect("first managed gate")
+                .environment
+                .cargo_target
+                .as_ref()
+                .expect("first target evidence");
+            let second = reports[1]
+                .as_ref()
+                .expect("second managed gate")
+                .environment
+                .cargo_target
+                .as_ref()
+                .expect("second target evidence");
+            assert_eq!(first.path, second.path);
+            assert_eq!(first.identity, second.identity);
+            assert!(std::path::Path::new(&first.path).is_dir());
+        });
+    }
+
+    fn run_shared_target_fixture_gate(cwd: &Path, index: usize) -> Result<AgentTaskGateReport> {
+        let mut policy = AgentTaskGateEnvironmentPolicy::default();
+        policy.shared_cargo_target = Some(true);
+        policy
+            .variables
+            .insert("CARGO_TARGET_DIR".to_string(), String::new());
+        run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            cwd,
+            index,
+            "sleep 0.1; printf artifact > \"$CARGO_TARGET_DIR/artifact-$$\"",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            &policy,
+            &[],
+        )
+    }
+
     /// Restores process-global environment variables when dropped.
     ///
     /// Save/restore has to be panic-safe. A failing assertion between the
@@ -4548,7 +4737,7 @@ mod tests {
         fs::write(
             &rustup,
             format!(
-                "#!/bin/sh\nif test \"$1\" = toolchain; then\n  /bin/mkdir -p \"$CARGO_HOME/registry\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin\"\n  /bin/cp \"{}\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\n  printf '%s\\n' rustup >> \"$CARGO_HOME/registry/hydration.log\"\nelif test \"$1\" = which; then\n  printf '%s\\n' \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\nfi\n/bin/sleep 0.1\n",
+                "#!/bin/sh\ntest \"$0\" = \"$CARGO_HOME/bin/rustup\"\nif test \"$1\" = toolchain; then\n  /bin/mkdir -p \"$CARGO_HOME/registry\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin\"\n  /bin/cp \"{}\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\n  printf '%s\\n' rustup >> \"$CARGO_HOME/registry/hydration.log\"\nelif test \"$1\" = which; then\n  printf '%s\\n' \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\nfi\n/bin/sleep 0.1\n",
                 direct_cargo.display()
             ),
         )

@@ -113,6 +113,27 @@ fn attach_runtime_tool_provenance(
     }
 }
 
+pub(super) fn describe_controller_owned_publication(
+    request: &AgentTaskExecutorRequest,
+    outcome: &mut AgentTaskOutcome,
+) {
+    if !request.request.publication_is_controller_owned() {
+        return;
+    }
+    if outcome.metadata.is_null() {
+        outcome.metadata = json!({});
+    }
+    if let Some(metadata) = outcome.metadata.as_object_mut() {
+        metadata.insert(
+            "publication".to_string(),
+            json!({
+                "owner": "controller",
+                "status": "not_attempted"
+            }),
+        );
+    }
+}
+
 /// True when an outcome represents a transient provider/network failure that is
 /// safe to retry.
 fn outcome_is_transient(outcome: &AgentTaskOutcome) -> bool {
@@ -825,6 +846,7 @@ fn run_materialized_provider_command_once_contained(
                     .map(std::path::Path::new),
             );
             validate_declared_outputs(&mut outcome, request);
+            describe_controller_owned_publication(request, &mut outcome);
             surface_provider_process_failure(
                 &mut outcome,
                 request,
