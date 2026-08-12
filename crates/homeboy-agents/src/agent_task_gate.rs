@@ -1599,7 +1599,13 @@ pub(crate) fn run_gate_command_with_supervision(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let test_result = cargo_test_result(command, runner_exit_code, &stdout, &stderr);
-    let cargo_selection = cargo_selection(command, &command_vec, &stdout, &stderr);
+    let cargo_selection = cargo_selection(
+        command,
+        &command_vec,
+        &stdout,
+        &stderr,
+        test_result.as_ref(),
+    );
     let exit_code = effective_gate_exit_code(runner_exit_code, cargo_selection.as_ref());
     let failure_evidence = (exit_code != 0).then(|| {
         gate_failure_evidence(
@@ -1702,7 +1708,13 @@ pub(crate) fn run_gate_command_with_timeout(
         output.status.code().unwrap_or(1)
     };
     let test_result = cargo_test_result(command, runner_exit_code, &stdout, &stderr);
-    let cargo_selection = cargo_selection(command, &command_vec, &stdout, &stderr);
+    let cargo_selection = cargo_selection(
+        command,
+        &command_vec,
+        &stdout,
+        &stderr,
+        test_result.as_ref(),
+    );
     let exit_code = effective_gate_exit_code(runner_exit_code, cargo_selection.as_ref());
     let failure_evidence = (exit_code != 0).then(|| {
         gate_failure_evidence(
@@ -2985,6 +2997,7 @@ fn cargo_selection(
     effective_argv: &[String],
     stdout: &str,
     stderr: &str,
+    test_result: Option<&AgentTaskGateTestResult>,
 ) -> Option<AgentTaskGateCargoSelection> {
     let tokens = crate::agent_task::tokenize_command(command);
     let cargo_index = cargo_test_index(&tokens)?;
@@ -2995,7 +3008,12 @@ fn cargo_selection(
     let exact =
         harness.is_some_and(|index| args[index + 1..].iter().any(|token| token == "--exact"));
     let mode = if filter.is_some() { "focused" } else { "broad" };
-    let selected_ids = cargo_test_ids(stdout, stderr);
+    let mut selected_ids = cargo_test_ids(stdout, stderr);
+    if selected_ids.is_empty() && exact && test_result.is_some_and(|result| result.total == 1) {
+        if let Some(filter) = &filter {
+            selected_ids.push(filter.clone());
+        }
+    }
     let discovered_ids = {
         let listed = cargo_test_list_ids(stdout, stderr);
         if listed.is_empty() {
@@ -3417,6 +3435,7 @@ mod tests {
             ],
             "selected_test: test\nselected_test_unrelated: test\ntest selected_test ... ok\n",
             "",
+            None,
         )
         .expect("Cargo selection");
         assert_eq!(focused.mode, "focused");
@@ -3438,6 +3457,7 @@ mod tests {
             ],
             "selected_test: test\nselected_test_unrelated: test\ntest selected_test ... ok\ntest selected_test_unrelated ... ok\n",
             "",
+            None,
         )
         .expect("Cargo selection");
         assert_eq!(broad.mode, "broad");
@@ -3454,6 +3474,7 @@ mod tests {
             ],
             "selected_test: test\nselected_test_unrelated: test\ntest selected_test ... ok\ntest selected_test_unrelated ... ok\n",
             "",
+            None,
         )
         .expect("Cargo selection");
         assert_eq!(ambiguous.filter_interpretation, "substring_ambiguous");
@@ -3473,6 +3494,7 @@ mod tests {
             ],
             "test selected_test ... ok\n",
             "",
+            None,
         )
         .expect("Cargo selection");
         assert_eq!(non_exact_single.selected_count, 1);
@@ -3487,6 +3509,7 @@ mod tests {
             ],
             "selected_test: test\nselected_test_unrelated: test\n",
             "",
+            None,
         )
         .expect("Cargo selection");
         assert_eq!(zero_match.filter_interpretation, "exact");
@@ -3503,10 +3526,57 @@ mod tests {
             ],
             "",
             "",
+            None,
         )
         .expect("Cargo selection");
         assert_eq!(package_only.mode, "broad");
         assert_eq!(effective_gate_exit_code(0, Some(&package_only)), 0);
+
+        let quiet_exact = cargo_selection(
+            "cargo --quiet test selected_test -- --exact",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo --quiet test selected_test -- --exact".to_string(),
+            ],
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s\n",
+            "",
+            Some(&AgentTaskGateTestResult {
+                runner: "cargo".to_string(),
+                total: 1,
+                passed: 1,
+                failed: 0,
+                filtered: 1,
+                runner_exit_code: 0,
+            }),
+        )
+        .expect("quiet exact Cargo selection");
+        assert_eq!(quiet_exact.selected_ids, vec!["selected_test"]);
+        assert_eq!(quiet_exact.selected_count, 1);
+        assert_eq!(effective_gate_exit_code(0, Some(&quiet_exact)), 0);
+
+        let quiet_zero_match = cargo_selection(
+            "cargo --quiet test missing_test -- --exact",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo --quiet test missing_test -- --exact".to_string(),
+            ],
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n",
+            "",
+            Some(&AgentTaskGateTestResult {
+                runner: "cargo".to_string(),
+                total: 0,
+                passed: 0,
+                failed: 0,
+                filtered: 2,
+                runner_exit_code: 0,
+            }),
+        )
+        .expect("quiet zero-match Cargo selection");
+        assert!(quiet_zero_match.selected_ids.is_empty());
+        assert_eq!(quiet_zero_match.selected_count, 0);
+        assert_eq!(effective_gate_exit_code(0, Some(&quiet_zero_match)), 1);
     }
 
     #[cfg(unix)]
