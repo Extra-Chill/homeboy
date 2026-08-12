@@ -2,6 +2,22 @@
   "id": "wordpress",
   "changelog_target": "docs/CHANGELOG.md",
   "version_targets": [{ "file": "wordpress.json", "pattern": "\"version\":\\s*\"([0-9.]+)\"" }],
+  "recipe_run_providers": [
+    {
+      "id": "wordpress.wp-codebox.recipe-run",
+      "version": "1.5.2",
+      "executable": "wp-codebox",
+      "command": [
+        "wp-codebox",
+        "recipe-run",
+        "--recipe",
+        "{recipe}",
+        "--artifacts",
+        "{artifacts}",
+        "--json"
+      ]
+    }
+  ],
   "self_checks": {
     "lint": [
       "jq empty wordpress.json",
