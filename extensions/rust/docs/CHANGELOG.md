@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.35.0] - 2026-08-12
+
+### Added
+- make nextest shard replay parallelism configurable
+
 ## [1.34.2] - 2026-08-12
 
 ### Changed
