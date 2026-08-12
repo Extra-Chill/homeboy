@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -115,8 +116,30 @@ def cargo_inventory(workspace_root, packages):
     return list(tests.values())
 
 
+def nextest_archive():
+    """Path to a prebuilt `cargo nextest archive`, when the caller supplies one.
+
+    Enumerating and running tests both compile every test binary in the
+    workspace. Sharded CI does that once per shard plus once for the inventory
+    -- five identical full-workspace debug compiles to execute a few dozen
+    tests. An archive is built once and reused, so `list` and `run` become
+    execution-only.
+    """
+    archive = os.environ.get("HOMEBOY_RUST_NEXTEST_ARCHIVE", "").strip()
+    if not archive:
+        return ""
+    if not os.path.isfile(archive):
+        fail(f"HOMEBOY_RUST_NEXTEST_ARCHIVE does not exist: {archive}")
+    return archive
+
+
 def nextest_inventory(workspace_root):
-    result = run(["cargo", "nextest", "list", "--workspace", "--run-ignored", "all", "--message-format", "json"], workspace_root)
+    archive = nextest_archive()
+    # `--archive-file` carries its own workspace, so it replaces `--workspace`
+    # in the same argv position rather than joining it.
+    source = ["--archive-file", archive] if archive else ["--workspace"]
+    command = ["cargo", "nextest", "list", *source, "--run-ignored", "all", "--message-format", "json"]
+    result = run(command, workspace_root)
     if result.returncode:
         fail(f"could not enumerate nextest tests: {result.stderr.strip()}")
     try:

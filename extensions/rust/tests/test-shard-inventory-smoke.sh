@@ -479,6 +479,64 @@ assert all(" --workspace " in line for line in lines), lines
 assert all("test(=member::member_works)" in line for line in lines[1:]), lines
 PY
 
+# A prebuilt nextest archive makes shard replay execution-only: listing and
+# running must both read the archive instead of recompiling the workspace, and
+# they must agree on the source so membership is validated against the binaries
+# that actually execute.
+: > "$WORK_DIR/archive.tar.zst"
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_RUST_NEXTEST_ARCHIVE="$WORK_DIR/archive.tar.zst" \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_FAKE_NEXTEST_LOG="$WORK_DIR/nextest-archive.log" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/archive-results.json" \
+HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/archive-runner.out"
+
+python3 - "$WORK_DIR/nextest-archive.log" "$WORK_DIR/archive.tar.zst" <<'PY_ARCHIVE'
+import sys
+
+lines = open(sys.argv[1]).read().splitlines()
+archive = sys.argv[2]
+replay = [line for line in lines if line.startswith(("list ", "run "))]
+assert len(replay) == 3, lines
+assert replay[1].startswith("list nextest list") and replay[2].startswith("run nextest run"), replay
+for line in replay[1:]:
+    assert f"--archive-file {archive}" in line, line
+    assert " --workspace " not in line, line
+    assert "--manifest-path" not in line, line
+PY_ARCHIVE
+printf 'PASS: nextest archive replaces workspace compilation for shard listing and execution\n'
+
+# A declared archive that is not present must fail closed rather than silently
+# falling back to a full-workspace compile, which would erase the saving and
+# hide the misconfiguration.
+if HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+  HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+  HOMEBOY_SKIP_LINT=1 \
+  HOMEBOY_RUST_TEST_RUNNER=nextest \
+  HOMEBOY_RUST_NEXTEST_ARCHIVE="$WORK_DIR/missing-archive.tar.zst" \
+  HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+  HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+  HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+  HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/missing-archive-results.json" \
+  HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+  HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+  HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+  PATH="$BIN_DIR:$PATH" \
+  bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/missing-archive.out" 2>&1; then
+  printf 'Expected a declared but absent nextest archive to fail closed\n' >&2
+  exit 1
+fi
+printf 'PASS: an absent declared nextest archive fails closed\n'
+
 # A small limit forces deterministic batches. Every filter stays below the
 # bound while the aggregate result remains the immutable manifest total.
 HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
