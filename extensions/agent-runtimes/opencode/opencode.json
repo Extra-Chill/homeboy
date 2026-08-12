@@ -118,7 +118,8 @@
         "nested_orchestrator",
         "run_scoped_scratch",
         "runtime_tool_attachment",
-        "workspace_permission_root/v1"
+        "workspace_permission_root/v1",
+        "workspace_permission_preflight/v1"
       ],
       "workspace_materialization": {
         "cwd": "git_checkout",

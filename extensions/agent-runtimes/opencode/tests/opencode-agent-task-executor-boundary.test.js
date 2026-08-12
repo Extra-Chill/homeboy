@@ -132,6 +132,7 @@ assert.equal(provider.capabilities.includes('run_scoped_scratch'), true);
 assert.equal(provider.capabilities.includes('runtime_tool_attachment'), true);
 assert.equal(provider.capabilities.includes('live_progress_events'), true);
 assert.equal(provider.capabilities.includes('workspace_permission_root/v1'), true);
+assert.equal(provider.capabilities.includes('workspace_permission_preflight/v1'), true);
 assert.equal(provider.capabilities.includes('browser_runtime'), false);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'opencode.json'), 'utf8'));
@@ -285,6 +286,7 @@ assert.equal(config.agent.title.disable, true);
 	  bash: { '*': 'allow', 'git push *': 'deny' },
 	  external_directory: {
 	    '/unrelated/**': 'deny',
+	    ${JSON.stringify(realModelWorkspace)}: 'allow',
 	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow'
 	  }
 	});
@@ -301,6 +303,7 @@ assert.equal(config.agent.title.disable, true);
 	  edit: { '*': 'allow' },
 	  bash: { '*': 'allow', 'git push *': 'deny' },
 	  external_directory: {
+	    ${JSON.stringify(realModelWorkspace)}: 'allow',
 	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow'
 	  }
 	});
@@ -387,7 +390,9 @@ assert.equal(config.agent.title.disable, true);
 		const concreteWorkspace = concretePath(permissionWorkspace.workspace);
 		const concretePermissionRoot = concretePath(permissionWorkspace.workspacePermissionRoot || permissionWorkspace.workspace);
 		const workspacePatterns = [...new Set([
+			concretePermissionRoot,
 			path.join(concretePermissionRoot, '**'),
+			concreteWorkspace,
 			path.join(concreteWorkspace, '**'),
 		])];
 		const concreteAttemptRoot = permissionWorkspace.attemptRoot && concretePath(permissionWorkspace.attemptRoot);
@@ -486,6 +491,13 @@ process.exit(0);
 		assert.equal(nativeToolAction(generatedConfig, 'build', 'edit', 'src/index.js'), 'allow');
 		assert.equal(nativeToolAction(generatedConfig, 'build', 'bash', 'git status --short'), 'allow');
 		assert.equal(nativeToolAction(generatedConfig, 'build', 'bash', 'git push origin trunk'), 'deny');
+		for (const tool of ['read', 'glob', 'grep', 'edit', 'bash']) {
+			assert.equal(nativeToolAction(generatedConfig, 'build', tool, 'src/index.js'), 'allow');
+		}
+		assert.equal(externalDirectoryAction(generatedConfig, 'build', concreteWorkspace), 'allow');
+		assert.equal(externalDirectoryAction(generatedConfig, 'build', path.join(concreteWorkspace, 'src', 'index.js')), 'allow');
+		assert.equal(externalDirectoryAction(generatedConfig, 'build', `${concreteWorkspace}-sibling`), 'deny');
+		assert.equal(externalDirectoryAction(generatedConfig, 'build', path.join(root, 'controller-scratch')), 'deny');
 		assert.equal(
 			readAction(generatedConfig, 'build', concreteWorkspace, path.join(root, 'outside-workspace', 'index.js')),
 			'deny'
@@ -525,6 +537,51 @@ process.exit(0);
 			}
 		}
 	}
+
+	const preflightWorkspace = path.join(root, 'controller-scratch', 'cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874', 'workspace');
+	fs.mkdirSync(preflightWorkspace, { recursive: true });
+	spawnSync('git', ['init'], { cwd: preflightWorkspace, encoding: 'utf8' });
+	spawnSync('git', ['commit', '--allow-empty', '-m', 'initial'], {
+		cwd: preflightWorkspace,
+		encoding: 'utf8',
+		env: { ...process.env, GIT_AUTHOR_NAME: 'Homeboy Test', GIT_AUTHOR_EMAIL: 'homeboy@example.test', GIT_COMMITTER_NAME: 'Homeboy Test', GIT_COMMITTER_EMAIL: 'homeboy@example.test' },
+	});
+	const concretePreflightWorkspace = concretePath(preflightWorkspace);
+	const preflightOpenCode = path.join(root, 'opencode');
+	const preflightRunMarker = path.join(root, 'opencode-preflight-run-marker');
+	fs.writeFileSync(preflightOpenCode, `#!/usr/bin/env node
+const fs = require('node:fs');
+const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
+const permission = Object.entries(config.agent.build.permission).flatMap(([name, rules]) => Object.entries(rules).map(([pattern, action]) => ({ permission: name, pattern, action })));
+if (process.argv[2] === 'debug') {
+  const omitted = process.env.HOMEBOY_TEST_OMIT_WORKSPACE_ROOT;
+  const omittedPermission = process.env.HOMEBOY_TEST_OMIT_PERMISSION;
+  process.stdout.write(JSON.stringify({ permission: permission.filter((rule) => !(omitted && rule.permission === 'external_directory' && rule.pattern === omitted) && rule.permission !== omittedPermission) }));
+  process.exit(0);
+}
+if (process.argv[2] === 'run') fs.appendFileSync(${JSON.stringify(preflightRunMarker)}, 'run\\n');
+process.exit(0);
+`);
+	fs.chmodSync(preflightOpenCode, 0o755);
+	const preflightRequest = (taskId, policy = { write: 'patch' }, runtimeEnv = {}) => ({
+		...request,
+		task_id: taskId,
+		policy,
+		workspace_path: preflightWorkspace,
+		executor: { ...request.executor, config: { ...request.executor.config, runtime_bin: preflightOpenCode, command_args: [], runtime_env: runtimeEnv } },
+	});
+	const preflightFailure = await executeOpenCodeAgentTask(preflightRequest('opencode-workspace-preflight-failure', { write: 'patch' }, { HOMEBOY_TEST_OMIT_WORKSPACE_ROOT: concretePreflightWorkspace }), { env: fixtureEnv });
+	assert.equal(preflightFailure.status, 'provider_error');
+	assert.equal(preflightFailure.failure_code, 'agent_task.opencode_workspace_permission_preflight_failed');
+	assert.equal(preflightFailure.diagnostics[0].class, 'opencode.workspace_permission_preflight');
+	assert.equal(fs.existsSync(preflightRunMarker), false);
+	const preflightReadOnly = await executeOpenCodeAgentTask(preflightRequest('opencode-workspace-preflight-readonly', { write: 'none' }, { HOMEBOY_TEST_OMIT_PERMISSION: 'edit' }), { env: fixtureEnv });
+	assert.equal(preflightReadOnly.status, 'succeeded', JSON.stringify(preflightReadOnly.diagnostics));
+	const preflightReadWriteMissingEdit = await executeOpenCodeAgentTask(preflightRequest('opencode-workspace-preflight-readwrite-missing-edit', { write: 'patch' }, { HOMEBOY_TEST_OMIT_PERMISSION: 'edit' }), { env: fixtureEnv });
+	assert.equal(preflightReadWriteMissingEdit.failure_code, 'agent_task.opencode_workspace_permission_preflight_failed');
+	const preflightReadWrite = await executeOpenCodeAgentTask(preflightRequest('opencode-workspace-preflight-readwrite'), { env: fixtureEnv });
+	assert.equal(preflightReadWrite.status, 'succeeded', JSON.stringify(preflightReadWrite.diagnostics));
+	assert.equal(fs.readFileSync(preflightRunMarker, 'utf8'), 'run\nrun\n');
 
 	const scratchAttempts = [
 		{ id: 'run-2250-attempt-1', status: 0 },
