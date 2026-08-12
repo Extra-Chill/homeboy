@@ -23,20 +23,53 @@ if [ -n "${TRACKED_DIRTY}" ]; then
   exit 0
 fi
 
+# A baseline exists to excuse the candidate for breakage that predates it. When
+# the candidate PASSED there is nothing to excuse: no baseline result can change
+# a passing verdict, so rerunning the whole command at the base ref buys nothing.
+#
+# It was being rerun unconditionally. Measured on Extra-Chill/homeboy, the Audit
+# baseline is 684s and the Lint baseline 110s -- Lint's real work is 137s, so its
+# baseline was +80% for no verdict (homeboy#11751 W1-10).
+#
+# `select-test-baseline.sh` already makes exactly this decision for the sharded
+# Test path; this brings the unsharded audit/lint path in line with it.
+#
+# Fail-safe: an absent or unparseable CANDIDATE_RESULTS keeps every baseline, so
+# a caller that does not supply candidate status is never silently degraded into
+# skipping the comparison.
+candidate_status() {
+  local cmd="$1"
+  [ -n "${CANDIDATE_RESULTS:-}" ] || { printf 'unknown'; return; }
+  printf '%s' "${CANDIDATE_RESULTS}" | jq -r --arg cmd "${cmd}" '.[$cmd] // "unknown"' 2>/dev/null || printf 'unknown'
+}
+
 BASELINE_RUN_COMMANDS=()
+SKIPPED_PASSING_COMMANDS=()
 ORDERED_COMMANDS="$(resolve_baseline_commands "${EFFECTIVE_COMMANDS}" "${BASELINE_COMMANDS_INPUT}")"
 IFS=',' read -ra CMD_ARRAY <<< "${ORDERED_COMMANDS}"
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD="$(echo "${CMD}" | xargs)"
   case "$(quality_base_command "${CMD}")" in
     audit|lint|test)
+      if [ "$(candidate_status "${CMD}")" = pass ]; then
+        SKIPPED_PASSING_COMMANDS+=("${CMD}")
+        continue
+      fi
       BASELINE_RUN_COMMANDS+=("${CMD}")
       ;;
   esac
 done
 
+if [ "${#SKIPPED_PASSING_COMMANDS[@]}" -gt 0 ]; then
+  echo "Candidate passed ${SKIPPED_PASSING_COMMANDS[*]}; skipping their baseline runs (a baseline cannot change a passing verdict)"
+fi
+
 if [ "${#BASELINE_RUN_COMMANDS[@]}" -eq 0 ]; then
-  echo "No audit/lint/test commands requested; skipping differential baseline run"
+  if [ "${#SKIPPED_PASSING_COMMANDS[@]}" -gt 0 ]; then
+    echo "Every requested command passed on the candidate; no baseline comparison is needed"
+  else
+    echo "No audit/lint/test commands requested; skipping differential baseline run"
+  fi
   exit 0
 fi
 

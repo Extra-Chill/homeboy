@@ -53,7 +53,8 @@ git checkout -qb feature
 run_baseline() {
   local mode="$1"
   local log_file="$2"
-  local env_file="${TMP_DIR}/github-env-${mode}"
+  local label="${3:-${mode}}"
+  local env_file="${TMP_DIR}/github-env-${label}"
 
   set +e
   PATH="${TMP_DIR}/bin:${PATH}" \
@@ -63,6 +64,7 @@ run_baseline() {
   COMMANDS='review test' \
   COMPONENT_NAME='fixture' \
   BASELINE_COMMANDS='auto' \
+  CANDIDATE_RESULTS="${CANDIDATE_RESULTS_FIXTURE:-}" \
   HOMEBOY_DIFFERENTIAL_GATING=true \
   SCOPE_CONTEXT=pr \
   SCOPE_BASE_REF=main \
@@ -70,7 +72,7 @@ run_baseline() {
   HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS=1 \
   RUN_GROUP_PREFIX='baseline test' \
   FAKE_HOMEBOY_MODE="${mode}" \
-  FAKE_HOMEBOY_CHILD_PID_FILE="${TMP_DIR}/child-${mode}.pid" \
+  FAKE_HOMEBOY_CHILD_PID_FILE="${TMP_DIR}/child-${label}.pid" \
   bash "${RUNNER}" >"${log_file}" 2>&1
   local exit_code=$?
   set -e
@@ -127,3 +129,59 @@ for output_mode in missing malformed; do
   fi
 done
 printf 'PASS: zero-exit baseline missing and malformed structured output fail closed\n'
+
+# A baseline exists to excuse a FAILING candidate. When the candidate passed,
+# rerunning the whole command at the base ref cannot change the verdict. It was
+# unconditional: on Extra-Chill/homeboy the Audit baseline is 684s and Lint's is
+# 110s against 137s of real work (homeboy#11751 W1-10).
+passing_log="${TMP_DIR}/candidate-passed.log"
+set +e
+PATH="${TMP_DIR}/bin:${PATH}" \
+GITHUB_ACTION_PATH="${ROOT_DIR}" \
+GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+GITHUB_ENV="${TMP_DIR}/github-env-passing" \
+COMMANDS='review test' \
+COMPONENT_NAME='fixture' \
+BASELINE_COMMANDS='auto' \
+CANDIDATE_RESULTS='{"review test":"pass"}' \
+HOMEBOY_DIFFERENTIAL_GATING=true \
+SCOPE_CONTEXT=pr \
+SCOPE_BASE_REF=main \
+RUN_GROUP_PREFIX='baseline test' \
+FAKE_HOMEBOY_MODE=success \
+bash "${RUNNER}" >"${passing_log}" 2>&1
+passing_exit=$?
+set -e
+if [ "${passing_exit}" -ne 0 ]; then
+  printf 'FAIL: skipping a passing baseline must still exit 0, got %s\n' "${passing_exit}"
+  exit 1
+fi
+if ! grep -q 'Every requested command passed on the candidate' "${passing_log}"; then
+  printf 'FAIL: a passing candidate still reran its baseline\n'
+  exit 1
+fi
+if grep -q 'Running baseline' "${passing_log}"; then
+  printf 'FAIL: a passing candidate executed a baseline command\n'
+  exit 1
+fi
+printf 'PASS: a passing candidate skips its baseline run\n'
+
+# Failing, timed-out and unrecorded candidates are exactly what a differential
+# comparison exists to adjudicate, so each must still run its baseline. An absent
+# CANDIDATE_RESULTS is the fail-safe: keep every baseline rather than silently
+# skipping the comparison.
+run_expecting_baseline() {
+  local label="$1"
+  local fixture="$2"
+  local dir
+  dir="$(CANDIDATE_RESULTS_FIXTURE="${fixture}" run_baseline success "${TMP_DIR}/${label}.log" "${label}")"
+  if ! jq -e '."review test" | .status == "pass"' "${dir}/baseline-status.json" >/dev/null; then
+    printf 'FAIL: %s did not run its baseline\n' "${label}"
+    exit 1
+  fi
+}
+run_expecting_baseline candidate-fail '{"review test":"fail"}'
+run_expecting_baseline candidate-timeout '{"review test":"timeout"}'
+run_expecting_baseline candidate-other-command '{"review lint":"pass"}'
+run_expecting_baseline candidate-absent ''
+printf 'PASS: failing, timed-out, unrecorded and absent candidate results all run their baseline\n'
