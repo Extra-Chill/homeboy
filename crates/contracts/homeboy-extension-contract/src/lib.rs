@@ -22,6 +22,7 @@ pub use manifest_toolchain_config::{
 };
 pub use manifest_toolchain_config::{CliConfig, RemotePathInferenceRule};
 pub mod action_types;
+pub mod agent_task_executor_declaration;
 pub mod autofix_config;
 pub mod bench_artifact;
 pub mod bench_diagnostics;
