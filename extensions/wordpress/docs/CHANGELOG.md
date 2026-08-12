@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.46] - 2026-08-12
+
+### Fixed
+- stop setup dirtying its own tracked source checkout
+- expose recipe provider to Homeboy
+
 ## [3.34.45] - 2026-08-12
 
 ### Fixed
