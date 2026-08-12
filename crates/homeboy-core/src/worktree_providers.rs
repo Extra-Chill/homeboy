@@ -59,6 +59,10 @@ const PROVIDER_ENSURE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const PROVIDER_ENSURE_TIMEOUT: Duration = Duration::from_secs(3);
 const PROVIDER_LOOKUP_OUTPUT_LIMIT: usize = 64 * 1024;
+#[cfg(not(test))]
+const PROVIDER_LOOKUP_HEARTBEAT: Duration = Duration::from_millis(100);
+#[cfg(test)]
+const PROVIDER_LOOKUP_HEARTBEAT: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone)]
 pub struct WorktreeProviderCleanupOptions {
@@ -1528,13 +1532,57 @@ fn run_provider_resolve_path_command(
         .iter()
         .map(|argument| argument.replace("{path}", &path))
         .collect::<Vec<_>>();
-    run_provider_lookup_command(
-        provider_id,
-        provider,
-        &command,
-        "resolve_path",
-        &provider.commands.resolve_not_found_exit_codes,
-    )
+    retry_resolve_path_timeouts(provider, &command, || {
+        run_provider_lookup_command(
+            provider_id,
+            provider,
+            &command,
+            "resolve_path",
+            &provider.commands.resolve_not_found_exit_codes,
+        )
+    })
+}
+
+fn retry_resolve_path_timeouts(
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+    mut run: impl FnMut() -> Result<Vec<WorktreeProviderHandle>>,
+) -> Result<Vec<WorktreeProviderHandle>> {
+    const RESOLVE_PATH_ATTEMPTS: u64 = 2;
+    let started = std::time::Instant::now();
+    let mut timed_out_attempts = Vec::with_capacity(RESOLVE_PATH_ATTEMPTS as usize);
+
+    for attempt in 1..=RESOLVE_PATH_ATTEMPTS {
+        match run() {
+            Ok(worktrees) => return Ok(worktrees),
+            Err(mut error)
+                if error.details["worktree_provider_lookup"] == "timed_out"
+                    && error.details["provider_lookup_timeout_kind"] == "supervision" =>
+            {
+                timed_out_attempts.push(serde_json::json!({
+                    "attempt": attempt,
+                    "elapsed_ms": error.details["latency_ms"],
+                    "timed_out": true,
+                }));
+                if attempt < RESOLVE_PATH_ATTEMPTS {
+                    continue;
+                }
+                let timeout_ms = provider_lookup_timeout(provider)?.as_millis() as u64;
+                error.details["worktree_provider_resolve_path_attempts"] = serde_json::json!({
+                    "attempt_count": RESOLVE_PATH_ATTEMPTS,
+                    "configured_execution_budget_ms": timeout_ms
+                        .saturating_mul(RESOLVE_PATH_ATTEMPTS),
+                    "observed_total_elapsed_ms": u64::try_from(started.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
+                    "attempts": timed_out_attempts,
+                    "replay_command": crate::redaction::redact_argv_shell_display(&command),
+                });
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("resolve_path retries return on success or final failure")
 }
 
 fn targeted_path_result(
@@ -1613,7 +1661,7 @@ fn run_provider_lookup_command(
         &mut child,
         output_limit,
         timeout,
-        Duration::from_millis(100),
+        PROVIDER_LOOKUP_HEARTBEAT,
         || false,
         |_, _| Ok(()),
     )
@@ -1647,6 +1695,8 @@ fn run_provider_lookup_command(
         error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
         error.details["worktree_provider_operation"] = Value::String(operation.to_string());
         error.details["lookup_timeout_ms"] = Value::from(timeout.as_millis() as u64);
+        error.details["latency_ms"] = Value::from(elapsed_ms as u64);
+        error.details["provider_lookup_timeout_kind"] = Value::String("supervision".to_string());
         return Err(error);
     }
     let output = output.output;
@@ -4124,6 +4174,114 @@ mod tests {
     }
 
     #[test]
+    fn path_resolution_retries_a_transient_resolve_path_timeout() {
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 25,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands::default(),
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+        let mut attempts = 0;
+        let result = retry_resolve_path_timeouts(&provider, &["fixture".to_string()], || {
+            attempts += 1;
+            if attempts == 2 {
+                return Ok(Vec::new());
+            }
+            let mut error =
+                Error::validation_invalid_argument("to_worktree", "timeout", None, None);
+            error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
+            error.details["provider_lookup_timeout_kind"] =
+                Value::String("supervision".to_string());
+            error.details["latency_ms"] = Value::from(25);
+            Err(error)
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn path_resolution_retries_after_terminating_the_timed_out_provider_process() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let requested = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let first_attempt = tempfile::NamedTempFile::new().expect("first attempt marker");
+        std::fs::remove_file(first_attempt.path()).expect("remove first attempt marker");
+        let active = tempfile::NamedTempFile::new().expect("active marker");
+        std::fs::remove_file(active.path()).expect("remove active marker");
+        let script = fake_provider_script_body(&format!(
+            "if mkdir '{first_attempt}'; then trap 'rm -f \"{active}\"; exit 0' TERM EXIT\n  touch '{active}'\n  sleep 8\n  exit 0\nfi\nif [ -e '{active}' ]; then exit 99; fi\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@cook-target\",\"path\":\"{path}\",\"branch\":\"cook-target\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+            first_attempt = first_attempt.path().display(),
+            active = active.path().display(),
+            path = requested.display(),
+        ));
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 4_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve_path: Some(vec![script, "{path}".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+
+        let resolution = resolve_worktree_provider_path_from_config(
+            workspace.path(),
+            &config_with_provider(provider),
+        )
+        .expect("second invocation succeeds after first process terminates")
+        .expect("provider owns requested path");
+
+        assert_eq!(resolution.worktree.path, requested.display().to_string());
+        assert!(!active.path().exists(), "timed-out provider was reaped");
+    }
+
+    #[test]
+    fn path_resolution_reports_exhausted_resolve_path_timeout_evidence() {
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 25,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands::default(),
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+        let command = vec!["fixture".to_string(), "--token=secret".to_string()];
+        let mut attempts = 0;
+        let error = retry_resolve_path_timeouts(&provider, &command, || {
+            attempts += 1;
+            let mut error =
+                Error::validation_invalid_argument("to_worktree", "timeout", None, None);
+            error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
+            error.details["provider_lookup_timeout_kind"] =
+                Value::String("supervision".to_string());
+            error.details["latency_ms"] = Value::from(25);
+            error.retryable = Some(true);
+            Err(error)
+        })
+        .expect_err("both bounded attempts time out");
+
+        let evidence = &error.details["worktree_provider_resolve_path_attempts"];
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(evidence["attempt_count"], 2);
+        assert_eq!(attempts, 2);
+        assert_eq!(evidence["configured_execution_budget_ms"], 50);
+        assert!(evidence["observed_total_elapsed_ms"].as_u64().is_some());
+        assert_eq!(evidence["attempts"].as_array().expect("attempts").len(), 2);
+        assert!(evidence["attempts"][0]["elapsed_ms"].as_u64().is_some());
+        let replay = evidence["replay_command"].as_str().expect("replay command");
+        assert!(replay.contains("[REDACTED]"));
+        assert!(!replay.contains("secret"));
+    }
+
+    #[test]
     fn path_resolution_reports_provider_timeout() {
         let workspace = tempfile::tempdir().expect("workspace");
         let dir = unique_fixture_script_dir();
@@ -4196,6 +4354,41 @@ mod tests {
             .details
             .to_string()
             .contains("provider-secret-must-not-persist"));
+    }
+
+    #[test]
+    fn path_resolution_does_not_retry_a_provider_reported_timeout() {
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 25,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands::default(),
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+        let mut attempts = 0;
+        let error = retry_resolve_path_timeouts(&provider, &["fixture".to_string()], || {
+            attempts += 1;
+            let mut error =
+                Error::validation_invalid_argument("to_worktree", "timeout", None, None);
+            error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
+            error.details["provider_timeout_attribution"] =
+                json!({ "error_code": "git_command_timeout" });
+            error.retryable = Some(true);
+            Err(error)
+        })
+        .expect_err("provider-reported timeout does not retry");
+
+        assert_eq!(
+            error.details["provider_timeout_attribution"],
+            json!({ "error_code": "git_command_timeout" })
+        );
+        assert_eq!(
+            error.details["worktree_provider_resolve_path_attempts"],
+            Value::Null
+        );
+        assert_eq!(attempts, 1);
     }
 
     #[test]
