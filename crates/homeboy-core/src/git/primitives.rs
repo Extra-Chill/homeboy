@@ -614,7 +614,7 @@ mod tests {
             .parse()
             .expect("numeric pid");
         assert!(
-            unsafe { libc::kill(pid, 0) } != 0,
+            !crate::process::pid_is_running(pid as u32),
             "timeout must terminate every subprocess in the Git process group"
         );
     }

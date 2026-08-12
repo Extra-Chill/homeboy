@@ -230,24 +230,7 @@ pub fn detach_from_caller_session(command: &mut Command) {
 pub fn detach_from_caller_session(_command: &mut Command) {}
 
 pub fn pid_is_running(pid: u32) -> bool {
-    if pid > i32::MAX as u32 {
-        return false;
-    }
-
-    #[cfg(target_os = "linux")]
-    if let Some(state) = linux_process_state(pid) {
-        return state != 'Z';
-    }
-
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as libc::pid_t, 0) == 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        pid == std::process::id()
-    }
+    homeboy_engine_primitives::command::process_is_running(pid)
 }
 
 /// The result of checking a persisted local process identity.
@@ -1357,12 +1340,6 @@ fn descendant_pids_from_ps(ps_output: &str, owner_pid: u32) -> Vec<u32> {
         }
     }
     descendants
-}
-
-#[cfg(target_os = "linux")]
-fn linux_process_state(pid: u32) -> Option<char> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    parse_linux_stat(&stat).map(|process| process.state)
 }
 
 #[cfg(target_os = "linux")]
