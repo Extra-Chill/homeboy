@@ -3,7 +3,7 @@
 //! resolution. Pure move out of the former `agent_task_service.rs` god-file.
 
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -508,12 +508,59 @@ fn promote_with_operation_claim(
 fn bounded_error_diagnostic(error: &Error) -> Value {
     let mut details = homeboy_core::redaction::redact_json(&error.details);
     bound_diagnostic_value(&mut details, 0);
+    let deepest_cause = deepest_typed_error(&details).unwrap_or_else(|| {
+        serde_json::json!({
+            "code": error.code.as_str(),
+            "field": details.get("field"),
+            "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(&error.message)),
+        })
+    });
     serde_json::json!({
         "status": "failed",
         "code": format!("{:?}", error.code),
         "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(&error.message)),
         "details": details,
+        "deepest_cause": deepest_cause,
     })
+}
+
+/// A failed nested Homeboy command result is more specific than the transport
+/// error that carried it. Keep only its typed routing fields in the projection;
+/// the enclosing bounded command evidence remains available to full readers.
+fn deepest_typed_error(value: &Value) -> Option<Value> {
+    causal_typed_error(value)
+}
+
+fn typed_error_at(value: &Value) -> Option<Value> {
+    let fields = value.as_object()?;
+    (fields.get("schema").and_then(Value::as_str) == Some("homeboy/command-result/v3")
+        && fields.get("success").and_then(Value::as_bool) == Some(false))
+    .then_some(())?;
+    let error = fields.get("error")?.as_object()?;
+    let code = error.get("code")?.as_str()?;
+    let message = error.get("message")?.as_str()?;
+    Some(serde_json::json!({
+        "code": code,
+        "field": error.get("details").and_then(|details| details.get("field")),
+        "message": truncate_diagnostic_text(message),
+    }))
+}
+
+/// Only an explicitly named `cause` is causal. Provider transcripts and sibling
+/// response envelopes are evidence, not a nested failure chain.
+fn causal_typed_error(value: &Value) -> Option<Value> {
+    let fields = value.as_object()?;
+    let cause = if typed_error_at(value).is_some() {
+        fields
+            .get("error")
+            .and_then(|error| error.get("details"))
+            .and_then(|details| details.get("cause"))
+    } else {
+        fields.get("cause")
+    };
+    cause
+        .and_then(causal_typed_error)
+        .or_else(|| typed_error_at(value))
 }
 
 fn bound_diagnostic_value(value: &mut Value, depth: usize) {
@@ -2899,13 +2946,16 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
     if !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
+        && !cook_workspace_lookup_pending(&options.initial_plan)
         && options.attempt_dispatcher.is_none()
+        && options.source_worktree_path.is_none()
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
     {
         crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)?;
     }
     if cook_attempt_needs_execution(&options.initial_run_id)
+        && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
         validate_cook_workspace(options)?;
@@ -3154,6 +3204,12 @@ fn durable_cook_error_report(
             context.phase = "controller".to_string();
             context.reason_code = error.code.as_str().to_string();
             context.diagnostic = Some(bounded_error_diagnostic(&error));
+            if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+                agent_task_lifecycle::record_cook_controller_failure(
+                    &options.initial_run_id,
+                    context.diagnostic.as_ref().expect("controller diagnostic"),
+                )?;
+            }
         }
         return Ok(report);
     }
@@ -3218,7 +3274,9 @@ where
     if !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
+        && !cook_workspace_lookup_pending(&options.initial_plan)
         && options.attempt_dispatcher.is_none()
+        && options.source_worktree_path.is_none()
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
     {
@@ -3298,6 +3356,7 @@ where
     // Its initial handoff has no controller-local source path to validate yet;
     // requiring one here turns an accepted detached retry into a local failure.
     if cook_attempt_needs_execution(&options.initial_run_id)
+        && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
         validate_cook_workspace(&options)?;
@@ -3331,6 +3390,29 @@ where
         .transpose()?;
     agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
     materialize_initial_cook_attempt(&options)?;
+    if cook_workspace_lookup_pending(&options.initial_plan) {
+        if let Err(error) = materialize_pending_cook_workspace(&mut options) {
+            let error = with_pre_execution_phase(error, "worktree_provider_lookup");
+            record_pre_execution_failure(
+                &options.initial_plan,
+                &options.initial_run_id,
+                &error,
+                "worktree_provider_lookup",
+            )?;
+            return Ok(pre_execution_failure_report(
+                options.cook_id.clone(),
+                Vec::new(),
+                pre_execution_failure_details(
+                    agent_task_lifecycle::exact_record(&options.initial_run_id)
+                        .ok()
+                        .as_ref(),
+                    &error,
+                ),
+                error,
+                Some(&options.initial_run_id),
+            ));
+        }
+    }
     record_active_cook_worktree_warning(&options)?;
     // Durable identity now exists and resolves through the Cook alias. Publish
     // it before every remaining long controller phase — gate toolchain
@@ -3592,11 +3674,11 @@ where
                     attempt_limit,
                 );
             }
-            if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
-                validate_cook_workspace(&options)?;
-            }
             let mut failed_dispatch_plan = None;
             let execution = (|| {
+                if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
+                    validate_cook_workspace(&options)?;
+                }
                 homeboy_core::cleanup::admit_reconstructable_artifact_work(
                     plan.tasks
                         .iter()
@@ -4250,7 +4332,7 @@ where
         )?;
         let mut promotion = match side_effects.promote(&options, &run_id) {
             Ok(report) => report,
-            Err(_error) => {
+            Err(error) => {
                 attempts.push(AgentTaskCookAttemptReport {
                     attempt,
                     run_id: run_id.clone(),
@@ -4260,6 +4342,10 @@ where
                     feedback: None,
                 });
                 let recovery = "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string();
+                agent_task_lifecycle::record_cook_controller_failure(
+                    &run_id,
+                    &bounded_error_diagnostic(&error),
+                )?;
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "policy_failure",
@@ -4851,14 +4937,28 @@ fn cook_attempt_needs_execution(run_id: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// Re-resolve the declared Cook target before a provider can run. Durable
-/// recipes may outlive provider metadata, so the filesystem identity is checked
-/// again on local, Lab, retry, and resume paths rather than trusting the plan.
+/// Validate the Cook target before a provider can run. An explicit source path
+/// is already the authoritative workspace; otherwise resolve the declared
+/// handle through the existing local/provider path.
 fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> {
     let continuation = tracked_promotion_continuation(options)?;
-    let direct_path = std::path::Path::new(&options.to_worktree);
-    let target = if direct_path.is_dir() {
-        direct_path.to_path_buf()
+    let source = options.source_worktree_path.as_deref();
+    let target = if let Some(source) = source {
+        if let Some(record) =
+            homeboy_core::worktree::resolve_workspace_ref_if_present(&options.to_worktree)?
+        {
+            if record.state() != &homeboy_core::worktree::TaskWorktreeState::Active {
+                return Err(Error::validation_invalid_argument(
+                    "to_worktree",
+                    "declared Cook task worktree is no longer active",
+                    Some(options.to_worktree.clone()),
+                    None,
+                ));
+            }
+        }
+        source.to_path_buf()
+    } else if std::path::Path::new(&options.to_worktree).is_dir() {
+        std::path::Path::new(&options.to_worktree).to_path_buf()
     } else if let Some(record) =
         homeboy_core::worktree::resolve_workspace_ref_if_present(&options.to_worktree)?
     {
@@ -4871,6 +4971,51 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             ));
         }
         PathBuf::from(record.path())
+    } else if let Some(expected) = options
+        .initial_plan
+        .metadata
+        .pointer("/cook_provision/workspace_identity")
+    {
+        let expected: homeboy_core::worktree_providers::WorktreeProviderExactIdentity =
+            serde_json::from_value(expected.clone()).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "cook_provision.workspace_identity",
+                    format!("persisted Cook workspace identity is invalid: {error}"),
+                    None,
+                    None,
+                )
+            })?;
+        let config = homeboy_core::defaults::load_config();
+        let identity = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+            &options.to_worktree,
+            &expected.provider_id,
+            &config,
+        )?;
+        if expected.schema != identity.schema
+            || expected.provider_id != identity.provider_id
+            || expected.token != identity.token
+            || expected.handle != identity.handle
+            || expected.path != identity.path
+            || expected.branch != identity.branch
+            || expected.primary != identity.primary
+        {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "provider exact identity no longer matches the durable Cook identity",
+                Some(options.to_worktree.clone()),
+                None,
+            ));
+        }
+        let safety = homeboy_core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config)?;
+        if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "provider safety attestation is not current and safe for Cook execution",
+                Some(options.to_worktree.clone()),
+                None,
+            ));
+        }
+        PathBuf::from(identity.path)
     } else {
         homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
             &options.to_worktree,
@@ -4884,7 +5029,7 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         .into()
     };
     homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
-    let source = options.source_worktree_path.as_deref().ok_or_else(|| {
+    let source = source.ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace",
             "Cook requires the provider workspace to be the declared task worktree",
@@ -4910,6 +5055,125 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         ));
     }
     Ok(())
+}
+
+fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
+    matches!(
+        plan.metadata
+            .pointer("/cook_provision/action")
+            .and_then(Value::as_str),
+        Some("lookup_pending" | "attestation_pending")
+    )
+}
+
+/// A pending lookup carries no provider path. Resolve the declared exact handle
+/// only after Cook's recipe and first run record exist, then persist that path
+/// before any provider can receive work.
+fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions) -> Result<()> {
+    let provider_id = options
+        .initial_plan
+        .metadata
+        .pointer("/cook_provision/workspace_identity/provider_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            options
+                .initial_plan
+                .metadata
+                .pointer("/cook_provision/worktree_provider_id")
+                .and_then(Value::as_str)
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "worktree_provider",
+                "pending Cook workspace lookup is missing its persisted provider identity",
+                Some(options.to_worktree.clone()),
+                None,
+            )
+        })?;
+    let config = homeboy_core::defaults::load_config();
+    let identity = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+        &options.to_worktree,
+        provider_id,
+        &config,
+    )?;
+    if identity.handle != options.to_worktree {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "worktree provider did not resolve the declared exact Cook handle",
+            Some(options.to_worktree.clone()),
+            None,
+        ));
+    }
+    if let Some(expected) = options
+        .initial_plan
+        .metadata
+        .pointer("/cook_provision/workspace_identity")
+    {
+        let expected: homeboy_core::worktree_providers::WorktreeProviderExactIdentity =
+            serde_json::from_value(expected.clone()).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "cook_provision.workspace_identity",
+                    format!("pending Cook identity is invalid: {error}"),
+                    None,
+                    None,
+                )
+            })?;
+        if expected.schema != identity.schema
+            || expected.provider_id != identity.provider_id
+            || expected.token != identity.token
+            || expected.handle != identity.handle
+            || expected.path != identity.path
+            || expected.branch != identity.branch
+            || expected.primary != identity.primary
+        {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "provider exact identity no longer matches the durable pending Cook identity",
+                Some(options.to_worktree.clone()),
+                None,
+            ));
+        }
+    }
+    let safety = homeboy_core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config)?;
+    if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "provider safety attestation is not current and safe for pending Cook execution",
+            Some(options.to_worktree.clone()),
+            None,
+        ));
+    }
+    let target = PathBuf::from(&identity.path);
+    homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
+    let target = std::fs::canonicalize(&target).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(target.display().to_string()))
+    })?;
+    validate_pending_cook_repository_identity(&options.initial_plan, &target)?;
+    for task in &mut options.initial_plan.tasks {
+        task.workspace.root = Some(target.display().to_string());
+        task.metadata["cook_workspace_identity"] =
+            crate::agent_task_workspace_identity::attest_workspace(&target)?;
+    }
+    options.initial_plan.metadata["cook_provision"]["workspace_identity"] =
+        serde_json::to_value(&identity).expect("workspace identity serializes");
+    options.initial_plan.metadata["cook_provision"]["workspace_safety"] =
+        serde_json::to_value(&safety).expect("workspace safety serializes");
+    options.initial_plan.metadata["cook_provision"]["action"] =
+        Value::String("existing".to_string());
+    options.source_worktree_path = Some(target);
+    agent_task_lifecycle::persist_controller_plan(&options.initial_run_id, &options.initial_plan)
+}
+
+fn validate_pending_cook_repository_identity(plan: &AgentTaskPlan, target: &Path) -> Result<()> {
+    homeboy_core::worktree_providers::validate_task_worktree_repository_identity(
+        target,
+        plan.metadata
+            .pointer("/cook_repository_identity/remote_identity")
+            .and_then(Value::as_str),
+        plan.metadata
+            .pointer("/cook_repository_identity/repository_name")
+            .and_then(Value::as_str),
+    )
 }
 
 /// The normal configured-provider preflight rejects every dirty destination. A
@@ -5265,6 +5529,20 @@ fn rebind_baseline_continuation_workspace(
                 .is_some()
     });
     if !baseline_bound_continuation {
+        if continuation_plan
+            .metadata
+            .pointer("/cook_provision/action")
+            .and_then(Value::as_str)
+            == Some("existing")
+        {
+            if let Some(root) = continuation_plan
+                .tasks
+                .first()
+                .and_then(|task| task.workspace.root.as_deref())
+            {
+                options.source_worktree_path = Some(root.into());
+            }
+        }
         return Ok(());
     }
     if std::path::Path::new(&options.to_worktree).is_dir() {

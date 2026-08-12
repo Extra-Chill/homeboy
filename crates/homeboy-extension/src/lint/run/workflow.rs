@@ -109,6 +109,7 @@ pub fn run_main_lint_workflow(
                     None
                 },
                 self_check_capture: None,
+                cargo_target: None,
                 extension_phase_timings: Vec::new(),
             });
         }
@@ -324,6 +325,7 @@ pub fn run_main_lint_workflow(
         producer_summaries,
         self_check_capture: None,
         extension_phase_timings: output.extension_phase_timings,
+        cargo_target: output.cargo_target,
     })
 }
 
@@ -483,6 +485,7 @@ fn run_scoped_lint_runs(
             timed_out: false,
             child_resource: None,
             extension_phase_timings,
+            cargo_target: None,
         },
         evidence,
         child_run_dirs,
@@ -610,6 +613,7 @@ Re-run `homeboy review lint {}` or skip only this gate with `--skip-checks=lint`
             None
         },
         self_check_capture: Some(output.capture),
+        cargo_target: output.cargo_target,
         extension_phase_timings: Vec::new(),
     })
 }

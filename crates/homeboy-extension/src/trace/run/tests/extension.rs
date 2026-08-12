@@ -292,6 +292,7 @@ fn test_run_trace_workflow() {
         timed_out: false,
         child_resource: None,
         extension_phase_timings: Vec::new(),
+        cargo_target: None,
     };
 
     let failure = failure_from_output(&args, &output, None, None);

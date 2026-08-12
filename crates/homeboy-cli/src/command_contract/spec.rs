@@ -1248,6 +1248,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         subcommand_safety: RUNNER_SUBCOMMAND_SAFETY,
         ..command_spec("runner", CommandJsonFamily::Workspace)
     },
+    crate::ops_command_spec!(source),
     CommandSpec {
         subcommand_safety: RUNTIME_SUBCOMMAND_SAFETY,
         ..command_spec_with_representative_argv(

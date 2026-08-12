@@ -69,6 +69,8 @@ pub struct TestCommandOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_output: Option<RawTestOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cargo_target: Option<homeboy_engine_primitives::cargo_target::CargoTargetEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_context: Option<CiContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
@@ -106,6 +108,7 @@ pub struct TestRunWorkflowResult {
     /// can see runner output (bootstrap errors, stack traces) without
     /// having to re-run with a different flag. (#1143)
     pub raw_output: Option<RawTestOutput>,
+    pub cargo_target: Option<homeboy_engine_primitives::cargo_target::CargoTargetEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
 }

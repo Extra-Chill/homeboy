@@ -362,7 +362,7 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
             "--backend",
             "fixture",
             "--cwd",
-            checkout.to_str().expect("checkout path"),
+            task_worktree.to_str().expect("task worktree path"),
             "--to-worktree",
             task_worktree.to_str().expect("task worktree path"),
             "--provider-command",
@@ -426,10 +426,13 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
         );
     }
     let accepted: serde_json::Value = serde_json::from_slice(&cook_stdout).expect("cook JSON");
-    assert!(
-        accepted["status"] == "in_flight"
-            || accepted.pointer("/data/status") == Some(&serde_json::json!("materializing")),
-        "expected accepted durable staging lifecycle: {accepted}"
+    assert_eq!(
+        accepted["schema"],
+        "homeboy/agent-task-cook-local-detach-handoff/v1"
+    );
+    assert_eq!(
+        accepted.pointer("/handoff/state"),
+        Some(&serde_json::json!("accepted"))
     );
 
     // The submitting CLI is gone before the reverse worker exists. The local
@@ -441,7 +444,7 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
             break jobs;
         }
         if Instant::now() >= deadline {
-            let run_id = accepted["latest_run_id"].as_str().unwrap_or("unknown");
+            let run_id = accepted["run_id"].as_str().unwrap_or("unknown");
             let status = context
                 .command(TestBinary::HomeboyFixture)
                 .env("PATH", &path)
@@ -577,7 +580,7 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     // The controller must project the broker result after the worker exits.
     // `daemon serve` is intentionally un-tokenized, so terminate the test-owned
     // foreground child only after that durable parent lifecycle is terminal.
-    let run_id = accepted["latest_run_id"].as_str().expect("accepted run id");
+    let run_id = accepted["run_id"].as_str().expect("accepted run id");
     // Bound this on observations as well as wall clock. Each poll is a whole
     // `homeboy` subprocess, so on a loaded machine a single observation can
     // outlast a bare wall-clock deadline and the controller is declared stalled

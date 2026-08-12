@@ -12,6 +12,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SCHEMA: &str = "homeboy/deferred-workloads/v1";
 pub const CLAIM_LEASE_MS: u64 = 60_000;
 
+/// The environment marker a worker process carries to prove it owns its
+/// `--startup-token`.
+///
+/// This must be present in the worker's **execve** environment. `/proc/<pid>/environ`
+/// exposes the environment block the kernel copied at exec time, so a
+/// `std::env::set_var` performed by the worker after it starts is invisible to
+/// [`pid_has_ownership_token`](homeboy_core::process::pid_has_ownership_token)
+/// and the worker can never prove its own liveness. The spawner sets it, and a
+/// hand-started worker re-execs itself with it (#12081).
+pub const WORKER_OWNER_ENV: &str = "HOMEBOY_DEFERRED_WORKLOAD_OWNER";
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeferredWorkload {
     pub id: String,
@@ -27,6 +38,17 @@ pub struct DeferredWorkload {
     pub resolved_resources: serde_json::Value,
     #[serde(default)]
     pub test_requirements: DeferredWorkloadRequirements,
+    /// The source worktree this workload was deferred from.
+    ///
+    /// A deferred record is replayed later by a long-lived singleton worker, so
+    /// the replay cannot inherit the deferring caller's working directory —
+    /// that is how workers ended up anchored to deleted worktrees, and how a
+    /// replay could have synced the wrong source tree. Recording the directory
+    /// makes the replay target explicit and lets the worker fail a record whose
+    /// worktree is gone instead of running it against whatever it is standing
+    /// in (#12081).
+    #[serde(default)]
+    pub source_directory: Option<String>,
     pub job_overrides: homeboy_core::lab_offload::LabJobOverrides,
     pub state: DeferredWorkloadState,
     pub created_at_ms: u64,
@@ -57,6 +79,7 @@ pub struct DeferredWorkloadInput {
     pub resolved_contract: serde_json::Value,
     pub resolved_resources: serde_json::Value,
     pub test_requirements: DeferredWorkloadRequirements,
+    pub source_directory: Option<String>,
     pub job_overrides: homeboy_core::lab_offload::LabJobOverrides,
 }
 
@@ -146,6 +169,7 @@ pub fn defer(input: DeferredWorkloadInput) -> Result<DeferredWorkload> {
             resolved_contract: input.resolved_contract,
             resolved_resources: input.resolved_resources,
             test_requirements: input.test_requirements,
+            source_directory: input.source_directory,
             job_overrides: input.job_overrides,
             state: DeferredWorkloadState::Deferred,
             created_at_ms: now,
@@ -298,11 +322,53 @@ pub fn defer_claim(id: &str, owner: &str) -> Result<()> {
     })
 }
 
+/// Return every claim held by `owner` to the queue.
+///
+/// Reconciliation terminates a worker that can no longer prove ownership, so
+/// its claims must not sit out the full lease before another worker may take
+/// them. Returns the ids that were released.
+pub fn release_claims_for_owner(owner: &str) -> Result<Vec<String>> {
+    update(|records| {
+        let now = now_ms();
+        let mut released = Vec::new();
+        for record in records.iter_mut() {
+            if record.state != DeferredWorkloadState::Claimed
+                || record.claim_owner.as_deref() != Some(owner)
+            {
+                continue;
+            }
+            record.state = DeferredWorkloadState::Deferred;
+            record.runner_id = None;
+            record.claim_owner = None;
+            record.claim_expires_at_ms = None;
+            record.updated_at_ms = now;
+            released.push(record.id.clone());
+        }
+        Ok(released)
+    })
+}
+
 pub fn records() -> Result<Vec<DeferredWorkload>> {
     read_store(&store_path()?)
 }
 
-pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
+/// Whether any record still needs a worker.
+pub fn has_pending_work() -> Result<bool> {
+    Ok(records()?.iter().any(|record| {
+        matches!(
+            record.state,
+            DeferredWorkloadState::Deferred | DeferredWorkloadState::Claimed
+        )
+    }))
+}
+
+/// The directory whose inode carries the singleton worker lock.
+///
+/// It doubles as the worker's working directory: a controller-owned singleton
+/// that outlives the command which started it must not hold a caller's
+/// ephemeral worktree open, because worktree cleanup then leaves the process
+/// anchored to a deleted directory (#12081).
+pub fn worker_root() -> Result<PathBuf> {
     let root = homeboy_core::paths::homeboy()?;
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
@@ -310,7 +376,7 @@ pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
             Some(format!("create deferred workload root {}", root.display())),
         )
     })?;
-    let root = fs::canonicalize(&root).map_err(|error| {
+    fs::canonicalize(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!(
@@ -318,7 +384,11 @@ pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
                 root.display()
             )),
         )
-    })?;
+    })
+}
+
+pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
+    let root = worker_root()?;
     let file = File::open(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -400,12 +470,8 @@ pub fn worker_is_live(status: &DeferredWorkloadWorkerStatus) -> bool {
         status,
         homeboy_core::process::process_identity_state,
         |pid, token| {
-            homeboy_core::process::pid_has_ownership_token(
-                pid,
-                "HOMEBOY_DEFERRED_WORKLOAD_OWNER",
-                token,
-            )
-            .unwrap_or(false)
+            homeboy_core::process::pid_has_ownership_token(pid, WORKER_OWNER_ENV, token)
+                .unwrap_or(false)
         },
     )
 }
@@ -421,6 +487,228 @@ fn worker_identity_is_live(
     inspect_process(status.pid, status.linux_starttime_ticks)
         == homeboy_core::process::ProcessIdentityState::Live
         && owns_token(status.pid, &status.owner_token)
+}
+
+/// A live process presenting as a deferred-workload worker.
+///
+/// Presenting is not owning. The command line only selects candidates; whether
+/// a candidate may keep running is decided by [`classify_worker_process`] from
+/// the startup token it can prove and the durable store, never from its name.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct DeferredWorkloadWorkerProcess {
+    pub pid: u32,
+    /// The `--startup-token` value read from the process command line.
+    pub startup_token: Option<String>,
+    /// Whether the process environment proves it owns [`startup_token`](Self::startup_token).
+    pub owns_startup_token: bool,
+    pub working_directory: Option<String>,
+    /// Whether the working directory has been unlinked since the process started.
+    pub working_directory_deleted: bool,
+}
+
+/// What reconciliation may do with a candidate worker process.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "disposition", rename_all = "snake_case")]
+pub enum DeferredWorkloadWorkerDisposition {
+    /// The live singleton owner with durable work in front of it.
+    Retained,
+    /// No live durable ownership backs this process.
+    Orphaned { reason: String },
+}
+
+impl DeferredWorkloadWorkerDisposition {
+    fn orphaned(reason: &str) -> Self {
+        Self::Orphaned {
+            reason: reason.to_string(),
+        }
+    }
+
+    pub fn is_orphaned(&self) -> bool {
+        matches!(self, Self::Orphaned { .. })
+    }
+}
+
+/// Decide whether a candidate worker process is the live singleton owner.
+///
+/// Every rejection is grounded in durable state: the record store says whether
+/// any work remains, and the worker status plus the process's own execve
+/// environment say which process owns it. A process that merely looks like a
+/// worker is never retained on that basis, and never terminated on it either.
+pub fn classify_worker_process(
+    process: &DeferredWorkloadWorkerProcess,
+    owner: Option<&DeferredWorkloadWorkerStatus>,
+    owner_is_live: bool,
+    pending_work: bool,
+) -> DeferredWorkloadWorkerDisposition {
+    if !pending_work {
+        return DeferredWorkloadWorkerDisposition::orphaned(
+            "no deferred workload remains for a worker to run",
+        );
+    }
+    let Some(owner) = owner.filter(|_| owner_is_live) else {
+        return DeferredWorkloadWorkerDisposition::orphaned(
+            "no live worker owns the deferred workload singleton",
+        );
+    };
+    if process.pid != owner.pid {
+        return DeferredWorkloadWorkerDisposition::orphaned(
+            "process is not the durable singleton owner pid",
+        );
+    }
+    if !process.owns_startup_token {
+        return DeferredWorkloadWorkerDisposition::orphaned(
+            "process environment does not prove ownership of its startup token",
+        );
+    }
+    if process.startup_token.as_deref() != Some(owner.owner_token.as_str()) {
+        return DeferredWorkloadWorkerDisposition::orphaned(
+            "startup token does not match the durable owner token",
+        );
+    }
+    DeferredWorkloadWorkerDisposition::Retained
+}
+
+/// Every live process whose command line presents as a deferred-workload worker.
+pub fn worker_processes() -> Result<Vec<DeferredWorkloadWorkerProcess>> {
+    let mut processes = worker_process_candidates()?
+        .into_iter()
+        .map(|(pid, argv)| {
+            let startup_token = worker_startup_token(&argv);
+            let owns_startup_token = startup_token.as_deref().is_some_and(|token| {
+                homeboy_core::process::pid_has_ownership_token(pid, WORKER_OWNER_ENV, token)
+                    .unwrap_or(false)
+            });
+            let (working_directory, working_directory_deleted) = process_working_directory(pid);
+            DeferredWorkloadWorkerProcess {
+                pid,
+                startup_token,
+                owns_startup_token,
+                working_directory,
+                working_directory_deleted,
+            }
+        })
+        .collect::<Vec<_>>();
+    processes.sort_by_key(|process| process.pid);
+    Ok(processes)
+}
+
+/// The `--startup-token` a candidate was started with, in either spelling clap accepts.
+///
+/// This reads another process's command line, not this invocation's argv, so
+/// the bare-separator rule that governs Homeboy-owned argument scans does not
+/// apply: there is no forwarded tail here to mistake for Homeboy's own.
+fn worker_startup_token(command_line: &[String]) -> Option<String> {
+    command_line
+        .iter()
+        .enumerate()
+        .find_map(|(index, argument)| {
+            if argument == "--startup-token" {
+                command_line.get(index + 1).cloned()
+            } else {
+                argument
+                    .strip_prefix("--startup-token=")
+                    .map(ToString::to_string)
+            }
+        })
+}
+
+/// Whether a process command line is a `deferred-workload worker` invocation.
+fn presents_as_worker(command_line: &[String]) -> bool {
+    command_line
+        .windows(2)
+        .any(|pair| pair == ["deferred-workload", "worker"])
+}
+
+#[cfg(target_os = "linux")]
+fn worker_process_candidates() -> Result<Vec<(u32, Vec<String>)>> {
+    let entries = fs::read_dir("/proc").map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("enumerate deferred workload worker processes".to_string()),
+        )
+    })?;
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        // A process can exit mid-scan; an unreadable entry is simply not a
+        // candidate rather than a scan failure.
+        let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let argv = cmdline
+            .split(|byte| *byte == 0)
+            .filter(|argument| !argument.is_empty())
+            .map(|argument| String::from_utf8_lossy(argument).into_owned())
+            .collect::<Vec<_>>();
+        if presents_as_worker(&argv) {
+            candidates.push((pid, argv));
+        }
+    }
+    Ok(candidates)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn worker_process_candidates() -> Result<Vec<(u32, Vec<String>)>> {
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("enumerate deferred workload worker processes".to_string()),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Error::internal_unexpected(
+            "enumerate deferred workload worker processes: ps failed",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let argv = fields.map(ToString::to_string).collect::<Vec<_>>();
+            presents_as_worker(&argv).then_some((pid, argv))
+        })
+        .collect())
+}
+
+#[cfg(not(unix))]
+fn worker_process_candidates() -> Result<Vec<(u32, Vec<String>)>> {
+    Err(Error::validation_invalid_argument(
+        "platform",
+        "deferred workload worker reconciliation requires a Unix process table",
+        None,
+        None,
+    ))
+}
+
+/// The working directory a process holds open, and whether it has been unlinked.
+///
+/// Linux renders an unlinked directory as `<path> (deleted)` in `/proc/<pid>/cwd`,
+/// which is the exact evidence that a finalized worktree is still pinned.
+#[cfg(target_os = "linux")]
+fn process_working_directory(pid: u32) -> (Option<String>, bool) {
+    let Ok(target) = fs::read_link(format!("/proc/{pid}/cwd")) else {
+        return (None, false);
+    };
+    let target = target.to_string_lossy().into_owned();
+    match target.strip_suffix(" (deleted)") {
+        Some(path) => (Some(path.to_string()), true),
+        None => (Some(target), false),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_working_directory(_pid: u32) -> (Option<String>, bool) {
+    (None, false)
 }
 
 pub fn write_worker_status(
@@ -474,6 +762,10 @@ fn fingerprint(input: &DeferredWorkloadInput) -> Result<String> {
         "args": input.args,
         "placement": input.placement,
         "resource_requirement": input.resource_requirement,
+        // Two identical commands deferred from two worktrees are two workloads.
+        // Leaving the source directory out of the identity collapsed them into
+        // one record, so the second caller's tree was silently never replayed.
+        "source_directory": input.source_directory,
         "job_overrides": input.job_overrides,
     }))
     .map_err(|error| {
@@ -635,7 +927,30 @@ mod tests {
                 required_runtimes: ["homeboy".to_string()].into(),
                 required_capabilities: ["review test".to_string()].into(),
             },
+            source_directory: None,
             job_overrides: homeboy_core::lab_offload::LabJobOverrides::default(),
+        }
+    }
+
+    fn owner_status(pid: u32, owner_token: &str) -> DeferredWorkloadWorkerStatus {
+        DeferredWorkloadWorkerStatus {
+            schema: "homeboy/deferred-workload-worker-status/v1".to_string(),
+            pid,
+            owner_token: owner_token.to_string(),
+            linux_starttime_ticks: Some(1),
+            state: "waiting_for_runner".to_string(),
+            updated_at_ms: 0,
+            detail: String::new(),
+        }
+    }
+
+    fn worker_process(pid: u32, owner_token: &str) -> DeferredWorkloadWorkerProcess {
+        DeferredWorkloadWorkerProcess {
+            pid,
+            startup_token: Some(owner_token.to_string()),
+            owns_startup_token: true,
+            working_directory: None,
+            working_directory_deleted: false,
         }
     }
 
@@ -909,5 +1224,167 @@ mod tests {
             assert!(defer(input).is_err());
             assert!(records().expect("records").is_empty());
         });
+    }
+
+    /// The same command deferred from two worktrees is two workloads. Collapsing
+    /// them dropped the second caller's tree on the floor, because a record
+    /// carries the worktree it must be replayed against.
+    #[test]
+    fn two_worktrees_deferring_the_same_command_are_two_records() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut first = input();
+            first.source_directory = Some("/workspace/repo@one".to_string());
+            let mut second = input();
+            second.source_directory = Some("/workspace/repo@two".to_string());
+
+            let first = defer(first).expect("defer first worktree");
+            let second = defer(second).expect("defer second worktree");
+
+            assert_ne!(first.id, second.id);
+            assert_eq!(
+                first.source_directory.as_deref(),
+                Some("/workspace/repo@one")
+            );
+            assert_eq!(records().expect("records").len(), 2);
+        });
+    }
+
+    /// A record deferred before `source_directory` existed must still load.
+    #[test]
+    fn a_record_without_a_recorded_source_directory_still_loads() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let record = defer(input()).expect("defer workload");
+            let mut value = serde_json::to_value(&record).expect("record serializes");
+            value
+                .as_object_mut()
+                .expect("record object")
+                .remove("source_directory");
+            let path = store_path().expect("store path");
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({ "schema": SCHEMA, "records": [value] }))
+                    .expect("legacy store serializes"),
+            )
+            .expect("write legacy store");
+
+            let loaded = records().expect("read legacy store");
+            assert_eq!(loaded.len(), 1);
+            assert!(loaded[0].source_directory.is_none());
+        });
+    }
+
+    #[test]
+    fn terminating_a_worker_returns_its_claims_to_the_queue() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let deferred = defer(input()).expect("defer workload");
+            claim_next_at("runner", "doomed-worker", 1).expect("claim workload");
+
+            let released = release_claims_for_owner("doomed-worker").expect("release claims");
+
+            assert_eq!(released, vec![deferred.id]);
+            assert_eq!(
+                records().expect("records")[0].state,
+                DeferredWorkloadState::Deferred
+            );
+            assert!(records().expect("records")[0].claim_owner.is_none());
+        });
+    }
+
+    #[test]
+    fn only_the_proven_singleton_owner_survives_reconciliation() {
+        let owner = owner_status(41, "owner-token");
+
+        assert_eq!(
+            classify_worker_process(&worker_process(41, "owner-token"), Some(&owner), true, true),
+            DeferredWorkloadWorkerDisposition::Retained
+        );
+
+        // A different process running the same command is not the owner.
+        assert!(classify_worker_process(
+            &worker_process(42, "owner-token"),
+            Some(&owner),
+            true,
+            true
+        )
+        .is_orphaned());
+        // The owner pid presenting a token it cannot prove is not the owner
+        // either: `/proc/<pid>/environ` is the proof, argv is only the label.
+        let unproven = DeferredWorkloadWorkerProcess {
+            owns_startup_token: false,
+            ..worker_process(41, "owner-token")
+        };
+        assert!(classify_worker_process(&unproven, Some(&owner), true, true).is_orphaned());
+        // A stale token from a previous singleton generation is not the owner.
+        assert!(classify_worker_process(
+            &worker_process(41, "stale-token"),
+            Some(&owner),
+            true,
+            true
+        )
+        .is_orphaned());
+    }
+
+    #[test]
+    fn a_worker_with_no_durable_work_or_no_live_owner_is_orphaned() {
+        let owner = owner_status(41, "owner-token");
+
+        assert!(classify_worker_process(
+            &worker_process(41, "owner-token"),
+            Some(&owner),
+            true,
+            false
+        )
+        .is_orphaned());
+        assert!(classify_worker_process(
+            &worker_process(41, "owner-token"),
+            Some(&owner),
+            false,
+            true
+        )
+        .is_orphaned());
+        assert!(
+            classify_worker_process(&worker_process(41, "owner-token"), None, true, true)
+                .is_orphaned()
+        );
+    }
+
+    #[test]
+    fn worker_candidates_are_selected_by_command_and_keyed_by_startup_token() {
+        assert!(presents_as_worker(&[
+            "/usr/local/bin/homeboy".to_string(),
+            "deferred-workload".to_string(),
+            "worker".to_string(),
+        ]));
+        assert!(!presents_as_worker(&[
+            "/usr/local/bin/homeboy".to_string(),
+            "deferred-workload".to_string(),
+            "status".to_string(),
+        ]));
+        assert_eq!(
+            worker_startup_token(&[
+                "homeboy".to_string(),
+                "deferred-workload".to_string(),
+                "worker".to_string(),
+                "--startup-token".to_string(),
+                "token-a".to_string(),
+            ]),
+            Some("token-a".to_string())
+        );
+        assert_eq!(
+            worker_startup_token(&["--startup-token=token-b".to_string()]),
+            Some("token-b".to_string())
+        );
+        assert_eq!(worker_startup_token(&["worker".to_string()]), None);
+    }
+
+    /// The scan must survive a live process table without classifying anything
+    /// on command name alone.
+    #[test]
+    #[cfg(unix)]
+    fn scanning_the_process_table_never_reports_this_test_as_a_worker() {
+        let processes = worker_processes().expect("scan process table");
+        assert!(processes
+            .iter()
+            .all(|process| process.pid != std::process::id()));
     }
 }

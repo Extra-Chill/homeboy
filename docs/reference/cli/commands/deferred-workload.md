@@ -24,6 +24,7 @@ Resume portable workloads deferred until a runner is ready
 | --- | --- |
 | `homeboy deferred-workload worker` | Run the singleton controller-owned deferred-workload worker |
 | `homeboy deferred-workload status` | Inspect deferred workloads and the controller worker |
+| `homeboy deferred-workload reconcile` | Terminate worker processes that no live durable ownership backs |
 
 ## `homeboy deferred-workload worker`
 
@@ -44,3 +45,15 @@ homeboy deferred-workload status
 ```
 
 Inspect deferred workloads and the controller worker
+
+## `homeboy deferred-workload reconcile`
+
+```sh
+homeboy deferred-workload reconcile [OPTIONS]
+```
+
+Terminate worker processes that no live durable ownership backs
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--dry-run` | flag | Report what would be terminated without signaling anything |

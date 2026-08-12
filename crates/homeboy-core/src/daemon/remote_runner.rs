@@ -395,7 +395,10 @@ fn authorize_job_read(job_id: Uuid, job_store: &JobStore, auth: &BrokerAuthConte
         Err(_) => auth.authorize(BrokerScope::Submit, None)?,
     };
     let job = job_store.get(job_id)?;
-    if let Some(grant) = grant {
+    // An explicitly open loopback broker has no credential-bound runner id.
+    // Keep authenticated grants runner-bound without treating that local test
+    // and smoke-run mode as ownership by the empty string.
+    if let Some(grant) = grant.filter(|grant| !grant.runner_id.is_empty()) {
         if job.target_runner_id.as_deref() != Some(grant.runner_id.as_str()) {
             return Err(Error::new(
                 crate::error::ErrorCode::RunnerPolicyDenied,

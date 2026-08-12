@@ -37,12 +37,15 @@ pub fn issue_create(
     ];
     let mut body_files = Vec::new();
     push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &options.body)?;
+    let label_args_start = args.len();
     for label in &options.labels {
         args.push("--label".into());
         args.push(label.clone());
     }
 
-    let output = gh.run(&args)?;
+    let output = run_issue_create(&mut args, label_args_start, &options.labels, |args| {
+        gh.run(args)
+    })?;
     let url = output.trim().to_string();
     let number = parse_issue_number_from_url(&url);
 
@@ -57,6 +60,32 @@ pub fn issue_create(
         title: Some(options.title),
         state: Some("open".to_string()),
     })
+}
+
+/// GitHub rejects the entire create request when any requested label is absent.
+/// Retrying without labels preserves the issue finding for repositories that do
+/// not share Homeboy's optional category-label vocabulary.
+fn missing_requested_label(error: &Error, labels: &[String]) -> bool {
+    let message = error.to_string();
+    labels
+        .iter()
+        .any(|label| message.contains(&format!("could not add label: '{label}' not found")))
+}
+
+fn run_issue_create(
+    args: &mut Vec<String>,
+    label_args_start: usize,
+    labels: &[String],
+    mut run: impl FnMut(&[String]) -> Result<String>,
+) -> Result<String> {
+    match run(args) {
+        Ok(output) => Ok(output),
+        Err(error) if missing_requested_label(&error, labels) => {
+            args.truncate(label_args_start);
+            run(args)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Post a comment on an existing issue.
@@ -352,6 +381,60 @@ mod tests {
     fn issue_close_reason_gh_flag() {
         assert_eq!(IssueCloseReason::Completed.as_gh_flag(), "completed");
         assert_eq!(IssueCloseReason::NotPlanned.as_gh_flag(), "not planned");
+    }
+
+    #[test]
+    fn recognizes_gh_missing_requested_label_error() {
+        let mut args = vec![
+            "issue".into(),
+            "create".into(),
+            "--label".into(),
+            "lint".into(),
+        ];
+        let mut calls = Vec::new();
+
+        let output = run_issue_create(&mut args, 2, &["lint".to_string()], |args| {
+            calls.push(args.to_vec());
+            if calls.len() == 1 {
+                Err(Error::git_command_failed(
+                    "gh issue failed: could not add label: 'lint' not found".to_string(),
+                ))
+            } else {
+                Ok("https://github.com/owner/repo/issues/42".to_string())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(output, "https://github.com/owner/repo/issues/42");
+        assert_eq!(
+            calls,
+            vec![
+                vec!["issue", "create", "--label", "lint"],
+                vec!["issue", "create"]
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_retry_unrelated_create_failures() {
+        let mut args = vec![
+            "issue".into(),
+            "create".into(),
+            "--label".into(),
+            "lint".into(),
+        ];
+        let mut calls = 0;
+
+        let error = run_issue_create(&mut args, 2, &["lint".to_string()], |_| {
+            calls += 1;
+            Err(Error::git_command_failed(
+                "gh issue failed: authentication required".to_string(),
+            ))
+        })
+        .unwrap_err();
+
+        assert_eq!(calls, 1);
+        assert!(error.to_string().contains("authentication required"));
     }
 
     #[test]

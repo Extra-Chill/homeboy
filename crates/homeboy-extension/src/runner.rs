@@ -30,6 +30,7 @@ pub struct RunnerOutput {
     pub timed_out: bool,
     pub child_resource: Option<ExtensionChildResourceSummary>,
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
+    pub cargo_target: Option<homeboy_core::CargoTargetEvidence>,
 }
 
 use super::ExtensionExecutionContext;
@@ -288,6 +289,35 @@ impl ExtensionRunner {
         let mut extra_env_vars =
             super::component_script::component_env_vars(&prepared.execution.component);
         extra_env_vars.extend(self.env_vars.clone());
+        let explicit_cargo_target = extra_env_vars
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "CARGO_TARGET_DIR")
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
+        let _cargo_target = prepared
+            .execution
+            .component
+            .managed_execution
+            .shared_cargo_target
+            .then(|| {
+                homeboy_core::cleanup::acquire_managed_cargo_target(
+                    &format!("component:{}", prepared.execution.component.id),
+                    &project_path,
+                    explicit_cargo_target.as_deref(),
+                )
+            })
+            .transpose()?;
+        if let Some(target) = _cargo_target.as_ref() {
+            extra_env_vars.push((
+                "CARGO_TARGET_DIR".to_string(),
+                target.target_dir().to_string_lossy().to_string(),
+            ));
+            extra_env_vars.push((
+                "HOMEBOY_CARGO_TARGET_RESOLUTION".to_string(),
+                target.resolution().to_string(),
+            ));
+        }
         extra_env_vars.extend(secret_env.iter().cloned());
         if !secret_env.is_empty() {
             extra_env_vars.push((
@@ -392,6 +422,7 @@ impl ExtensionRunner {
                 .map(read_extension_phase_timings)
                 .transpose()?
                 .unwrap_or_default(),
+            cargo_target: _cargo_target.as_ref().map(|target| target.evidence()),
         })
     }
 

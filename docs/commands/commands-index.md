@@ -39,6 +39,7 @@ cargo run -p homeboy-cli --bin generate-cli-reference -->
 - [schedule](schedule.md)
 - [self](self.md)
 - [server](server.md)
+- [source](source.md)
 - [ssh](ssh.md)
 - [stack](stack.md)
 - [status](status.md)
