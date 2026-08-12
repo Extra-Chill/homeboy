@@ -1956,6 +1956,13 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
 /// This is an explicit lifecycle command because it may persist observations,
 /// promote admission, stop a drained daemon, and terminate its local tunnel.
 pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
+    reconcile_status_with_outcome(runner_id).map(|outcome| outcome.status)
+}
+
+/// Reconcile a runner and retain the exact generations this operation retired.
+/// The report is a fresh postcondition observation; retirement IDs come only
+/// from the generation reconciler's locked removal path.
+pub fn reconcile_status_with_outcome(runner_id: &str) -> Result<RunnerReconcileStatusOutcome> {
     let runner = load(runner_id)?;
     let mut report = status(runner_id)?;
     if report.connected {
@@ -1967,11 +1974,13 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
     if report.connected {
         reconcile_terminal_jobs(runner_id)?;
     }
-    if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(&runner) {
-        super::generation_store::reconcile_with_ssh(runner_id, report.session.as_ref(), &client)?;
+    let generation_reconcile = if let Ok(Some((_, _, client))) =
+        remote_daemon::resolve_ssh_runner(&runner)
+    {
+        super::generation_store::reconcile_with_ssh(runner_id, report.session.as_ref(), &client)?
     } else {
-        super::generation_store::reconcile(runner_id, report.session.as_ref())?;
-    }
+        super::generation_store::reconcile(runner_id, report.session.as_ref())?
+    };
     if report.connected {
         if let (Some(session), Some(_)) =
             (report.session.as_ref(), report.daemon_freshness.as_ref())
@@ -1979,7 +1988,16 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
             super::generation_store::reconcile_admission_session(runner_id, session)?;
         }
     }
-    status(runner_id)
+    Ok(RunnerReconcileStatusOutcome {
+        status: status(runner_id)?,
+        retired_generation_ids: generation_reconcile.retired_generation_ids,
+    })
+}
+
+#[derive(Debug)]
+pub struct RunnerReconcileStatusOutcome {
+    pub status: RunnerStatusReport,
+    pub retired_generation_ids: Vec<String>,
 }
 
 /// Return the persisted controller-side session projection without reconnecting,

@@ -191,8 +191,15 @@ pub(super) fn status(
 }
 
 pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
-    let before_inventory = runner::runner_generation_inventory_for_session(id, None)?;
-    let report = runner::reconcile_status(id)?;
+    let outcome = runner::reconcile_status_with_outcome(id)?;
+    reconcile_output(id, outcome.status, outcome.retired_generation_ids)
+}
+
+pub(super) fn reconcile_output(
+    id: &str,
+    report: homeboy::runner::runners::RunnerStatusReport,
+    retired_generation_ids: Vec<String>,
+) -> CmdResult<RunnerOutput> {
     let generation_inventory =
         runner::runner_generation_inventory_for_session(id, report.session.as_ref())?;
     let generation_owners =
@@ -202,12 +209,8 @@ pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
         &generation_owners,
         generation_inventory.len(),
     );
-    let reconciliation = reconciliation_outcome(
-        id,
-        before_inventory.len(),
-        generation_inventory.len(),
-        &admission_summary,
-    );
+    let reconciliation =
+        reconciliation_outcome(id, retired_generation_ids, &report, &admission_summary);
     let exit_code = if reconciliation.status == "converged" {
         0
     } else {
@@ -240,30 +243,33 @@ pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
 
 pub(super) fn reconciliation_outcome(
     runner_id: &str,
-    before_generation_count: usize,
-    after_generation_count: usize,
+    retired_generation_ids: Vec<String>,
+    report: &homeboy::runner::runners::RunnerStatusReport,
     admission: &homeboy::runner::runners::RunnerAdmissionSummary,
 ) -> RunnerReconciliationOutcome {
-    let retired_generation_count = before_generation_count.saturating_sub(after_generation_count);
-    if admission.accepting_jobs {
+    let retired_generation_count = retired_generation_ids.len();
+    let unresolved_projection = admission.unresolved_retained_projection_count > 0
+        || !admission.unresolved_generation_ids.is_empty();
+    if admission.accepting_jobs && !unresolved_projection {
         return RunnerReconciliationOutcome {
             status: "converged",
             retired_generation_count,
+            retired_generation_ids,
             remaining_blocker: None,
             next_action: None,
         };
     }
 
-    let remaining_blocker = if !admission.connected {
-        "runner_disconnected"
+    let remaining_blocker = if unresolved_projection {
+        "unresolved_generation_projection".to_string()
+    } else if !admission.connected {
+        "runner_disconnected".to_string()
     } else if !admission.daemon_fresh {
-        "daemon_version_skew"
+        daemon_freshness_blocker(report)
     } else if admission.blocking_generation.is_some() {
-        "retained_generation_ownership"
-    } else if admission.unresolved_retained_projection_count > 0 {
-        "unresolved_generation_projection"
+        "retained_generation_ownership".to_string()
     } else {
-        "admission_unavailable"
+        "admission_unavailable".to_string()
     };
     let reconcile_command = format!("homeboy runner reconcile {}", shell_arg(runner_id));
     let next_action = admission
@@ -285,8 +291,34 @@ pub(super) fn reconciliation_outcome(
             "blocked"
         },
         retired_generation_count,
+        retired_generation_ids,
         remaining_blocker: Some(remaining_blocker),
         next_action,
+    }
+}
+
+fn daemon_freshness_blocker(report: &homeboy::runner::runners::RunnerStatusReport) -> String {
+    match report
+        .daemon_freshness
+        .as_ref()
+        .and_then(|freshness| freshness.stale_reason_code)
+    {
+        Some(reason) => format!("daemon_{}", daemon_stale_reason_code(reason)),
+        None => "daemon_freshness_unavailable".to_string(),
+    }
+}
+
+fn daemon_stale_reason_code(reason: DaemonStaleReasonCode) -> &'static str {
+    match reason {
+        DaemonStaleReasonCode::LeaseMissing => "lease_missing",
+        DaemonStaleReasonCode::LeaseCorrupt => "lease_corrupt",
+        DaemonStaleReasonCode::LeaseSchemaMismatch => "lease_schema_mismatch",
+        DaemonStaleReasonCode::PidDead => "pid_dead",
+        DaemonStaleReasonCode::BuildIdentityMismatch => "build_identity_mismatch",
+        DaemonStaleReasonCode::BinaryHashMismatch => "binary_hash_mismatch",
+        DaemonStaleReasonCode::VersionMismatch => "version_mismatch",
+        DaemonStaleReasonCode::RuntimePathsDrift => "runtime_paths_drift",
+        DaemonStaleReasonCode::TransportUnreachable => "transport_unreachable",
     }
 }
 

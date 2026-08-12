@@ -95,8 +95,11 @@ pub struct RunnerReconciliationOutcome {
     /// `converged`, `partial_progress`, or `blocked`.
     pub status: &'static str,
     pub retired_generation_count: usize,
+    /// IDs retired by this reconciliation operation under the generation lock.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retired_generation_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remaining_blocker: Option<&'static str>,
+    pub remaining_blocker: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
 }
