@@ -750,6 +750,38 @@ fi
 
 # Shard manifests and changed-source selections are Rust-owned because Cargo
 # target identities and their resolution are runner-specific. Changed selections
+# A prebuilt `cargo nextest archive` makes list/run execution-only. Without it,
+# every shard recompiles the entire workspace to execute its own slice, so a
+# four-shard run performs five identical full-workspace debug compiles. The
+# archive carries its own workspace, so `--archive-file` replaces
+# `--workspace`/`--manifest-path` rather than joining them.
+rust_nextest_archive_args() {
+    [ -n "${HOMEBOY_RUST_NEXTEST_ARCHIVE:-}" ] || return 1
+    if [ ! -f "${HOMEBOY_RUST_NEXTEST_ARCHIVE}" ]; then
+        echo "Rust test error: HOMEBOY_RUST_NEXTEST_ARCHIVE does not exist: ${HOMEBOY_RUST_NEXTEST_ARCHIVE}" >&2
+        return 2
+    fi
+    printf '%s\n' --archive-file "${HOMEBOY_RUST_NEXTEST_ARCHIVE}"
+}
+
+# Preflight listing and execution take different workspace arguments without an
+# archive, and both are pinned by tests; only the archive case is shared.
+rust_nextest_list_source_args() {
+    local status
+    rust_nextest_archive_args && return 0
+    status=$?
+    [ "$status" -eq 2 ] && return 1
+    printf '%s\n' --workspace
+}
+
+rust_nextest_run_source_args() {
+    local status
+    rust_nextest_archive_args && return 0
+    status=$?
+    [ "$status" -eq 2 ] && return 1
+    printf '%s\n' --manifest-path "${PROJECT_PATH}/Cargo.toml" --workspace
+}
+
 # resolve against the current inventory, then reuse the exact replay and
 # ARG_MAX-safe batching path below.
 if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE:-}${HOMEBOY_TEST_INVENTORY_FILE:-}${HOMEBOY_TEST_INVENTORY_ONLY:-}" ]; then
@@ -854,6 +886,25 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
             rust_nextest_cleanup 1
             exit 1
         fi
+        # Resolve the test source once. Preflight and execution must agree on it:
+        # listing from the workspace while running from an archive (or the
+        # reverse) would validate membership against binaries that are not the
+        # ones executed.
+        NEXTEST_LIST_SOURCE_ARGS=()
+        while IFS= read -r NEXTEST_SOURCE_ARG; do
+            NEXTEST_LIST_SOURCE_ARGS+=("$NEXTEST_SOURCE_ARG")
+        done < <(rust_nextest_list_source_args) || true
+        NEXTEST_RUN_SOURCE_ARGS=()
+        while IFS= read -r NEXTEST_SOURCE_ARG; do
+            NEXTEST_RUN_SOURCE_ARGS+=("$NEXTEST_SOURCE_ARG")
+        done < <(rust_nextest_run_source_args) || true
+        if [ "${#NEXTEST_LIST_SOURCE_ARGS[@]}" -eq 0 ] || [ "${#NEXTEST_RUN_SOURCE_ARGS[@]}" -eq 0 ]; then
+            SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+            rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+            rust_nextest_cleanup 1
+            exit 1
+        fi
+
         # Capture filter argv values once. Preflight and execution consume the
         # same shell-owned bytes, never a mutable filter file.
         declare -A NEXTEST_FILTERS NEXTEST_FILTER_DIGESTS
@@ -869,7 +920,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
                 exit 1
             fi
             homeboy_runner_harness_register_cleanup "$NEXTEST_LIST_JSON"
-            homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- rust_capture_stdout "$NEXTEST_LIST_JSON" cargo nextest list --workspace --message-format json -E "$NEXTEST_FILTER" || true
+            homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- rust_capture_stdout "$NEXTEST_LIST_JSON" cargo nextest list "${NEXTEST_LIST_SOURCE_ARGS[@]}" --message-format json -E "$NEXTEST_FILTER" || true
             if [ "$NEXTEST_LIST_EXIT" -ne 0 ] || ! rust_validate_nextest_membership "$NEXTEST_LIST_JSON" "$NEXTEST_BATCH"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
@@ -900,7 +951,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
                 rust_nextest_cleanup 1
                 exit 1
             fi
-            homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --manifest-path "${PROJECT_PATH}/Cargo.toml" --workspace --test-threads 1 --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
+            homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${NEXTEST_RUN_SOURCE_ARGS[@]}" --test-threads 1 --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
             if ! NEXTEST_BATCH_FAILED_NAMES="$(mktemp)"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
