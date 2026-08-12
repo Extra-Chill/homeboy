@@ -184,6 +184,11 @@ raise SystemExit(1 if mode in {"failure", "leaky-failure", "retry-failure"} and 
 PY
   exit $?
 fi
+if [ -n "${HOMEBOY_SILENT_TEST:-}" ] && [[ " $* " == *" ${HOMEBOY_SILENT_TEST} "* ]]; then
+  # A planned identity that produces no `test result:` line at all: the shape a
+  # shard sees when execution is cut short rather than reported as a failure.
+  exit 0
+fi
 if [ -n "${HOMEBOY_FAIL_TEST:-}" ] && [[ " $* " == *" ${HOMEBOY_FAIL_TEST} "* ]]; then
   printf 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n'
   exit 1
@@ -572,6 +577,117 @@ assert selected == ["member::member_works", "unit::alpha", "unit::beta", "api::w
 assert len(selected) == len(set(selected)), selected
 assert json.load(open(sys.argv[2])) == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}
 PY
+
+# A shard killed by its wall-clock budget never reaches a terminal emit, so the
+# only thing that can report the gap is evidence already written to disk. Record
+# every result write and prove a partial checkpoint exists *before* completion:
+# that checkpoint is what a killed shard leaves behind (#12219).
+cat > "$WORK_DIR/checkpoint-writer.sh" <<'EOF'
+homeboy_write_test_results() {
+  python3 - "$HOMEBOY_TEST_RESULTS_FILE" "$HOMEBOY_CHECKPOINT_LOG" "$@" <<'PY'
+import json
+import sys
+path, log, executed, passed, failed, skipped, partial = sys.argv[1:]
+record = {"executed": int(executed), "passed": int(passed), "failed": int(failed), "skipped": int(skipped), "partial": partial}
+with open(path, "w") as handle:
+    json.dump(record, handle)
+with open(log, "a") as handle:
+    handle.write(json.dumps(record) + "\n")
+PY
+}
+EOF
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_RUST_NEXTEST_FILTER_MAX_BYTES=150 \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_FAKE_NEXTEST_RUN_LOG="$WORK_DIR/checkpoint-nextest.log" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/checkpoint-writer.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/checkpoint-results.json" \
+HOMEBOY_CHECKPOINT_LOG="$WORK_DIR/checkpoint-log.jsonl" \
+HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/checkpoint-nextest.out"
+
+python3 - "$WORK_DIR/checkpoint-log.jsonl" "$WORK_DIR/checkpoint-nextest.out" <<'PY'
+import json
+import sys
+
+records = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+assert records, "the shard must write results incrementally, not only at the end"
+
+# The last word is still the complete, correct shard outcome.
+assert records[-1] == {
+    "executed": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"
+}, records
+
+# At least one durable write predates completion. Had the budget expired there,
+# `executed < total` would already be on disk instead of nothing at all.
+partial_writes = [record for record in records[:-1] if record["executed"] < 5]
+assert partial_writes, records
+
+# Progress only moves forward, so a surviving checkpoint is always a lower bound
+# on what actually ran rather than a stale higher count.
+executed = [record["executed"] for record in records]
+assert executed == sorted(executed), executed
+
+# The same progress is legible in the log a human reads during triage.
+progress = [line for line in open(sys.argv[2]).read().splitlines() if line.startswith("Rust shard progress:")]
+assert len(progress) == len(records) - 1, progress
+assert progress[-1] == "Rust shard progress: executed=5/5 passed=4 failed=0 skipped=1", progress
+PY
+printf 'PASS: a shard checkpoints partial progress before it can be killed\n'
+
+# A shard that reaches its terminal check with an incomplete plan must say so.
+# "failed" alone is indistinguishable from a red suite, and the difference
+# between "these tests broke" and "most of these never ran" is the whole
+# diagnosis (#12219). The cargo shard path has no per-batch membership
+# enforcement, so this check is the only thing standing between an unrun shard
+# and a plausible-looking red one.
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_SILENT_TEST=unit::beta \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/manifest.json" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/truncated-results.json" \
+HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/truncated.out" 2> "$WORK_DIR/truncated.err"
+TRUNCATED_EXIT=$?
+set -e
+
+python3 - "$WORK_DIR/truncated.err" "$WORK_DIR/truncated-results.json" "$WORK_DIR/annotations/rust-test-shard.json" "$TRUNCATED_EXIT" <<'PY'
+import json
+import sys
+
+stderr = open(sys.argv[1], encoding="utf-8").read()
+assert int(sys.argv[4]) != 0, "a truncated shard must not report success"
+
+# The gap is named in full, so triage never has to compute total - executed.
+assert "Rust shard truncated: executed 6 of 7 planned identities; 1 never ran" in stderr, stderr
+assert "status=truncated" in stderr, stderr
+
+# Zero tests failed. Without the explicit truncation finding this shard would
+# present as a bare nonzero exit with nothing broken in it.
+results = json.load(open(sys.argv[2]))
+assert results == {"total": 6, "passed": 5, "failed": 0, "skipped": 1, "partial": "rust-shard"}, results
+
+# Consumers get the same distinction structurally, not just in prose.
+record = json.load(open(sys.argv[3]))[0]
+assert record["status"] == "truncated", record
+assert (record["total"], record["executed"], record["failed"]) == (7, 6, 0), record
+PY
+printf 'PASS: an incomplete shard reports truncation rather than a bare failure\n'
 
 # A nonzero batch exit remains aggregate evidence: every prevalidated batch
 # runs exactly once, and the final shard fails only after all outcomes exist.
