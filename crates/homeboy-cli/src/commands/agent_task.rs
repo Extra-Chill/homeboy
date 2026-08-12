@@ -255,10 +255,14 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 exit_code,
             ))
         }
-        AgentTaskCommand::List(list_args) => status::list_runs(
-            agent_task_service::AgentTaskDiscoveryFilter::All,
-            list_args.into(),
-        ),
+        AgentTaskCommand::List(list_args) => {
+            let filter = if list_args.latest {
+                agent_task_service::AgentTaskDiscoveryFilter::Latest
+            } else {
+                agent_task_service::AgentTaskDiscoveryFilter::All
+            };
+            status::list_runs(filter, list_args.into())
+        }
         AgentTaskCommand::Active(active_args) => {
             if active_args.reconcile {
                 status::reconcile_active(!active_args.apply)

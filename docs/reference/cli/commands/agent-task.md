@@ -369,7 +369,7 @@ homeboy agent-task list [OPTIONS]
 
 List durable runs, newest first.
 
-Discovery returns a finite agent-facing page by default; use `--limit` for a different page or `--full` for every matching record.
+Discovery returns a finite agent-facing page by default; use `--limit` for a different page or `--full` for every matching record. Use `--latest` to return only the newest record matching the supplied list filters.
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -383,6 +383,7 @@ Discovery returns a finite agent-facing page by default; use `--limit` for a dif
 | `--run-placement` | `<RUN_PLACEMENT>` | Filter by recorded execution placement, not the global routing policy Values: `local`, `remote`, `runner`. |
 | `--parent-id` | `<PARENT_ID>` | _no help text_ |
 | `--full` | flag | Return every matching record. This is intentionally explicit because discovery defaults to a finite agent-facing page |
+| `--latest` | flag | Return only the newest record matching the supplied list filters |
 
 ## `homeboy agent-task active`
 

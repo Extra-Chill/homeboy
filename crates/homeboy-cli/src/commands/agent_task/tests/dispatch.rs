@@ -1880,6 +1880,54 @@ fn active_cursor_continues_discovery_and_cannot_scope_fleet_reconciliation() {
 }
 
 #[test]
+fn list_latest_accepts_list_filters_and_rejects_pagination_selectors() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "list",
+        "--latest",
+        "--repo",
+        "homeboy",
+        "--worktree",
+        "homeboy@fix-12242",
+        "--task-url",
+        "https://github.com/Extra-Chill/homeboy/issues/12242",
+        "--submitted-after",
+        "2026-01-01T00:00:00Z",
+        "--state",
+        "failed",
+        "--run-placement",
+        "runner",
+        "--parent-id",
+        "batch-12242",
+    ])
+    .expect("filtered latest list parses");
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::List(args) = agent_task.command else {
+        panic!("expected list command");
+    };
+    assert!(args.latest);
+    assert_eq!(args.repo.as_deref(), Some("homeboy"));
+    assert_eq!(args.worktree.as_deref(), Some("homeboy@fix-12242"));
+    assert_eq!(args.task_url.as_deref(), Some("https://github.com/Extra-Chill/homeboy/issues/12242"));
+    assert_eq!(args.submitted_after.as_deref(), Some("2026-01-01T00:00:00Z"));
+    assert_eq!(args.state.as_deref(), Some("failed"));
+    assert_eq!(args.run_placement.as_deref(), Some("runner"));
+    assert_eq!(args.parent_id.as_deref(), Some("batch-12242"));
+
+    assert!(Cli::try_parse_from([
+        "homeboy", "agent-task", "list", "--latest", "--cursor", "1",
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from([
+        "homeboy", "agent-task", "list", "--latest", "--full",
+    ])
+    .is_err());
+}
+
+#[test]
 fn agent_task_timeout_ms_flags_parse_for_cook_run_and_run_plan() {
     let cook = Cli::try_parse_from([
         "homeboy",

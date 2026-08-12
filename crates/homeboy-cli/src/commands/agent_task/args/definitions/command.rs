@@ -108,7 +108,8 @@ pub enum AgentTaskCommand {
     /// List durable runs, newest first.
     ///
     /// Discovery returns a finite agent-facing page by default; use `--limit` for
-    /// a different page or `--full` for every matching record.
+    /// a different page or `--full` for every matching record. Use `--latest` to
+    /// return only the newest record matching the supplied list filters.
     List(ListArgs),
     /// List queued and running durable runs, newest first.
     ///
@@ -261,6 +262,9 @@ pub struct ListArgs {
     /// discovery defaults to a finite agent-facing page.
     #[arg(long)]
     pub full: bool,
+    /// Return only the newest record matching the supplied list filters.
+    #[arg(long, conflicts_with_all = ["cursor", "full"])]
+    pub latest: bool,
 }
 #[derive(Args, Debug)]
 pub struct ActiveArgs {
