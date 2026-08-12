@@ -222,8 +222,10 @@ jobs:
     name: homeboy
     needs: [pr-state, ci-capacity-admission]
     if: ${{ needs.pr-state.outputs.active == 'true' }}
-    # Includes the jq-portable exact shard partitioning fix from homeboy-action#372.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@8f90f5c37f703240c8b0f4327845ac8c89fb2b08
+    # v2.11.21. Includes the jq-portable exact shard partitioning fix from
+    # homeboy-action#372, and homeboy-action#376, which stops the `Test`
+    # reconciliation job from publishing a cancelled run as a red verdict (#10997).
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@a6ff2f5d47ad4b628ffbb0861f2159ed8cb7af1e
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
