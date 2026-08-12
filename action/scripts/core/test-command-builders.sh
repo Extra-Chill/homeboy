@@ -218,10 +218,18 @@ assert_equals \
   "audit flags route after component through review"
 
 HOMEBOY_DIFFERENTIAL_GATING="true"
+# Reverses the assertion added with differential gating in #153 (7e1fd83), which
+# held that a full-scope run on both candidate and base would be diffed into a
+# clean verdict. Measured on Extra-Chill/homeboy, the premise does not hold: the
+# base is red too, so both sides fail and the gate downgrades to `baseline_red`
+# -- 32.7 minutes to publish a green check carrying no verdict (#11751 W1-2).
+#
+# `test` keeps the exemption; its scope rides the extension's
+# HOMEBOY_TEST_SCOPE_* contract rather than a CLI flag.
 assert_equals \
-  "homeboy review audit data-machine --path /tmp/workspace" \
+  "homeboy review audit data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
-  "differential audit uses full scope"
+  "differential audit is changed-scoped"
 
 assert_equals \
   "homeboy review test data-machine --path /tmp/workspace" \
@@ -234,9 +242,9 @@ assert_equals \
   "differential lint keeps changed scope"
 
 assert_equals \
-  "homeboy review audit data-machine --path /tmp/workspace" \
+  "homeboy review audit data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review audit" "${COMPONENT}" "${WORKSPACE}")" \
-  "differential review audit uses full scope"
+  "differential review audit is changed-scoped"
 
 assert_equals \
   "homeboy review test data-machine --path /tmp/workspace" \
