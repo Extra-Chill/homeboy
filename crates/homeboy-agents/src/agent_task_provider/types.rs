@@ -437,6 +437,10 @@ pub(crate) fn wildcard_match(pattern: &str, value: &str) -> bool {
 pub struct AgentTaskProviderRunnerReadiness {
     pub id: String,
     pub label: String,
+    /// Optional extension-owned readiness command run by runner doctor.
+    /// `{{runtime_path}}` is resolved against the selected runner's runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<CommandInvocation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_env: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

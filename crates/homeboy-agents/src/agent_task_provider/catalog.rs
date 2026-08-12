@@ -271,11 +271,30 @@ pub fn default_backend_for_component(
     default_backend_from_policy(component_id)
 }
 
-pub fn provider_runner_readiness_contracts() -> Vec<AgentTaskProviderRunnerReadiness> {
+#[derive(Debug, Clone)]
+pub struct AgentTaskProviderRunnerReadinessContract {
+    pub provider_id: String,
+    pub backend: String,
+    pub runtime_id: Option<String>,
+    pub runtime_path: Option<String>,
+    pub readiness: AgentTaskProviderRunnerReadiness,
+}
+
+pub fn provider_runner_readiness_contracts() -> Vec<AgentTaskProviderRunnerReadinessContract> {
     AgentTaskProviderCatalog::discover()
         .providers
         .into_iter()
-        .flat_map(|provider| provider.runner_readiness)
+        .flat_map(|provider| {
+            provider.runner_readiness.into_iter().map(move |readiness| {
+                AgentTaskProviderRunnerReadinessContract {
+                    provider_id: provider.id.clone(),
+                    backend: provider.backend.clone(),
+                    runtime_id: provider.runtime_id.clone(),
+                    runtime_path: provider.runtime_path.clone(),
+                    readiness,
+                }
+            })
+        })
         .collect()
 }
 

@@ -1129,6 +1129,7 @@ fn readiness_validation_fails_before_execution_when_provider_executable_is_missi
     provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
         id: "test.executable".to_string(),
         label: "Test executable".to_string(),
+        invocation: None,
         secret_env: Vec::new(),
         env_path: None,
         executable: Some(AgentTaskProviderExecutableReadiness {

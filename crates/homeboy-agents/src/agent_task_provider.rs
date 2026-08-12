@@ -69,7 +69,8 @@ pub use admission::{
 pub use catalog::*;
 pub use command_runner::{
     probe_provider_executor_resolves, provider_command_parts, run_provider_readiness_invocation,
-    ProviderExecutorResolution,
+    ProviderExecutorResolution, ProviderReadinessInvocationResult,
+    PROVIDER_READINESS_RESULT_SCHEMA,
 };
 pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
 pub use credential_readiness::{

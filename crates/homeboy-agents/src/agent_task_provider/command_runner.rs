@@ -22,7 +22,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
-const PROVIDER_READINESS_RESULT_SCHEMA: &str = "homeboy/agent-task-provider-readiness-result/v1";
+pub const PROVIDER_READINESS_RESULT_SCHEMA: &str =
+    "homeboy/agent-task-provider-readiness-result/v1";
 const PROVIDER_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, PartialEq, Eq)]

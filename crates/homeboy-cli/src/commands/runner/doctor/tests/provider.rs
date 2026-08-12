@@ -2,6 +2,7 @@ use super::super::*;
 use homeboy::agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
 };
+use homeboy::core::command_invocation::CommandInvocation;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -14,6 +15,7 @@ fn provider_readiness_renderer_uses_fake_provider_contract() {
     let contract = AgentTaskProviderRunnerReadiness {
         id: "lab.fake_runtime.cache".to_string(),
         label: "Fake runtime cache".to_string(),
+        invocation: None,
         secret_env: Vec::new(),
         env_path: Some(AgentTaskProviderEnvPathReadiness {
             env: vec!["FAKE_RUNTIME_BIN".to_string()],
@@ -52,6 +54,7 @@ fn provider_readiness_warns_on_non_canonical_checkout() {
     let contract = AgentTaskProviderRunnerReadiness {
         id: "lab.fake_runtime.cache".to_string(),
         label: "Fake runtime cache".to_string(),
+        invocation: None,
         secret_env: Vec::new(),
         env_path: Some(AgentTaskProviderEnvPathReadiness {
             env: vec!["FAKE_RUNTIME_BIN".to_string()],
@@ -89,6 +92,7 @@ fn provider_readiness_ok_when_path_within_canonical_root() {
     let contract = AgentTaskProviderRunnerReadiness {
         id: "lab.fake_runtime.cache".to_string(),
         label: "Fake runtime cache".to_string(),
+        invocation: None,
         secret_env: Vec::new(),
         env_path: Some(AgentTaskProviderEnvPathReadiness {
             env: vec!["FAKE_RUNTIME_BIN".to_string()],
@@ -265,6 +269,52 @@ fn remote_executor_probe_keeps_missing_runner_local_dependency_actionable() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Cannot find module"));
+}
+
+#[test]
+fn command_readiness_surfaces_incomplete_cache_repair() {
+    let controller_runtime = "/Users/controller/.config/homeboy/agent-runtimes/cache-fixture";
+    let invocation = CommandInvocation {
+        argv: vec![
+            "node".to_string(),
+            "{{runtime_path}}/scripts/readiness.cjs".to_string(),
+        ],
+        ..CommandInvocation::default()
+    };
+    let entrypoint =
+        probes::remote_readiness_entrypoint("cache-fixture", controller_runtime, &invocation)
+            .expect("runtime-relative readiness invocation");
+    let home = tempfile::tempdir().expect("runner home");
+    let script = home
+        .path()
+        .join(".config/homeboy/agent-runtimes/cache-fixture/scripts/readiness.cjs");
+    std::fs::create_dir_all(script.parent().expect("script parent")).expect("create scripts");
+    std::fs::write(
+        &script,
+        "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'incomplete_cache',retryable:false,reason:'built CLI is missing',remediation:'repair the managed runtime cache',identity:{runtime:'cache-fixture'}}));",
+    )
+    .expect("write readiness script");
+
+    let shell = probes::provider_readiness_remote_shell(
+        &entrypoint,
+        r#"{"schema":"homeboy/agent-task-provider-readiness-request/v1"}"#,
+    );
+    assert!(!shell.contains(controller_runtime));
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(shell)
+        .env("HOME", home.path())
+        .output()
+        .expect("run runner-local readiness");
+
+    assert!(output.status.success());
+    let result: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("structured readiness result");
+    assert_eq!(result["ready"], false);
+    assert_eq!(result["classification"], "incomplete_cache");
+    assert_eq!(result["reason"], "built CLI is missing");
+    assert_eq!(result["remediation"], "repair the managed runtime cache");
+    assert_eq!(result["identity"]["runtime"], "cache-fixture");
 }
 
 #[test]
