@@ -2695,10 +2695,10 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
             invocation_run_ids.push(run_id.to_string());
         }
     }
+    let selected_candidate = cook_selected_candidate_provenance(&cook_id, &invocation_run_ids);
     let failure_context = (exit_code != 0)
         .then(|| cook_failure_context(&cook_id, latest_run_id.as_deref(), status))
         .flatten();
-    let selected_candidate = cook_selected_candidate_provenance(&cook_id, &invocation_run_ids);
     AgentTaskRunResult {
         value: AgentTaskCookReport {
             schema: "homeboy/agent-task-cook/v1",

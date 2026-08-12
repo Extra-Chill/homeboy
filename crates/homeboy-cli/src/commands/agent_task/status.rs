@@ -158,6 +158,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     attach_status_identity(&mut value, &args.run_id, &target);
     attach_cook_notification_delivery(&mut value, &record, &target);
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
+    attach_cook_completion(&mut value, &record);
     let acceptance_is_actionable = record.state
         == agent_task_lifecycle::AgentTaskRunState::Succeeded
         && record
@@ -1341,6 +1342,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "retry_replay": retry.projection(),
         "next_commands": next_commands,
     });
+    attach_cook_completion(&mut value, &record);
     if let Some(selection) = target.selection {
         value["candidate_selection"] = selection;
     }
@@ -1370,6 +1372,29 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     bound_full_reader_payload(&mut value);
     preserve_controller_owner_placement(&mut value, run_id);
     Ok((value, 0))
+}
+
+/// Add the Cook-level completion fact to record readers. Aggregate success is
+/// nested provider evidence; only a durable PR receipt completes a requested
+/// Cook publication.
+fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRecord) {
+    let Ok(Some(recipe)) = agent_task_service::load_recipe_for_attempt(&record.run_id) else {
+        return;
+    };
+    let candidate_produced = record
+        .metadata
+        .pointer("/latest_promotion/patch_artifact/sha256")
+        .and_then(Value::as_str)
+        .is_some();
+    let finalization_requested = recipe.finalization["no_finalize"] != true;
+    if let Some(completion) = agent_task_service_direct::cook_completion(
+        candidate_produced,
+        finalization_requested,
+        record.metadata.get("cook_finalization"),
+        Some(&record.run_id),
+    ) {
+        value["cook_completion"] = serde_json::to_value(completion).expect("completion serializes");
+    }
 }
 
 /// Basis marker for `next_actions`: the diagnosis mapped a typed failure
