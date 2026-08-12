@@ -137,8 +137,6 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
             target.path(),
             "https://github.com/example/target.git",
         );
-        std::fs::write(target.path().join("homeboy.json"), r#"{"id":"target"}"#)
-            .expect("write portable config");
         let stale = tempfile::tempdir().expect("stale checkout");
         std::fs::write(stale.path().join("homeboy.json"), r#"{"id":"stale"}"#)
             .expect("write portable config");

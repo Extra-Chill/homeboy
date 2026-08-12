@@ -89,36 +89,20 @@ pub fn registered() -> Result<Vec<Component>> {
 /// Cook admission uses this for an explicit repository identity so stale,
 /// unrelated registrations cannot trigger portable Git enrichment.
 pub fn registered_by_id(id: &str) -> Result<Option<Component>> {
-    if let Some(component) = load_standalone_component(id)? {
-        return Ok(Some(component));
+    let projects = project::list().unwrap_or_default();
+    let standalone_snapshot = project::StandaloneComponentConfigSnapshot::load();
+    for project in &projects {
+        if project.components.iter().any(|attachment| attachment.id == id) {
+            return project::resolve_project_component_with_standalone_snapshot(
+                project,
+                id,
+                Some(&standalone_snapshot),
+            )
+            .map(Some);
+        }
     }
 
-    // Project attachments establish that this ID is registered, but Cook only
-    // needs an explicit identity here. Avoid materializing portable metadata.
-    Ok(project::list().unwrap_or_default().into_iter().find_map(|project| {
-        project
-            .components
-            .into_iter()
-            .find(|attachment| attachment.id == id)
-            .map(|attachment| {
-                let remote_url = read_portable_config(Path::new(&attachment.local_path))
-                    .ok()
-                    .flatten()
-                    .and_then(|config| {
-                        config
-                            .get("remote_url")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                    });
-                Component {
-                    id: attachment.id,
-                    local_path: attachment.local_path,
-                    remote_path: attachment.remote_path.unwrap_or_default(),
-                    remote_url,
-                    ..Default::default()
-                }
-            })
-    }))
+    load_standalone_component(id)
 }
 
 /// Load standalone component registrations from `~/.config/homeboy/components/`.
@@ -223,7 +207,7 @@ fn load_standalone_component(id: &str) -> Result<Option<Component>> {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
         return Ok(None);
     };
-    Ok(component_from_standalone_config(id, json))
+    Ok(component_from_standalone_registration(id, json))
 }
 
 fn component_from_standalone_config(id: &str, mut json: serde_json::Value) -> Option<Component> {
