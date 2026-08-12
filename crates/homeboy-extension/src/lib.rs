@@ -139,7 +139,8 @@ pub use manifest::{
     EXTENSION_MATERIALIZATION_SOURCE_SCHEMA, NOTIFICATION_TRANSPORT_SCHEMA,
 };
 pub use recipe_run::{
-    recipe_run_providers, resolve_recipe_run_provider, RecipeRunProviderDescriptor,
+    recipe_run_provider_inventory, recipe_run_providers, resolve_recipe_run_provider,
+    RecipeRunProviderDescriptor, RecipeRunProviderInventoryEntry, RecipeRunProviderValidation,
     RecipeRunRequest,
 };
 pub use refactor_protocol::{
