@@ -11308,6 +11308,69 @@ fn recovery_context_uses_current_gate_and_finalization_evidence_not_an_older_can
     });
 }
 
+#[test]
+fn exact_checkpoint_destination_mismatch_projects_a_fork_replacement_response() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-checkpoint-destination-mismatch";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .expect("persist lifecycle record");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, &options.initial_run_id)
+            .expect("index Cook attempt");
+        let operation_key = format!("promote:{}", options.initial_run_id);
+        agent_task_lifecycle::claim_cook_operation(
+            &options.initial_run_id,
+            &operation_key,
+            std::time::Duration::from_secs(60),
+        )
+        .expect("claim promotion");
+        agent_task_lifecycle::fail_cook_operation(
+            &options.initial_run_id,
+            &operation_key,
+            serde_json::json!({
+                "code": "ValidationInvalidArgument",
+                "details": {
+                    "field": "promotion",
+                    "recovery": { "action": "fork_replacement" },
+                },
+                "deepest_cause": {
+                    "code": "validation.invalid_argument",
+                    "field": "promotion",
+                    "message": "promotion resume target differs from the exact checkpointed applied candidate",
+                },
+            }),
+        )
+        .expect("persist exact checkpoint rejection");
+
+        let context = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "durable_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some(&options.initial_run_id),
+        })
+        .value
+        .failure_context
+        .expect("durable failure context");
+
+        assert_eq!(context.phase, "promotion");
+        assert!(context.legal_actions.iter().any(|action| {
+            action.action == "fork_replacement"
+                && action.command
+                    == format!("homeboy agent-task retry {} --run", options.initial_run_id)
+        }));
+        assert!(context
+            .legal_actions
+            .iter()
+            .chain(&context.next_actions)
+            .all(|action| action.action != "resume" && !action.command.contains("cook-continue")));
+    });
+}
+
 /// #11114: `select_cook_candidate` deliberately spans invocations, so a report
 /// can name this invocation's `latest_run_id` while `selected_candidate` names a
 /// prior attempt. `invocation_scoped` makes that difference legible instead of
