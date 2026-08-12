@@ -859,6 +859,7 @@ fn run_main_test_workflow_inner(
                     },
                     raw_output: None,
                     extension_phase_timings: Vec::new(),
+                    cargo_target: None,
                 });
             }
 
@@ -897,6 +898,7 @@ fn run_main_test_workflow_inner(
                 },
                 raw_output: None,
                 extension_phase_timings: Vec::new(),
+                cargo_target: None,
             });
         }
     }
@@ -1324,6 +1326,7 @@ fn run_main_test_workflow_inner(
         test_scope: changed_scope,
         summary,
         raw_output,
+        cargo_target: output.cargo_target,
         extension_phase_timings,
     })
 }
@@ -1552,6 +1555,7 @@ fn failed_test_workflow(
             stderr_limit_bytes: 0,
         }),
         extension_phase_timings: Vec::new(),
+        cargo_target: None,
     }
 }
 
@@ -1889,6 +1893,7 @@ pub fn run_self_check_test_workflow_with_progress(
         },
         raw_output,
         extension_phase_timings: Vec::new(),
+        cargo_target: output.cargo_target,
     })
 }
 
@@ -2471,6 +2476,7 @@ mod tests {
                 )),
                 raw_output: None,
                 extension_phase_timings: Vec::new(),
+                cargo_target: None,
             })
         })
         .expect("test failure should remain a test result");
@@ -2564,6 +2570,7 @@ mod tests {
             summary: None,
             raw_output: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: None,
         });
         let json = serde_json::to_value(report).expect("report json");
 

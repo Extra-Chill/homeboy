@@ -302,7 +302,7 @@ pub(crate) fn prepare_runner_process(
                 runner.workspace_root.as_deref(),
             ),
         });
-    crate::hydrate_prepared_workspace_source_snapshot(&runner.id, &cwd, &mut source_snapshot)?;
+    crate::hydrate_prepared_workspace_source_snapshot(&runner, &cwd, &mut source_snapshot)?;
     validate_required_paths(
         &runner,
         &request.require_paths,

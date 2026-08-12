@@ -6,7 +6,7 @@ Hand-written narrative for these commands lives in `docs/commands/`. -->
 
 # Homeboy CLI reference (generated)
 
-`homeboy` exposes 556 visible commands across 41 top-level command families. Every page below is generated from the clap command tree in `crates/homeboy-cli`, so it cannot drift from the binary.
+`homeboy` exposes 560 visible commands across 42 top-level command families. Every page below is generated from the clap command tree in `crates/homeboy-cli`, so it cannot drift from the binary.
 
 Hand-written narrative lives in the [commands index](../../../commands/commands-index.md). Global flags are documented in [the root command reference](../homeboy-root-command.md). Machine-readable safety, docs, output, and Lab metadata come from `homeboy contract manifest`.
 
@@ -45,6 +45,7 @@ Hand-written narrative lives in the [commands index](../../../commands/commands-
 | `homeboy refactor` | [refactor.md](refactor.md) | Structural refactoring (rename terms across codebase) |
 | `homeboy rig` | [rig.md](rig.md) | Manage local dev rigs (reproducible multi-component environments) |
 | `homeboy runner` | [runner.md](runner.md) | Manage local and SSH execution runners |
+| `homeboy source` | [source.md](source.md) | Inspect sealed source-package admissibility without staging resources |
 | `homeboy runtime` | [runtime.md](runtime.md) | Inspect core-owned runtime helper assets |
 | `homeboy worktree` | [worktree.md](worktree.md) | Manage component-backed task worktrees |
 | `homeboy tunnel` | [tunnel.md](tunnel.md) | Manage private service tunnel declarations |

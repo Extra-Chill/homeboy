@@ -595,6 +595,15 @@ pub enum WorktreeProviderKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeProviderCommands {
+    /// Versioned exact-identity lookup. It receives `{handle}` and returns a
+    /// `homeboy/worktree-provider-identity/v1` envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_identity: Option<Vec<String>>,
+    /// Versioned safety lookup. It receives `{identity}` from
+    /// `resolve_identity` and returns a `homeboy/worktree-provider-safety/v1`
+    /// envelope. Configure this together with `resolve_identity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attest_safety: Option<Vec<String>>,
     /// Targeted handle lookup. Each `{handle}` argument is replaced with the
     /// requested handle. The result uses `list_result_mapping` and may contain one item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -644,6 +653,8 @@ pub struct WorktreeProviderCommands {
 impl Default for WorktreeProviderCommands {
     fn default() -> Self {
         Self {
+            resolve_identity: None,
+            attest_safety: None,
             resolve: None,
             resolve_path: None,
             resolve_not_found_exit_codes: Vec::new(),
@@ -1077,6 +1088,8 @@ mod tests {
     #[test]
     fn legacy_worktree_provider_commands_literal_remains_compatible() {
         let commands = WorktreeProviderCommands {
+            resolve_identity: None,
+            attest_safety: None,
             resolve: None,
             resolve_path: None,
             resolve_not_found_exit_codes: Vec::new(),

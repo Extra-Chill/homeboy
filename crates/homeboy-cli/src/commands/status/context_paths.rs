@@ -10,12 +10,17 @@ use serde_json::Value;
 
 use homeboy::core::{component, git};
 
-use super::types::{UnregisteredContextStatusOutput, UnregisteredControlPlaneStatus};
+use super::types::{StatusTimer, UnregisteredContextStatusOutput, UnregisteredControlPlaneStatus};
 
-pub(super) fn unregistered_cwd_status_output() -> Option<UnregisteredContextStatusOutput> {
+pub(super) fn unregistered_cwd_status_output(
+    timer: &StatusTimer,
+) -> Option<UnregisteredContextStatusOutput> {
     let cwd = std::env::current_dir().ok()?;
-    let git_root = git::get_git_root(&cwd.to_string_lossy())
-        .ok()
+    let git_root = timer
+        .remaining()
+        .and_then(|remaining| {
+            git::get_git_root_with_timeout(&cwd.to_string_lossy(), remaining).ok()
+        })
         .map(PathBuf::from);
     let candidates = [Some(cwd.as_path()), git_root.as_deref()];
 

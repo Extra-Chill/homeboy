@@ -4,6 +4,91 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.336.1] - 2026-08-11
+
+### Changed
+- order active retention fixture
+
+### Fixed
+- isolate standard temp roots
+- preserve active checkout remediation
+- clear inherited runtime temp from tests
+- apply hermetic test environment in ci
+- isolate nextest child environments
+- make retention ownership portable
+- retain absent cargo target fixture evidence
+- share automatic artifact retention admission
+- single-flight pressured artifact retention
+- report local cargo target self-checks
+- preserve complete daemon recovery plans
+- inherit managed cargo targets for gates
+- admit component output under capacity pressure
+- share cargo targets across compatible worktrees
+- declare shared cargo targets for gates
+- scale retention admission to filesystem
+- lease shared cargo targets for component scripts
+- retry without missing labels
+- admit cargo targets through bounded retention
+- Fix shadowed install update diagnostics
+
+## [0.336.0] - 2026-08-11
+
+### Added
+- report ignored link exclusions
+- split worktree identity and safety attestation
+- add sealed package check
+
+### Changed
+- align refreshed candidate contracts
+- accept durable detached cook handoff
+- cover exclusion bound
+- consume fixed shard aggregation
+
+### Fixed
+- preserve Cook cwd authority in reverse handoff
+- gate legacy scanner path on Unix
+- preserve Cook timeout and identity contracts
+- resolve self artifacts from shared targets
+- validate managed cwd continuations
+- validate immediate Cook provider repository
+- reject inactive cwd worktree handles
+- compile sealed staging on Windows
+- preserve non-Unix target reclaimability
+- validate split worktree identity claims
+- make sealed extraction retry safe
+- restore durable runtime contracts
+- traverse sealed sources by descriptor
+- probe split worktree providers by ownership
+- preserve repo-only Cook compatibility
+- probe Cargo locks without path races
+- pin split worktree attestation identity
+- halt blocked package scans
+- bind repo-only Cook workspace identity
+- harden sealed source package scanning
+- protect cross-target Cargo builds
+- keep unadmitted commands local
+- preserve explicit cwd authority
+- preserve safe sealed package symlinks
+- reclaim local Cargo target caches
+- bound status latency
+- execute Cook retries exactly once
+- preserve Cook controller diagnostics
+- preserve admitted Lab placement
+- restore post-integration contracts
+
+## [0.335.4] - 2026-08-11
+
+### Changed
+- canonicalize provider workspace fixture
+
+### Fixed
+- reject zero artifact limit
+- persist resolver timeout failures safely
+- omit continuation after convergence
+- defer timed-out worktree resolution
+- report terminal Cook liveness
+- preserve exact Cook execution accounting
+
 ## [0.335.3] - 2026-08-11
 
 ### Fixed

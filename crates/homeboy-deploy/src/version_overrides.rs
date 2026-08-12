@@ -128,6 +128,44 @@ pub(crate) fn fetch_remote_versions_for_project(
     result
 }
 
+pub(crate) fn fetch_remote_versions_for_project_with_deadline(
+    components: &[Component],
+    project: Option<&Project>,
+    base_path: &str,
+    client: &SshClient,
+    deadline: std::time::Instant,
+) -> RemoteVersionProbeResult {
+    let mut result = RemoteVersionProbeResult::default();
+    for component in components {
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            result.failures.push(RemoteVersionProbeFailure {
+                component_id: component.id.clone(),
+                diagnostic: "project status deadline exhausted before remote version probe"
+                    .to_string(),
+            });
+            continue;
+        };
+        let timeout = remaining.min(REMOTE_VERSION_PROBE_TIMEOUT);
+        if let Some(version) = fetch_version_from_file_with_timeout(
+            component,
+            project,
+            base_path,
+            client,
+            &mut result,
+            timeout,
+        ) {
+            result.versions.insert(component.id.clone(), version);
+            continue;
+        }
+        if let Some(version) =
+            fetch_version_from_binary_with_timeout(component, client, &mut result, timeout)
+        {
+            result.versions.insert(component.id.clone(), version);
+        }
+    }
+    result
+}
+
 /// Try to fetch version by reading a version file on the remote server.
 fn fetch_version_from_file(
     component: &Component,
@@ -184,6 +222,57 @@ fn fetch_version_from_file(
         }
     }
 
+    None
+}
+
+fn fetch_version_from_file_with_timeout(
+    component: &Component,
+    project: Option<&Project>,
+    base_path: &str,
+    client: &SshClient,
+    result: &mut RemoteVersionProbeResult,
+    timeout: Duration,
+) -> Option<String> {
+    let version_targets = component.version_targets.as_ref()?;
+    let remote_dir = match project {
+        Some(project) => resolve_effective_remote_path(project, component, base_path).ok()?,
+        None => base_path::join_remote_path(Some(base_path), &component.remote_path).ok()?,
+    };
+    for target in version_targets {
+        for remote_file in remote_version_file_candidates(target) {
+            let remote_path = base_path::join_remote_child(None, &remote_dir, &remote_file).ok()?;
+            if client.is_local {
+                if let Ok(content) = fs::read_to_string(&remote_path) {
+                    if let Some(version) =
+                        parse_component_version(&content, target.pattern.as_deref(), &remote_file)
+                    {
+                        return Some(version);
+                    }
+                }
+                continue;
+            }
+            let output =
+                client.execute_with_timeout(&format!("cat '{}' 2>/dev/null", remote_path), timeout);
+            if output.timed_out {
+                result.failures.push(RemoteVersionProbeFailure {
+                    component_id: component.id.clone(),
+                    diagnostic: format!(
+                        "remote version probe timed out after {}ms while reading {}",
+                        timeout.as_millis(),
+                        remote_path
+                    ),
+                });
+                return None;
+            }
+            if output.success {
+                if let Some(version) =
+                    parse_component_version(&output.stdout, target.pattern.as_deref(), &remote_file)
+                {
+                    return Some(version);
+                }
+            }
+        }
+    }
     None
 }
 
@@ -247,6 +336,43 @@ fn fetch_version_from_binary(
         }
     }
 
+    None
+}
+
+fn fetch_version_from_binary_with_timeout(
+    component: &Component,
+    client: &SshClient,
+    result: &mut RemoteVersionProbeResult,
+    timeout: Duration,
+) -> Option<String> {
+    let artifact = component.build_artifact.as_ref()?;
+    let binary = Path::new(artifact).file_name()?.to_str()?;
+    for candidate in [
+        format!("/usr/local/bin/{binary}"),
+        format!("/usr/bin/{binary}"),
+        binary.to_string(),
+    ] {
+        let output = client.execute_with_timeout(
+            &format!("{} --version 2>/dev/null", shell::quote_path(&candidate)),
+            timeout,
+        );
+        if output.timed_out {
+            result.failures.push(RemoteVersionProbeFailure {
+                component_id: component.id.clone(),
+                diagnostic: format!(
+                    "remote binary version probe timed out after {}ms for {}",
+                    timeout.as_millis(),
+                    candidate
+                ),
+            });
+            return None;
+        }
+        if output.success {
+            if let Some(version) = parse_cli_version_output(output.stdout.trim()) {
+                return Some(version);
+            }
+        }
+    }
     None
 }
 

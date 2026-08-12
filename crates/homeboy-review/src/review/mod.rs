@@ -407,6 +407,8 @@ mod tests {
             test_scope: None,
             summary: None,
             raw_output: None,
+            // This artifact fixture does not represent a Cargo execution.
+            cargo_target: None,
             ci_context: None,
             extension_phase_timings: vec![ExtensionPhaseTiming {
                 name: "provider".to_string(),
