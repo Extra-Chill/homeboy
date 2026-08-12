@@ -884,6 +884,16 @@ fn connect_runner_for_offload(
     let (stdout, stderr, exit_code, timed_out) =
         run_runner_connect_command(runner_id, timeout, &lease)?;
     if !timed_out && exit_code == 0 {
+        match structured_runner_connect_response(&stdout, runner_id) {
+            Ok(Some(report)) => return Ok((report, 0)),
+            Ok(None) => {}
+            Err(reason) => {
+                return Ok((
+                    failed_runner_connect_report(runner_id, status(runner_id)?, reason),
+                    1,
+                ));
+            }
+        }
         if let Some(session) =
             wait_for_live_session(HANDOFF_CONNECT_STATUS_CONVERGENCE_TIMEOUT, |remaining| {
                 crate::local_live_session(runner_id, remaining)
@@ -922,31 +932,200 @@ fn connect_runner_for_offload(
     };
 
     Ok((
-        RunnerConnectReport {
-            runner_id: runner_id.to_string(),
-            mode: None,
-            role: None,
-            connected: false,
-            recorded: None,
-            local_url: None,
-            broker_url: None,
-            controller_id: None,
-            remote_daemon_address: None,
-            tunnel_pid: None,
-            remote_daemon_pid: None,
-            connection_warning: None,
-            homeboy_version: None,
-            homeboy_build_identity: None,
-            session_path: Some(status.session_path),
-            leaseless_recovery: None,
-            state_loss_recovery: None,
-            leaseless_recovery_evidence: None,
-            failure_kind: Some(super::RunnerFailureKind::SshFailure),
-            failure_message: Some(reason),
-            failure_evidence: None,
-        },
+        failed_runner_connect_report(runner_id, status, reason),
         exit_code,
     ))
+}
+
+#[derive(serde::Deserialize)]
+struct RunnerConnectCommandResult {
+    schema: String,
+    command: String,
+    operation: Option<String>,
+    success: bool,
+    status: String,
+    data: RunnerConnectCommandData,
+}
+
+#[derive(serde::Deserialize)]
+struct RunnerConnectCommandData {
+    command: String,
+    id: String,
+    connection: RunnerConnectCommandConnection,
+}
+
+#[derive(serde::Deserialize)]
+struct RunnerConnectCommandConnection {
+    action: String,
+    runner_id: String,
+    connected: bool,
+    recorded: Option<bool>,
+    local_url: Option<String>,
+    broker_url: Option<String>,
+    controller_id: Option<String>,
+    remote_daemon_address: Option<String>,
+    tunnel_pid: Option<u32>,
+    remote_daemon_pid: Option<u32>,
+    homeboy_version: Option<String>,
+    homeboy_build_identity: Option<String>,
+    session_path: Option<String>,
+}
+
+fn structured_runner_connect_response(
+    stdout: &str,
+    runner_id: &str,
+) -> std::result::Result<Option<RunnerConnectReport>, String> {
+    const LIMIT: usize = 1024;
+    let stdout = stdout.trim();
+    if stdout.is_empty() {
+        return Ok(None);
+    }
+    let response: RunnerConnectCommandResult = serde_json::from_str(stdout).map_err(|error| {
+        format!(
+            "runner connect returned malformed structured output: {error}; stdout={}",
+            bounded_connect_diagnostic(stdout, LIMIT)
+        )
+    })?;
+    let connection = response.data.connection;
+    if response.schema != "homeboy/command-result/v3"
+        || !response.success
+        || response.status != "succeeded"
+        || response.command != "runner"
+        || response.operation.as_deref() != Some("connect")
+        || response.data.command != "runner.connect"
+        || response.data.id != runner_id
+        || connection.action != "connect"
+        || connection.runner_id != runner_id
+        || !connection.connected
+    {
+        return Err(format!(
+            "runner connect structured response contradicts a successful connected result; stdout={}",
+            bounded_connect_diagnostic(stdout, LIMIT)
+        ));
+    }
+    Ok(Some(RunnerConnectReport {
+        runner_id: runner_id.to_string(),
+        mode: None,
+        role: None,
+        connected: connection.connected,
+        recorded: connection.recorded,
+        local_url: connection.local_url,
+        broker_url: connection.broker_url,
+        controller_id: connection.controller_id,
+        remote_daemon_address: connection.remote_daemon_address,
+        tunnel_pid: connection.tunnel_pid,
+        remote_daemon_pid: connection.remote_daemon_pid,
+        connection_warning: None,
+        homeboy_version: connection.homeboy_version,
+        homeboy_build_identity: connection.homeboy_build_identity,
+        session_path: connection.session_path,
+        leaseless_recovery: None,
+        state_loss_recovery: None,
+        leaseless_recovery_evidence: None,
+        failure_kind: None,
+        failure_message: None,
+        failure_evidence: None,
+    }))
+}
+
+fn bounded_connect_diagnostic(value: &str, limit: usize) -> String {
+    let excerpt: String = value.chars().take(limit).collect();
+    if excerpt.len() < value.len() {
+        format!("{excerpt}...<truncated>")
+    } else {
+        excerpt
+    }
+}
+
+fn failed_runner_connect_report(
+    runner_id: &str,
+    status: RunnerStatusReport,
+    reason: String,
+) -> RunnerConnectReport {
+    RunnerConnectReport {
+        runner_id: runner_id.to_string(),
+        mode: None,
+        role: None,
+        connected: false,
+        recorded: None,
+        local_url: None,
+        broker_url: None,
+        controller_id: None,
+        remote_daemon_address: None,
+        tunnel_pid: None,
+        remote_daemon_pid: None,
+        connection_warning: None,
+        homeboy_version: None,
+        homeboy_build_identity: None,
+        session_path: Some(status.session_path),
+        leaseless_recovery: None,
+        state_loss_recovery: None,
+        leaseless_recovery_evidence: None,
+        failure_kind: Some(super::RunnerFailureKind::SshFailure),
+        failure_message: Some(reason),
+        failure_evidence: None,
+    }
+}
+
+#[cfg(test)]
+mod runner_connect_response_tests {
+    use super::structured_runner_connect_response;
+
+    const OBSERVED_V3_CONNECT_RESPONSE: &str = r#"{
+        "schema":"homeboy/command-result/v3",
+        "command":"runner",
+        "operation":"connect",
+        "success":true,
+        "exit_code":0,
+        "status":"succeeded",
+        "data":{
+            "command":"runner.connect",
+            "id":"homeboy-lab",
+            "connection":{
+                "action":"connect",
+                "runner_id":"homeboy-lab",
+                "connected":true,
+                "local_url":"http://127.0.0.1:53321",
+                "tunnel_pid":1604,
+                "remote_daemon_pid":1467759,
+                "homeboy_version":"homeboy 0.338.0+269cfe6b1198"
+            }
+        }
+    }"#;
+
+    #[test]
+    fn accepts_the_observed_v3_successful_connected_runner_response() {
+        let report =
+            structured_runner_connect_response(OBSERVED_V3_CONNECT_RESPONSE, "homeboy-lab")
+                .expect("valid response")
+                .expect("structured response");
+
+        assert!(report.connected);
+        assert_eq!(report.local_url.as_deref(), Some("http://127.0.0.1:53321"));
+        assert_eq!(report.tunnel_pid, Some(1604));
+    }
+
+    #[test]
+    fn rejects_a_success_envelope_that_reports_a_disconnected_runner() {
+        let response =
+            OBSERVED_V3_CONNECT_RESPONSE.replace("\"connected\":true", "\"connected\":false");
+
+        let error = structured_runner_connect_response(&response, "homeboy-lab")
+            .expect_err("contradictory response is rejected");
+
+        assert!(error.contains("contradicts a successful connected result"));
+    }
+
+    #[test]
+    fn bounds_malformed_structured_response_diagnostics() {
+        let response = format!("{{{}", "x".repeat(2048));
+
+        let error = structured_runner_connect_response(&response, "homeboy-lab")
+            .expect_err("malformed response is rejected");
+
+        assert!(error.contains("malformed structured output"));
+        assert!(error.contains("...<truncated>"));
+    }
 }
 
 /// Emit queue admission separately from the terminal command envelope so a

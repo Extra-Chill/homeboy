@@ -197,7 +197,7 @@ pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String
             ));
         }
         if let Some(forward) = session.proxy_forward.as_ref() {
-            if homeboy_core::process::pid_is_running(forward.tunnel_pid) {
+            if proxy_forward_is_owned(forward, homeboy_core::process::process_start_identity) {
                 return Ok(forward.runner_url.clone());
             }
         }
@@ -253,6 +253,32 @@ pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String
         }
         Ok(forward.runner_url)
     })
+}
+
+fn proxy_forward_is_owned<Inspect>(forward: &RunnerProxyForward, inspect: Inspect) -> bool
+where
+    Inspect:
+        Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
+{
+    let Some(expected) = forward.tunnel_process_start_identity.as_ref() else {
+        return false;
+    };
+    let actual = inspect(forward.tunnel_pid)
+        .ok()
+        .flatten()
+        .map(|identity| match identity {
+            homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+            }
+            homeboy_core::process::ProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            } => RunnerTunnelProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            },
+        });
+    actual.as_ref() == Some(expected)
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
@@ -534,7 +560,7 @@ fn cleanup_direct_generation_with<Fallback, Tunnel>(
 ) -> Result<()>
 where
     Fallback: FnMut(u32) -> Result<()>,
-    Tunnel: FnMut(u32),
+    Tunnel: FnMut(&RunnerSession),
 {
     let cleanup_result = match graceful_stop {
         Ok(()) => Ok(()),
@@ -548,9 +574,7 @@ where
             None => Err(graceful_error),
         },
     };
-    if let Some(pid) = session.tunnel_pid {
-        terminate_tunnel(pid);
-    }
+    terminate_tunnel(session);
     cleanup_result
 }
 
@@ -2203,33 +2227,6 @@ where
         close(&replaced);
         Ok(session)
     })
-}
-
-fn capture_tunnel_process_start_identity(
-    pid: Option<u32>,
-) -> Result<Option<RunnerTunnelProcessStartIdentity>> {
-    let Some(pid) = pid else {
-        return Ok(None);
-    };
-    let identity = homeboy_core::process::process_start_identity(pid)
-        .map_err(|error| {
-            Error::internal_unexpected(format!("capture tunnel process identity: {error}"))
-        })?
-        .ok_or_else(|| {
-            Error::internal_unexpected("new tunnel exited before its process identity was captured")
-        })?;
-    Ok(Some(match identity {
-        homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
-            RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
-        }
-        homeboy_core::process::ProcessStartIdentity::Macos {
-            start_seconds,
-            start_microseconds,
-        } => RunnerTunnelProcessStartIdentity::Macos {
-            start_seconds,
-            start_microseconds,
-        },
-    }))
 }
 
 pub(crate) fn terminate_tunnel_if_owned(session: &RunnerSession) {
