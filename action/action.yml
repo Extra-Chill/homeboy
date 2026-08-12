@@ -610,6 +610,9 @@ runs:
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
         BASELINE_COMMANDS: ${{ inputs.baseline-commands }}
+        # A baseline can only excuse a FAILING candidate, so commands whose
+        # candidate already passed skip theirs (homeboy#11751 W1-10).
+        CANDIDATE_RESULTS: ${{ steps.run-commands.outputs.results }}
         HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
         RUN_GROUP_PREFIX: homeboy baseline
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}

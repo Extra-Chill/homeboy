@@ -224,11 +224,14 @@ if grep -q 'run-with-liveness-timeout.sh.*| tee' "${ROOT_DIR}/scripts/core/run-b
   printf 'FAIL: baseline command finalization still depends on an unbounded tee pipeline\n'
   exit 1
 fi
-if ! grep -A18 'name: Run baseline Homeboy commands' "${ACTION}" | grep -q 'HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS:'; then
+# Window is sized to span the step's whole `env:` block, not a fixed offset: the
+# assertion is that the timeout reaches the baseline step, not where in the block
+# it sits.
+if ! grep -A26 'name: Run baseline Homeboy commands' "${ACTION}" | grep -q 'HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS:'; then
   printf 'FAIL: baseline commands do not receive the execution timeout input\n'
   exit 1
 fi
-if ! grep -A18 'name: Run baseline Homeboy commands' "${ACTION}" | grep -q 'HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS:'; then
+if ! grep -A26 'name: Run baseline Homeboy commands' "${ACTION}" | grep -q 'HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS:'; then
   printf 'FAIL: baseline commands do not receive the cleanup timeout input\n'
   exit 1
 fi
