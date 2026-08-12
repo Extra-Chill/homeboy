@@ -40,11 +40,27 @@ homeboy runs import --from-gh-actions --component <id> --repo <owner/repo> --run
 homeboy runs query --select <jsonpath>[,<jsonpath>...] [--group-by <jsonpath>] [--count] [--format json|table|csv]
 homeboy runs drift --metric <jsonpath> [--window 7d] [--threshold 0.0] [--baseline <duration>] [--format json|table]
 homeboy runs loop-sync <archive-root> [--component <id>] [--rig <id>] [--label <label>] [--dry-run]
+homeboy runs report <failure-digest|performance-digest|bench-coverage|browser-evidence-compare|matrix-artifacts|compare> [OPTIONS]
 ```
 
 ## Description
 
-`homeboy runs` is the inspection and maintenance surface for Homeboy's local observation store. Producers such as `bench`, `rig`, and `trace` write run and artifact records; this command lets humans and agents inspect that evidence without opening SQLite directly, export/import portable bundles, and run explicit cleanup or reconciliation tasks.
+`homeboy runs` is the inspection and maintenance surface for Homeboy's local observation store. Producers such as `bench`, `rig`, and `trace` write run and artifact records; this command lets humans and agents inspect that evidence without opening SQLite directly, export/import portable bundles, render typed report projections, and run explicit cleanup or reconciliation tasks.
+
+### Report projections
+
+The former top-level `homeboy report` family now lives under `homeboy runs report`, alongside the evidence it interprets:
+
+```bash
+homeboy runs report failure-digest --output-dir <dir> --results <json>
+homeboy runs report performance-digest --output-dir <dir>
+homeboy runs report bench-coverage [component] [--path <checkout>] [--all]
+homeboy runs report browser-evidence-compare --before <dir> --after <dir>
+homeboy runs report matrix-artifacts <run-id>
+homeboy runs report compare --old <artifact> --new <artifact>
+```
+
+The report arguments, inner `report.*` payload schemas, and Markdown rendering are unchanged. JSON output is now carried by the standard tagged Runs envelope under `variant: "report"`; consumers of the old direct JSON object must read its `payload` field. External scripts using `homeboy report ...` must replace that prefix with `homeboy runs report ...`.
 
 `homeboy runs list` reads only the local observation store by default. Pass `--include-active-runner-jobs` to also append active jobs from connected runner daemons, which may inspect runner sessions. `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine. For benchmark records, `--scenario <id>` filters to runs whose stored metadata includes that scenario.
 

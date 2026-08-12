@@ -379,7 +379,7 @@ The common shape is:
 `severity: "error"` or `passed: false` fails the bench run. Lower severities
 are report-only. `code` is the stable grouping key, `subject` identifies the
 endpoint/resource/phase being measured, and `actual` / `expected` / `unit` are
-rendered by `homeboy report failure-digest`.
+rendered by `homeboy runs report failure-digest`.
 
 ## Metric Policy Presets
 

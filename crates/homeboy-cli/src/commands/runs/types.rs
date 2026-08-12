@@ -41,6 +41,7 @@ use super::proof::RunsProofOutput;
 use super::query::{RunsQueryArgs, RunsQueryOutput};
 use super::reconcile::{RunsReconcileArgs, RunsReconcileOutput};
 use super::refs::{RunsRefsArgs, RunsRefsOutput};
+use super::report::{ReportArgs, ReportOutput};
 use super::resources::{RunsResourcesArgs, RunsResourcesOutput};
 use super::watch::{RunsWatchArgs, RunsWatchOutput};
 use crate::commands::fuzz::FuzzCompareOutput;
@@ -184,6 +185,8 @@ pub(super) enum RunsCommand {
     Drift(RunsDriftArgs),
     /// Sync continuous-loop archive directories into observation artifacts.
     LoopSync(RunsLoopSyncArgs),
+    /// Render typed projections from Homeboy structured output artifacts.
+    Report(ReportArgs),
 }
 
 #[derive(Args, Clone, Default)]
@@ -285,6 +288,7 @@ pub enum RunsOutput {
     Resources(RunsResourcesOutput),
     Drift(RunsDriftOutput),
     LoopSync(RunsLoopSyncOutput),
+    Report(ReportOutput),
 }
 
 #[derive(Serialize)]

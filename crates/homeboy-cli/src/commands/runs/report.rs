@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::CmdResult;
+use super::super::CmdResult;
 
 mod bench_coverage;
 mod browser_evidence_compare;

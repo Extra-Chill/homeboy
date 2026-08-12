@@ -35,6 +35,7 @@ pub(crate) mod reconcile;
 mod refs;
 mod remote;
 mod remote_artifact;
+pub mod report;
 mod resources;
 #[cfg(test)]
 mod tests;

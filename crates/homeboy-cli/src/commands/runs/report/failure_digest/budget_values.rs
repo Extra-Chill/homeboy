@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-pub(in crate::commands::report) fn string_value(
+pub(in crate::commands::runs::report) fn string_value(
     finding: &Map<String, Value>,
     key: &str,
 ) -> Option<String> {
@@ -9,7 +9,7 @@ pub(in crate::commands::report) fn string_value(
         .or_else(|| nested_string_value(finding, "raw", key))
 }
 
-pub(in crate::commands::report) fn number_value(
+pub(in crate::commands::runs::report) fn number_value(
     finding: &Map<String, Value>,
     key: &str,
 ) -> Option<f64> {

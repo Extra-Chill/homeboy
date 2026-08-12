@@ -15,7 +15,7 @@ use super::parse::{
 };
 use super::{BrowserEvidenceSample, EvidenceSet, SampleContext};
 
-pub(in crate::commands::report::browser_evidence_compare) fn read_evidence_set(
+pub(in crate::commands::runs::report::browser_evidence_compare) fn read_evidence_set(
     root: &Path,
     include_local_paths: bool,
     adapters: &[TraceBrowserEvidenceAdapterConfig],
@@ -102,7 +102,7 @@ pub(in crate::commands::report::browser_evidence_compare) fn read_evidence_set(
     })
 }
 
-pub(in crate::commands::report::browser_evidence_compare) fn read_evidence_dirs(
+pub(in crate::commands::runs::report::browser_evidence_compare) fn read_evidence_dirs(
     roots: &[PathBuf],
     include_local_paths: bool,
     adapters: &[TraceBrowserEvidenceAdapterConfig],

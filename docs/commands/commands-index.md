@@ -29,7 +29,6 @@ cargo run -p homeboy-cli --bin generate-cli-reference -->
 - [project](project.md)
 - [refactor](refactor.md)
 - [release](release.md)
-- [report](report.md)
 - [review](review.md)
 - [rig](rig.md)
 - [runner](runner.md)

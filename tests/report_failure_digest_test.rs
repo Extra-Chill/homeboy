@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use homeboy::commands::report::{render_failure_digest_from_args, FailureDigestArgs};
+use homeboy::commands::runs::report::{render_failure_digest_from_args, FailureDigestArgs};
 
 #[path = "support/mod.rs"]
 mod support;

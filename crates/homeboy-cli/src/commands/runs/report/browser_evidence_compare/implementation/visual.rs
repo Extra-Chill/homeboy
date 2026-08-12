@@ -9,7 +9,7 @@ use super::super::types::{
 };
 use super::super::VisualCompareOptions;
 
-pub(in crate::commands::report::browser_evidence_compare) fn attach_visual_comparisons(
+pub(in crate::commands::runs::report::browser_evidence_compare) fn attach_visual_comparisons(
     variants: &mut [BrowserEvidenceVariantComparison],
     local_variants: &[BrowserEvidenceVariantComparison],
     options: &VisualCompareOptions,

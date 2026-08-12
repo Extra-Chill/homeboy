@@ -3,7 +3,7 @@ use crate::command_contract::{CommandRawOutputMode, CommandResponseMode};
 
 use super::output_runtime::{CommandPresentation, CommandRun};
 use super::utils::{response as output, tty};
-use super::{file, release, report, review, runner, runs, runtime, self_cmd, ssh, trace};
+use super::{file, release, review, runner, runs, runtime, self_cmd, ssh, trace};
 
 pub enum RawExecution {
     Handled(i32),
@@ -53,7 +53,6 @@ fn run_markdown(command: Commands) -> CommandRun {
         Commands::Review(args) => review::raw_output::run_markdown_with_json(args),
         Commands::Trace(args) => trace::run_markdown_with_json_artifact(args),
         Commands::Runs(args) => raw_stdout_only(runs::run_markdown(args)),
-        Commands::Report(args) => raw_stdout_only(report::run_markdown(args)),
         _ => raw_stdout_only(unsupported_output("markdown")),
     }
 }

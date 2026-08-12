@@ -8,7 +8,7 @@ use super::super::types::{
     BrowserEvidenceVariantComparison, MetricComparison, MetricStats,
 };
 
-pub(in crate::commands::report::browser_evidence_compare) fn render_markdown(
+pub(in crate::commands::runs::report::browser_evidence_compare) fn render_markdown(
     baseline_label: &str,
     candidate_label: &str,
     totals: &BrowserEvidenceCompareTotals,

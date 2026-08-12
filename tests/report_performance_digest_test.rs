@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use homeboy::commands::report::{performance_digest_from_args, PerformanceDigestArgs};
+use homeboy::commands::runs::report::{performance_digest_from_args, PerformanceDigestArgs};
 
 #[path = "support/mod.rs"]
 mod support;
