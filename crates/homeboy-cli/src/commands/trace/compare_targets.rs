@@ -968,6 +968,7 @@ mod tests {
 
     fn compare_args_for_rig(rig_id: &str, component_id: Option<&str>) -> TraceArgs {
         TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("compare".to_string()),
                 path: None,

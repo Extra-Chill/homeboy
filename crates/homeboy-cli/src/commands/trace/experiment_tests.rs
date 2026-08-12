@@ -11,6 +11,7 @@ use super::{execute_trace_run, TraceArgs, TraceSchedule, TraceVariantMatrixMode}
 
 fn trace_args_for_rig(rig_id: &str, scenario: &str) -> TraceArgs {
     TraceArgs {
+        command: None,
         comp: PositionalComponentArgs {
             component: None,
             path: None,

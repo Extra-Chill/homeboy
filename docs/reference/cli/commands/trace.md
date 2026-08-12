@@ -15,7 +15,7 @@ Global flags apply to every command and are documented once in [the root command
 ## `homeboy trace`
 
 ```sh
-homeboy trace [OPTIONS] [COMPONENT] [SCENARIO] [AFTER_JSON]
+homeboy trace [OPTIONS] [COMPONENT] [SCENARIO] [AFTER_JSON] [COMMAND]
 ```
 
 Capture black-box behavioral traces for a component
@@ -72,3 +72,29 @@ Capture black-box behavioral traces for a component
 | `--allow-local-toolchain` | flag | Allow intentionally local/development evidence. The output is marked non-canonical |
 | `--stale` | flag | Clean only stale trace overlay locks |
 | `--force` | flag | Remove stale trace overlay locks even when touched files are dirty |
+
+| Subcommand | Summary |
+| --- | --- |
+| `homeboy trace observe` | Passively observe a running system and persist timeline evidence |
+
+## `homeboy trace observe`
+
+```sh
+homeboy trace observe [OPTIONS] [COMPONENT]
+```
+
+Passively observe a running system and persist timeline evidence
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `[COMPONENT]` | no | Component ID (optional — auto-detected from CWD if omitted) |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--path` | `<PATH>` | Override the component checkout path for this invocation |
+| `--duration` | `<DURATION>` | How long to observe before closing the run, as a duration such as `30s` or `5m` |
+| `--tail-log` | `<PATH>` | Log file to tail for the length of the run. Repeatable |
+| `--grep` | `<REGEX>` | Regex applied to every `--tail-log` probe, so only matching lines are recorded |
+| `--watch-process` | `<REGEX>` | Regex matched against running process command lines; a snapshot is recorded on each interval. Repeatable |
+| `--watch-process-interval` | `<WATCH_PROCESS_INTERVAL>` | How often `--watch-process` samples, as a duration such as `1s` |
+| `--probe` | `<JSON>` | Raw `TraceProbeConfig` JSON for probes that the flags above cannot express. Repeatable |

@@ -1,6 +1,7 @@
 use clap::{Args, ValueEnum};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use homeboy::core::component::{Component, ScopedExtensionConfig};
 use homeboy::core::engine::baseline::BaselineFlags;
@@ -41,6 +42,7 @@ mod metadata;
 mod observations;
 mod output;
 mod overlay_locks;
+mod passive;
 mod phase_args;
 mod preview_args;
 mod probes;
@@ -104,6 +106,8 @@ pub(crate) use secret_env::{
 use matrix::{expand_variant_matrix, TraceVariantStackItem};
 #[derive(Args, Clone)]
 pub struct TraceArgs {
+    #[command(subcommand)]
+    pub command: Option<TraceSubcommand>,
     #[command(flatten)]
     comp: PositionalComponentArgs,
     /// Target component for command-shaped trace modes like `compare-variant` and `compare-bundle`.
@@ -262,6 +266,36 @@ pub struct TraceArgs {
     pub checkout_provenance: Option<TraceCheckoutProvenance>,
 }
 
+#[derive(clap::Subcommand, Clone)]
+pub enum TraceSubcommand {
+    /// Passively observe a running system and persist timeline evidence.
+    Observe(PassiveTraceArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct PassiveTraceArgs {
+    #[command(flatten)]
+    pub comp: PositionalComponentArgs,
+    /// How long to observe before closing the run, as a duration such as `30s` or `5m`.
+    #[arg(long, default_value = passive::DEFAULT_DURATION, value_parser = crate::commands::utils::watch::parse_duration_arg)]
+    pub duration: Duration,
+    /// Log file to tail for the length of the run. Repeatable.
+    #[arg(long = "tail-log", value_name = "PATH")]
+    pub tail_logs: Vec<PathBuf>,
+    /// Regex applied to every `--tail-log` probe, so only matching lines are recorded.
+    #[arg(long, value_name = "REGEX")]
+    pub grep: Option<String>,
+    /// Regex matched against running process command lines; a snapshot is recorded on each interval. Repeatable.
+    #[arg(long = "watch-process", value_name = "REGEX")]
+    pub watch_processes: Vec<String>,
+    /// How often `--watch-process` samples, as a duration such as `1s`.
+    #[arg(long = "watch-process-interval", default_value = passive::DEFAULT_PROCESS_WATCH_INTERVAL, value_parser = crate::commands::utils::watch::parse_duration_arg)]
+    pub watch_process_interval: Duration,
+    /// Raw `TraceProbeConfig` JSON for probes that the flags above cannot express. Repeatable.
+    #[arg(long = "probe", value_name = "JSON")]
+    pub probes: Vec<String>,
+}
+
 impl TraceArgs {
     pub fn is_compare_target_run(&self) -> bool {
         self.comp.component.as_deref() == Some("compare")
@@ -269,6 +303,9 @@ impl TraceArgs {
     }
 
     pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
+        if matches!(self.command, Some(TraceSubcommand::Observe(_))) {
+            return CommandPortabilityContract::none();
+        }
         let mut contract = LabCommandContract::portable_workload(
             TRACE_LAB_LABEL,
             self.keep_overlay.then_some("--keep-overlay"),
@@ -364,6 +401,10 @@ fn render_markdown_output(output: &TraceCommandOutput) -> String {
             }
             markdown
         }
+        TraceCommandOutput::Passive(output) => format!(
+            "# Passive Trace\n\n- **Component:** `{}`\n- **Status:** `{}`\n- **Run:** `{}`\n",
+            output.component_id, output.status, output.run_id
+        ),
     }
 }
 
@@ -404,6 +445,9 @@ pub fn run_json_with_output_artifact(
 }
 
 fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<TraceCommandOutput>)> {
+    if let Some(TraceSubcommand::Observe(args)) = args.command {
+        return passive::run(args).map(|(output, exit_code)| ((output, None), exit_code));
+    }
     if args.profiles && args.comp.component.as_deref() == Some("list") {
         let output = run_list_profiles(args.rig.as_deref())?;
         return Ok(((output, None), 0));

@@ -410,6 +410,7 @@ fn trace_compare_exits_nonzero_for_guardrail_failures() {
     .expect("write after");
 
     let (_output, exit_code) = run_compare(TraceArgs {
+        command: None,
         comp: PositionalComponentArgs {
             component: Some("compare".to_string()),
             path: None,

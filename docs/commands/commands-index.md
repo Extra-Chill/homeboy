@@ -26,7 +26,6 @@ cargo run -p homeboy-cli --bin generate-cli-reference -->
 - [git](git.md)
 - [harvest](harvest.md)
 - [logs](logs.md)
-- [observe](observe.md)
 - [project](project.md)
 - [refactor](refactor.md)
 - [release](release.md)

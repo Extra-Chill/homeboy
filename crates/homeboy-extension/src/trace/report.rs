@@ -40,6 +40,7 @@ mod envelope_types {
         ScenarioMatrix(TraceScenarioMatrixOutput),
         List(TraceListOutput),
         OverlayLocks(TraceOverlayLocksOutput),
+        Passive(TracePassiveOutput),
     }
 
     #[derive(Serialize)]
@@ -71,6 +72,23 @@ mod envelope_types {
         pub toolchain: Option<TraceToolchainProvenance>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub components: Option<TraceComponentsProvenance>,
+    }
+
+    #[derive(Serialize)]
+    pub struct TracePassiveOutput {
+        pub command: &'static str,
+        pub run_id: String,
+        pub component_id: String,
+        pub status: String,
+        pub duration_ms: u64,
+        pub event_count: usize,
+        pub artifact_path: String,
+        pub hints: Vec<String>,
+        #[serde(
+            rename = "_homeboy_actionable",
+            skip_serializing_if = "Option::is_none"
+        )]
+        pub actionable: Option<serde_json::Value>,
     }
 
     #[derive(Serialize)]

@@ -248,7 +248,6 @@ pub mod issues;
 pub mod json_output;
 pub mod lint;
 pub mod logs;
-pub mod observe;
 pub mod project;
 pub mod raw_output;
 pub mod refactor;

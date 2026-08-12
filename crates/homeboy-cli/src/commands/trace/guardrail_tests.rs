@@ -7,6 +7,7 @@ use super::*;
 
 fn trace_args_for_rig(rig_id: &str) -> TraceArgs {
     TraceArgs {
+        command: None,
         comp: PositionalComponentArgs {
             component: Some("studio".to_string()),
             path: None,

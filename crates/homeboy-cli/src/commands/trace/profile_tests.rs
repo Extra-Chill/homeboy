@@ -7,6 +7,7 @@ use super::*;
 
 fn trace_args_for_profile(profile: &str) -> TraceArgs {
     TraceArgs {
+        command: None,
         comp: PositionalComponentArgs {
             component: None,
             path: None,
@@ -255,6 +256,7 @@ fn trace_list_profiles_lists_rig_profiles() {
         write_trace_rig_with_profile(home, "studio-rig", "studio", component_dir.path());
 
         let ((output, _artifact_output), exit_code) = run_outputs(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("list".to_string()),
                 path: None,
