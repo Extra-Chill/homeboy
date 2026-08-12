@@ -28,9 +28,10 @@ struct DaemonVersionResponse {
 }
 
 #[derive(Debug)]
-struct DaemonHealthReport {
-    freshness: DaemonFreshnessReport,
-    pid: Option<u32>,
+pub(crate) struct DaemonHealthReport {
+    pub(crate) freshness: DaemonFreshnessReport,
+    pub(crate) pid: Option<u32>,
+    pub(crate) build_identity: Option<String>,
 }
 
 pub(super) struct RemoteDaemonConnectRequest<'a> {
@@ -252,7 +253,18 @@ fn open_daemon_tunnel(
     // A loopback runner already shares the controller network namespace, so
     // its published endpoint is the reachable local endpoint. Avoid reserving
     // an unrelated port when no SSH forwarding process is needed.
-    let local_port = if matches!(server.host.as_str(), "localhost" | "127.0.0.1" | "::1") {
+    let loopback_transport = match homeboy_core::server::server_uses_loopback_transport(server) {
+        Ok(loopback) => loopback,
+        Err(error) => {
+            return Err(Box::new(failed_connect(
+                runner_id,
+                session_path.to_path_buf(),
+                RunnerFailureKind::TunnelFailure,
+                format!("resolve SSH tunnel transport: {error}"),
+            )));
+        }
+    };
+    let local_port = if loopback_transport {
         remote_addr.port()
     } else {
         reserve_loopback_port().map_err(|err| {
@@ -264,11 +276,12 @@ fn open_daemon_tunnel(
             ))
         })?
     };
-    let tunnel = open_loopback_tunnel(
+    let mut tunnel = open_loopback_tunnel(
         server,
         local_port,
         &remote_addr.ip().to_string(),
         remote_addr.port(),
+        loopback_transport,
     );
     if !tunnel.success {
         return Err(Box::new(failed_connect(
@@ -281,27 +294,11 @@ fn open_daemon_tunnel(
 
     // Capture the local process identity before readiness can cause a fast SSH
     // child to exit and be reaped. Session cleanup relies on this exact identity.
-    let (tunnel_process_start_identity, tunnel_ready) =
-        match capture_identity_before_tunnel_readiness(
-            tunnel.pid,
-            super::capture_tunnel_process_start_identity,
-            || wait_for_tcp(local_port, Duration::from_secs(5)),
-        ) {
-            Ok(identity) => identity,
-            Err(error) => {
-                return Err(Box::new(failed_connect(
-                    runner_id,
-                    session_path.to_path_buf(),
-                    RunnerFailureKind::TunnelFailure,
-                    error.message,
-                )));
-            }
-        };
+    let tunnel_process_start_identity = tunnel.process_start_identity.clone();
+    let tunnel_ready = wait_for_tcp(local_port, Duration::from_secs(5));
 
     if !tunnel_ready {
-        if let Some(pid) = tunnel.pid {
-            super::terminate_tunnel_if_owned_parts(pid, tunnel_process_start_identity.as_ref());
-        }
+        tunnel.contain_child();
         return Err(Box::new(failed_connect(
             runner_id,
             session_path.to_path_buf(),
@@ -312,6 +309,7 @@ fn open_daemon_tunnel(
             ),
         )));
     }
+    tunnel.release_child();
     Ok((
         local_port,
         tunnel.pid,
@@ -480,7 +478,7 @@ fn daemon_health_report(local_url: &str) -> std::result::Result<DaemonHealthRepo
     daemon_health_report_with_timeout(local_url, Duration::from_secs(2))
 }
 
-fn daemon_health_report_with_timeout(
+pub(crate) fn daemon_health_report_with_timeout(
     local_url: &str,
     timeout: Duration,
 ) -> std::result::Result<DaemonHealthReport, String> {
@@ -494,6 +492,7 @@ fn daemon_health_report_with_timeout(
     Ok(DaemonHealthReport {
         freshness,
         pid: daemon_pid_from_body(&response.body),
+        build_identity: daemon_identity_from_body(&response.body).map(str::to_string),
     })
 }
 
@@ -737,6 +736,7 @@ mod tests {
                 repair_plan: Vec::new(),
             },
             pid: Some(pid),
+            build_identity: None,
         }
     }
 

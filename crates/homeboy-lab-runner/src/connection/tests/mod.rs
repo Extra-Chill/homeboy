@@ -28,6 +28,25 @@ fn controller_proxy_url_rejects_userinfo_before_opening_a_forward() {
     assert!(error.details.to_string().contains("credential-free"));
 }
 
+#[test]
+fn proxy_forward_reuse_rejects_a_reused_pid_with_a_different_start_identity() {
+    let forward = RunnerProxyForward {
+        runner_url: "http://127.0.0.1:8080".to_string(),
+        tunnel_pid: 4242,
+        tunnel_process_start_identity: Some(RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds: 1,
+            start_microseconds: 2,
+        }),
+    };
+
+    assert!(!proxy_forward_is_owned(&forward, |_| {
+        Ok(Some(homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds: 3,
+            start_microseconds: 4,
+        }))
+    }));
+}
+
 pub(super) fn command_output(
     success: bool,
     stdout: impl Into<String>,
@@ -100,7 +119,11 @@ fn failed_generation_cleanup_kills_the_exact_daemon_and_tunnel() {
             remote_pids.push(pid);
             Ok(())
         },
-        |pid| tunnel_pids.push(pid),
+        |session| {
+            if let Some(pid) = session.tunnel_pid {
+                tunnel_pids.push(pid);
+            }
+        },
     );
     assert!(result.is_ok());
     assert_eq!(

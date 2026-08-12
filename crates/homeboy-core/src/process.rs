@@ -868,6 +868,45 @@ pub fn terminate_isolated_process_group_with_grace(
     }
 }
 
+/// Terminate an identity-verified isolated process group, reap its leader, and
+/// prove no group member remains. The caller must have spawned `child` as the
+/// process-group leader; a reused PID is never used as a group signal target.
+pub fn terminate_verified_isolated_process_group_and_reap(
+    child: &mut std::process::Child,
+    expected_identity: &ProcessStartIdentity,
+    grace: Duration,
+) -> Result<()> {
+    let pid = child.id();
+    match process_identity_state_with_start_identity(pid, None, Some(expected_identity)) {
+        ProcessIdentityState::Live => {
+            terminate_isolated_process_group_with_grace(pid, grace)?;
+        }
+        ProcessIdentityState::Dead => {
+            let _ = child.wait();
+            return Ok(());
+        }
+        ProcessIdentityState::IdentityMismatch => {
+            return Err(Error::internal_unexpected(format!(
+                "refuse to terminate reused isolated process group {pid}"
+            )));
+        }
+        ProcessIdentityState::Unverifiable => {
+            return Err(Error::internal_unexpected(format!(
+                "refuse to terminate unverifiable isolated process group {pid}"
+            )));
+        }
+    }
+    let _ = child.wait().map_err(|error| {
+        Error::internal_unexpected(format!("reap isolated process-group leader {pid}: {error}"))
+    })?;
+    if !wait_for_isolated_process_group_exit(pid, grace).map_err(Error::internal_unexpected)? {
+        return Err(Error::internal_unexpected(format!(
+            "isolated process group {pid} remains alive after leader reaping"
+        )));
+    }
+    Ok(())
+}
+
 /// Construct the Windows-native tree termination command without coupling
 /// callers to a platform-specific shell or product workflow.
 pub fn windows_taskkill_process_tree_step(pid: u32) -> ProcessStep {
