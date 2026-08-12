@@ -24,13 +24,30 @@ scope_flags_for() {
   fi
 
   case "${base_cmd}" in
-    audit|test)
+    # `test` alone is exempt under differential gating: its scope is carried by
+    # the extension's own HOMEBOY_TEST_SCOPE_* contract, not by a CLI flag, so
+    # adding `--changed-since` here would double-scope it.
+    test)
       if [ "${HOMEBOY_DIFFERENTIAL_GATING:-false}" = "true" ]; then
         return
       fi
       printf '%s' "--changed-since ${SCOPE_BASE_REF}"
       ;;
-    audit|lint|test|refactor|review)
+    # `audit` was in the exempt arm above, so under differential gating it ran
+    # UNSCOPED over the whole repository. Measured on Extra-Chill/homeboy: 12m07s
+    # to report `DRIFT INCREASED: 445 new finding(s) since baseline`, exit 1,
+    # then a 684s baseline rerun that failed identically, so the gate excused it
+    # as `baseline_red` and published green. 32.7 minutes for no verdict
+    # (homeboy#11751 W1-2).
+    #
+    # A differential baseline is not a substitute for scoping here: `review
+    # audit` already computes introduced-versus-contextual findings from
+    # `--changed-since` itself, which answers "did this PR add a finding" without
+    # rerunning the whole audit at the base ref.
+    #
+    # `audit` and `test` also appeared in the arm below, where they were dead:
+    # `case` takes the first matching arm, so those patterns never applied.
+    audit|lint|refactor|review)
       printf '%s' "--changed-since ${SCOPE_BASE_REF}"
       ;;
     # release, fleet, deploy, and other commands are never scoped
