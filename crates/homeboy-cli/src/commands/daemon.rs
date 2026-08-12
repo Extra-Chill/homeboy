@@ -37,8 +37,8 @@ enum DaemonCommand {
     },
     /// Resolve and run the right daemon recovery from the current status report
     ///
-    /// Reads `homeboy daemon status` once, matches its stale reason code, and
-    /// fills every argument the resolved recovery needs from that report. The
+    /// Reads `homeboy daemon status` once to plan and fill every recovery
+    /// argument, then re-reads it after execution to verify freshness. The
     /// explicit subcommands below stay available as escape hatches for the
     /// cases this cannot resolve.
     Recover {
@@ -470,16 +470,51 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
 
 /// Resolve the recovery for the local daemon and either print it or run it.
 ///
-/// One `read_status()` read supplies every argument. Dispatch is on the typed
-/// step code, never on the rendered command string (#11105).
+/// The planning `read_status()` supplies every argument. A successful execution
+/// requires a second authoritative read that proves freshness. Dispatch is on
+/// the typed step code, never on the rendered command string (#11105).
 fn recover(
     dry_run: bool,
     confirm_workload_processes_absent: bool,
     addr: &str,
 ) -> CmdResult<DaemonOutput> {
+    let status = daemon::read_status()?;
+    recover_from_status(
+        status,
+        dry_run,
+        confirm_workload_processes_absent,
+        |plan, lease_id, job_ids| {
+            execute_recovery_plan(
+                plan,
+                lease_id.as_deref(),
+                job_ids,
+                confirm_workload_processes_absent,
+                addr,
+            )
+        },
+        daemon::read_status,
+    )
+}
+
+/// Resolve a recovery from one authoritative status report, execute it when
+/// requested, and prove the daemon is fresh before reporting success.
+fn recover_from_status<Execute, ReadPostcondition>(
+    status: DaemonStatus,
+    dry_run: bool,
+    confirm_workload_processes_absent: bool,
+    execute: Execute,
+    read_postcondition: ReadPostcondition,
+) -> CmdResult<DaemonOutput>
+where
+    Execute: FnOnce(
+        &daemon::recovery_actions::DaemonRecoveryPlan,
+        &Option<String>,
+        &[Uuid],
+    ) -> homeboy::core::Result<Vec<String>>,
+    ReadPostcondition: FnOnce() -> homeboy::core::Result<DaemonStatus>,
+{
     use daemon::recovery_actions as actions;
 
-    let status = daemon::read_status()?;
     let plan = actions::plan_recovery(&status);
     let lease_id = status.freshness.lease_id.clone();
     let job_ids: Vec<Uuid> = status
@@ -510,7 +545,7 @@ fn recover(
         // and its reason are the answer; running it would be a guess.
         output.blocked_on = Some(output.plan.reason.clone());
         output.next_command = rendered_plan(&output.plan);
-        return Ok((DaemonOutput::Recover(output), 0));
+        return Ok((DaemonOutput::Recover(output), 1));
     }
 
     // Confirmations an operator has to make are surfaced, never synthesized.
@@ -529,7 +564,7 @@ fn recover(
             rendered_plan(&output.plan),
             actions::CONFIRM_WORKLOAD_PROCESSES_ABSENT
         );
-        return Ok((DaemonOutput::Recover(output), 0));
+        return Ok((DaemonOutput::Recover(output), 1));
     }
 
     if dry_run {
@@ -537,7 +572,52 @@ fn recover(
         return Ok((DaemonOutput::Recover(output), 0));
     }
 
-    for step in &output.plan.steps {
+    output.applied_steps = execute(&output.plan, &lease_id, &job_ids)?;
+    output.executed = true;
+
+    let postcondition = match read_postcondition() {
+        Ok(status) => status,
+        Err(error) => {
+            output.blocked_on = Some(format!(
+                "recovery executed but authoritative freshness verification failed: {}",
+                bounded_error_message(&error.message)
+            ));
+            output.next_command = "homeboy daemon status".to_string();
+            return Ok((DaemonOutput::Recover(output), 1));
+        }
+    };
+    let fresh = daemon_is_fresh(&postcondition);
+    output.fresh = postcondition.fresh;
+    output.stale_reason_code = postcondition.freshness.stale_reason_code;
+    output.lease_id = postcondition.freshness.lease_id;
+    output.active_jobs = postcondition.freshness.active_jobs;
+    output.next_command = "homeboy daemon status".to_string();
+    if !fresh {
+        output.blocked_on = Some(format!(
+            "recovery executed but the authoritative status remains stale{}",
+            postcondition
+                .stale_reason
+                .as_deref()
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default()
+        ));
+        return Ok((DaemonOutput::Recover(output), 1));
+    }
+
+    Ok((DaemonOutput::Recover(output), 0))
+}
+
+fn execute_recovery_plan(
+    plan: &daemon::recovery_actions::DaemonRecoveryPlan,
+    lease_id: Option<&str>,
+    job_ids: &[Uuid],
+    confirm_workload_processes_absent: bool,
+    addr: &str,
+) -> homeboy::core::Result<Vec<String>> {
+    use daemon::recovery_actions as actions;
+
+    let mut applied_steps = Vec::new();
+    for step in &plan.steps {
         match step.code.as_str() {
             // A lease-bound stop refuses to kill a daemon other than the exact
             // one the report described, which is why the lease is carried here
@@ -546,7 +626,7 @@ fn recover(
             // renders its own `--lease-id`, #11220); this injection stays as a
             // fallback for reports produced by older binaries that still carry
             // the bare stop.
-            code if code == actions::DAEMON_STOP => match lease_id.as_deref() {
+            code if code == actions::DAEMON_STOP => match lease_id {
                 Some(lease_id) => {
                     daemon::stop_for_lease(lease_id)?;
                 }
@@ -558,7 +638,7 @@ fn recover(
                 daemon::start_background(addr)?;
             }
             code if code == actions::DAEMON_ADOPT_ORPHAN => {
-                let lease_id = lease_id.as_deref().ok_or_else(|| {
+                let lease_id = lease_id.ok_or_else(|| {
                     Error::validation_invalid_argument(
                         "lease_id",
                         "the status report named an orphan adoption but carried no lease id",
@@ -572,7 +652,7 @@ fn recover(
                 daemon::reconcile_leaseless_orphans(addr, None)?;
             }
             code if code == actions::DAEMON_RECONCILE_DEAD_LEASE_ORPHANS => {
-                let lease_id = lease_id.as_deref().ok_or_else(|| {
+                let lease_id = lease_id.ok_or_else(|| {
                     Error::validation_invalid_argument(
                         "lease_id",
                         "the status report named a dead-lease reconciliation but carried no lease id",
@@ -582,7 +662,7 @@ fn recover(
                 })?;
                 daemon::reconcile_dead_lease_orphans(
                     lease_id,
-                    &job_ids,
+                    job_ids,
                     confirm_workload_processes_absent,
                     addr,
                 )?;
@@ -598,12 +678,22 @@ fn recover(
                 ));
             }
         }
-        output.applied_steps.push(step.code.clone());
+        applied_steps.push(step.code.clone());
     }
 
-    output.executed = true;
-    output.next_command = "homeboy daemon status".to_string();
-    Ok((DaemonOutput::Recover(output), 0))
+    Ok(applied_steps)
+}
+
+fn daemon_is_fresh(status: &DaemonStatus) -> bool {
+    status.fresh && status.freshness.fresh && status.freshness.stale_reason_code.is_none()
+}
+
+fn bounded_error_message(message: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    if message.chars().count() <= MAX_CHARS {
+        return message.to_string();
+    }
+    format!("{}...", message.chars().take(MAX_CHARS).collect::<String>())
 }
 
 /// Attestations the resolved plan needs and the operator has not made.
@@ -1015,6 +1105,239 @@ mod tests {
             assert!(!output.executed, "a bare recover must not mutate anything");
             assert_eq!(output.command, "daemon.recover");
         });
+    }
+
+    fn recovery_status(
+        fresh: bool,
+        stale_reason_code: Option<daemon::DaemonStaleReasonCode>,
+        repair_plan: Vec<daemon::DaemonRepairStep>,
+    ) -> DaemonStatus {
+        DaemonStatus {
+            running: fresh,
+            fresh,
+            reachable: fresh,
+            freshness: daemon::DaemonFreshnessReport {
+                fresh,
+                stale_reason_code,
+                restartable: !fresh,
+                lease_id: Some("lease-test".to_string()),
+                pid: Some(4242),
+                recovery_evidence: None,
+                ownership_evidence: Some("test recovery evidence".to_string()),
+                adoption_command: None,
+                binary_hash: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan,
+            },
+            stale_reason: (!fresh).then(|| "test daemon remains stale".to_string()),
+            state: None,
+            state_path: "test".to_string(),
+            state_identity: "test".to_string(),
+            process_candidates: Vec::new(),
+            active_job_recovery_evidence: Vec::new(),
+            termination_evidence: None,
+        }
+    }
+
+    #[test]
+    fn blocked_recovery_returns_structured_nonzero_outcome() {
+        use daemon::recovery_actions as actions;
+
+        let initial = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::TransportUnreachable),
+            Vec::new(),
+        );
+        let (output, exit_code) = recover_from_status(
+            initial,
+            false,
+            false,
+            |_, _, _| panic!("a blocked recovery must not execute"),
+            || panic!("a blocked recovery must not read a postcondition"),
+        )
+        .expect("blocked recovery returns its typed report");
+
+        assert_eq!(exit_code, 1);
+        let DaemonOutput::Recover(output) = output else {
+            panic!("expected recovery output");
+        };
+        assert!(!output.executed);
+        assert!(!output.fresh);
+        assert!(output.blocked_on.is_some());
+        assert_eq!(output.plan.steps[0].code, actions::DAEMON_DIAGNOSE);
+        assert_eq!(output.next_command, "homeboy daemon status");
+
+        let data = serde_json::to_value(DaemonOutput::Recover(output)).expect("recovery JSON");
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(data),
+            exit_code,
+            "daemon",
+            None,
+        );
+        assert!(!envelope.success);
+        assert_eq!(envelope.exit_code, 1);
+        assert_eq!(envelope.status, "failed");
+        assert_eq!(
+            envelope.data.as_ref().expect("recovery payload")["executed"],
+            false
+        );
+        assert!(envelope.data.as_ref().expect("recovery payload")["blocked_on"].is_string());
+        assert_eq!(
+            envelope.data.as_ref().expect("recovery payload")["next_command"],
+            "homeboy daemon status"
+        );
+    }
+
+    #[test]
+    fn executed_recovery_succeeds_only_after_a_fresh_postcondition() {
+        use daemon::recovery_actions as actions;
+
+        let initial = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            vec![daemon::DaemonRepairStep::executable(
+                actions::DAEMON_START,
+                actions::start(),
+            )],
+        );
+        let (output, exit_code) = recover_from_status(
+            initial,
+            false,
+            false,
+            |plan, _, _| {
+                assert_eq!(plan.steps[0].code, actions::DAEMON_START);
+                Ok(vec![actions::DAEMON_START.to_string()])
+            },
+            || Ok(recovery_status(true, None, Vec::new())),
+        )
+        .expect("successful recovery returns its report");
+
+        assert_eq!(exit_code, 0);
+        let DaemonOutput::Recover(output) = output else {
+            panic!("expected recovery output");
+        };
+        assert!(output.executed);
+        assert!(output.fresh);
+        assert!(output.blocked_on.is_none());
+        assert_eq!(output.applied_steps, vec![actions::DAEMON_START]);
+    }
+
+    #[test]
+    fn executed_recovery_fails_when_authoritative_postcondition_is_stale() {
+        use daemon::recovery_actions as actions;
+
+        let initial = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            vec![daemon::DaemonRepairStep::executable(
+                actions::DAEMON_START,
+                actions::start(),
+            )],
+        );
+        let (output, exit_code) = recover_from_status(
+            initial,
+            false,
+            false,
+            |_, _, _| Ok(vec![actions::DAEMON_START.to_string()]),
+            || {
+                Ok(recovery_status(
+                    false,
+                    Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+                    Vec::new(),
+                ))
+            },
+        )
+        .expect("failed postcondition returns its typed report");
+
+        assert_eq!(exit_code, 1);
+        let DaemonOutput::Recover(output) = output else {
+            panic!("expected recovery output");
+        };
+        assert!(output.executed);
+        assert!(!output.fresh);
+        assert!(output
+            .blocked_on
+            .as_deref()
+            .is_some_and(|message| message.contains("authoritative status remains stale")));
+    }
+
+    #[test]
+    fn executed_recovery_preserves_evidence_when_postcondition_read_fails() {
+        use daemon::recovery_actions as actions;
+
+        let initial = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            vec![daemon::DaemonRepairStep::executable(
+                actions::DAEMON_START,
+                actions::start(),
+            )],
+        );
+        let (output, exit_code) = recover_from_status(
+            initial,
+            false,
+            false,
+            |_, _, _| Ok(vec![actions::DAEMON_START.to_string()]),
+            || {
+                Err(Error::internal_unexpected(
+                    "postcondition daemon unavailable",
+                ))
+            },
+        )
+        .expect("verification failure returns its typed recovery report");
+
+        assert_eq!(exit_code, 1);
+        let DaemonOutput::Recover(output) = output else {
+            panic!("expected recovery output");
+        };
+        assert!(output.executed);
+        assert!(
+            !output.fresh,
+            "the planning status remains the only evidence"
+        );
+        assert_eq!(output.applied_steps, vec![actions::DAEMON_START]);
+        assert_eq!(output.next_command, "homeboy daemon status");
+        assert!(output
+            .blocked_on
+            .as_deref()
+            .is_some_and(|message| message.contains("freshness verification failed")));
+
+        let data = serde_json::to_value(DaemonOutput::Recover(output)).expect("recovery JSON");
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(data),
+            exit_code,
+            "daemon",
+            None,
+        );
+        assert!(!envelope.success);
+        assert_eq!(envelope.exit_code, exit_code);
+        assert_eq!(envelope.status, "failed");
+        assert_eq!(
+            envelope.data.as_ref().expect("recovery payload")["executed"],
+            true
+        );
+        assert_eq!(
+            envelope.data.as_ref().expect("recovery payload")["applied_steps"],
+            serde_json::json!([actions::DAEMON_START])
+        );
+        assert_eq!(
+            envelope.data.as_ref().expect("recovery payload")["next_command"],
+            "homeboy daemon status"
+        );
+    }
+
+    #[test]
+    fn postcondition_verification_blocker_is_bounded() {
+        let message = "x".repeat(501);
+
+        let bounded = bounded_error_message(&message);
+
+        assert_eq!(bounded.chars().count(), 503);
+        assert!(bounded.ends_with("..."));
     }
 
     /// The one confirmation on this surface that is not ceremony must stay

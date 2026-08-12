@@ -69,7 +69,7 @@ homeboy daemon recover [OPTIONS]
 
 Resolve and run the right daemon recovery from the current status report
 
-Reads `homeboy daemon status` once, matches its stale reason code, and fills every argument the resolved recovery needs from that report. The explicit subcommands below stay available as escape hatches for the cases this cannot resolve.
+Reads `homeboy daemon status` once to plan and fill every recovery argument, then re-reads it after execution to verify freshness. The explicit subcommands below stay available as escape hatches for the cases this cannot resolve.
 
 | Option | Value | Description |
 | --- | --- | --- |

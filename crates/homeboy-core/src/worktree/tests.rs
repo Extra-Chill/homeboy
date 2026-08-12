@@ -1518,10 +1518,23 @@ fn sibling_worktree_path(source: &Path, suffix: &str) -> PathBuf {
 fn queue_options() -> WorktreeQueueCreateOptions {
     WorktreeQueueCreateOptions {
         repo: "homeboy".to_string(),
-        branches: vec!["cook/one".to_string(), "cook/two".to_string()],
+        requests: vec![
+            WorktreeQueueCreateRequest {
+                branch: "cook/one".to_string(),
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/5786".to_string()),
+                task_ref: Some("Extra-Chill/homeboy#5786".to_string()),
+                run_id: None,
+                provider_lifecycle: None,
+            },
+            WorktreeQueueCreateRequest {
+                branch: "cook/two".to_string(),
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/5786".to_string()),
+                task_ref: Some("Extra-Chill/homeboy#5786".to_string()),
+                run_id: None,
+                provider_lifecycle: None,
+            },
+        ],
         from: "origin/main".to_string(),
-        task_url: Some("https://github.com/Extra-Chill/homeboy/issues/5786".to_string()),
-        task_ref: Some("Extra-Chill/homeboy#5786".to_string()),
         dry_run: true,
         retry_after_seconds: 30,
     }
@@ -1609,10 +1622,14 @@ fn queue_create_records_successful_homeboy_worktree() {
 
         let output = queue_create(WorktreeQueueCreateOptions {
             repo: "queue-fixture".to_string(),
-            branches: vec!["cook/one".to_string()],
+            requests: vec![WorktreeQueueCreateRequest {
+                branch: "cook/one".to_string(),
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/5924".to_string()),
+                task_ref: None,
+                run_id: None,
+                provider_lifecycle: None,
+            }],
             from: "HEAD".to_string(),
-            task_url: Some("https://github.com/Extra-Chill/homeboy/issues/5924".to_string()),
-            task_ref: None,
             dry_run: false,
             retry_after_seconds: 30,
         })
@@ -1641,6 +1658,135 @@ fn queue_create_records_successful_homeboy_worktree() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn queue_create_uses_provider_lifecycle_with_per_child_metadata() {
+    use std::os::unix::fs::PermissionsExt;
+
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("provider fixture");
+        let workspace = temp.path().join("workspace");
+        let records = temp.path().join("records");
+        let script = temp.path().join("provider");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -d '{}' ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-12124\",\"path\":\"{}\",\"branch\":\"fix/12124\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}'; fi\nelif [ \"$1\" = ensure ]; then\n  printf 'ensure|%s|%s|%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" \"$8\" \"$9\" >> '{}'\n  if [ ! -d '{}' ]; then git init -q -b fix/12124 '{}'; fi\nelse\n  printf 'finalize|%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\nfi\n",
+                workspace.display(),
+                workspace.display(),
+                records.display(),
+                workspace.display(),
+                workspace.display(),
+                records.display(),
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("make provider executable");
+
+        let mut config = crate::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            crate::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: crate::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: crate::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        script.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    resolve_not_found_exit_codes: vec![1],
+                    ensure: Some(vec![
+                        script.display().to_string(),
+                        "ensure".to_string(),
+                        "{handle}".to_string(),
+                        "{repo}".to_string(),
+                        "{base}".to_string(),
+                        "{head}".to_string(),
+                        "{task_url}".to_string(),
+                        "{purpose}".to_string(),
+                        "{owner_run_ref}".to_string(),
+                        "{cleanup_policy}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(crate::defaults::WorktreeProviderListResultMapping {
+                    items: "$.worktrees".to_string(),
+                    handle: "$.handle".to_string(),
+                    path: "$.path".to_string(),
+                    branch: "$.branch".to_string(),
+                    dirty: "$.safety.dirty".to_string(),
+                    unpushed: "$.safety.unpushed".to_string(),
+                    primary: "$.safety.primary".to_string(),
+                    task_url: None,
+                }),
+            },
+        );
+        config.settings.insert(
+            crate::worktree_providers::WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY.to_string(),
+            serde_json::json!({ "fixture": { "finalize": [script.display().to_string(), "finalize", "{handle}", "{purpose}", "{owner_run_ref}", "{cleanup_policy}", "{disposition}", "{idempotency_key}"] } }),
+        );
+        crate::defaults::save_config(&config).expect("save provider config");
+
+        let lifecycle = crate::worktree_providers::WorktreeProviderLifecycleIntent {
+            purpose: "agent_task_cook".to_string(),
+            owner_run_ref: "cook-issue-12124".to_string(),
+            cleanup_policy:
+                crate::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+        };
+        let request = WorktreeQueueCreateRequest {
+            branch: "fix/12124".to_string(),
+            task_url: Some("https://github.com/Extra-Chill/homeboy/issues/12124".to_string()),
+            task_ref: Some("Extra-Chill/homeboy#12124".to_string()),
+            run_id: Some(lifecycle.owner_run_ref.clone()),
+            provider_lifecycle: Some(lifecycle.clone()),
+        };
+        let options = WorktreeQueueCreateOptions {
+            repo: "homeboy".to_string(),
+            requests: vec![request],
+            from: "main".to_string(),
+            dry_run: false,
+            retry_after_seconds: 30,
+        };
+        let first = queue_create(options.clone()).expect("provider creates worktree");
+        let second = queue_create(options).expect("provider reuses worktree");
+        assert_eq!(
+            first.rows[0].path.as_deref(),
+            workspace.to_str(),
+            "provider queue row: {:?}",
+            first.rows[0]
+        );
+        assert_eq!(second.rows[0].status, WorktreeQueueCreateStatus::Created);
+        let records_text = std::fs::read_to_string(&records).expect("provider records");
+        assert!(records_text.lines().all(|line| line == "ensure|homeboy@fix-12124|homeboy|main|fix/12124|https://github.com/Extra-Chill/homeboy/issues/12124|agent_task_cook|cook-issue-12124|remove_on_success"));
+
+        let resolution =
+            crate::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+                "homeboy@fix-12124",
+                &config,
+                None,
+            )
+            .expect("resolve provider worktree");
+        crate::worktree_providers::finalize_apply_enabled_worktree_provider_from_config(
+            &resolution,
+            &lifecycle,
+            crate::worktree_providers::WorktreeProviderTerminalDisposition::Succeeded,
+            &config,
+        )
+        .expect("finalize provider worktree");
+        assert!(std::fs::read_to_string(records).expect("finalization record").contains(
+            "finalize|homeboy@fix-12124|agent_task_cook|cook-issue-12124|remove_on_success|succeeded|finalize:cook-issue-12124"
+        ));
+    });
+}
+
 #[test]
 fn queue_create_uses_runner_checkout_when_lab_snapshot_is_not_git_backed() {
     use crate::test_support::with_isolated_home;
@@ -1664,10 +1810,14 @@ fn queue_create_uses_runner_checkout_when_lab_snapshot_is_not_git_backed() {
 
         let output = queue_create(WorktreeQueueCreateOptions {
             repo: "lab-fixture".to_string(),
-            branches: vec!["cook/lab".to_string()],
+            requests: vec![WorktreeQueueCreateRequest {
+                branch: "cook/lab".to_string(),
+                task_url: None,
+                task_ref: None,
+                run_id: None,
+                provider_lifecycle: None,
+            }],
             from: "HEAD".to_string(),
-            task_url: None,
-            task_ref: None,
             dry_run: false,
             retry_after_seconds: 30,
         })

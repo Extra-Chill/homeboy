@@ -46,6 +46,101 @@ pub fn latest_component_tag(component: &Component) -> homeboy_core::Result<Optio
     scope.latest_tag()
 }
 
+/// Resolve the version a git ref names, when that ref is this component's
+/// release tag.
+///
+/// The exact inverse of [`component_tag_name`], and the shared answer to "is
+/// this ref a release tag?". Returns `None` for branches, raw SHAs, and tags
+/// outside this component's release namespace.
+///
+/// Deploy needs this to decide whether an exact `--ref` addresses a release
+/// whose canonical asset should be reused rather than rebuilt locally (#12215).
+/// It lives here, next to the tag naming contract it inverts, so the two cannot
+/// drift apart — and, like the rest of this crate, it stays ecosystem-agnostic.
+pub fn component_release_tag_version(
+    component: &Component,
+    git_ref: &str,
+) -> homeboy_core::Result<Option<String>> {
+    let scope = scope::ReleaseScope::resolve(component, &component.id)?;
+    Ok(release_tag_version_for_prefix(git_ref, scope.tag_prefix()))
+}
+
+/// Strip the namespace a component tags under and keep what remains only when
+/// it is a real version.
+///
+/// The version check is what separates a release tag from a same-shaped branch:
+/// `v2` and `release/v1` are not releases, `v1.2.3` is.
+fn release_tag_version_for_prefix(git_ref: &str, tag_prefix: Option<&str>) -> Option<String> {
+    let version = match tag_prefix {
+        Some(prefix) => git_ref.strip_prefix(&format!("{prefix}-v"))?,
+        None => git_ref.strip_prefix('v')?,
+    };
+
+    semver::Version::parse(version)
+        .ok()
+        .map(|_| version.to_string())
+}
+
+#[cfg(test)]
+mod release_tag_version_tests {
+    use super::release_tag_version_for_prefix;
+
+    #[test]
+    fn a_root_component_release_tag_resolves_its_version() {
+        assert_eq!(
+            release_tag_version_for_prefix("v1.2.3", None),
+            Some("1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn a_scoped_component_release_tag_resolves_its_version() {
+        assert_eq!(
+            release_tag_version_for_prefix(
+                "data-machine-events-v0.55.1",
+                Some("data-machine-events")
+            ),
+            Some("0.55.1".to_string())
+        );
+    }
+
+    #[test]
+    fn a_tag_outside_the_components_namespace_is_not_a_release_tag() {
+        // A scoped component does not release under bare `vX.Y.Z`, and must not
+        // claim another component's namespace.
+        assert_eq!(
+            release_tag_version_for_prefix("v0.55.1", Some("events")),
+            None
+        );
+        assert_eq!(
+            release_tag_version_for_prefix("other-component-v0.55.1", Some("events")),
+            None
+        );
+    }
+
+    #[test]
+    fn branches_and_raw_shas_are_not_release_tags() {
+        assert_eq!(release_tag_version_for_prefix("main", None), None);
+        assert_eq!(release_tag_version_for_prefix("release/v1.2.3", None), None);
+        assert_eq!(
+            release_tag_version_for_prefix("9b780f558f0e4a1b2c3d4e5f60718293a4b5c6d7", None),
+            None
+        );
+        // A `v`-prefixed branch name is the case that makes the version parse
+        // load-bearing rather than decorative.
+        assert_eq!(release_tag_version_for_prefix("vnext", None), None);
+        assert_eq!(release_tag_version_for_prefix("v2", None), None);
+    }
+
+    #[test]
+    fn prerelease_and_build_metadata_tags_are_release_tags() {
+        assert_eq!(
+            release_tag_version_for_prefix("v1.2.3-rc.1", None),
+            Some("1.2.3-rc.1".to_string())
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// The shared version reader must not branch on ecosystem-specific terms —
