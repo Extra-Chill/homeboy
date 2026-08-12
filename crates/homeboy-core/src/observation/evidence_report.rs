@@ -336,6 +336,29 @@ pub struct EvidenceFailureSummary {
     /// Missing for local and pre-projection records to preserve their schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_failure: Option<RunnerFailureEvidence>,
+    /// Controller-side runner failure before a daemon or broker accepted a job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_pre_handoff_failure: Option<RunnerPreHandoffFailureEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerPreHandoffFailureEvidence {
+    pub phase: String,
+    pub code: String,
+    pub message: String,
+    pub details: Value,
+    pub recovery: Value,
+}
+
+impl RunnerPreHandoffFailureEvidence {
+    fn from_metadata(value: &Value) -> Option<Self> {
+        let evidence: Self = serde_json::from_value(value.clone()).ok()?;
+        (!evidence.phase.is_empty()
+            && !evidence.code.is_empty()
+            && !evidence.message.is_empty()
+            && evidence.recovery.is_object())
+        .then_some(evidence)
+    }
 }
 
 /// Versioned, controller-owned projection of a runner terminal failure.
@@ -964,6 +987,9 @@ pub fn evidence_failure_summary(run: &RunRecord) -> EvidenceFailureSummary {
         runner_failure: metadata
             .pointer("/lab/failure")
             .and_then(RunnerFailureEvidence::from_metadata),
+        runner_pre_handoff_failure: metadata
+            .get("runner_pre_handoff_failure")
+            .and_then(RunnerPreHandoffFailureEvidence::from_metadata),
     }
 }
 

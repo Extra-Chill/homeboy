@@ -168,6 +168,197 @@ fn diagnostic_ssh_run_id_creates_generic_run_without_a_runner_job() {
 }
 
 #[test]
+fn pre_handoff_connection_failure_is_terminal_local_evidence_without_a_runner_job() {
+    with_isolated_home(|_| {
+        let run_id = "runner-exec-connection-failure";
+        ensure_generic_runner_exec_run(
+            run_id,
+            "homeboy-lab",
+            "/runner/workspace",
+            &[
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+            ],
+        )
+        .expect("persist attempt before connection");
+        record_runner_exec_pre_handoff_phase(run_id, "connection").expect("record phase");
+        let error = Error::new(
+            ErrorCode::InternalUnexpected,
+            "new tunnel exited before its process identity was captured: Authorization: Bearer abc.def.ghi",
+            serde_json::json!({ "token": "secretvalue123" }),
+        );
+
+        assert!(finish_runner_exec_pre_handoff_failure(
+            run_id,
+            "pre_handoff",
+            "connection",
+            false,
+            &error
+        )
+        .expect("terminalize connection failure"));
+
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let run = store.get_run(run_id).expect("read").expect("persisted run");
+        assert_eq!(run.status, "fail");
+        assert!(run.finished_at.is_some());
+        assert_eq!(run.metadata_json["runner_exec_phase"], "connection");
+        assert_eq!(
+            run.metadata_json["runner_pre_handoff_failure"]["code"],
+            "internal.unexpected"
+        );
+        assert!(!run.metadata_json["runner_pre_handoff_failure"]
+            .to_string()
+            .contains("abc.def.ghi"));
+        assert_eq!(
+            run.metadata_json["runner_pre_handoff_failure"]["details"]["token"],
+            "[REDACTED]"
+        );
+        assert!(run.metadata_json.get("runner_job_id").is_none());
+        assert!(store.list_artifacts(run_id).expect("artifacts").is_empty());
+        assert_eq!(
+            run.metadata_json["runner_terminal_projection"]["state"],
+            "pre_handoff_failed"
+        );
+        assert!(
+            run.metadata_json["runner_pre_handoff_failure"]["recovery"]["evidence"]
+                .as_str()
+                .expect("evidence command")
+                .contains(run_id)
+        );
+        assert!(
+            run.metadata_json["runner_pre_handoff_failure"]["recovery"]["retry"]
+                .as_str()
+                .expect("retry command")
+                .contains("--run-id <new-run-id>")
+        );
+    });
+}
+
+#[test]
+fn duplicate_pre_handoff_failure_is_idempotent() {
+    with_isolated_home(|_| {
+        let run_id = "runner-exec-duplicate-pre-handoff";
+        let command = vec!["homeboy".to_string(), "review".to_string()];
+        ensure_generic_runner_exec_run(run_id, "homeboy-lab", "/runner/workspace", &command)
+            .expect("first attempt");
+        let error = Error::internal_unexpected("connection refused");
+        assert!(finish_runner_exec_pre_handoff_failure(
+            run_id,
+            "pre_handoff",
+            "connection",
+            false,
+            &error
+        )
+        .expect("first terminal failure"));
+
+        let duplicate =
+            ensure_generic_runner_exec_run(run_id, "homeboy-lab", "/runner/workspace", &command)
+                .expect("duplicate lookup reuses the persisted attempt");
+        assert_eq!(duplicate.status, "fail");
+        assert!(!finish_runner_exec_pre_handoff_failure(
+            run_id,
+            "pre_handoff",
+            "connection",
+            false,
+            &error
+        )
+        .expect("duplicate terminalization is ignored"));
+
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let run = store.get_run(run_id).expect("read").expect("run");
+        assert!(run.metadata_json.get("runner_job_id").is_none());
+        assert!(store.list_artifacts(run_id).expect("artifacts").is_empty());
+    });
+}
+
+#[test]
+fn accepted_handoff_marker_prevents_pre_handoff_terminalization() {
+    with_isolated_home(|_| {
+        let run_id = "runner-exec-accepted-but-unbound";
+        ensure_generic_runner_exec_run(run_id, "homeboy-lab", "/runner/workspace", &[])
+            .expect("persist attempt");
+        let error = Error::internal_unexpected("controller binding failed");
+
+        assert!(!finish_runner_exec_pre_handoff_failure(
+            run_id,
+            "pre_handoff",
+            "handoff",
+            true,
+            &error
+        )
+        .expect("accepted handoff remains non-terminal"));
+
+        let run = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .get_run(run_id)
+            .expect("read")
+            .expect("run");
+        assert_eq!(run.status, "running");
+        assert!(run
+            .metadata_json
+            .get("runner_pre_handoff_failure")
+            .is_none());
+    });
+}
+
+#[test]
+fn accepted_binding_wins_the_pre_handoff_terminalization_race() {
+    with_isolated_home(|_| {
+        let run_id = "runner-exec-accepted-race";
+        let command = vec!["homeboy".to_string(), "review".to_string()];
+        ensure_generic_runner_exec_run(run_id, "homeboy-lab", "/runner/workspace", &command)
+            .expect("persist attempt");
+
+        // This mirrors the race between a controller that has already built a
+        // failure payload and a binding write that wins before its CAS update.
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let bound = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let bind_ready = ready.clone();
+        let bind_done = bound.clone();
+        let binding = std::thread::spawn(move || {
+            bind_ready.wait();
+            record_runner_exec_job_identity(
+                run_id,
+                "homeboy-lab",
+                "accepted-job",
+                "/runner/workspace",
+                &command,
+            )
+            .expect("accepted binding");
+            bind_done.wait();
+        });
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let run = store.get_run(run_id).expect("read").expect("attempt");
+        let failure = serde_json::json!({ "phase": "handoff", "code": "connection", "message": "lost", "details": {}, "recovery": {} });
+        let projection = serde_json::json!({ "state": "pre_handoff_failed" });
+        let execution = serde_json::to_value(
+            homeboy_core::runner_execution_envelope::RunnerExecutionRecord::terminal(
+                run.id,
+                "homeboy-lab",
+                "pre_handoff",
+                1,
+            ),
+        )
+        .expect("execution record");
+        ready.wait();
+        bound.wait();
+
+        assert!(!store
+            .finish_running_runner_exec_pre_handoff_failure(run_id, failure, projection, execution,)
+            .expect("CAS terminalization"));
+        binding.join().expect("binding thread");
+        let run = store.get_run(run_id).expect("read").expect("run");
+        assert_eq!(run.status, "running");
+        assert_eq!(run.metadata_json["runner_job_id"], "accepted-job");
+        assert!(run
+            .metadata_json
+            .get("runner_pre_handoff_failure")
+            .is_none());
+    });
+}
+
+#[test]
 fn generic_runner_exec_run_supports_artifact_attachment() {
     // The end-to-end contract #9485 restores: once the generic run exists, the
     // declared evidence attaches to it (previously `run record not found`).

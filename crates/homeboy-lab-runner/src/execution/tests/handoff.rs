@@ -8,6 +8,28 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 #[test]
+fn accepted_handoff_persistence_error_carries_an_explicit_remote_boundary() {
+    let error = accepted_handoff_persistence_error(
+        Error::internal_unexpected("controller write failed"),
+        "lab",
+        "job-accepted",
+    );
+
+    assert_eq!(
+        error.details["runner_exec_accepted_handoff"]["runner_id"],
+        "lab"
+    );
+    assert_eq!(
+        error.details["runner_exec_accepted_handoff"]["job_id"],
+        "job-accepted"
+    );
+    assert!(error
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("runner job logs lab job-accepted")));
+}
+
+#[test]
 fn timeout_mirrors_remote_job_without_cancelling() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner = ssh_runner();

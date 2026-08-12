@@ -271,6 +271,34 @@ pub(super) fn exec_via_reverse_broker(
             Some("parse reverse broker job".to_string()),
         )
     })?;
+    if let Some(run_id) = run_id.as_deref() {
+        // The broker has accepted this job. Persist that boundary before local
+        // follow-up work can fail, preserving the authoritative remote identity.
+        let binding = if !run_id_owns_generic_exec {
+            homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
+                &homeboy_core::lab_contract::RunnerJobIdentity::new(
+                    run_id,
+                    &runner.id,
+                    job.id.to_string(),
+                ),
+                &cwd,
+                &command,
+            )
+            .map(|_| ())
+        } else {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                run_id,
+                &runner.id,
+                &job.id.to_string(),
+                &cwd,
+                &command,
+            )
+            .map(|_| ())
+        };
+        binding.map_err(|error| {
+            super::accepted_handoff_persistence_error(error, &runner.id, &job.id.to_string())
+        })?;
+    }
     persist_runner_execution_transition(
         &RunnerExecutionRecord::in_flight(job.id.to_string(), runner.id.clone(), "reverse_broker")
             .with_job_id(job.id.to_string())
@@ -288,31 +316,6 @@ pub(super) fn exec_via_reverse_broker(
         &cwd,
         &command,
     )?;
-    if let Some(run_id) = run_id.as_deref() {
-        // Every portable agent-task run is a controller-owned Lab handoff.
-        // Persist the accepted daemon job before foreground cook or retry can
-        // validate a runner snapshot; metadata-only binding leaves the typed
-        // handoff pending and loses that identity at preacceptance (#9240).
-        if !run_id_owns_generic_exec {
-            homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
-                &homeboy_core::lab_contract::RunnerJobIdentity::new(
-                    run_id,
-                    &runner.id,
-                    job.id.to_string(),
-                ),
-                &cwd,
-                &command,
-            )?;
-        } else {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
-                run_id,
-                &runner.id,
-                &job.id.to_string(),
-                &cwd,
-                &command,
-            )?;
-        }
-    }
     let persisted_run_id = mirror_evidence
         .then(|| {
             persist_lab_offload_handoff_run(

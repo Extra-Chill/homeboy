@@ -678,6 +678,56 @@ mod tests {
     }
 
     #[test]
+    fn evidence_command_surfaces_local_pre_handoff_failure_without_runner_connectivity() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "runner_execution",
+                    "homeboy-lab",
+                    "",
+                    serde_json::json!({
+                        "runner_pre_handoff_failure": {
+                            "phase": "connection",
+                            "code": "runner.lab_transport_failure",
+                            "message": "tunnel setup failed: token=<redacted>",
+                            "details": { "token": "<redacted>" },
+                            "recovery": {
+                                "evidence": "homeboy runs evidence local-pre-handoff",
+                                "status": "homeboy runs show local-pre-handoff",
+                                "retry": "homeboy runner exec homeboy-lab --run-id <new-run-id> -- <command>"
+                            }
+                        }
+                    }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, homeboy::core::observation::RunStatus::Fail, None)
+                .expect("finish");
+
+            let (output, _) = evidence(&run.id).expect("local evidence does not need a runner");
+            let RunsOutput::Evidence(report) = output else {
+                panic!("full evidence output");
+            };
+            let failure = report
+                .failure
+                .runner_pre_handoff_failure
+                .expect("pre-handoff evidence");
+            assert_eq!(failure.phase, "connection");
+            assert_eq!(failure.code, "runner.lab_transport_failure");
+            assert!(failure.message.contains("<redacted>"));
+            assert_eq!(
+                failure.recovery["evidence"],
+                "homeboy runs evidence local-pre-handoff"
+            );
+            assert!(failure.recovery["retry"]
+                .as_str()
+                .expect("retry command")
+                .contains("--run-id <new-run-id>"));
+        });
+    }
+
+    #[test]
     fn evidence_projection_bounds_large_inventories_and_keeps_the_top_diagnostic() {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();

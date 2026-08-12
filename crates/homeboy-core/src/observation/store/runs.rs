@@ -243,6 +243,29 @@ impl ObservationStore {
         Ok(rows == 1)
     }
 
+    /// Atomically terminalize a generic runner-exec attempt only while it has
+    /// not crossed the durable runner-job handoff boundary. `json_set` preserves
+    /// metadata written by a concurrent accepted-handoff binder.
+    pub fn finish_running_runner_exec_pre_handoff_failure(
+        &self,
+        run_id: &str,
+        failure: serde_json::Value,
+        terminal_projection: serde_json::Value,
+        execution_record: serde_json::Value,
+    ) -> Result<bool> {
+        let failure = serialize_metadata(&failure)?;
+        let terminal_projection = serialize_metadata(&terminal_projection)?;
+        let execution_record = serialize_metadata(&execution_record)?;
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let rows = execute_with_retry("finish pre-handoff runner exec", || {
+            self.connection.execute(
+                "UPDATE runs SET finished_at = ?1, status = 'fail', metadata_json = json_set(metadata_json, '$.runner_pre_handoff_failure', json(?2), '$.runner_terminal_projection', json(?3), '$.runner_execution_record', json(?4)) WHERE id = ?5 AND status = 'running' AND json_extract(metadata_json, '$.kind') = 'runner_exec' AND COALESCE(json_extract(metadata_json, '$.runner_job_id'), json_extract(metadata_json, '$.agent_task_run.metadata.runner_job_id')) IS NULL",
+                params![finished_at, failure, terminal_projection, execution_record, run_id],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
     /// Claim a running runner-exec source for one child identity. The child
     /// token fences later source terminalization after a retry or takeover.
     pub fn claim_running_runner_exec_recovery_source(

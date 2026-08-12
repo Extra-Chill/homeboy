@@ -768,6 +768,13 @@ const RUNNER_EXEC_RUN_ID_ENV_NAMES: &[&str] = &[
 
 const RUNNER_EXEC_SCRUBBED_RUN_ID_ENV_NAMES: &[&str] = &["WORKFLOW_BENCH_RUN_ID"];
 
+fn explicit_generic_runner_exec_id(options: &RunnerExecOptions) -> Option<&str> {
+    options
+        .run_id_owns_generic_exec
+        .then(|| options.run_id.as_deref())
+        .flatten()
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RunnerProcessRequest {
     pub runner_id: String,
@@ -830,6 +837,87 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 /// that verified transport rather than resolving a controller-scoped session a
 /// second time during the same transaction.
 pub(crate) fn exec_with_status_snapshot(
+    runner_id: &str,
+    options: RunnerExecOptions,
+    status_snapshot: Option<RunnerStatusReport>,
+) -> Result<(RunnerExecOutput, i32)> {
+    let explicit_generic_run_id = options
+        .run_id_owns_generic_exec
+        .then(|| options.run_id.clone())
+        .flatten();
+    if let Some(run_id) = explicit_generic_run_id.as_deref() {
+        // Persist before preparation, which can materialize inputs, or connection,
+        // which can create a tunnel. No runner job is claimed at this boundary.
+        let attempt = homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
+            run_id,
+            runner_id,
+            options.cwd.as_deref().unwrap_or_default(),
+            &options.command,
+        )?;
+        if homeboy_core::observation::RunStatus::from_label(&attempt.status)
+            .is_some_and(homeboy_core::observation::RunStatus::is_terminal)
+        {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                format!(
+                    "runner exec attempt `{run_id}` is already terminal; use a new --run-id to submit another attempt"
+                ),
+                Some(run_id.to_string()),
+                Some(vec![format!("Inspect the existing evidence: homeboy runs evidence {run_id}" )]),
+            ));
+        }
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_execution_record(
+            run_id,
+            &RunnerExecutionRecord::planned(run_id, runner_id, "pre_handoff"),
+        )?;
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_pre_handoff_phase(
+            run_id,
+            "preflight",
+        )?;
+    }
+    let result = exec_with_status_snapshot_attempt(runner_id, options, status_snapshot);
+    if let (Some(run_id), Err(error)) = (explicit_generic_run_id.as_deref(), &result) {
+        let accepted = error.details.get("runner_exec_accepted_handoff").is_some();
+        if let Err(persistence_error) =
+            homeboy_agents::agent_task_lifecycle::finish_runner_exec_pre_handoff_failure(
+                run_id,
+                "pre_handoff",
+                "pre_handoff",
+                accepted,
+                error,
+            )
+        {
+            let mut primary = error.clone();
+            primary.details["pre_handoff_evidence_persistence"] = json!({
+                "code": persistence_error.code.as_str(),
+                "message": homeboy_core::redaction::redact_string(&persistence_error.message),
+                "details": homeboy_core::redaction::redact_json(&persistence_error.details),
+                "run_id": run_id,
+            });
+            primary = primary.with_hint(format!(
+                "The primary runner exec failure could not be persisted as local evidence; inspect and retry with `homeboy runs evidence {run_id}`."
+            ));
+            return Err(primary);
+        }
+    }
+    result
+}
+
+pub(super) fn accepted_handoff_persistence_error(
+    mut error: Error,
+    runner_id: &str,
+    job_id: &str,
+) -> Error {
+    error.details["runner_exec_accepted_handoff"] = json!({
+        "runner_id": runner_id,
+        "job_id": job_id,
+    });
+    error.with_hint(format!(
+        "Runner handoff was accepted as job `{job_id}` on `{runner_id}`; inspect it with `homeboy runner job logs {runner_id} {job_id}`."
+    ))
+}
+
+fn exec_with_status_snapshot_attempt(
     runner_id: &str,
     options: RunnerExecOptions,
     status_snapshot: Option<RunnerStatusReport>,
@@ -947,6 +1035,12 @@ pub(crate) fn exec_with_status_snapshot(
     }
     // Observe the session before selecting diagnostic SSH. This keeps a stale
     // runner diagnosable without bypassing healthy daemon admission.
+    if let Some(run_id) = explicit_generic_runner_exec_id(&options) {
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_pre_handoff_phase(
+            run_id,
+            "connection",
+        )?;
+    }
     let connected = if should_force_diagnostic_ssh(&runner, &options) {
         // Admission status reconnects a disconnected direct SSH session. A
         // diagnostic must only observe controller state and must not rotate it.
@@ -964,6 +1058,12 @@ pub(crate) fn exec_with_status_snapshot(
             &required_extensions,
         )
     {
+        if let Some(run_id) = explicit_generic_runner_exec_id(&options) {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_pre_handoff_phase(
+                run_id,
+                "materialization",
+            )?;
+        }
         let extension_parity_plan = plan_extension_parity(
             runner_id,
             &runner,
@@ -1080,6 +1180,11 @@ pub(crate) fn exec_with_status_snapshot(
         return Err(read_only_artifact_access_unresolved_error(
             runner_id, &connected,
         ));
+    }
+    if let Some(run_id) = explicit_generic_runner_exec_id(&options) {
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_pre_handoff_phase(
+            run_id, "handoff",
+        )?;
     }
     let result = match select_runner_transport(&runner, Some(&connected), false) {
         RunnerTransport::DirectDaemon(handle) => {
