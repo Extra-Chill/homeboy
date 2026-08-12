@@ -240,6 +240,7 @@ pub fn register_startup_providers_after_reconcile(
     // caller: a detached cook whose owner died stayed `running` forever, and a
     // controller parked in `Waiting` never left it.
     crate::agents::agent_task_service::register_orchestration_driver();
+    crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
     // A locally-placed detached Cook is a daemon-owned durable job: the daemon
     // owns its record, checkpointing, cancellation and HTTP inspection, while
     // the launcher-spawned child keeps the operator's execution environment.

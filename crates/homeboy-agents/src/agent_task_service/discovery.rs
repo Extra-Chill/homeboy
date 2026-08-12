@@ -10,6 +10,10 @@ use crate::agent_task_scheduler::AgentTaskState;
 // surfaces cannot disagree about what "stale" means.
 use homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES;
 use homeboy_core::{Error, Result};
+use homeboy_upgrade::upgrade::{
+    register_controller_upgrade_admission_provider as register_upgrade_admission_provider,
+    ControllerUpgradeAdmission, ControllerUpgradeAdmissionProvider, ControllerUpgradeBlocker,
+};
 use serde_json::Value;
 
 /// The cross-location surface that federates controller-local records with
@@ -440,6 +444,78 @@ fn liveness_summary_for_records(
         }
     }
     summary
+}
+
+/// Read-only controller-upgrade admission derived from the same liveness model
+/// as `agent-task active`. A stale local record is retained for audit and later
+/// explicit reconciliation, not treated as a live controller owner. A stale
+/// runner-backed record remains fail-closed because its remote owner is not
+/// disproven by a local read.
+pub(crate) fn controller_upgrade_admission_for_records(
+    records: &[AgentTaskRunRecord],
+    record_health: AgentTaskRecordHealthSummary,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ControllerUpgradeAdmission {
+    let summary = liveness_summary_for_records(records, now);
+    let blockers = records
+        .iter()
+        .filter_map(|record| {
+            let liveness =
+                classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
+            let runner_unverified = record.runner_job_id().is_some()
+                && matches!(
+                    liveness,
+                    AgentTaskLiveness::Stale
+                        | AgentTaskLiveness::Suspect
+                        | AgentTaskLiveness::Unreconciled
+                );
+            (!matches!(liveness, AgentTaskLiveness::Stale) || runner_unverified).then(|| {
+                let recovery_command = record
+                    .runner_id()
+                    .map(|runner| format!("homeboy runner reconcile {runner}"))
+                    .unwrap_or_else(|| {
+                        format!("homeboy agent-task reconcile {} --dry-run", record.run_id)
+                    });
+                ControllerUpgradeBlocker {
+                    run_id: record.run_id.clone(),
+                    liveness: liveness.as_str(),
+                    reason: if runner_unverified {
+                        "runner_job_unverified_after_daemon_restart".to_string()
+                    } else {
+                        stale_reason_for_record(record)
+                    },
+                    recovery_command,
+                }
+            })
+        })
+        .collect();
+    ControllerUpgradeAdmission {
+        schema: "homeboy/controller-upgrade-admission/v1",
+        active: summary.active,
+        stale: summary.stale,
+        suspect: summary.suspect,
+        unreconciled: summary.unreconciled,
+        reconcilable: summary.reconcilable,
+        record_health: serde_json::to_value(record_health).unwrap_or(serde_json::Value::Null),
+        blockers,
+    }
+}
+
+struct AgentTaskControllerUpgradeAdmissionProvider;
+
+impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionProvider {
+    fn controller_upgrade_admission(&self) -> Result<ControllerUpgradeAdmission> {
+        let (records, health) = agent_task_lifecycle::read_records_with_health()?;
+        Ok(controller_upgrade_admission_for_records(
+            &records,
+            health,
+            chrono::Utc::now(),
+        ))
+    }
+}
+
+pub fn register_controller_upgrade_admission_provider() {
+    register_upgrade_admission_provider(Box::new(AgentTaskControllerUpgradeAdmissionProvider));
 }
 
 fn classify_liveness(
