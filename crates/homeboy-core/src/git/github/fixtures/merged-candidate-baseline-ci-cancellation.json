@@ -1,0 +1,21 @@
+{
+  "state": "MERGED",
+  "mergedAt": "2026-08-12T12:47:01Z",
+  "statusCheckRollup": [
+    {
+      "name": "candidate / test",
+      "status": "COMPLETED",
+      "conclusion": "CANCELLED"
+    },
+    {
+      "name": "baseline / test",
+      "status": "COMPLETED",
+      "conclusion": "CANCELLED"
+    },
+    {
+      "name": "candidate / lint",
+      "status": "IN_PROGRESS",
+      "conclusion": null
+    }
+  ]
+}
