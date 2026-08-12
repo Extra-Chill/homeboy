@@ -503,6 +503,26 @@ pub(super) enum RunnerCommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+    /// Execute an extension-owned recipe provider in one materialized workspace.
+    RecipeRun {
+        /// Runner ID
+        runner_id: String,
+        /// Stable extension-owned recipe execution provider ID
+        #[arg(long)]
+        provider: String,
+        /// Controller-local workspace to snapshot once before execution
+        #[arg(long = "sync-workspace")]
+        sync_workspace: String,
+        /// Recipe path relative to the materialized workspace
+        #[arg(long)]
+        recipe: String,
+        /// Artifact directory relative to the materialized workspace
+        #[arg(long)]
+        artifacts: String,
+        /// Durable run identity that receives execution evidence
+        #[arg(long = "run-id")]
+        run_id: String,
+    },
     /// Show the effective environment injected into runner jobs
     Env {
         /// Runner ID

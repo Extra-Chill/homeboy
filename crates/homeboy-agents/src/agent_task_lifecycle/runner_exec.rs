@@ -183,6 +183,37 @@ pub fn record_runner_exec_execution_record(
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
+/// Persist extension-owned invocation identity and the terminal structured
+/// result beside the generic runner execution record.
+pub fn record_runner_exec_provider_result(
+    run_id: &str,
+    provider_id: &str,
+    provider_version: &str,
+    invocation: &[String],
+    source_snapshot: &serde_json::Value,
+    terminal_result: &serde_json::Value,
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    metadata.insert(
+        "execution_provider".to_string(),
+        json!({
+            "id": provider_id,
+            "version": provider_version,
+            "invocation": invocation,
+        }),
+    );
+    metadata.insert("source_snapshot".to_string(), source_snapshot.clone());
+    metadata.insert("terminal_json_result".to_string(), terminal_result.clone());
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
 /// Create (or validate ownership of) a generic runner-exec run that has no
 /// daemon runner job — the diagnostic-SSH transport executes synchronously and
 /// never accepts a durable runner job, but a caller-supplied `--run-id` with

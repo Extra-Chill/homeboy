@@ -290,6 +290,21 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             command,
             extension_env_providers,
         )),
+        RunnerCommand::RecipeRun {
+            runner_id,
+            provider,
+            sync_workspace,
+            recipe,
+            artifacts,
+            run_id,
+        } => map_execution(super::recipe_run::recipe_run(
+            &runner_id,
+            &provider,
+            sync_workspace,
+            recipe,
+            artifacts,
+            run_id,
+        )),
         RunnerCommand::Env { id } => map_env(env_mod::env(&id)),
         RunnerCommand::Lifecycle {
             runner_id,

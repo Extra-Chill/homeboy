@@ -18,6 +18,7 @@ mod exec;
 mod jobs;
 mod lifecycle;
 mod log_projection;
+mod recipe_run;
 mod registry;
 mod status;
 mod types;
