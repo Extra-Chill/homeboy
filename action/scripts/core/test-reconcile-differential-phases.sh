@@ -79,8 +79,8 @@ fi
 printf 'PASS: workflow keeps candidate and baseline retries independent\n'
 
 if grep -F 'results="${RESULTS:-{}}"' "${WORKFLOW}" >/dev/null \
-  || [ "$(grep -Fc 'results="${RESULTS:-}"' "${WORKFLOW}")" -ne 4 ] \
-  || [ "$(grep -Fc "[ -n \"\${results}\" ] || results='{}'" "${WORKFLOW}")" -ne 4 ]; then
+  || [ "$(grep -Fc 'results="${RESULTS:-}"' "${WORKFLOW}")" -ne 3 ] \
+  || [ "$(grep -Fc "[ -n \"\${results}\" ] || results='{}'" "${WORKFLOW}")" -ne 3 ]; then
   printf 'FAIL: candidate and baseline provenance do not preserve populated result JSON\n'
   exit 1
 fi

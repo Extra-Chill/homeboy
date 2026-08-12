@@ -21,8 +21,6 @@ expected = {
     "baseline": ["Run baseline ${{ matrix.title }}"],
     "candidate-test-plan": ["Configure candidate Test shards"],
     "candidate-test-shards": ["Run candidate Test shard ${{ matrix.shard_id }}"],
-    "baseline-test-plan": ["Configure baseline Test shards"],
-    "baseline-test-shards": ["Run baseline Test shard ${{ matrix.shard_id }}"],
 }
 
 for job_name, names in expected.items():
