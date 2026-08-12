@@ -163,6 +163,16 @@ pub struct WorktreeProviderResolution {
     pub worktree: WorktreeProviderHandle,
 }
 
+/// Non-mutating provider answer for one explicit workspace creation intent.
+/// Existing destinations retain their resolved metadata; absent destinations
+/// require a provider-declared path projection before they can be represented
+/// as a runnable plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeProviderCreatePlan {
+    Existing(WorktreeProviderResolution),
+    WouldCreate(WorktreeProviderResolution),
+}
+
 /// Exact provider identity, intentionally separate from mutable workspace
 /// safety. `token` is opaque to Homeboy and is the sole value accepted by a
 /// versioned provider safety command.
@@ -777,6 +787,111 @@ pub fn select_apply_enabled_worktree_provider_from_config(
         [] => Err(Error::validation_invalid_argument("to_worktree", format!("worktree handle `{}` is missing and no enabled apply-enabled provider configures commands.ensure, so Homeboy cannot create it", intent.handle), Some(intent.handle.clone()), Some(missing_ensure_provider_remediation(intent)))),
         _ => Err(Error::validation_invalid_argument("to_worktree", format!("worktree handle `{}` is missing and multiple providers can ensure it: {}", intent.handle, providers.join(", ")), Some(intent.handle.clone()), Some(ambiguous_ensure_provider_remediation(&providers.iter().map(String::as_str).collect::<Vec<_>>())))),
     }
+}
+
+/// Resolve an existing provider workspace or ask its configured read-only
+/// `plan` command to project the exact workspace that `ensure` would create.
+/// A provider without that command is intentionally not guessed from native
+/// worktree naming, because provider path policy is provider-owned.
+pub fn plan_apply_enabled_worktree_provider_from_config(
+    intent: &WorktreeProviderCreateIntent,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderCreatePlan> {
+    match resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None) {
+        Ok(resolution) => return Ok(WorktreeProviderCreatePlan::Existing(resolution)),
+        Err(error)
+            if error
+                .details
+                .get("worktree_provider_lookup")
+                .and_then(Value::as_str)
+                == Some("not_found") => {}
+        Err(error) => return Err(error),
+    }
+    let mut provider_ids = config
+        .worktree_providers
+        .iter()
+        .filter_map(|(id, provider)| {
+            (provider.enabled && provider.apply_enabled && provider.commands.ensure.is_some())
+                .then_some(id.clone())
+        })
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    let provider_id = match provider_ids.as_slice() {
+        [provider_id] => provider_id.clone(),
+        [] => return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!("worktree handle `{}` is missing and no enabled apply-enabled provider configures commands.ensure", intent.handle),
+            Some(intent.handle.clone()),
+            None,
+        )),
+        _ => return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!("worktree handle `{}` is missing and multiple providers can ensure it: {}", intent.handle, provider_ids.join(", ")),
+            Some(intent.handle.clone()),
+            None,
+        )),
+    };
+    let provider = config
+        .worktree_providers
+        .get(&provider_id)
+        .expect("selected provider is configured");
+    let Some(command) = provider.commands.plan.as_ref() else {
+        let mut error = Error::validation_invalid_argument(
+            "worktree_providers.commands.plan",
+            format!(
+                "worktree provider `{provider_id}` can ensure `{}` but cannot non-mutatingly plan its destination",
+                intent.handle
+            ),
+            Some(provider_id.clone()),
+            Some(vec![format!(
+                "Configure worktree_providers.{provider_id}.commands.plan with the same intent placeholders as commands.ensure."
+            )]),
+        );
+        error.details["worktree_provider_planning"] = Value::String("unsupported".to_string());
+        error.details["worktree_provider_id"] = Value::String(provider_id);
+        error.details["handle"] = Value::String(intent.handle.clone());
+        return Err(error);
+    };
+    let command = expand_ensure_command(command, intent, &provision_idempotency_key(intent));
+    let worktrees = run_provider_lookup_command(
+        &provider_id,
+        provider,
+        &command,
+        "plan",
+        &provider.commands.resolve_not_found_exit_codes,
+    )?;
+    let worktree = worktrees
+        .into_iter()
+        .find(|worktree| worktree.handle == intent.handle)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "worktree_providers.commands.plan",
+                format!(
+                    "worktree provider `{provider_id}` plan did not return requested handle `{}`",
+                    intent.handle
+                ),
+                Some(provider_id.clone()),
+                None,
+            )
+        })?;
+    if worktree.path.trim().is_empty() || worktree.branch != intent.head || worktree.safety.primary
+    {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands.plan",
+            format!(
+                "worktree provider `{provider_id}` returned an incomplete or unsafe planned destination for `{}`",
+                intent.handle
+            ),
+            Some(provider_id),
+            None,
+        ));
+    }
+    Ok(WorktreeProviderCreatePlan::WouldCreate(
+        WorktreeProviderResolution {
+            provider_id,
+            worktree,
+        },
+    ))
 }
 
 /// Auto-creation is not a default capability: it needs an operator-configured
@@ -2907,6 +3022,107 @@ mod tests {
                 .expect("list result mapping")
                 .items,
             "$.result.items"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_create_plan_projects_absent_existing_and_unsupported_destinations_without_ensure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let existing = temp.path().join("existing");
+        let marker = temp.path().join("ensure-called");
+        let script = temp.path().join("provider");
+        Command::new("git")
+            .args([
+                "init",
+                "-q",
+                "-b",
+                "fix/existing",
+                existing.to_str().unwrap(),
+            ])
+            .status()
+            .expect("initialize existing workspace");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\nresolve) if [ \"$2\" = \"fixture@existing\" ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@existing\",\"path\":\"{}\",\"branch\":\"fix/existing\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}'; fi ;;\nplan) printf '%s\\n' \"{{\\\"worktrees\\\":[{{\\\"handle\\\":\\\"$2\\\",\\\"path\\\":\\\"/provider/planned/$2\\\",\\\"branch\\\":\\\"$5\\\",\\\"safety\\\":{{\\\"dirty\\\":false,\\\"unpushed\\\":false,\\\"primary\\\":false}}}}]}}\" ;;\nensure) touch '{}' ;;\nesac\n",
+                existing.display(),
+                marker.display(),
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("executable");
+        let mut config = config_with_provider(WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve: Some(vec![
+                    script.display().to_string(),
+                    "resolve".to_string(),
+                    "{handle}".to_string(),
+                ]),
+                plan: Some(vec![
+                    script.display().to_string(),
+                    "plan".to_string(),
+                    "{handle}".to_string(),
+                    "{repo}".to_string(),
+                    "{base}".to_string(),
+                    "{head}".to_string(),
+                    "{task_url}".to_string(),
+                    "{idempotency_key}".to_string(),
+                ]),
+                ensure: Some(vec![script.display().to_string(), "ensure".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        });
+        let intent = |handle: &str, head: &str| WorktreeProviderCreateIntent {
+            handle: handle.to_string(),
+            repo: "fixture".to_string(),
+            base: "main".to_string(),
+            head: head.to_string(),
+            task_url: "https://example.test/issues/1".to_string(),
+        };
+
+        let existing = plan_apply_enabled_worktree_provider_from_config(
+            &intent("fixture@existing", "fix/existing"),
+            &config,
+        )
+        .expect("existing plan");
+        assert!(matches!(existing, WorktreeProviderCreatePlan::Existing(_)));
+        let absent = plan_apply_enabled_worktree_provider_from_config(
+            &intent("fixture@fix-new", "fix/new"),
+            &config,
+        )
+        .expect("absent plan");
+        let WorktreeProviderCreatePlan::WouldCreate(absent) = absent else {
+            panic!("would create")
+        };
+        assert_eq!(absent.worktree.path, "/provider/planned/fixture@fix-new");
+        assert!(!marker.exists(), "planning must not invoke ensure");
+
+        config
+            .worktree_providers
+            .get_mut("fixture")
+            .unwrap()
+            .commands
+            .plan = None;
+        let error = plan_apply_enabled_worktree_provider_from_config(
+            &intent("fixture@fix-unsupported", "fix/unsupported"),
+            &config,
+        )
+        .expect_err("unsupported planning");
+        assert_eq!(error.details["worktree_provider_planning"], "unsupported");
+        assert!(
+            !marker.exists(),
+            "unsupported planning must not invoke ensure"
         );
     }
 

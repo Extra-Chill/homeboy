@@ -1452,7 +1452,7 @@ fn cook_batch_inner(
             (branch, cook.to_worktree.clone())
         })
         .collect::<Vec<_>>();
-    let worktrees = queue_or_reuse_worktrees(&args, &branches)?;
+    let worktrees = queue_or_reuse_worktrees(&args, &plan, &branches)?;
     bind_materialized_worktree_paths(&mut plan, &worktrees);
     let blocked = worktrees
         .rows
@@ -1461,7 +1461,7 @@ fn cook_batch_inner(
             !matches!(
                 row.status,
                 worktree::WorktreeQueueCreateStatus::Created
-                    | worktree::WorktreeQueueCreateStatus::Queued
+                    | worktree::WorktreeQueueCreateStatus::WouldCreate
             )
         })
         .count();
@@ -1478,7 +1478,7 @@ fn cook_batch_inner(
         // materialization.
         preflight_batch_cook_recipes(&plan, attempt_dispatcher)?;
     } else if args.dry_run {
-        preflight_batch_cook_recipes(&plan, attempt_dispatcher)?;
+        preflight_batch_cook_recipe_declarations(&plan)?;
     }
     let run_result = if args.run_plan && can_run {
         let (value, exit_code) = match attempt_dispatcher {
@@ -1499,7 +1499,7 @@ fn cook_batch_inner(
     } else if blocked > 0 {
         "blocked"
     } else if args.dry_run {
-        "planned"
+        "ready"
     } else {
         "ready"
     };
@@ -1774,16 +1774,24 @@ fn bind_materialized_worktree_paths(
         if cook.cwd.is_some() || cook.workspace.is_some() {
             continue;
         }
-        cook.workspace = worktrees
+        let row = worktrees
             .rows
             .iter()
-            .find(|row| row.handle == cook.to_worktree)
-            .and_then(|row| row.path.clone());
+            .find(|row| row.handle == cook.to_worktree);
+        // A planned path describes the future mutation. Keeping its handle in
+        // the emitted plan lets normal execution create that exact destination.
+        if matches!(
+            row.map(|row| &row.status),
+            Some(worktree::WorktreeQueueCreateStatus::Created)
+        ) {
+            cook.workspace = row.and_then(|row| row.path.clone());
+        }
     }
 }
 
 fn queue_or_reuse_worktrees(
     args: &AgentTaskFanoutCookBatchArgs,
+    plan: &BatchCookFanoutPlan,
     branches: &[(String, String)],
 ) -> Result<worktree::WorktreeQueueCreateOutput> {
     let queue_create = |create_branches: Vec<String>, dry_run: bool| {
@@ -1799,10 +1807,10 @@ fn queue_or_reuse_worktrees(
     };
 
     if args.dry_run {
-        return queue_create(
-            branches.iter().map(|(branch, _)| branch.clone()).collect(),
-            true,
-        );
+        if configured_provider_workspace_creation()? {
+            return plan_provider_worktrees_dry_run(args, plan);
+        }
+        return queue_or_reuse_worktrees_dry_run(args, branches, queue_create);
     }
 
     let mut reused = Vec::new();
@@ -1847,6 +1855,153 @@ fn queue_or_reuse_worktrees(
     })
 }
 
+/// Provider-managed destinations have provider-owned path policy. Dry-run
+/// therefore asks the provider's optional read-only plan command rather than
+/// deriving native sibling paths or invoking ensure.
+fn plan_provider_worktrees_dry_run(
+    args: &AgentTaskFanoutCookBatchArgs,
+    plan: &BatchCookFanoutPlan,
+) -> Result<worktree::WorktreeQueueCreateOutput> {
+    use homeboy::core::worktree_providers::{
+        plan_apply_enabled_worktree_provider_from_config, WorktreeProviderCreateIntent,
+        WorktreeProviderCreatePlan,
+    };
+
+    let config = homeboy::core::defaults::load_config();
+    let mut rows = Vec::new();
+    for cook in &plan.cooks {
+        let head = cook.head.as_ref().expect("generated cooks have heads");
+        let task_url = cook
+            .task_url
+            .as_ref()
+            .expect("generated cooks have task URLs");
+        let intent = WorktreeProviderCreateIntent {
+            handle: cook.to_worktree.clone(),
+            repo: args.repo.clone(),
+            base: args.from.clone(),
+            head: head.clone(),
+            task_url: task_url.clone(),
+        };
+        let command = worktree_create_command(args, head);
+        match plan_apply_enabled_worktree_provider_from_config(&intent, &config) {
+            Ok(WorktreeProviderCreatePlan::Existing(resolution)) => {
+                rows.push(worktree::WorktreeQueueCreateRow {
+                    branch: head.clone(),
+                    handle: resolution.worktree.handle,
+                    status: worktree::WorktreeQueueCreateStatus::Created,
+                    command,
+                    retry_after_seconds: None,
+                    active_lock_holder: None,
+                    path: Some(resolution.worktree.path),
+                    error: None,
+                });
+            }
+            Ok(WorktreeProviderCreatePlan::WouldCreate(resolution)) => {
+                rows.push(worktree::WorktreeQueueCreateRow {
+                    branch: head.clone(),
+                    handle: resolution.worktree.handle,
+                    status: worktree::WorktreeQueueCreateStatus::WouldCreate,
+                    command,
+                    retry_after_seconds: None,
+                    active_lock_holder: None,
+                    path: Some(resolution.worktree.path),
+                    error: None,
+                });
+            }
+            Err(error) => {
+                let mut row = worktree::WorktreeQueueCreateRow {
+                    branch: head.clone(),
+                    handle: cook.to_worktree.clone(),
+                    status: worktree::WorktreeQueueCreateStatus::Failed,
+                    command,
+                    retry_after_seconds: None,
+                    active_lock_holder: None,
+                    path: None,
+                    error: Some(error.message),
+                };
+                row.error = Some(
+                    serde_json::json!({
+                        "message": row.error,
+                        "details": error.details,
+                    })
+                    .to_string(),
+                );
+                rows.push(row);
+            }
+        }
+    }
+    Ok(worktree::WorktreeQueueCreateOutput {
+        schema: "homeboy/worktree-queue-create/v1",
+        repo: args.repo.clone(),
+        base_ref: args.from.clone(),
+        dry_run: true,
+        rows,
+    })
+}
+
+fn configured_provider_workspace_creation() -> Result<bool> {
+    let config = homeboy::core::defaults::load_config();
+    Ok(config.worktree_providers.values().any(|provider| {
+        provider.enabled && provider.apply_enabled && provider.commands.ensure.is_some()
+    }))
+}
+
+/// Dry-run observes existing managed worktrees but only plans creation for
+/// missing handles. This preserves the exact native creation path while never
+/// asking dispatch to resolve a workspace that does not exist yet.
+fn queue_or_reuse_worktrees_dry_run(
+    args: &AgentTaskFanoutCookBatchArgs,
+    branches: &[(String, String)],
+    queue_create: impl Fn(Vec<String>, bool) -> Result<worktree::WorktreeQueueCreateOutput>,
+) -> Result<worktree::WorktreeQueueCreateOutput> {
+    let mut reused = Vec::new();
+    let mut to_create = Vec::new();
+    for (branch, handle) in branches {
+        match worktree::status(handle) {
+            Ok(status)
+                if status.record.state == worktree::TaskWorktreeState::Active
+                    && !status.safety.worktree_missing =>
+            {
+                reused.push(worktree::WorktreeQueueCreateRow {
+                    branch: branch.clone(),
+                    handle: handle.clone(),
+                    status: worktree::WorktreeQueueCreateStatus::Created,
+                    command: worktree_create_command(args, branch),
+                    retry_after_seconds: None,
+                    active_lock_holder: None,
+                    path: Some(status.record.worktree_path),
+                    error: None,
+                });
+            }
+            _ => to_create.push(branch.clone()),
+        }
+    }
+    let planned = queue_create(to_create, true)?;
+    let rows = branches
+        .iter()
+        .filter_map(|(branch, handle)| {
+            reused
+                .iter()
+                .find(|row| row.handle == *handle)
+                .cloned()
+                .or_else(|| {
+                    planned
+                        .rows
+                        .iter()
+                        .find(|row| row.branch == *branch)
+                        .cloned()
+                })
+        })
+        .collect();
+    Ok(worktree::WorktreeQueueCreateOutput {
+        schema: "homeboy/worktree-queue-create/v1",
+        repo: args.repo.clone(),
+        base_ref: args.from.clone(),
+        dry_run: true,
+        rows,
+    })
+}
+
 fn preflight_batch_cook_recipes(
     plan: &BatchCookFanoutPlan,
     attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
@@ -1870,6 +2025,16 @@ fn preflight_batch_cook_recipes(
             options.attempt_dispatcher = Some(dispatcher(&options));
         }
         agent_task_service::validate_initial_recipe_compatibility(&options)?;
+    }
+    Ok(())
+}
+
+/// A dry-run validates the immutable recipe declaration, not a future
+/// workspace. Dispatch compilation resolves workspace handles by design, so it
+/// runs only after execution has materialized the declared destination.
+fn preflight_batch_cook_recipe_declarations(plan: &BatchCookFanoutPlan) -> Result<()> {
+    for cook in &plan.cooks {
+        cook.to_cook_invocation(plan)?;
     }
     Ok(())
 }
@@ -2970,7 +3135,7 @@ fn cook_batch_next_actions(
             !matches!(
                 row.status,
                 worktree::WorktreeQueueCreateStatus::Created
-                    | worktree::WorktreeQueueCreateStatus::Queued
+                    | worktree::WorktreeQueueCreateStatus::WouldCreate
             )
         })
         .collect::<Vec<_>>();
@@ -4671,11 +4836,13 @@ fi
     #[test]
     fn cook_batch_dry_run_returns_status_and_resume_commands() {
         with_materialized_cook_batch_worktrees(|| {
-            let (value, exit_code) = cook_batch(cook_batch_args()).expect("cook batch dry run");
+            let mut args = cook_batch_args();
+            args.branch_prefix = "dry-run-plan-test".to_string();
+            let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
 
-            assert_eq!(exit_code, 0);
+            assert_eq!(exit_code, 0, "{value}");
             assert_eq!(value["schema"], "homeboy/agent-task-cook-batch/v1");
-            assert_eq!(value["status"], "planned");
+            assert_eq!(value["status"], "ready");
             assert_eq!(value["summary"]["issues"], 2);
             assert_eq!(
                 value["preflight"]["provider_selection"]["executor"]["backend"],
@@ -4687,7 +4854,7 @@ fi
                 "provided"
             );
             assert_eq!(value["worktrees"]["dry_run"], true);
-            assert_eq!(value["worktrees"]["rows"][0]["status"], "queued");
+            assert_eq!(value["worktrees"]["rows"][0]["status"], "would_create");
             assert!(value["commands"]["resume_from_plan"]
                 .as_str()
                 .expect("resume command")
@@ -4716,6 +4883,104 @@ fi
                 );
                 assert!(action["kind"].is_string(), "next action must carry a kind");
             }
+        });
+    }
+
+    #[test]
+    fn dry_run_plans_absent_worktrees_without_creating_them() {
+        with_isolated_home(|home| {
+            let parent = home.path().join("Developer");
+            let source = parent.join("fanout-dry-run-fixture");
+            std::fs::create_dir_all(&source).expect("source directory");
+            std::fs::write(
+                source.join("homeboy.json"),
+                r#"{"id":"fanout-dry-run-fixture"}"#,
+            )
+            .expect("component manifest");
+            for args in [
+                ["init", "-b", "main"].as_slice(),
+                ["config", "user.email", "test@example.com"].as_slice(),
+                ["config", "user.name", "Homeboy Test"].as_slice(),
+                ["commit", "--allow-empty", "-m", "initial"].as_slice(),
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            write_component_registration(home.path(), "fanout-dry-run-fixture", &source);
+
+            let mut args = cook_batch_args();
+            args.repo = "fanout-dry-run-fixture".to_string();
+            args.from = "HEAD".to_string();
+            let (value, exit_code) = cook_batch(args).expect("dry-run plan");
+
+            assert_eq!(exit_code, 0, "{value}");
+            assert_eq!(value["status"], "ready");
+            for row in value["worktrees"]["rows"].as_array().expect("rows") {
+                assert_eq!(row["status"], "would_create");
+                let path = row["path"].as_str().expect("planned path");
+                assert!(!std::path::Path::new(path).exists());
+            }
+            assert!(value["plan"]["cooks"]
+                .as_array()
+                .expect("cooks")
+                .iter()
+                .all(|cook| cook["workspace"].is_null()));
+            assert!(!home
+                .path()
+                .join(".local/share/homeboy/agent-task-recipes")
+                .exists());
+        });
+    }
+
+    #[test]
+    fn dry_run_reuses_existing_worktrees_and_plans_missing_children() {
+        with_isolated_home(|home| {
+            let parent = home.path().join("Developer");
+            let source = parent.join("fanout-mixed-fixture");
+            std::fs::create_dir_all(&source).expect("source directory");
+            std::fs::write(
+                source.join("homeboy.json"),
+                r#"{"id":"fanout-mixed-fixture"}"#,
+            )
+            .expect("component manifest");
+            for args in [
+                ["init", "-b", "main"].as_slice(),
+                ["config", "user.email", "test@example.com"].as_slice(),
+                ["config", "user.name", "Homeboy Test"].as_slice(),
+                ["add", "."].as_slice(),
+                ["commit", "-m", "initial"].as_slice(),
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            write_component_registration(home.path(), "fanout-mixed-fixture", &source);
+            worktree::queue_create(worktree::WorktreeQueueCreateOptions {
+                repo: "fanout-mixed-fixture".to_string(),
+                branches: vec!["fix/issue-6453-homeboy".to_string()],
+                from: "HEAD".to_string(),
+                task_url: None,
+                task_ref: None,
+                dry_run: false,
+                retry_after_seconds: 30,
+            })
+            .expect("create existing child worktree");
+
+            let mut args = cook_batch_args();
+            args.repo = "fanout-mixed-fixture".to_string();
+            args.from = "HEAD".to_string();
+            let (value, exit_code) = cook_batch(args).expect("mixed dry-run plan");
+
+            assert_eq!(exit_code, 0, "{value}");
+            assert_eq!(value["worktrees"]["rows"][0]["status"], "created");
+            assert_eq!(value["worktrees"]["rows"][1]["status"], "would_create");
         });
     }
 
