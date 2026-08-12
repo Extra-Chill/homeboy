@@ -356,7 +356,18 @@ def main():
     if args.changed_selection_file:
         resolved = resolve_changed_selection(args.changed_selection_file, current, args.project)
         if args.inventory_only:
-            output = current if "fallback_reason" in resolved else project_inventory(current, resolved["selected"])
+            if "fallback_reason" in resolved:
+                # Widening to the full inventory is the correct fail-safe, but it
+                # silently multiplies the planned work -- on Extra-Chill/homeboy
+                # it took a changed union of ~2.8k identities to the full 13.2k,
+                # which no shard budget could absorb. Discarding the reason here
+                # left a plan that looked deliberately full-scope and gave no
+                # indication the narrowing had been attempted and abandoned
+                # (Extra-Chill/homeboy#12219). Carry it on the inventory so the
+                # widening is attributable to the candidate that stopped matching.
+                output = dict(current, fallback_reason=resolved["fallback_reason"])
+            else:
+                output = project_inventory(current, resolved["selected"])
         else:
             output = {"inventory": current, **resolved}
     Path(args.output).write_text(json.dumps(output, indent=2) + "\n")
