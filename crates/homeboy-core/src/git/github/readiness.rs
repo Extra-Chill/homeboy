@@ -151,12 +151,20 @@ pub(super) fn classify_pr_ci(
     merge_state: Option<&str>,
     checks: &[serde_json::Value],
 ) -> (String, String, String) {
+    let terminal_pr = pr_state.eq_ignore_ascii_case("MERGED") || merged_at.is_some();
     if checks.is_empty() {
+        let next_action = if terminal_pr { "none" } else { "merge_ready" };
         return (
             "no_checks".to_string(),
-            "GitHub reported no status checks for this PR head; next action: merge-ready"
-                .to_string(),
-            "merge_ready".to_string(),
+            format!(
+                "GitHub reported no status checks for this PR head; next action: {}",
+                if terminal_pr {
+                    "none (PR merged)"
+                } else {
+                    "merge-ready"
+                }
+            ),
+            next_action.to_string(),
         );
     }
 
@@ -219,19 +227,24 @@ pub(super) fn classify_pr_ci(
         }
     }
 
-    let blocked = failed + unknown;
+    // GitHub cancels in-flight work after a PR is merged. That is a terminal
+    // supersession signal, not evidence that the candidate failed.
+    let superseded = terminal_pr && (rerunnable > 0 || queued + running + pending > 0);
+    let blocked = failed + unknown + if terminal_pr { 0 } else { rerunnable };
     let waiting = queued + running + pending;
-    let state = if failed > 0 || unknown > 0 {
+    let state = if failed > rerunnable || unknown > 0 || (!terminal_pr && rerunnable > 0) {
         "terminal_failed"
-    } else if waiting > 0 && (pr_state == "MERGED" || merged_at.is_some()) {
-        "stale"
+    } else if superseded {
+        "superseded"
     } else if waiting > 0 {
         "pending"
     } else {
         "terminal_green"
     };
 
-    let next_action = if blocked > 0 && failed == rerunnable && unknown == 0 {
+    let next_action = if terminal_pr {
+        "none"
+    } else if blocked > 0 && failed == rerunnable && unknown == 0 {
         "rerun"
     } else if blocked > 0 {
         "inspect_failed_logs"
@@ -281,8 +294,16 @@ pub(super) fn classify_pr_ci(
                 .join(", ")
         ));
     }
+    if terminal_pr && rerunnable > 0 {
+        parts.push(format!(
+            "{} cancellation(s) superseded by the merged PR",
+            rerunnable
+        ));
+    }
     let action_label = if next_action == "merge_ready" {
         "merge-ready".to_string()
+    } else if next_action == "none" && terminal_pr {
+        "none (PR merged)".to_string()
     } else {
         next_action.replace('_', " ")
     };
@@ -633,9 +654,32 @@ mod tests {
     }
 
     #[test]
-    fn classify_pr_ci_marks_merged_pending_checks_as_stale() {
+    fn classify_pr_ci_marks_merged_cancellations_as_superseded() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "fixtures/merged-candidate-baseline-ci-cancellation.json"
+        ))
+        .expect("merged cancellation fixture is valid JSON");
+        let (state, summary, next_action) = classify_pr_ci(
+            fixture["state"].as_str().expect("fixture PR state"),
+            fixture["mergedAt"].as_str(),
+            None,
+            fixture["statusCheckRollup"]
+                .as_array()
+                .expect("fixture check rollup"),
+        );
+
+        assert_eq!(state, "superseded");
+        assert!(summary.contains("2 cancellation(s) superseded by the merged PR"));
+        assert!(summary.contains("1 running"));
+        assert!(summary.contains("next action: none (PR merged)"));
+        assert_eq!(next_action, "none");
+    }
+
+    #[test]
+    fn classify_pr_ci_keeps_real_failures_visible_after_merge() {
         let checks = serde_json::json!([
-            {"name":"homeboy / Test","status":"IN_PROGRESS","conclusion":""}
+            {"name":"candidate","status":"COMPLETED","conclusion":"CANCELLED"},
+            {"name":"baseline","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://example.test/baseline"}
         ]);
         let (state, summary, next_action) = classify_pr_ci(
             "MERGED",
@@ -644,9 +688,10 @@ mod tests {
             checks.as_array().unwrap(),
         );
 
-        assert_eq!(state, "stale");
-        assert!(summary.contains("1 running"));
-        assert_eq!(next_action, "wait");
+        assert_eq!(state, "terminal_failed");
+        assert!(summary.contains("baseline (https://example.test/baseline)"));
+        assert!(summary.contains("1 cancellation(s) superseded by the merged PR"));
+        assert_eq!(next_action, "none");
     }
 
     #[test]
