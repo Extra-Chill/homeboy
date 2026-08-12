@@ -557,6 +557,102 @@ pub fn required_lab_handoff_capabilities() -> Vec<LabCapabilityVersion> {
     .collect()
 }
 
+/// Capability id for the lease-less daemon orphan reconciliation contract.
+pub const DAEMON_RECOVERY_LEASELESS_CAPABILITY: &str = "daemon-recovery-leaseless";
+
+/// Capability id for the exact state-loss daemon recovery contract.
+pub const DAEMON_RECOVERY_STATE_LOSS_CAPABILITY: &str = "daemon-recovery-state-loss";
+
+/// Capability id for `daemon ensure-running --replacement-operation-id`.
+pub const DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY: &str =
+    "daemon-ensure-running-operation-id";
+
+/// The conditionally-needed daemon recovery contracts a runner may advertise.
+///
+/// These are NOT part of [`required_lab_handoff_capabilities`]: they are
+/// recovery contracts negotiated only when a controller must repair a remote
+/// daemon, not admission requirements every ordinary handoff needs. A runner
+/// that omits them can still execute work; controllers that need the recovery
+/// path fall back to scraping the long-option help text when the typed list is
+/// absent. Keep these names protocol-focused.
+pub fn daemon_recovery_capabilities() -> Vec<LabCapabilityVersion> {
+    [
+        DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+        DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
+        DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
+    ]
+    .into_iter()
+    .map(|id| LabCapabilityVersion {
+        id: id.to_string(),
+        version: 1,
+    })
+    .collect()
+}
+
+/// The bare long options rendered by a clap help `Options:` heading.
+///
+/// This is the last-resort contract for daemon-recovery negotiation against a
+/// remote that does not advertise the typed [`LabCapabilityVersion`] list. It
+/// only accepts an option whose trailing tokens are all value placeholders, so
+/// a `/// doc comment` rendering prose after the flag name silently removes it
+/// from the advertised contract. Kept here (rather than in the runner crate)
+/// so the CLI crate can assert the same predicate against real rendered help.
+pub fn declared_long_options(help: &str) -> std::collections::BTreeSet<&str> {
+    let mut options = std::collections::BTreeSet::new();
+    let mut in_options = false;
+    for line in help.lines() {
+        let trimmed = line.trim();
+        if line == trimmed && trimmed.ends_with(':') {
+            in_options = trimmed.eq_ignore_ascii_case("options:");
+            continue;
+        }
+        if !in_options || line == trimmed {
+            continue;
+        }
+        let mut tokens = trimmed.split_whitespace();
+        let Some(option) = tokens.next() else {
+            continue;
+        };
+        let option = option.trim_end_matches(',');
+        if option.starts_with("--") && tokens.all(is_option_value_placeholder) {
+            options.insert(option);
+        }
+    }
+    options
+}
+
+/// Whether a clap help token is a value placeholder (`<NAME>` or `[<NAME>]`).
+pub fn is_option_value_placeholder(token: &str) -> bool {
+    (token.starts_with('<') && token.ends_with('>'))
+        || (token.starts_with("[<") && token.ends_with(">]"))
+}
+
+/// Decide whether a remote daemon advertises a recovery capability.
+///
+/// `advertised` is the typed capability list parsed from the remote's
+/// self-identity report. `None` means the remote is an older binary that never
+/// advertised the field, so the caller's `scrape` (long-option help text) is
+/// consulted. `Some(list)` is authoritative: the scrape is never executed.
+///
+/// The three daemon-recovery negotiations each call this with their own
+/// capability id and their own scrape closure, so the decision is defined once
+/// instead of copied at every site.
+pub fn daemon_recovery_capability_negotiated<Scrape>(
+    advertised: Option<&[LabCapabilityVersion]>,
+    capability_id: &str,
+    scrape: Scrape,
+) -> std::result::Result<bool, String>
+where
+    Scrape: FnOnce() -> std::result::Result<bool, String>,
+{
+    match advertised {
+        Some(capabilities) => Ok(capabilities
+            .iter()
+            .any(|capability| capability.id == capability_id)),
+        None => scrape(),
+    }
+}
+
 /// Immutable runtime provenance supplied by a controller, runner command, or
 /// active daemon. Dirty or incomplete provenance is never eligible for a
 /// compatibility admission.
@@ -853,5 +949,120 @@ mod capability_handshake_tests {
             version: 2,
         });
         assert!(negotiate_lab_capability_handshake(&handshake).compatible);
+    }
+}
+
+#[cfg(test)]
+mod daemon_recovery_capability_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_capabilities_are_their_own_protocol_focused_list() {
+        let recovery = daemon_recovery_capabilities();
+        let ids: BTreeSet<_> = recovery
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            BTreeSet::from([
+                DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+                DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
+                DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
+            ])
+        );
+        assert!(recovery.iter().all(|capability| capability.version == 1));
+
+        let handoff_capabilities = required_lab_handoff_capabilities();
+        let handoff: BTreeSet<_> = handoff_capabilities
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect();
+        assert!(
+            ids.is_disjoint(&handoff),
+            "recovery capabilities must not leak into the admission handshake"
+        );
+    }
+
+    #[test]
+    fn declared_long_options_accepts_only_bare_value_placeholders() {
+        let options = declared_long_options(
+            "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n    --replacement-operation-id <ID>\n    --addr <ADDR>\n",
+        );
+        assert!(options.contains("--confirm-no-daemon-owner"));
+        assert!(options.contains("--replacement-operation-id"));
+        assert!(options.contains("--addr"));
+
+        let prose =
+            declared_long_options("Options:\n    --confirm-no-daemon-owner after inspection\n");
+        assert!(!prose.contains("--confirm-no-daemon-owner"));
+        assert!(prose.is_empty());
+
+        let examples = declared_long_options("Examples:\n    --confirm-no-daemon-owner\n");
+        assert!(examples.is_empty());
+
+        let lowercase = declared_long_options("options:\n    --confirm-no-daemon-owner\n");
+        assert!(lowercase.contains("--confirm-no-daemon-owner"));
+    }
+
+    #[test]
+    fn is_option_value_placeholder_matches_only_value_shaped_tokens() {
+        assert!(is_option_value_placeholder("<ID>"));
+        assert!(is_option_value_placeholder("[<ID>]"));
+        assert!(!is_option_value_placeholder("ID"));
+        assert!(!is_option_value_placeholder("after inspection"));
+    }
+
+    #[test]
+    fn typed_capability_advertisement_is_authoritative_and_skips_the_scrape() {
+        let advertised: [LabCapabilityVersion; 1] = [LabCapabilityVersion {
+            id: DAEMON_RECOVERY_LEASELESS_CAPABILITY.to_string(),
+            version: 1,
+        }];
+        let mut scraped = false;
+        let negotiated = daemon_recovery_capability_negotiated(
+            Some(advertised.as_slice()),
+            DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+            || {
+                scraped = true;
+                Ok(false)
+            },
+        );
+        assert_eq!(negotiated, Ok(true));
+        assert!(!scraped, "the typed list must replace the help scrape");
+    }
+
+    #[test]
+    fn typed_advertisement_missing_the_capability_is_an_authoritative_no() {
+        let advertised: [LabCapabilityVersion; 1] = [LabCapabilityVersion {
+            id: DAEMON_RECOVERY_STATE_LOSS_CAPABILITY.to_string(),
+            version: 1,
+        }];
+        let mut scraped = false;
+        let negotiated = daemon_recovery_capability_negotiated(
+            Some(advertised.as_slice()),
+            DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+            || {
+                scraped = true;
+                Ok(true)
+            },
+        );
+        assert_eq!(negotiated, Ok(false));
+        assert!(!scraped, "a typed no must not be overridden by the scrape");
+    }
+
+    #[test]
+    fn absent_advertisement_falls_back_to_the_scrape() {
+        let mut scraped = false;
+        let negotiated = daemon_recovery_capability_negotiated::<_>(
+            None,
+            DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+            || {
+                scraped = true;
+                Ok(true)
+            },
+        );
+        assert_eq!(negotiated, Ok(true));
+        assert!(scraped, "an older binary must fall back to the help scrape");
     }
 }

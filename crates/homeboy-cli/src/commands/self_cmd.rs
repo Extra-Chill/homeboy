@@ -56,6 +56,7 @@ struct SelfIdentityReport {
     #[serde(flatten)]
     build_identity: build_identity::BuildIdentity,
     lab_handoff_capabilities: Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
+    daemon_recovery_capabilities: Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
 }
 
 pub fn identity_report() -> Value {
@@ -65,6 +66,7 @@ pub fn identity_report() -> Value {
             .unwrap_or_else(|_| "unknown".to_string()),
         build_identity: build_identity::current(),
         lab_handoff_capabilities: homeboy_lab_runner_contract::required_lab_handoff_capabilities(),
+        daemon_recovery_capabilities: homeboy_lab_runner_contract::daemon_recovery_capabilities(),
     })
     .expect("identity report serializes")
 }
@@ -386,5 +388,34 @@ mod tests {
         assert_eq!(cli.args.limit, Some(9));
         assert_eq!(cli.args.run_max_bytes, Some(1024));
         assert_eq!(cli.args.run_max_count, Some(3));
+    }
+
+    /// #11102: controllers negotiate the daemon-recovery contract from this
+    /// envelope instead of scraping `--help` text. The field name is a wire
+    /// contract read by `homeboy_lab_runner::connection::remote_daemon`, so
+    /// renaming or dropping it here must fail loudly rather than silently
+    /// reverting every controller to the help scrape.
+    #[test]
+    fn identity_report_advertises_the_daemon_recovery_capabilities() {
+        let report = super::identity_report();
+
+        let advertised = report
+            .get("daemon_recovery_capabilities")
+            .expect("self identity advertises daemon_recovery_capabilities");
+        assert_eq!(
+            advertised,
+            &serde_json::to_value(homeboy_lab_runner_contract::daemon_recovery_capabilities())
+                .expect("capabilities serialize")
+        );
+
+        // The generic admission handshake list is a separate contract and must
+        // not be replaced or merged by the recovery list.
+        assert_eq!(
+            report
+                .get("lab_handoff_capabilities")
+                .expect("self identity still advertises lab_handoff_capabilities"),
+            &serde_json::to_value(homeboy_lab_runner_contract::required_lab_handoff_capabilities())
+                .expect("capabilities serialize")
+        );
     }
 }

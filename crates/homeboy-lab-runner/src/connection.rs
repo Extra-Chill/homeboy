@@ -35,6 +35,7 @@ use super::session::{
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 use homeboy_core::broker_auth;
+use homeboy_lab_runner_contract::declared_long_options;
 
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 const REMOTE_LEASELESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -654,6 +655,10 @@ fn connect_with_orphan_adoption_and_live_lease(
         ));
     };
     let version = identity.version.clone();
+    // The typed daemon-recovery capability list replaces the `--help` scrape
+    // for current runners. `None` (an older binary that never advertised the
+    // field) keeps the scrape fallback at every negotiation site below.
+    let daemon_recovery_capabilities = identity.daemon_recovery_capabilities.as_deref();
     let Some(configured_build_identity) = identity.build_identity.clone() else {
         return Ok(failed_connect(
             runner_id,
@@ -738,6 +743,7 @@ fn connect_with_orphan_adoption_and_live_lease(
                     &client,
                     homeboy,
                     Some(&replacement_operation_id),
+                    daemon_recovery_capabilities,
                 ) {
                     return Ok(failed_connect(
                         runner_id,
@@ -866,22 +872,36 @@ fn connect_with_orphan_adoption_and_live_lease(
                     None,
                 )
             })?;
-            let capability = format!(
-                "{} daemon recover-missing-lease-state --help",
-                shell::quote_arg(homeboy),
-            );
-            let capability =
-                client.execute_with_timeout(&capability, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
-            if !capability.success {
+            // Negotiate the exact state-loss recovery contract from the typed
+            // capability list when the runner advertises it; otherwise scrape
+            // `daemon recover-missing-lease-state --help` on the remote.
+            if let Err(message) = homeboy_lab_runner_contract::daemon_recovery_capability_negotiated(
+                daemon_recovery_capabilities,
+                homeboy_lab_runner_contract::DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
+                || {
+                    let capability = format!(
+                        "{} daemon recover-missing-lease-state --help",
+                        shell::quote_arg(homeboy),
+                    );
+                    let capability =
+                        client.execute_with_timeout(&capability, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+                    if !capability.success {
+                        return Err("remote Homeboy does not support `daemon recover-missing-lease-state`; update the runner to a build with the canonical state-loss recovery contract before retrying".to_string());
+                    }
+                    if !declared_long_options(&capability.stdout)
+                        .contains("--replacement-operation-id")
+                    {
+                        return Err("remote Homeboy must be upgraded: recover-missing-lease-state does not support --replacement-operation-id".to_string());
+                    }
+                    Ok(true)
+                },
+            ) {
                 return Ok(failed_connect(
-                runner_id,
-                session_path,
-                RunnerFailureKind::DaemonStartupFailure,
-                "remote Homeboy does not support `daemon recover-missing-lease-state`; update the runner to a build with the canonical state-loss recovery contract before retrying".to_string(),
-            ));
-            }
-            if !declared_long_options(&capability.stdout).contains("--replacement-operation-id") {
-                return Ok(failed_connect(runner_id, session_path, RunnerFailureKind::DaemonStartupFailure, "remote Homeboy must be upgraded: recover-missing-lease-state does not support --replacement-operation-id".to_string()));
+                    runner_id,
+                    session_path,
+                    RunnerFailureKind::DaemonStartupFailure,
+                    message,
+                ));
             }
             let command = remote_state_loss_recovery_command(
                 homeboy,
@@ -951,6 +971,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             .filter(|address| parse_loopback_daemon_addr(address).is_ok())
             .unwrap_or("127.0.0.1:0");
         let recovery = execute_remote_leaseless_recovery(
+            daemon_recovery_capabilities,
             || {
                 client.execute_with_timeout(
                     &remote_leaseless_recovery_help_command(homeboy),
@@ -1079,6 +1100,7 @@ fn connect_with_orphan_adoption_and_live_lease(
                     replacement_operation_id: Some(&replacement_operation_id),
                     admission_fence,
                     registry_lock_held: false,
+                    daemon_recovery_capabilities,
                 })
                 .map_err(Error::internal_unexpected)
             },
@@ -1399,6 +1421,7 @@ fn remote_leaseless_recovery_command(
 }
 
 fn execute_remote_leaseless_recovery<Probe, Recover>(
+    daemon_recovery_capabilities: Option<&[homeboy_lab_runner_contract::LabCapabilityVersion]>,
     probe: Probe,
     recover: Recover,
 ) -> std::result::Result<
@@ -1412,8 +1435,21 @@ where
     Probe: FnOnce() -> homeboy_core::server::CommandOutput,
     Recover: FnOnce(RunnerLeaselessRecoveryContract) -> homeboy_core::server::CommandOutput,
 {
-    let probe = probe();
-    let contract = negotiate_leaseless_recovery_contract(&probe)?;
+    // A runner that advertises the typed lease-less recovery capability skips
+    // the help scrape entirely; an older runner still negotiates from the
+    // `--help` text. Both paths resolve to the canonical one-flag contract.
+    let advertised = homeboy_lab_runner_contract::daemon_recovery_capability_negotiated(
+        daemon_recovery_capabilities,
+        homeboy_lab_runner_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+        || {
+            let probe = probe();
+            negotiate_leaseless_recovery_contract(&probe).map(|_| true)
+        },
+    )?;
+    if !advertised {
+        return Err("remote Homeboy must be upgraded: daemon reconcile-leaseless-orphans does not advertise the lease-less recovery contract".to_string());
+    }
+    let contract = RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner;
     Ok((contract.clone(), recover(contract)))
 }
 
@@ -1450,35 +1486,6 @@ fn negotiate_leaseless_recovery_contract(
                 .to_string(),
         )
     }
-}
-
-fn declared_long_options(help: &str) -> std::collections::BTreeSet<&str> {
-    let mut options = std::collections::BTreeSet::new();
-    let mut in_options = false;
-    for line in help.lines() {
-        let trimmed = line.trim();
-        if line == trimmed && trimmed.ends_with(':') {
-            in_options = trimmed.eq_ignore_ascii_case("options:");
-            continue;
-        }
-        if !in_options || line == trimmed {
-            continue;
-        }
-        let mut tokens = trimmed.split_whitespace();
-        let Some(option) = tokens.next() else {
-            continue;
-        };
-        let option = option.trim_end_matches(',');
-        if option.starts_with("--") && tokens.all(is_option_value_placeholder) {
-            options.insert(option);
-        }
-    }
-    options
-}
-
-fn is_option_value_placeholder(token: &str) -> bool {
-    (token.starts_with('<') && token.ends_with('>'))
-        || (token.starts_with("[<") && token.ends_with(">]"))
 }
 
 fn leaseless_recovery_evidence(
