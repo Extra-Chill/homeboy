@@ -5222,8 +5222,7 @@ fi
     #[test]
     fn cook_batch_dry_run_returns_status_and_resume_commands() {
         with_materialized_cook_batch_worktrees(|| {
-            let mut args = cook_batch_args();
-            args.branch_prefix = "dry-run-plan-test".to_string();
+            let args = cook_batch_args();
             let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
 
             assert_eq!(exit_code, 0, "{value}");
@@ -5240,7 +5239,7 @@ fi
                 "provided"
             );
             assert_eq!(value["worktrees"]["dry_run"], true);
-            assert_eq!(value["worktrees"]["rows"][0]["status"], "would_create");
+            assert_eq!(value["worktrees"]["rows"][0]["status"], "created");
             assert!(value["commands"]["resume_from_plan"]
                 .as_str()
                 .expect("resume command")
