@@ -170,6 +170,29 @@ PY
     rm -f "$result_tmp"
 }
 
+# Persist shard progress after each batch so a shard that never reaches a
+# terminal emit still leaves structured counts behind.
+#
+# The shard's completeness invariant (executed vs total, below) and the
+# per-batch membership check in `rust_nextest_counts` both live on the happy
+# path. When the wall-clock test budget expires, the supervisor destroys this
+# process tree mid-loop and neither ever runs, so the shard dies having emitted
+# no result at all -- and the only surviving evidence is the per-test events
+# already streamed, which read exactly like an ordinary test failure. A shard
+# truncated at 21% of its plan is indistinguishable from one that simply had
+# failing tests (#12219).
+#
+# A signal trap cannot cover this: the observed containment sequence sends
+# SIGTERM and SIGKILL in the same millisecond, so there is no window in which a
+# handler is guaranteed to run. A checkpoint written after each completed batch
+# survives regardless of how the shard dies, and the terminal emit overwrites it
+# with the real outcome whenever the shard does finish.
+rust_checkpoint_shard_progress() {
+    local executed="$1" passed="$2" failed="$3" skipped="$4"
+    type homeboy_write_test_results >/dev/null 2>&1 || return 0
+    homeboy_write_test_results "$executed" "$passed" "$failed" "$skipped" "rust-shard"
+}
+
 rust_shard_cargo_counts() {
     python3 - "$1" <<'PY'
 import re
@@ -973,6 +996,12 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
             SHARD_SKIPPED=$((SHARD_SKIPPED + SKIPPED))
             [ "$NEXTEST_BATCH_EXIT" -eq 0 ] || SHARD_EXIT="$NEXTEST_BATCH_EXIT"
             rm -f "$SHARD_OUTPUT"
+            # Checkpoint after every completed batch. If the shard is killed
+            # before its terminal emit, this is the last word on how much of the
+            # plan actually ran (#12219).
+            SHARD_EXECUTED=$((SHARD_PASSED + SHARD_FAILED + SHARD_SKIPPED))
+            rust_checkpoint_shard_progress "$SHARD_EXECUTED" "$SHARD_PASSED" "$SHARD_FAILED" "$SHARD_SKIPPED"
+            echo "Rust shard progress: executed=${SHARD_EXECUTED}/${SHARD_TOTAL} passed=${SHARD_PASSED} failed=${SHARD_FAILED} skipped=${SHARD_SKIPPED}"
         done
         if rust_nextest_merge_failure_evidence "$NEXTEST_FAILED_NAMES"; then
             :
@@ -1002,13 +1031,28 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
             SHARD_PASSED=$((SHARD_PASSED + PASSED))
             SHARD_FAILED=$((SHARD_FAILED + FAILED))
             SHARD_SKIPPED=$((SHARD_SKIPPED + SKIPPED))
+            # Durability of shard progress must not depend on which runner the
+            # component selected (#12219). This path already pays for one cargo
+            # invocation per identity, so the checkpoint is negligible beside it.
+            SHARD_EXECUTED=$((SHARD_PASSED + SHARD_FAILED + SHARD_SKIPPED))
+            rust_checkpoint_shard_progress "$SHARD_EXECUTED" "$SHARD_PASSED" "$SHARD_FAILED" "$SHARD_SKIPPED"
         done < <(jq -r '.selected[] | [.package, .target, .target_kind, .name] | @tsv' "$SHARD_DATA")
     fi
     SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
     SHARD_EXECUTED=$((SHARD_PASSED + SHARD_FAILED + SHARD_SKIPPED))
     if [ "$SHARD_EXECUTED" -ne "$SHARD_TOTAL" ] || [ "$SHARD_FAILED" -ne 0 ] || [ "${SHARD_EXIT:-0}" -ne 0 ]; then
-        echo "Rust shard result: total=${SHARD_TOTAL} executed=${SHARD_EXECUTED} passed=${SHARD_PASSED} failed=${SHARD_FAILED} skipped=${SHARD_SKIPPED}" >&2
-        rust_emit_shard_result failed "$SHARD_TOTAL" "$SHARD_EXECUTED" "$SHARD_PASSED" "$SHARD_FAILED" "$SHARD_SKIPPED" "$((SHARD_ELAPSED*1000))"
+        SHARD_STATUS=failed
+        if [ "$SHARD_EXECUTED" -ne "$SHARD_TOTAL" ]; then
+            # An incomplete plan is a different finding from a red one, and the
+            # distinction is the entire signal: "failed" alone reads as "these
+            # tests are broken" when the truth may be that most of the shard
+            # never ran. Name the gap in both the log line and the emitted
+            # status so neither a human nor a consumer has to infer it (#12219).
+            SHARD_STATUS=truncated
+            echo "Rust shard truncated: executed ${SHARD_EXECUTED} of ${SHARD_TOTAL} planned identities; $((SHARD_TOTAL - SHARD_EXECUTED)) never ran" >&2
+        fi
+        echo "Rust shard result: status=${SHARD_STATUS} total=${SHARD_TOTAL} executed=${SHARD_EXECUTED} passed=${SHARD_PASSED} failed=${SHARD_FAILED} skipped=${SHARD_SKIPPED}" >&2
+        rust_emit_shard_result "$SHARD_STATUS" "$SHARD_TOTAL" "$SHARD_EXECUTED" "$SHARD_PASSED" "$SHARD_FAILED" "$SHARD_SKIPPED" "$((SHARD_ELAPSED*1000))"
         rm -f "$SHARD_DATA"
         exit 1
     fi
