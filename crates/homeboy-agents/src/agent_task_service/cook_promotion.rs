@@ -3043,7 +3043,12 @@ mod recovery_action_tests {
     #[test]
     fn recovery_actions_follow_the_cook_state_matrix() {
         let cases = [
-            ("gate_failed", true, false, vec!["status", "diagnose", "resume"]),
+            (
+                "gate_failed",
+                true,
+                false,
+                vec!["status", "diagnose", "resume"],
+            ),
             (
                 "execution_budget_exhausted",
                 false,
@@ -3133,22 +3138,38 @@ mod recovery_action_tests {
         assert_eq!(
             actions(&recovery.legal_actions),
             vec![
-                ("status".to_string(), "homeboy agent-task status checkpoint-mismatch-attempt-1 --full".to_string()),
-                ("diagnose".to_string(), "homeboy agent-task diagnose checkpoint-mismatch-attempt-1".to_string()),
-                ("fork_replacement".to_string(), "homeboy agent-task retry checkpoint-mismatch-attempt-1 --run".to_string()),
+                (
+                    "status".to_string(),
+                    "homeboy agent-task status checkpoint-mismatch-attempt-1 --full".to_string()
+                ),
+                (
+                    "diagnose".to_string(),
+                    "homeboy agent-task diagnose checkpoint-mismatch-attempt-1".to_string()
+                ),
+                (
+                    "fork_replacement".to_string(),
+                    "homeboy agent-task retry checkpoint-mismatch-attempt-1 --run".to_string()
+                ),
             ]
         );
-        assert_eq!(actions(&recovery.next_actions), actions(&recovery.legal_actions));
+        assert_eq!(
+            actions(&recovery.next_actions),
+            actions(&recovery.legal_actions)
+        );
     }
 
     #[test]
     fn exact_checkpoint_mismatch_matches_only_the_typed_recovery_action() {
-        assert!(exact_checkpoint_candidate_mismatch(&Some(serde_json::json!({
-            "details": { "recovery": { "action": "fork_replacement" } },
-        }))));
-        assert!(!exact_checkpoint_candidate_mismatch(&Some(serde_json::json!({
-            "details": { "recovery": { "action": "resume" } },
-        }))));
+        assert!(exact_checkpoint_candidate_mismatch(&Some(
+            serde_json::json!({
+                "details": { "recovery": { "action": "fork_replacement" } },
+            })
+        )));
+        assert!(!exact_checkpoint_candidate_mismatch(&Some(
+            serde_json::json!({
+                "details": { "recovery": { "action": "resume" } },
+            })
+        )));
     }
 }
 

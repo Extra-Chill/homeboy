@@ -698,7 +698,10 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         .message
         .contains("differs from the exact checkpointed"));
     assert_eq!(
-        mismatch.details.pointer("/recovery/action").and_then(Value::as_str),
+        mismatch
+            .details
+            .pointer("/recovery/action")
+            .and_then(Value::as_str),
         Some("fork_replacement")
     );
 
@@ -709,7 +712,10 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         .message
         .contains("differs from the exact checkpointed"));
     assert_eq!(
-        extra.details.pointer("/recovery/action").and_then(Value::as_str),
+        extra
+            .details
+            .pointer("/recovery/action")
+            .and_then(Value::as_str),
         Some("fork_replacement")
     );
 }
