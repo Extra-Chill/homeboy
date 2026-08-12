@@ -45,6 +45,12 @@ homeboy agent-task logs <run-id>
 
 Use this path before designing a loop. It proves the provider, workspace, promotion, and deterministic gates work for the repo.
 
+When `--cwd` names an existing linked task worktree, it is the authoritative
+workspace for provider execution, gates, promotion, and finalization. If you
+also pass `--to-worktree`, it must resolve locally or through Homeboy's active
+managed workspace registry to that same worktree; Cook does not query a
+provider merely to rediscover the supplied path.
+
 ## 3. Define A Durable Loop
 
 Use `agent-task loop` for a named workflow that can be turned on, resumed, and stopped:

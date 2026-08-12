@@ -49,6 +49,7 @@ macro_rules! ops_command_descriptors {
             (status, Status, $crate::commands::status::run),
             (git, Git, $crate::commands::git::run),
             (self_cmd, SelfCmd, $crate::commands::self_cmd::run),
+            (source, Source, $crate::commands::source::run),
             (api, Api, $crate::commands::api::run),
             (upgrade, Upgrade, $crate::commands::upgrade::run),
         }
@@ -81,6 +82,7 @@ macro_rules! ops_command_spec {
     (status) => { command_spec("status", CommandJsonFamily::Ops) };
     (git) => { CommandSpec { subcommand_safety: GIT_SUBCOMMAND_SAFETY, ..command_spec("git", CommandJsonFamily::Ops) } };
     (self_cmd) => { CommandSpec { subcommand_safety: SELF_SUBCOMMAND_SAFETY, ..command_spec_with_output_notes("self", CommandJsonFamily::Ops, "inspects the active Homeboy runtime and renders built-in CLI documentation") } };
+    (source) => { command_spec_with_output_notes("source", CommandJsonFamily::Ops, "read-only sealed source-package admissibility check; creates no Homeboy resources") };
     (api) => { CommandSpec { subcommand_safety: API_SUBCOMMAND_SAFETY, ..command_spec("api", CommandJsonFamily::Ops) } };
     (upgrade) => { command_spec_with_output_notes_and_safety("upgrade", CommandJsonFamily::Ops, "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used", operator_safety(None, UPGRADE_DANGEROUS_FLAGS)) };
 }

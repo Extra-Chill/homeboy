@@ -16,7 +16,7 @@ use super::types::Schedule;
 /// always because the daemon was killed between marking a schedule running and
 /// recording its result. Without this, a single hard kill would leave a
 /// schedule permanently un-runnable under `OverlapPolicy::Skip`.
-pub const STALE_RUN_RECLAIM_SECS: i64 = 6 * 60 * 60;
+pub use super::state::STALE_RUN_RECLAIM_SECS;
 
 /// Tracks which schedules this process currently has in flight.
 ///
@@ -112,17 +112,7 @@ pub fn reclaim_stale_runs(now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
         if !state.running {
             continue;
         }
-        let stale = state
-            .started_at
-            .as_deref()
-            .and_then(|started| chrono::DateTime::parse_from_rfc3339(started).ok())
-            .map(|started| {
-                (now - started.with_timezone(&chrono::Utc)).num_seconds() > STALE_RUN_RECLAIM_SECS
-            })
-            // A running marker with no start time cannot be aged, and would
-            // otherwise block the schedule forever.
-            .unwrap_or(true);
-        if !stale {
+        if !state.is_stale_running(now) {
             continue;
         }
         let recovered = super::ScheduleState {

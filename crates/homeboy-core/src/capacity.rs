@@ -41,6 +41,19 @@ use crate::error::StorageExhaustedDetails;
 use crate::observation::disk_budget::{disk_budget, DiskBudget};
 use crate::{Error, Result};
 
+/// The same relative free-space floor reported by [`disk_budget`].
+pub const FILESYSTEM_RESERVE_DIVISOR: u64 = 10;
+
+/// Keep the configured absolute reserve, while scaling it to a filesystem that
+/// is substantially larger. This makes the existing disk-budget warning a
+/// protective admission floor without introducing a second policy vocabulary.
+pub fn filesystem_relative_reserve_bytes(absolute: u64, total_bytes: Option<u64>) -> u64 {
+    total_bytes
+        .map(|total| total / FILESYSTEM_RESERVE_DIVISOR)
+        .unwrap_or(0)
+        .max(absolute)
+}
+
 /// Free capacity a caller wants left over after its write.
 ///
 /// Both keys already exist in [`RetentionConfig`] and are consulted today by
@@ -414,6 +427,24 @@ impl CapacityReserve {
         }
     }
 
+    /// Resolve the reserve for the filesystem that will receive materialized
+    /// output. The absolute configuration remains a floor on small volumes.
+    pub fn configured_for_path(path: &Path) -> Self {
+        let retention = crate::defaults::load_config().retention;
+        let budget = disk_budget(
+            path,
+            "capacity admission",
+            "capacity is not measurable on this platform",
+        );
+        Self {
+            bytes: filesystem_relative_reserve_bytes(
+                retention.shared_store_reserve_bytes,
+                budget.total_bytes,
+            ),
+            inodes: retention.shared_store_reserve_inodes,
+        }
+    }
+
     /// The configured reserve, resolved from the loaded configuration.
     pub fn configured() -> Self {
         Self::from_retention(&crate::defaults::load_config().retention)
@@ -697,6 +728,24 @@ mod tests {
 
         assert_eq!(configured.bytes, 5 * 1024 * 1024 * 1024);
         assert_eq!(configured.inodes, 100_000);
+    }
+
+    #[test]
+    fn relative_reserve_protects_large_filesystems_without_weakening_small_ones() {
+        assert_eq!(
+            filesystem_relative_reserve_bytes(
+                5 * 1024 * 1024 * 1024,
+                Some(926 * 1024 * 1024 * 1024)
+            ),
+            92 * 1024 * 1024 * 1024 + 6 * 1024 * 1024 * 1024 / 10,
+        );
+        assert_eq!(
+            filesystem_relative_reserve_bytes(
+                20 * 1024 * 1024 * 1024,
+                Some(100 * 1024 * 1024 * 1024)
+            ),
+            20 * 1024 * 1024 * 1024,
+        );
     }
 
     /// Filesystems that do not track inodes report none. That must read as "not
