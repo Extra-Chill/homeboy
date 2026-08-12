@@ -1268,10 +1268,15 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let aggregate = completed_run_aggregate(run_id).transpose()?;
     let mut hydrated_evidence = Vec::new();
     let mut total_hydrated_evidence = 0;
-    let mut nested_reasons = aggregate
-        .as_ref()
-        .map(aggregate_failure_diagnostics)
-        .unwrap_or_default();
+    let mut nested_reasons = persisted_cook_failure_diagnostic(&record)
+        .into_iter()
+        .collect::<Vec<_>>();
+    nested_reasons.extend(
+        aggregate
+            .as_ref()
+            .map(aggregate_failure_diagnostics)
+            .unwrap_or_default(),
+    );
     let mut diagnostic_truncations = Vec::new();
     let mut diagnostic_budget = DiagnosticCollectionBudget::default();
 
@@ -3245,10 +3250,9 @@ pub(crate) fn compact_aggregate_summary(
 /// computes the exact runnable recovery commands for the failed Cook state, and
 /// the notification path forwards them verbatim — the pull channel has no reason
 /// to be poorer than the push channel from the same computation. Only the
-/// runnable/classification fields are surfaced here; `diagnostic` and
-/// `blocking_claim` stay behind `--full` because they carry provider and gate
-/// evidence that `cook_failure_context` deliberately keeps out of a command
-/// envelope. Output only grows on the failure path: `failure_context` is `None`
+/// runnable/classification fields are surfaced here; full diagnostics and
+/// `blocking_claim` stay behind `--full`. Compact output retains only a typed
+/// diagnostic cause. Output only grows on the failure path: `failure_context` is `None`
 /// whenever `exit_code == 0`.
 pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
     if full {
@@ -3280,8 +3284,8 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         summary["invocation_run_ids"] = invocation_run_ids.clone();
     }
     // The recovery commands the Cook already computed for its own failed state.
-    // `diagnostic` and `blocking_claim` are deliberately absent: they carry
-    // provider and gate evidence that stays behind `--full` and `diagnose`.
+    // Full diagnostics and `blocking_claim` stay behind `--full` and `diagnose`.
+    // Compact output retains only the typed diagnostic cause.
     if let Some(failure_context) = value.get("failure_context") {
         summary["failure_context"] = compact_fields(
             failure_context,
@@ -3300,6 +3304,9 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
                 "next_actions",
             ],
         );
+        if let Some(diagnostic) = failure_context.get("diagnostic") {
+            summary["failure_context"]["diagnostic"] = compact_cook_diagnostic(diagnostic);
+        }
     }
     // The promotion report this carries is full evidence, so keep only the
     // blocker and the continuation the caller is expected to act on.
@@ -3325,6 +3332,62 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         }
     }
     summary
+}
+
+fn compact_cook_diagnostic(diagnostic: &Value) -> Value {
+    let cause = diagnostic
+        .get("deepest_cause")
+        .filter(|value| value.is_object())
+        .unwrap_or(diagnostic);
+    json!({
+        "code": cause.get("code"),
+        "field": cause.get("field").or_else(|| diagnostic.pointer("/details/field")),
+        "message": bounded_value(cause.get("message").unwrap_or(&Value::Null)),
+    })
+}
+
+fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<CollectedDiagnostic> {
+    let terminal = record
+        .metadata
+        .get("cook_operation_claims")
+        .and_then(Value::as_array)
+        .and_then(|claims| {
+            claims.iter().find(|claim| {
+                claim.get("state").and_then(Value::as_str) == Some("failed")
+                    && claim
+                        .get("operation_key")
+                        .and_then(Value::as_str)
+                        .is_some_and(|key| {
+                            key.starts_with("promote:") || key.starts_with("finalize:")
+                        })
+            })
+        })
+        .and_then(|claim| claim.get("result"));
+    if let Some(diagnostic) = terminal {
+        let cause = diagnostic
+            .get("deepest_cause")
+            .filter(|value| value.is_object())
+            .unwrap_or(diagnostic);
+        return Some(CollectedDiagnostic {
+            task_id: "controller".to_string(),
+            class: cause.get("code")?.as_str()?.to_string(),
+            message: cause.get("message")?.as_str()?.to_string(),
+            source: "terminal_operation_failure".to_string(),
+            data: json!({ "field": cause.get("field") }),
+        });
+    }
+    let diagnostic = record.metadata.get("cook_controller_failure")?;
+    let cause = diagnostic
+        .get("deepest_cause")
+        .filter(|value| value.is_object())
+        .unwrap_or(diagnostic);
+    Some(CollectedDiagnostic {
+        task_id: "controller".to_string(),
+        class: cause.get("code")?.as_str()?.to_string(),
+        message: cause.get("message")?.as_str()?.to_string(),
+        source: "controller_failure".to_string(),
+        data: json!({ "field": cause.get("field") }),
+    })
 }
 
 fn compact_items(value: Option<&Value>, fields: &[&str]) -> Value {
@@ -4070,6 +4133,9 @@ fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
     });
     if let Some(details) = policy_denial_details(&item.data) {
         value["details"] = details;
+    }
+    if let Some(field) = item.data.get("field").filter(|field| !field.is_null()) {
+        value["field"] = bounded_diagnostic_value(field);
     }
     value
 }
@@ -5763,7 +5829,15 @@ mod tests {
                 "next_actions": [
                     { "action": "status", "command": "homeboy agent-task status run-2 --full" }
                 ],
-                "diagnostic": { "code": "promotion_rejected", "evidence": "private gate output" },
+                "diagnostic": {
+                    "code": "promotion_rejected",
+                    "evidence": "private gate output",
+                    "deepest_cause": {
+                        "code": "validation.invalid_argument",
+                        "field": "promotion_provider.response",
+                        "message": "provider rejected the request"
+                    }
+                },
                 "blocking_claim": { "state": "Running", "evidence": "private claim payload" }
             }
         });
@@ -5785,10 +5859,14 @@ mod tests {
         );
         assert_eq!(compact["invocation_run_ids"], json!(["run-2"]));
 
-        // Private evidence stays behind --full and `diagnose`.
-        assert!(
-            context.get("diagnostic").is_none(),
-            "diagnostic carries provider and gate evidence"
+        // Private evidence stays behind --full; compact retains only the typed cause.
+        assert_eq!(
+            context["diagnostic"],
+            json!({
+                "code": "validation.invalid_argument",
+                "field": "promotion_provider.response",
+                "message": "provider rejected the request"
+            })
         );
         assert!(
             context.get("blocking_claim").is_none(),

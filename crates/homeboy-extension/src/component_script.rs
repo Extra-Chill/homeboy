@@ -19,6 +19,7 @@ impl From<RunnerOutput> for ComponentScriptOutput {
             timed_out: output.timed_out,
             child_resource: output.child_resource,
             extension_phase_timings: output.extension_phase_timings,
+            cargo_target: output.cargo_target,
         }
     }
 }
@@ -33,6 +34,7 @@ impl From<ComponentScriptOutput> for RunnerOutput {
             timed_out: output.timed_out,
             child_resource: output.child_resource,
             extension_phase_timings: output.extension_phase_timings,
+            cargo_target: output.cargo_target,
         }
     }
 }
@@ -81,7 +83,31 @@ fn run_component_scripts_with_env_and_timeout(
     let mut stderr = String::new();
     let mut timed_out = false;
     let mut child_resource = None;
-    let env = component_script_env(component, source_path, extra_env)?;
+    let mut env = component_script_env(component, source_path, extra_env)?;
+    let _cargo_target = if component.managed_execution.shared_cargo_target {
+        let explicit_target = env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "CARGO_TARGET_DIR")
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
+        let target = homeboy_core::cleanup::acquire_managed_cargo_target(
+            &format!("component:{}", component.id),
+            source_path,
+            explicit_target.as_deref(),
+        )?;
+        env.push((
+            "CARGO_TARGET_DIR".to_string(),
+            target.target_dir().to_string_lossy().to_string(),
+        ));
+        env.push((
+            "HOMEBOY_CARGO_TARGET_RESOLUTION".to_string(),
+            target.resolution().to_string(),
+        ));
+        Some(target)
+    } else {
+        None
+    };
 
     for command in commands {
         if passthrough {
@@ -123,6 +149,7 @@ fn run_component_scripts_with_env_and_timeout(
                 timed_out,
                 child_resource,
                 extension_phase_timings: Vec::new(),
+                cargo_target: _cargo_target.as_ref().map(|target| target.evidence()),
             });
         }
     }
@@ -135,6 +162,7 @@ fn run_component_scripts_with_env_and_timeout(
         timed_out,
         child_resource,
         extension_phase_timings: Vec::new(),
+        cargo_target: _cargo_target.as_ref().map(|target| target.evidence()),
     })
 }
 

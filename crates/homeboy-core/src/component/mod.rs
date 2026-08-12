@@ -50,7 +50,7 @@ pub use inventory::{
     reconcile_standalone_registration, registered, write_standalone_component_config,
     write_standalone_registration, ComponentReconcileReport,
 };
-pub use model::{Component, ComponentLifecycle};
+pub use model::{Component, ComponentLifecycle, ComponentManagedExecution};
 pub use mutations::{delete_safe, merge, rename};
 pub use portable::{
     discover_from_portable, infer_portable_component_id, mutate_portable, portable_json,

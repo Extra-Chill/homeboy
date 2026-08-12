@@ -90,6 +90,33 @@ pub struct SharedCargoTargetLease {
     _lock: File,
 }
 
+/// The Cargo target selected for a managed child process. Holding this value
+/// keeps a shared-store lease alive until that child exits.
+pub struct ManagedCargoTarget {
+    target_dir: PathBuf,
+    resolution: &'static str,
+    owner: String,
+    _lease: Option<SharedCargoTargetLease>,
+}
+
+impl ManagedCargoTarget {
+    pub fn target_dir(&self) -> &Path {
+        &self.target_dir
+    }
+
+    pub fn resolution(&self) -> &'static str {
+        self.resolution
+    }
+
+    pub fn evidence(&self) -> homeboy_engine_primitives::cargo_target::CargoTargetEvidence {
+        homeboy_engine_primitives::cargo_target::CargoTargetEvidence {
+            path: self.target_dir.to_string_lossy().to_string(),
+            resolution: self.resolution.to_string(),
+            owner: self.owner.clone(),
+        }
+    }
+}
+
 impl SharedCargoTargetLease {
     pub fn target_dir(&self) -> &Path {
         &self.target_dir
@@ -111,6 +138,81 @@ pub fn acquire_shared_cargo_target(owner: &str) -> Result<SharedCargoTargetLease
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
     acquire_shared_cargo_target_in(&root, owner, SystemTime::now())
+}
+
+/// Resolve Cargo output for an explicit managed-execution declaration.
+///
+/// An explicit caller target is authoritative, including a relative target
+/// used to intentionally keep output in the checkout. Otherwise this acquires
+/// a stable shared-store lease for the complete child lifetime.
+pub fn acquire_managed_cargo_target(
+    owner: &str,
+    source_path: &Path,
+    explicit_target: Option<&str>,
+) -> Result<ManagedCargoTarget> {
+    if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
+        let target_dir = PathBuf::from(target);
+        let target_dir = if target_dir.is_absolute() {
+            target_dir
+        } else {
+            source_path.join(target_dir)
+        };
+        return Ok(ManagedCargoTarget {
+            target_dir,
+            resolution: "local",
+            owner: owner.to_string(),
+            _lease: None,
+        });
+    }
+
+    let compatibility = cargo_target_repository_identity(source_path);
+    let lease = acquire_shared_cargo_target(&format!("{owner}:{compatibility}"))?;
+    Ok(ManagedCargoTarget {
+        target_dir: lease.target_dir().to_path_buf(),
+        resolution: "shared",
+        owner: owner.to_string(),
+        _lease: Some(lease),
+    })
+}
+
+/// Cargo itself separates compatible crate fingerprints inside one target
+/// directory. The store key therefore identifies the repository rather than a
+/// checkout path or current HEAD, allowing divergent worktrees to reuse it.
+fn cargo_target_repository_identity(source_path: &Path) -> String {
+    let remote = crate::git::resolve_default_remote(source_path);
+    let remote_url = std::process::Command::new("git")
+        .args(["config", "--get", &format!("remote.{remote}.url")])
+        .current_dir(source_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(remote_url) = remote_url {
+        return remote_url;
+    }
+
+    let common_dir = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(source_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty());
+    common_dir
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                source_path.join(path)
+            }
+        })
+        .and_then(|path| fs::canonicalize(path).ok())
+        .unwrap_or_else(|| source_path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Resolve the one shared Cargo store used by producers, cleanup, and reports.
@@ -382,7 +484,39 @@ fn admit_shared_cargo_target(root: &Path) -> Result<()> {
     fs::create_dir_all(root).map_err(|error| io_error(error, "create shared Cargo target root"))?;
     let retention = crate::defaults::load_config().retention;
     let capacity = filesystem_capacity(root)?;
-    admit_shared_cargo_target_with_capacity(root, &retention, capacity)
+    let reserve = crate::capacity::CapacityReserve::configured_for_path(root);
+    let admission_retention = crate::defaults::RetentionConfig {
+        shared_store_reserve_bytes: reserve.bytes,
+        shared_store_reserve_inodes: reserve.inodes,
+        ..retention.clone()
+    };
+    admit_shared_cargo_target_after_bounded_retention(root, &admission_retention, capacity, || {
+        // The automatic owner is bounded and single-flight across processes.
+        // A busy pass is followed by this fresh measurement, never assumed to
+        // have restored capacity.
+        super::run_automatic_cargo_retention()?;
+        filesystem_capacity(root)
+    })
+}
+
+/// Run one bounded retention pass only when a new build would breach the
+/// configured reserve, then require a fresh capacity measurement before
+/// admitting it.
+fn admit_shared_cargo_target_after_bounded_retention<Retain>(
+    root: &Path,
+    retention: &crate::defaults::RetentionConfig,
+    capacity: FilesystemCapacity,
+    mut retain: Retain,
+) -> Result<()>
+where
+    Retain: FnMut() -> Result<FilesystemCapacity>,
+{
+    if capacity.available_bytes >= retention.shared_store_reserve_bytes
+        && capacity.available_inodes >= retention.shared_store_reserve_inodes
+    {
+        return Ok(());
+    }
+    admit_shared_cargo_target_with_capacity(root, retention, retain()?)
 }
 
 fn admit_shared_cargo_target_with_capacity(
@@ -914,6 +1048,69 @@ mod tests {
             "homeboy cleanup --include shared-cargo-targets --apply"
         );
         assert!(protected.target_dir().exists());
+    }
+
+    #[test]
+    fn capacity_breach_runs_one_bounded_retention_pass_before_refusing_admission() {
+        let root = TempDir::new().unwrap();
+        let retention = crate::defaults::RetentionConfig {
+            shared_store_reserve_bytes: 100,
+            ..crate::defaults::RetentionConfig::default()
+        };
+        let mut passes = 0;
+
+        let error = admit_shared_cargo_target_after_bounded_retention(
+            root.path(),
+            &retention,
+            FilesystemCapacity {
+                filesystem: "constrained-test-volume".to_string(),
+                available_bytes: 99,
+                available_inodes: u64::MAX,
+            },
+            || {
+                passes += 1;
+                Ok(FilesystemCapacity {
+                    filesystem: "constrained-test-volume".to_string(),
+                    available_bytes: 99,
+                    available_inodes: u64::MAX,
+                })
+            },
+        )
+        .expect_err("admission must still refuse when bounded retention cannot recover reserve");
+
+        assert_eq!(passes, 1, "one admission performs one bounded pass");
+        assert_eq!(error.details["reserve_bytes"], 100);
+    }
+
+    #[test]
+    fn bounded_retention_remeasurement_admits_only_after_recovery() {
+        let root = TempDir::new().unwrap();
+        let retention = crate::defaults::RetentionConfig {
+            shared_store_reserve_bytes: 100,
+            ..crate::defaults::RetentionConfig::default()
+        };
+        let mut passes = 0;
+
+        admit_shared_cargo_target_after_bounded_retention(
+            root.path(),
+            &retention,
+            FilesystemCapacity {
+                filesystem: "constrained-test-volume".to_string(),
+                available_bytes: 99,
+                available_inodes: u64::MAX,
+            },
+            || {
+                passes += 1;
+                Ok(FilesystemCapacity {
+                    filesystem: "constrained-test-volume".to_string(),
+                    available_bytes: 100,
+                    available_inodes: u64::MAX,
+                })
+            },
+        )
+        .expect("re-measured capacity above reserve admits the build");
+
+        assert_eq!(passes, 1, "admission remains bounded to one retention pass");
     }
 
     #[test]

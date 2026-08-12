@@ -1,3 +1,5 @@
+experimental = ["wrapper-scripts"]
+
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }
 
@@ -8,3 +10,18 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 [profile.quick]
 fail-fast = true
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+[scripts.wrapper.hermetic-test-environment]
+command = { command-line = "scripts/nextest-hermetic-test-environment.sh", relative-to = "workspace-root" }
+
+[[profile.default.scripts]]
+filter = "all()"
+run-wrapper = "hermetic-test-environment"
+
+[[profile.ci.scripts]]
+filter = "all()"
+run-wrapper = "hermetic-test-environment"
+
+[[profile.quick.scripts]]
+filter = "all()"
+run-wrapper = "hermetic-test-environment"

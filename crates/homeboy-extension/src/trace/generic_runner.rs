@@ -45,6 +45,7 @@ pub(super) fn run_generic_trace_runner(
             timed_out: false,
             child_resource: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: None,
         });
     }
 
@@ -60,6 +61,7 @@ pub(super) fn run_generic_trace_runner(
             timed_out: false,
             child_resource: None,
             extension_phase_timings: Vec::new(),
+            cargo_target: None,
         });
     };
 
@@ -94,6 +96,7 @@ pub(super) fn run_generic_trace_runner(
         extension_phase_timings: super::super::runner::read_extension_phase_timings(
             run_dir.path(),
         )?,
+        cargo_target: None,
     })
 }
 

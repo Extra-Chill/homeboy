@@ -30,10 +30,10 @@ pub use commits::{
     categorize_commits, find_version_commit, find_version_release_commit, get_commits_in_range,
     get_commits_since_tag, get_commits_since_tag_for_path, get_commits_since_tag_for_paths,
     get_commits_since_tag_for_scope, get_component_changes_since_tag, get_last_n_commits,
-    get_latest_tag, get_latest_tag_any_with_prefix, get_latest_tag_with_prefix,
-    get_previous_tag_before_any_with_prefix, get_previous_tag_before_with_prefix,
-    recommended_bump_from_commits, strip_conventional_prefix, CommitCategory, CommitCounts,
-    CommitInfo, MonorepoContext, SemverBump,
+    get_latest_tag, get_latest_tag_any_with_prefix, get_latest_tag_any_with_prefix_with_timeout,
+    get_latest_tag_with_prefix, get_previous_tag_before_any_with_prefix,
+    get_previous_tag_before_with_prefix, recommended_bump_from_commits, strip_conventional_prefix,
+    CommitCategory, CommitCounts, CommitInfo, MonorepoContext, SemverBump,
 };
 pub use gh_client::{github_cli_env, GhClient};
 pub use github::push_markdown_body_file_arg;
@@ -55,8 +55,9 @@ pub use github_types::{
 pub use operation_output::GitOutput;
 pub use operations::{
     cherry_pick, cherry_pick_at, execute_git_for_release, fetch_and_fast_forward,
-    fetch_and_get_behind_count, get_repo_snapshot, pull, pull_at, pull_bulk, rebase, rebase_at,
-    status, status_at, status_bulk, CherryPickOptions, RebaseOptions, RepoSnapshot,
+    fetch_and_get_behind_count, get_repo_snapshot, get_repo_snapshot_with_timeout, pull, pull_at,
+    pull_bulk, rebase, rebase_at, status, status_at, status_bulk, CherryPickOptions, RebaseOptions,
+    RepoSnapshot,
 };
 pub use operations_changes::{
     build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,
@@ -85,9 +86,9 @@ pub(crate) use primitives::list_tracked_markdown_files;
 pub use primitives::{
     clone_repo, clone_repo_at_ref, clone_repo_at_ref_with_timeout, commit_staged_with_author,
     default_branch_name, default_remote_branch, get_component_path_prefix, get_git_root,
-    git_probe_path, has_staged_changes, is_workdir_clean_or_not_git, pull_repo,
-    resolve_default_remote, run_git, run_git_output, run_git_output_with_env, run_git_with_env,
-    run_git_with_env_timeout, stage_all, update_to_remote_default_branch,
+    get_git_root_with_timeout, git_probe_path, has_staged_changes, is_workdir_clean_or_not_git,
+    pull_repo, resolve_default_remote, run_git, run_git_output, run_git_output_with_env,
+    run_git_with_env, run_git_with_env_timeout, stage_all, update_to_remote_default_branch,
 };
 pub use primitives::{is_git_repo, is_tracked_path};
 pub use primitives_query::{
