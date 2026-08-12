@@ -30,6 +30,19 @@ pub(super) fn run_if_configured(
     if component_ids.is_empty() {
         return Ok(None);
     }
+    // Deciding whether this project is provider-owned requires reading each
+    // component's declared configuration from its checkout. In check mode a
+    // component whose checkout is absent must not abort that decision for the
+    // whole project (#12214): set it aside as a scoped finding, decide ownership
+    // from the components this host can actually resolve, and report the rest.
+    let (component_ids, unresolvable): (Vec<&str>, Vec<UnresolvableComponent>) = if config.check {
+        partition_unresolvable_components(project, &component_ids, config)
+    } else {
+        (component_ids, Vec::new())
+    };
+    if component_ids.is_empty() {
+        return Ok(None);
+    }
     let components = component_ids
         .iter()
         .map(|id| {
@@ -54,7 +67,7 @@ pub(super) fn run_if_configured(
         ));
     }
     if provider_count == components.len() {
-        let mut results = Vec::with_capacity(components.len());
+        let mut results = Vec::with_capacity(components.len() + unresolvable.len());
         for component in &components {
             results.push(run_component(
                 project_id,
@@ -64,23 +77,84 @@ pub(super) fn run_if_configured(
                 observation.as_deref_mut(),
             )?);
         }
+        results.extend(unresolvable_results(&unresolvable));
         let failed = results
             .iter()
             .filter(|result| result.status == "failed")
             .count() as u32;
+        let skipped = unresolvable.len() as u32;
         let total = results.len() as u32;
         return Ok(Some(DeployOrchestrationResult {
             results,
             summary: DeploySummary {
                 total,
-                succeeded: total - failed,
+                succeeded: total - failed - skipped,
                 failed,
-                skipped: 0,
+                skipped,
             },
             deploy_run_id: None,
         }));
     }
     Ok(None)
+}
+
+/// A component this host cannot resolve, with the operator-facing reason.
+struct UnresolvableComponent {
+    id: String,
+    reason: String,
+}
+
+/// Split requested components into those this host can resolve and those whose
+/// local checkout is absent.
+///
+/// A projected source stands in for the on-disk checkout, so a component the
+/// caller already materialized is always resolvable.
+fn partition_unresolvable_components<'a>(
+    project: &Project,
+    component_ids: &[&'a str],
+    config: &DeployConfig,
+) -> (Vec<&'a str>, Vec<UnresolvableComponent>) {
+    let mut resolvable = Vec::with_capacity(component_ids.len());
+    let mut unresolvable = Vec::new();
+
+    for id in component_ids {
+        if super::planning::projected_component(project, id, config.prepared_projection.as_ref())
+            .is_some()
+        {
+            resolvable.push(*id);
+            continue;
+        }
+
+        let findings = homeboy_core::project::component_local_path_findings(project, id);
+        if findings.is_empty() {
+            resolvable.push(*id);
+        } else {
+            unresolvable.push(UnresolvableComponent {
+                id: (*id).to_string(),
+                reason: findings.join("; "),
+            });
+        }
+    }
+
+    (resolvable, unresolvable)
+}
+
+/// Build `status: "skipped"` rows so a project-wide check reports the components
+/// it could not resolve alongside the ones it did.
+fn unresolvable_results(unresolvable: &[UnresolvableComponent]) -> Vec<ComponentDeployResult> {
+    unresolvable
+        .iter()
+        .map(|skip| {
+            let component = Component {
+                id: skip.id.clone(),
+                ..Default::default()
+            };
+            let mut result = ComponentDeployResult::new(&component, "").with_status("skipped");
+            result.local_path = None;
+            result.warnings.push(format!("skipped: {}", skip.reason));
+            result
+        })
+        .collect()
 }
 
 fn run_component(
@@ -764,6 +838,111 @@ mod tests {
             ])
         );
         assert!(!error.message.contains("server_id"));
+    }
+
+    /// Deciding provider ownership resolves every attached component, so one stale
+    /// attachment used to abort the whole project-wide check before any other
+    /// component was inspected (#12214). Ownership must be decided from the
+    /// components this host can resolve, with the rest reported as skipped.
+    #[test]
+    fn project_wide_check_reports_absent_checkout_and_still_checks_the_rest() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let repository = provider_repository("fixture");
+            write_provider_extension(
+                home.path(),
+                Some("sh {{extension_path}}/run.sh check {{payload.contract}}"),
+            );
+            let mut project = provider_project(repository.path());
+            project.components.push(ProjectComponentAttachment {
+                id: "absent".to_string(),
+                local_path: repository
+                    .path()
+                    .join("deleted-checkout")
+                    .to_string_lossy()
+                    .to_string(),
+                ..Default::default()
+            });
+
+            let result = run_if_configured(
+                "site",
+                &project,
+                &DeployConfig::check_all_no_pull_head(),
+                None,
+            )
+            .expect("an absent checkout must not abort a project-wide check")
+            .expect("provider-owned result");
+
+            assert_eq!(result.summary.total, 2);
+            assert_eq!(result.summary.skipped, 1);
+            assert_eq!(result.summary.failed, 0);
+
+            let checked = result
+                .results
+                .iter()
+                .find(|row| row.id == "fixture")
+                .expect("resolvable component is still checked");
+            assert_eq!(checked.status, "validated");
+
+            let skipped = result
+                .results
+                .iter()
+                .find(|row| row.id == "absent")
+                .expect("absent component is reported");
+            assert_eq!(skipped.status, "skipped");
+            assert!(
+                skipped.warnings.iter().any(|warning| {
+                    warning.contains("does not exist") && warning.contains("attach-path")
+                }),
+                "the skip must carry the remedy: {:?}",
+                skipped.warnings
+            );
+        });
+    }
+
+    /// The reported shape: a server-deployed project with one stale attachment.
+    /// Provider dispatch must decline it so orchestration can run the read-only
+    /// status pass, instead of erroring out of the command entirely (#12214).
+    #[test]
+    fn project_wide_check_with_absent_checkout_defers_non_provider_project() {
+        let generic = tempfile::tempdir().expect("generic repository");
+        std::fs::write(
+            generic.path().join("homeboy.json"),
+            r#"{"id":"generic","deploy_strategy":"git"}"#,
+        )
+        .expect("generic component");
+        let project = Project {
+            id: "site".to_string(),
+            components: vec![
+                ProjectComponentAttachment {
+                    id: "generic".to_string(),
+                    local_path: generic.path().to_string_lossy().to_string(),
+                    ..Default::default()
+                },
+                ProjectComponentAttachment {
+                    id: "absent".to_string(),
+                    local_path: generic
+                        .path()
+                        .join("deleted-checkout")
+                        .to_string_lossy()
+                        .to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let dispatched = run_if_configured(
+            "site",
+            &project,
+            &DeployConfig::check_all_no_pull_head(),
+            None,
+        )
+        .expect("an absent checkout must not abort provider dispatch");
+
+        assert!(
+            dispatched.is_none(),
+            "a server-deployed project must fall through to orchestration"
+        );
     }
 
     #[test]

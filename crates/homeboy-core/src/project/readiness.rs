@@ -172,15 +172,27 @@ pub fn validate_deploy_component_local_paths(
     Err(err)
 }
 
-pub fn validate_component_local_path(project: &Project, component_id: &str) -> Result<()> {
-    let blockers = project
+/// The operator-facing local_path findings for one attached component, as
+/// values rather than as an error.
+///
+/// A missing local checkout is a fact about *this host*, not a malformed
+/// project. Read-only callers (`deploy --check`, status probes) need to report
+/// it as one scoped finding and keep going, instead of aborting a project-wide
+/// pass and hiding every other component (#12214). `validate_component_local_path`
+/// remains the fail-closed wrapper that every mutating path uses.
+pub fn component_local_path_findings(project: &Project, component_id: &str) -> Vec<String> {
+    project
         .components
         .iter()
         .filter(|attachment| attachment.id == component_id)
         .filter_map(|attachment| {
             component_local_path_blocker(project, &attachment.id, &attachment.local_path)
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+pub fn validate_component_local_path(project: &Project, component_id: &str) -> Result<()> {
+    let blockers = component_local_path_findings(project, component_id);
 
     if blockers.is_empty() {
         return Ok(());
@@ -298,6 +310,40 @@ mod tests {
         assert!(blockers.iter().any(|blocker| {
             blocker.contains("Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist")
         }));
+    }
+
+    /// Read-only callers need the blocker as a value so a missing checkout can be
+    /// reported as one scoped finding instead of aborting a project-wide pass (#12214).
+    #[test]
+    fn component_local_path_findings_report_missing_checkout_without_erroring() {
+        let project = project_with_component("/tmp/homeboy-missing-component-path".to_string());
+
+        let findings = component_local_path_findings(&project, "plugin");
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains(
+            "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist"
+        ));
+    }
+
+    /// The findings helper and the fail-closed validator must agree — one is the
+    /// value form of the other, not a second implementation that can drift.
+    #[test]
+    fn component_local_path_findings_are_empty_for_a_present_checkout() {
+        let repo = repo_with_component("plugin", serde_json::json!({}));
+        let project = project_with_component(repo.path().to_string_lossy().to_string());
+
+        assert!(component_local_path_findings(&project, "plugin").is_empty());
+        validate_component_local_path(&project, "plugin").expect("present checkout validates");
+    }
+
+    /// An unattached component has nothing to report — absence of an attachment is
+    /// a different error, surfaced by resolution.
+    #[test]
+    fn component_local_path_findings_are_empty_for_an_unattached_component() {
+        let project = project_with_component("/tmp/homeboy-missing-component-path".to_string());
+
+        assert!(component_local_path_findings(&project, "not-attached").is_empty());
     }
 
     #[test]
