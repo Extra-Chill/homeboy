@@ -120,7 +120,7 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         for (path, body) in [
             (
                 "/health",
-                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759}"#,
+                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
             ),
             (
                 "/jobs",
@@ -167,7 +167,8 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,
-        active_jobs: 0,
+        // Status is stale; admission must use the matching fresh health count.
+        active_jobs: 1,
         termination_evidence: None,
         repair_plan: Vec::new(),
     });
@@ -272,6 +273,87 @@ fn stale_disconnected_projection_rejects_mismatched_typed_health() {
 
     daemon.join().expect("daemon");
     assert!(error.message.contains("health did not match"));
+}
+
+#[test]
+fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    for (coordinate, health) in [
+        (
+            "lease",
+            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":null,"pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+        ),
+        (
+            "pid",
+            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":null,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":null,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+        ),
+        (
+            "build identity",
+            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759}"#,
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("daemon listener");
+        let address = listener.local_addr().expect("daemon address");
+        let daemon = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("health request");
+            let mut request = [0; 4096];
+            let length = stream.read(&mut request).expect("read request");
+            assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /health HTTP/1.1"));
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{health}").as_bytes()).expect("health response");
+        });
+        let mut status = connected_reverse_status("lab", None);
+        status.connected = false;
+        status.state = super::super::RunnerSessionState::Disconnected;
+        status.session = Some(connected_direct_session(
+            "lab",
+            Some(&format!("http://{address}")),
+        ));
+        let session = status.session.as_mut().expect("session");
+        session.local_port = Some(address.port());
+        session.tunnel_pid = Some(22420);
+        session.remote_daemon_pid = Some(1467759);
+        session.remote_daemon_lease_id = Some("lease-fresh".to_string());
+        status.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: true,
+            stale_reason_code: None,
+            restartable: false,
+            lease_id: Some("lease-fresh".to_string()),
+            pid: Some(1467759),
+            recovery_evidence: None,
+            ownership_evidence: None,
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        });
+        let mut connect = connected_direct_connect_report("lab");
+        connect.local_url = Some(format!("http://{address}"));
+        connect.tunnel_pid = Some(22420);
+        connect.remote_daemon_pid = Some(1467759);
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+            mode: RunnerTunnelMode::DirectSsh,
+        };
+        let error = preflight_lab_runner_availability_from_status(
+            &selection,
+            |_| Ok(status.clone()),
+            Some(1),
+            Some(&connect),
+        )
+        .expect_err("omitted coordinate is rejected");
+        daemon.join().expect("daemon");
+        assert!(
+            error.message.contains("health did not match"),
+            "{coordinate}"
+        );
+    }
 }
 
 #[test]

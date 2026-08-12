@@ -836,28 +836,39 @@ pub(super) fn authoritative_status_for_preflight(
                 None,
             )
         })?;
+    let recorded_build_identities = [
+        session.homeboy_build_identity.as_deref(),
+        connect_authority.homeboy_build_identity.as_deref(),
+        status
+            .daemon_freshness
+            .as_ref()
+            .and_then(|freshness| freshness.daemon_build_identity.as_deref()),
+    ];
     let health_identity_matches = health.build_identity.as_deref().is_none_or(|identity| {
-        [
-            session.homeboy_build_identity.as_deref(),
-            connect_authority.homeboy_build_identity.as_deref(),
-            status
-                .daemon_freshness
-                .as_ref()
-                .and_then(|freshness| freshness.daemon_build_identity.as_deref()),
-        ]
-        .into_iter()
-        .flatten()
-        .all(|expected| expected == identity)
+        recorded_build_identities
+            .iter()
+            .copied()
+            .flatten()
+            .all(|expected| expected == identity)
     });
+    let health_has_required_identity = recorded_build_identities
+        .iter()
+        .any(Option::is_some)
+        .then(|| health.build_identity.is_some())
+        .unwrap_or(true);
+    let health_has_required_pid = connect_authority
+        .remote_daemon_pid
+        .is_some_and(|_| health.pid.is_some());
+    let health_has_required_lease = session
+        .remote_daemon_lease_id
+        .as_ref()
+        .is_some_and(|_| health.freshness.lease_id.is_some());
     if !health.freshness.fresh
-        || health
-            .pid
-            .is_some_and(|pid| Some(pid) != connect_authority.remote_daemon_pid)
-        || health
-            .freshness
-            .lease_id
-            .as_deref()
-            .is_some_and(|lease_id| Some(lease_id) != session.remote_daemon_lease_id.as_deref())
+        || !health_has_required_pid
+        || !health_has_required_lease
+        || !health_has_required_identity
+        || health.pid != connect_authority.remote_daemon_pid
+        || health.freshness.lease_id != session.remote_daemon_lease_id
         || !health_identity_matches
     {
         return Err(Error::validation_invalid_argument(
@@ -871,11 +882,7 @@ pub(super) fn authoritative_status_for_preflight(
         &connect_authority.runner_id,
         session,
     )?;
-    let daemon_active_jobs = status
-        .daemon_freshness
-        .as_ref()
-        .map(|freshness| freshness.active_jobs)
-        .expect("fresh daemon evidence was required above");
+    let daemon_active_jobs = health.freshness.active_jobs;
     if daemon_active_jobs != active_jobs.len() {
         return Err(Error::validation_invalid_argument(
             "runner",
