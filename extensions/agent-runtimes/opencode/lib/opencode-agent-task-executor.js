@@ -87,6 +87,7 @@ const OPENCODE_CAPABILITIES = [
 	'run_scoped_scratch',
 	'runtime_tool_attachment',
 	'workspace_permission_root/v1',
+	'workspace_permission_preflight/v1',
 ];
 
 const OPENCODE_COMMAND = 'node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs';
@@ -353,7 +354,11 @@ function opencodeExternalDirectoryPatterns(request = {}, config = {}) {
 function opencodeWorkspaceReadPatterns(request = {}, config = {}) {
 	return opencodeWorkspacePermissionRoots(request, config)
 		.filter(isAbsolutePath)
-		.map((workspaceRoot) => path.join(concretePath(workspaceRoot), '**'));
+		.flatMap((workspaceRoot) => {
+			const workspace = concretePath(workspaceRoot);
+			// OpenCode may request the workspace itself before it requests a child.
+			return [workspace, path.join(workspace, '**')];
+		});
 }
 
 function opencodeWorkspacePermissionRoot(request = {}, config = {}) {
@@ -1186,6 +1191,57 @@ function resolveOpenCodeCwd(request = {}, config = {}) {
 		|| process.cwd();
 }
 
+function openCodeWorkspacePermissionPreflight(commandSpec = {}, primaryAgent, cwd, env, allowedTools) {
+	if (!isOpenCodeCommand(commandSpec) || !isAbsolutePath(cwd)) {
+		return null;
+	}
+	const result = spawnSync(commandSpec.command, [
+		...arrayValue(commandSpec.args),
+		'debug', 'agent', primaryAgent, '--pure',
+	], {
+		cwd,
+		env,
+		encoding: 'utf8',
+		maxBuffer: 1024 * 1024,
+	});
+	if (result.status !== 0 || result.error) {
+		return 'OpenCode could not resolve the configured agent permission contract.';
+	}
+	try {
+		const resolvedAgent = JSON.parse(result.stdout);
+		return hasOpenCodeWorkspacePermissionContract(resolvedAgent, cwd, allowedTools) ? null
+			: 'OpenCode resolved an agent without the required workspace coding permissions.';
+	} catch {
+		return 'OpenCode returned an invalid resolved agent permission contract.';
+	}
+}
+
+function isOpenCodeCommand(commandSpec = {}) {
+	return typeof commandSpec.command === 'string' && /^opencode(?:\.exe)?$/i.test(path.basename(commandSpec.command));
+}
+
+function hasOpenCodeWorkspacePermissionContract(agent, cwd, allowedTools = Object.values(OPENCODE_NATIVE_WORKSPACE_PERMISSIONS).flat()) {
+	const permissions = openCodePermissionRules(agent?.permission);
+	const requiredExternalDirectoryPatterns = [concretePath(cwd), path.join(concretePath(cwd), '**')];
+	return requiredExternalDirectoryPatterns.every((pattern) => permissions.some((rule) => (
+		rule?.permission === 'external_directory' && rule.pattern === pattern && rule.action === 'allow'
+	))) && allowedTools.every((tool) => permissions.some((rule) => (
+			rule?.permission === tool && rule.pattern === '*' && rule.action === 'allow'
+		)));
+}
+
+function openCodePermissionRules(permission) {
+	if (Array.isArray(permission)) {
+		return permission;
+	}
+	return Object.entries(objectValue(permission)).flatMap(([name, rules]) => {
+		if (typeof rules === 'string') {
+			return [{ permission: name, pattern: '*', action: rules }];
+		}
+		return Object.entries(objectValue(rules)).map(([pattern, action]) => ({ permission: name, pattern, action }));
+	});
+}
+
 async function executeOpenCodeAgentTask(request = {}, options = {}) {
 	const validationError = validateOpenCodeRequest(request);
 	if (validationError) {
@@ -1207,6 +1263,26 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 	const cwd = resolveOpenCodeCwd(request, config);
 	const args = opencodeRunArgs(request, config, commandSpec);
 	const spawnExtra = { env: { ...opencodeSpawnEnv(request, options), PWD: cwd } };
+	const toolPermissions = agentTaskPolicyToolPermissions(request.policy, {
+		native: OPENCODE_NATIVE_WORKSPACE_PERMISSIONS,
+		workspace: OPENCODE_WORKSPACE_TOOLS,
+	});
+	const workspacePermissionError = openCodeWorkspacePermissionPreflight(
+		commandSpec,
+		config.agent || 'build',
+		cwd,
+		spawnExtra.env,
+		toolPermissions.native
+	);
+	if (workspacePermissionError) {
+		return outcome(request, {
+			status: 'provider_error',
+			failure_classification: 'provider_setup',
+			failure_code: 'agent_task.opencode_workspace_permission_preflight_failed',
+			summary: 'OpenCode workspace permission preflight failed.',
+			diagnostics: [{ class: 'opencode.workspace_permission_preflight', classification: 'provider_setup', message: workspacePermissionError }],
+		});
+	}
 	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds);
 	const runtimeLogPaths = openCodeRuntimeLogPaths(request, config);
 	const progressEventPath = openCodeProgressEventPath(request, config);
@@ -1568,6 +1644,7 @@ module.exports = {
 	OPENCODE_WORKSPACE_TOOLS,
 	OPENCODE_WORKSPACE_MATERIALIZATION,
 	executeOpenCodeAgentTask,
+	openCodeWorkspacePermissionPreflight,
 	outcome,
 	providerContract,
 	validationFailure,
