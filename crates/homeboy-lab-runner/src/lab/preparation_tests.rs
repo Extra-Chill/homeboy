@@ -1,6 +1,7 @@
 use super::super::lab_selection::{
     authoritative_status_for_preflight, preflight_lab_runner_availability_from_status,
-    prepare_lab_runner_for_offload_with, LabRunnerPreparation, LabRunnerSelection,
+    prepare_lab_runner_for_offload_with, reconnect_after_compatible_lease_with,
+    LabRunnerPreparation, LabRunnerSelection,
 };
 use super::*;
 use crate::{
@@ -8,6 +9,7 @@ use crate::{
     RunnerTunnelProcessStartIdentity,
 };
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
+use homeboy_core::{Error, ErrorCode};
 
 use super::super::session::{RunnerStaleDaemonWarning, RunnerStaleRuntimePath};
 
@@ -952,6 +954,100 @@ fn concurrent_unreachable_health_handoffs_connect_once() {
         ));
     }
     assert_eq!(connects.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn compatible_reconnect_wait_reuses_the_owner_session_without_a_second_tunnel() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let owner = homeboy_core::runtime_promotion::acquire("runner daemon reconnect", "lab")
+            .expect("owner lease");
+        let connects = Arc::new(AtomicUsize::new(0));
+        connects.fetch_add(1, Ordering::SeqCst);
+        let contender_connects = Arc::clone(&connects);
+        let contender = std::thread::spawn(move || {
+            reconnect_after_compatible_lease_with(
+                "lab",
+                || {
+                    homeboy_core::runtime_promotion::acquire_waiting_for_compatible(
+                        "runner daemon reconnect",
+                        "lab",
+                        std::time::Duration::from_secs(1),
+                        |_| {},
+                    )
+                    .map(drop)
+                },
+                || {
+                    let session = connected_direct_session("lab", Some("http://127.0.0.1:63378"));
+                    Ok(RunnerStatusReport {
+                        runner_id: "lab".to_string(),
+                        connected: true,
+                        state: super::super::RunnerSessionState::Connected,
+                        session: Some(session),
+                        stale_daemon: None,
+                        daemon_freshness: None,
+                        active_jobs: Vec::new(),
+                        active_runner_jobs: Vec::new(),
+                        active_job_count: 0,
+                        stale_runner_jobs: Vec::new(),
+                        stale_runner_job_count: 0,
+                        active_job_state: RunnerActiveJobState::Available,
+                        active_job_source: None,
+                        active_job_error: None,
+                        active_job_recovery_evidence: None,
+                        session_path: "/tmp/lab.json".to_string(),
+                    })
+                },
+                || {
+                    contender_connects.fetch_add(1, Ordering::SeqCst);
+                    panic!("compatible owner session must be reused without a second connect")
+                },
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(owner);
+
+        let (report, exit_code) = contender
+            .join()
+            .expect("contender thread")
+            .expect("compatible handoff");
+        assert_eq!(exit_code, 0);
+        assert!(report.connected);
+        assert_eq!(report.local_url.as_deref(), Some("http://127.0.0.1:63378"));
+        assert_eq!(connects.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn compatible_reconnect_wait_preserves_timeout_diagnostics_without_connecting() {
+    let timeout = Error::new(
+        ErrorCode::RuntimePromotionWaitTimeout,
+        "runtime promotion wait timed out after 30s behind pid 42 operation `runner daemon reconnect` target `lab`".to_string(),
+        serde_json::json!({
+            "queue_state": "timed_out_waiting_for_compatible_owner",
+            "holder_pid": 42,
+            "holder_operation": "runner daemon reconnect",
+            "target": "lab",
+        }),
+    );
+    let error = reconnect_after_compatible_lease_with(
+        "lab",
+        || Err(timeout),
+        || unreachable!("timed-out wait must not read or adopt a session"),
+        || unreachable!("timed-out wait must not open a second tunnel"),
+    )
+    .expect_err("bounded lease wait propagates its diagnostic");
+
+    assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+    assert_eq!(
+        error.details["queue_state"],
+        "timed_out_waiting_for_compatible_owner"
+    );
+    assert_eq!(error.details["holder_pid"], 42);
 }
 
 #[test]

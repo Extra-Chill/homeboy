@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use crate::daemon_repair;
 use crate::resolve_lab_runner_hint;
@@ -671,6 +672,7 @@ fn provider_admission_for_request(
 
 static HANDOFF_CONNECT_LOCKS: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<Mutex<()>>>>> =
     OnceLock::new();
+const HANDOFF_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) fn prepare_lab_runner_for_offload(
     selection: &LabRunnerSelection,
@@ -688,7 +690,7 @@ pub(super) fn prepare_lab_runner_for_offload(
     }
 
     prepare_lab_runner_for_offload_with(selection, status, |runner_id| {
-        crate::connection::connect(runner_id)
+        connect_runner_for_offload(runner_id)
     })
 }
 
@@ -1060,6 +1062,92 @@ pub(super) fn lab_runner_availability_error(
             "tried": tried,
         }),
     )
+}
+
+fn connect_runner_for_offload(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
+    let lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible(
+        "runner daemon reconnect",
+        runner_id.to_string(),
+        HANDOFF_ADMISSION_TIMEOUT,
+        emit_runtime_promotion_wait,
+    )?;
+    // A compatible controller may have published its exact live session while
+    // this process waited for the lease. Reuse that session rather than opening
+    // a second controller-owned tunnel to the same daemon generation.
+    if let Some(report) =
+        connected_runner_connect_report_from_status(runner_id, status(runner_id)?)?
+    {
+        return Ok((report, 0));
+    }
+    lease.with_local_target(runner_id.to_string(), || {
+        crate::connection::connect(runner_id)
+    })
+}
+
+fn connected_runner_connect_report_from_status(
+    runner_id: &str,
+    status: RunnerStatusReport,
+) -> Result<Option<RunnerConnectReport>> {
+    if !status.connected {
+        return Ok(None);
+    }
+    connected_runner_connect_report(runner_id, status).map(|(report, _)| Some(report))
+}
+
+fn connected_runner_connect_report(
+    runner_id: &str,
+    status: RunnerStatusReport,
+) -> Result<(RunnerConnectReport, i32)> {
+    let session = status.session.ok_or_else(|| {
+        Error::internal_unexpected("connected runner status did not include a session")
+    })?;
+    Ok((
+        RunnerConnectReport {
+            runner_id: runner_id.to_string(),
+            mode: Some(session.mode),
+            role: Some(session.role),
+            connected: true,
+            recorded: None,
+            local_url: session.local_url,
+            broker_url: session.broker_url,
+            controller_id: session.controller_id,
+            remote_daemon_address: session.remote_daemon_address,
+            tunnel_pid: session.tunnel_pid,
+            remote_daemon_pid: session.remote_daemon_pid,
+            connection_warning: None,
+            homeboy_version: Some(session.homeboy_version),
+            homeboy_build_identity: session.homeboy_build_identity,
+            session_path: Some(status.session_path),
+            leaseless_recovery: None,
+            state_loss_recovery: None,
+            leaseless_recovery_evidence: session
+                .leaseless_recovery_evidence
+                .and_then(|value| serde_json::from_value(value).ok()),
+            failure_kind: None,
+            failure_message: None,
+            failure_evidence: None,
+        },
+        0,
+    ))
+}
+
+#[cfg(test)]
+pub(super) fn reconnect_after_compatible_lease_with<Acquire, Status, Connect>(
+    runner_id: &str,
+    acquire: Acquire,
+    status: Status,
+    connect: Connect,
+) -> Result<(RunnerConnectReport, i32)>
+where
+    Acquire: FnOnce() -> Result<()>,
+    Status: FnOnce() -> Result<RunnerStatusReport>,
+    Connect: FnOnce() -> Result<(RunnerConnectReport, i32)>,
+{
+    acquire()?;
+    if let Some(report) = connected_runner_connect_report_from_status(runner_id, status()?)? {
+        return Ok((report, 0));
+    }
+    connect()
 }
 
 /// Emit queue admission separately from the terminal command envelope so a
