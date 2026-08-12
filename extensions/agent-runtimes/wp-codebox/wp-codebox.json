@@ -234,6 +234,11 @@
           "{{runtime_path}}/scripts/agent/homeboy-codebox-provider-readiness.cjs"
         ],
         "env_allowlist": [
+          "HOMEBOY_WP_CODEBOX_BIN",
+          "WP_CODEBOX_BIN",
+          "HOMEBOY_SETTINGS_WP_CODEBOX_BIN",
+          "HOMEBOY_SETTINGS_JSON",
+          "HOMEBOY_WP_CODEBOX_INSTALL_DIR",
           "HOMEBOY_WP_CODEBOX_CORE_MODULE",
           "WP_CODEBOX_CORE_MODULE"
         ],
@@ -398,15 +403,17 @@
       },
       "runner_readiness": [
         {
-          "id": "wp-codebox.executable",
-          "label": "WP Codebox executable",
-          "executable": {
-            "env": ["HOMEBOY_WP_CODEBOX_BIN"],
-            "candidates": ["wp-codebox"],
-            "version_command": ["--version"],
-            "install_hint": "Install WP Codebox or set the generic runtime_bin executor config; HOMEBOY_WP_CODEBOX_BIN remains a legacy compatibility env alias."
+          "id": "wp-codebox.runner",
+          "label": "WP Codebox managed runner",
+          "invocation": {
+            "schema": "homeboy/command-invocation/v1",
+            "argv": [
+              "node",
+              "{{runtime_path}}/scripts/agent/homeboy-wp-codebox-runner-readiness.cjs"
+            ],
+            "display": "node {{runtime_path}}/scripts/agent/homeboy-wp-codebox-runner-readiness.cjs"
           },
-          "remediation": "Install WP Codebox or set the generic runtime_bin executor config; HOMEBOY_WP_CODEBOX_BIN remains a legacy compatibility env alias."
+          "remediation": "homeboy extension setup wordpress"
         }
       ],
       "runner_sources": [
@@ -416,7 +423,7 @@
           "path": "~/.cache/homeboy/wp-codebox/source",
           "remote_url": "https://github.com/Automattic/wp-codebox.git",
           "git_ref": "main",
-          "remediation": "Refresh the managed WP Codebox source cache before dispatching WP Codebox-backed runner workloads."
+          "remediation": "homeboy extension setup wordpress"
         }
       ],
       "workspace_tools": {

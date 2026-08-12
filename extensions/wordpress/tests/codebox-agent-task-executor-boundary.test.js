@@ -283,15 +283,22 @@ assert.equal(Object.hasOwn(runtime.agent_task_executors[0], 'deprecated_compatib
 assert.equal(runtime.agent_task_executors[0].upstream_primitive_requirements.some((requirement) => requirement.id === 'run-agent-task' && requirement.schema === 'wp-codebox/run-agent-task/v1'), true);
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.deepEqual(provider.runner_readiness, [{
-  id: 'wp-codebox.executable',
-  label: 'WP Codebox executable',
-  executable: {
-    env: ['HOMEBOY_WP_CODEBOX_BIN'],
-    candidates: ['wp-codebox'],
-    version_command: ['--version'],
-    install_hint: 'Install WP Codebox or set the generic runtime_bin executor config; HOMEBOY_WP_CODEBOX_BIN remains a legacy compatibility env alias.',
+  id: 'wp-codebox.runner',
+  label: 'WP Codebox managed runner',
+  invocation: {
+    schema: 'homeboy/command-invocation/v1',
+    argv: ['node', '{{runtime_path}}/scripts/agent/homeboy-wp-codebox-runner-readiness.cjs'],
+    display: 'node {{runtime_path}}/scripts/agent/homeboy-wp-codebox-runner-readiness.cjs',
   },
-  remediation: 'Install WP Codebox or set the generic runtime_bin executor config; HOMEBOY_WP_CODEBOX_BIN remains a legacy compatibility env alias.',
+  remediation: 'homeboy extension setup wordpress',
+}]);
+assert.deepEqual(provider.runner_sources, [{
+  id: 'wp-codebox.source',
+  label: 'WP Codebox source cache',
+  path: '~/.cache/homeboy/wp-codebox/source',
+  remote_url: 'https://github.com/Automattic/wp-codebox.git',
+  git_ref: 'main',
+  remediation: 'homeboy extension setup wordpress',
 }]);
 assert.deepEqual(secretEnvRequirementForProvider(runtime.agent_task_executors[0], 'codex').env, codexSecretEnv);
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
