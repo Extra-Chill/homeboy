@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.22] - 2026-08-12
+
+### Changed
+- collapse the sharded Test path to its reachable candidate half
+
 ## [2.11.21] - 2026-08-12
 
 ### Fixed
