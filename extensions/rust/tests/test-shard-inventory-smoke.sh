@@ -509,6 +509,45 @@ assert all(" --workspace " in line for line in lines), lines
 assert all("test(=member::member_works)" in line for line in lines[1:]), lines
 PY
 
+# Shard replay parallelism is configurable but still defaults to serial.
+#
+# `--test-threads 1` was hard-coded here and did not come from
+# `rust_cargo_test_threads`, whose default is 0. Serializing test functions also
+# does not fix the hazard it was credited with: homeboy-core/src/test_support.rs
+# records that `--test-threads=1` "did not stop the failures", because readers
+# and a test's own worker threads never take the lock. nextest runs each test in
+# its own process, so the default stays 1 only out of caution (homeboy#11751 W1-9).
+grep -F -- '--test-threads 1' "${WORK_DIR}/nextest-selection.log" >/dev/null || {
+  printf 'FAIL: shard replay must default to serial execution\n' >&2
+  exit 1
+}
+printf 'PASS: shard replay defaults to serial execution\n'
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_RUST_NEXTEST_SHARD_THREADS=0 \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_FAKE_NEXTEST_LOG="$WORK_DIR/nextest-threads.log" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/threads-results.json" \
+HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/threads-runner.out"
+grep -F -- '--test-threads num-cpus' "${WORK_DIR}/nextest-threads.log" >/dev/null || {
+  printf 'FAIL: zero threads must select nextest num-cpus parallelism\n' >&2
+  exit 1
+}
+if grep -F -- '--test-threads 1' "${WORK_DIR}/nextest-threads.log" >/dev/null; then
+  printf 'FAIL: an explicit thread count must replace the serial default\n' >&2
+  exit 1
+fi
+printf 'PASS: shard replay honours a configured thread count\n'
+
 # A prebuilt nextest archive makes shard replay execution-only: listing and
 # running must both read the archive instead of recompiling the workspace, and
 # they must agree on the source so membership is validated against the binaries

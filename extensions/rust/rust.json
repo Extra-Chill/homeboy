@@ -180,6 +180,13 @@
       "description": "Optional Cargo libtest thread count. Set to 1 for suites that mutate process-global environment and need deterministic serial execution. Zero preserves Cargo's default parallelism."
     },
     {
+      "id": "rust_nextest_shard_threads",
+      "label": "Nextest shard threads",
+      "type": "integer",
+      "default": 1,
+      "description": "Thread count for nextest shard replay, which hard-coded 1 before it was configurable. Zero selects nextest's num-cpus parallelism. nextest runs every test in its own process, so process-global state is already isolated and serial replay is only the conservative default. Override per run with HOMEBOY_RUST_NEXTEST_SHARD_THREADS."
+    },
+    {
       "id": "clippy_all",
       "label": "Enable clippy::all",
       "type": "boolean",
