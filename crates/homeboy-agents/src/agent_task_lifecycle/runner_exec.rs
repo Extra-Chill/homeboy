@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 use homeboy_core::api_jobs::{JobStatus, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
 use homeboy_core::observation::RunStatus;
+use homeboy_core::redaction::redact_argv;
 
 use super::*;
 
@@ -113,7 +114,7 @@ fn ensure_runner_exec_observation_run(
             status: homeboy_core::observation::RunStatus::Running
                 .as_str()
                 .to_string(),
-            command: Some(remote_command.join(" ")),
+            command: Some(redact_argv(remote_command).join(" ")),
             cwd: Some(remote_workspace.to_string()),
             homeboy_version: Some(homeboy_core::build_identity::current().version),
             git_sha: None,
@@ -129,7 +130,10 @@ fn ensure_runner_exec_observation_run(
     metadata.insert("kind".to_string(), json!(RUNNER_EXEC_RUN_KIND));
     metadata.insert("runner_id".to_string(), json!(runner_id));
     metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
-    metadata.insert("remote_command".to_string(), json!(remote_command));
+    metadata.insert(
+        "remote_command".to_string(),
+        json!(redact_argv(remote_command)),
+    );
     if let Some(runner_job_id) = runner_job_id {
         metadata.insert("runner_job_id".to_string(), json!(runner_job_id));
     }
@@ -228,6 +232,85 @@ pub fn ensure_generic_runner_exec_run(
     remote_command: &[String],
 ) -> Result<homeboy_core::observation::RunRecord> {
     ensure_runner_exec_observation_run(run_id, runner_id, remote_workspace, remote_command, None)
+}
+
+/// Record a controller-side phase before work can reach a runner. This local
+/// evidence never implies that a runner job exists.
+pub fn record_runner_exec_pre_handoff_phase(run_id: &str, phase: &str) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND)
+        || RunStatus::from_label(&run.status).is_some_and(RunStatus::is_terminal)
+    {
+        return Ok(());
+    }
+    run.metadata_json
+        .as_object_mut()
+        .expect("metadata object")
+        .insert("runner_exec_phase".to_string(), json!(phase));
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+/// Terminalize an attempt that failed before a runner accepted a job. Once a
+/// job is bound, normal runner reconciliation owns the terminal outcome.
+pub fn finish_runner_exec_pre_handoff_failure(
+    run_id: &str,
+    transport: &str,
+    phase: &str,
+    handoff_accepted: bool,
+    error: &Error,
+) -> Result<bool> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(false);
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND)
+        || RunStatus::from_label(&run.status).is_some_and(RunStatus::is_terminal)
+        || run.metadata_json.get("runner_job_id").is_some()
+        || handoff_accepted
+    {
+        return Ok(false);
+    }
+    let recorded_phase = run.metadata_json["runner_exec_phase"]
+        .as_str()
+        .unwrap_or(phase)
+        .to_string();
+    let runner_id = run.metadata_json["runner_id"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let mut execution_record = run
+        .metadata_json
+        .get("runner_execution_record")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_else(|| {
+            homeboy_core::runner_execution_envelope::RunnerExecutionRecord::terminal(
+                run.id.clone(),
+                &runner_id,
+                transport,
+                1,
+            )
+        });
+    execution_record.status = "failed".to_string();
+    store.finish_running_runner_exec_pre_handoff_failure(
+        &run.id,
+        json!({
+            "phase": recorded_phase,
+            "code": error.code.as_str(),
+            "message": homeboy_core::redaction::redact_string(&error.message),
+            "details": homeboy_core::redaction::redact_json(&error.details),
+            "recovery": {
+                "evidence": format!("homeboy runs evidence {run_id}"),
+                "status": format!("homeboy runs show {run_id}"),
+                "retry": format!("homeboy runner exec {runner_id} --run-id <new-run-id> -- <command>"),
+            },
+        }),
+        json!({ "state": "pre_handoff_failed", "artifact_promotion": "not_started" }),
+        serde_json::to_value(execution_record).expect("runner execution record serializes"),
+    )
 }
 
 /// Persist the output contract before submitting a daemon job. This gives a

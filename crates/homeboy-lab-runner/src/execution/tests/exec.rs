@@ -1072,6 +1072,44 @@ fn test_exec_runs_local_runner_command() {
 }
 
 #[test]
+fn real_runner_exec_rejects_a_duplicate_terminal_explicit_run_id() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+            .expect("create local runner");
+        let run_id = "duplicate-terminal-run";
+        homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
+            run_id,
+            "lab-local",
+            ".",
+            &[],
+        )
+        .expect("persist prior attempt");
+        homeboy_agents::agent_task_lifecycle::finish_runner_exec_pre_handoff_failure(
+            run_id,
+            "pre_handoff",
+            "connection",
+            false,
+            &Error::internal_unexpected("connection refused"),
+        )
+        .expect("terminal prior attempt");
+
+        let mut options = RunnerExecOptions::raw_command(vec!["true".to_string()]);
+        options.run_id = Some(run_id.to_string());
+        options.run_id_owns_generic_exec = true;
+        let error = exec("lab-local", options).expect_err("terminal run ID must not execute again");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert!(error.message.contains("already terminal"));
+        assert!(error.details["tried"]
+            .as_array()
+            .is_some_and(|suggestions| suggestions.iter().any(|suggestion| suggestion
+                .as_str()
+                .is_some_and(
+                    |suggestion| suggestion.contains(&format!("runs evidence {run_id}"))
+                ))));
+    });
+}
+
+#[test]
 fn test_exec_does_not_leak_ambient_process_env() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let _guard = EnvVarGuard::set("HOMEBOY_TEST_AMBIENT_ONLY", "leaked");

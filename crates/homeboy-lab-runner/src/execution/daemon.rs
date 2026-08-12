@@ -178,6 +178,35 @@ pub(super) fn exec_via_daemon(
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
+    if let Some(run_id) = run_id.as_deref() {
+        // `/exec` has accepted the job. Bind this fact before any local
+        // bookkeeping can fail so a later error never misclassifies an accepted
+        // handoff as a controller-only pre-handoff failure.
+        let binding = if !run_id_owns_generic_exec {
+            homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
+                &homeboy_core::lab_contract::RunnerJobIdentity::new(
+                    run_id,
+                    &runner.id,
+                    job.id.to_string(),
+                ),
+                &cwd,
+                &command,
+            )
+            .map(|_| ())
+        } else {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                run_id,
+                &runner.id,
+                &job.id.to_string(),
+                &cwd,
+                &command,
+            )
+            .map(|_| ())
+        };
+        binding.map_err(|error| {
+            super::accepted_handoff_persistence_error(error, &runner.id, &job.id.to_string())
+        })?;
+    }
     if let Some(session) = accepted_session.as_ref() {
         // Persist the endpoint selected at admission before any controller-side
         // wait or evidence work can fail. Follow-up operations route by this
@@ -209,36 +238,6 @@ pub(super) fn exec_via_daemon(
         &cwd,
         &command,
     )?;
-    if let Some(run_id) = run_id.as_deref() {
-        // The daemon has durably accepted this child. Bind it before waiting so
-        // a lost controller still leaves cancellation and reconciliation with a
-        // concrete runner job identity.
-        if !run_id_owns_generic_exec {
-            // Every portable agent-task run is a controller-owned Lab handoff,
-            // including foreground cook and retry attempts. Persist the daemon
-            // acceptance before either runner-result preacceptance path can read
-            // the controller record. Metadata-only binding leaves the typed
-            // handoff pending and can expose a valid snapshot to validation with
-            // no accepted controller job identity (#9240).
-            homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
-                &homeboy_core::lab_contract::RunnerJobIdentity::new(
-                    run_id,
-                    &runner.id,
-                    job.id.to_string(),
-                ),
-                &cwd,
-                &command,
-            )?;
-        } else {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
-                run_id,
-                &runner.id,
-                &job.id.to_string(),
-                &cwd,
-                &command,
-            )?;
-        }
-    }
     let foreground_source_lease = run_id
         .as_deref()
         .map(|run_id| {
