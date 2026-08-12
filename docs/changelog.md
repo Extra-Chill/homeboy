@@ -4,6 +4,26 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.337.0] - 2026-08-12
+
+### Added
+- rename --apply to --confirm-dangerous
+
+### Changed
+- consolidate command descriptors
+- bind no-op provider to changed source
+- repair dispatch fixtures three later changes invalidated
+- budget public URL probes
+- cargo fmt
+- Use liveness evidence for upgrade admission
+
+### Fixed
+- make worker ownership provable and reconcilable
+- permit contracted local Lab outcomes
+- route local Lab fallbacks without runner
+- negotiate daemon recovery from typed capabilities instead of help text
+- bound stale summaries and follow-up actions
+
 ## [0.336.1] - 2026-08-11
 
 ### Changed
