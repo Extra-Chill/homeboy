@@ -36,6 +36,8 @@ By default Homeboy auto-detects the bump from commit history. Use `--bump <major
 
 `homeboy release` executes component releases: detects or applies a version bump, finalizes generated changelog entries, commits, tags, pushes, and optionally publishes release artifacts. Use `--dry-run` to preview the release plan without making changes.
 
+When the newest matching release tag is reachable from `HEAD` but all configured source version targets lag it, Homeboy previews and then reconciles every target to that tag's version as the first release-owned mutation before applying the requested bump. This recovers an externally-created release without reusing a tag. Higher tags on unreachable history, conflicting targets, malformed versions, and non-advancing targets still refuse.
+
 `--head` is for CI jobs where another step already created the release commit and tag, but Homeboy should still own the rest of the release lifecycle. It keeps the safe preflight checks, skips changelog/version/git mutation steps, populates release state from the version and tag at HEAD, then runs `release.package` (unless `--from-artifacts` is provided), `github.release`, `release.publish`, cleanup, and post-release hooks through the normal pipeline.
 
 GitHub Release asset uploads use a 30-minute timeout by default. Set `HOMEBOY_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS` to a positive number of seconds when a slower connection or larger release assets need a longer budget. When `--head` finds an existing draft release, Homeboy resumes it, verifies attached asset metadata, and publishes it only after every requested asset is present.
