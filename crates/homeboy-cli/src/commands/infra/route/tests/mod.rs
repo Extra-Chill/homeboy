@@ -4,6 +4,7 @@ mod dispatch;
 mod handoff;
 
 use super::*;
+use homeboy::core::test_support::bounded_output;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -14,11 +15,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 pub(super) const FIXTURE_REPOSITORY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
 
 pub(super) fn git_init(path: &Path) {
-    let output = Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(path)
-        .output()
-        .expect("initialize git workspace");
+    let mut command = Command::new("git");
+    command.args(["init", "-b", "main"]).current_dir(path);
+    let output = bounded_output(command);
     assert!(
         output.status.success(),
         "{}",
@@ -32,11 +31,11 @@ pub(super) fn git_init(path: &Path) {
 /// configured remote (#11987). A bare `git init` has none, so a fixture without
 /// this is not a checkout Cook can accept.
 pub(super) fn git_add_remote(path: &Path, remote_url: &str) {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["remote", "add", "origin", remote_url])
-        .current_dir(path)
-        .output()
-        .expect("add fixture remote");
+        .current_dir(path);
+    let output = bounded_output(command);
     assert!(
         output.status.success(),
         "{}",

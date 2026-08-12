@@ -1438,6 +1438,21 @@ mod tests {
             std::fs::create_dir_all(&resource_path).expect("runner workspace");
             std::fs::write(resource_path.join("generated.txt"), "generated")
                 .expect("workspace file");
+            std::fs::create_dir_all(resource_path.join(".homeboy")).expect("metadata directory");
+            std::fs::write(
+                resource_path.join(".homeboy/runner-workspace.json"),
+                serde_json::json!({
+                    "schema": "homeboy/runner-workspace/v1",
+                    "runner_id": "lab-local",
+                    "local_path": resource_path.display().to_string(),
+                    "remote_path": resource_path.display().to_string(),
+                    "sync_mode": "snapshot",
+                    "snapshot_identity": "fixture",
+                    "synced_at": "2026-08-12T00:00:00Z"
+                })
+                .to_string(),
+            )
+            .expect("runner workspace metadata");
             homeboy::runner::create(
                 &format!(
                     r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,

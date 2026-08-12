@@ -1063,6 +1063,7 @@ fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
             &synthetic,
             Some(&warning),
             false,
+            false,
             Some(&ready_lab()),
             false,
         ));
@@ -1134,6 +1135,7 @@ fn bench_observation_records_local_placement_override_with_legacy_evidence() {
             &synthetic,
             Some(&warning),
             true,
+            false,
             Some(&ready_lab()),
             false,
         ));

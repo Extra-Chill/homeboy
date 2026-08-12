@@ -713,6 +713,11 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
             }),
             "full output retains the bounded terminal diagnostic after rearm"
         );
+        assert_eq!(
+            rearmed.0["failure_context"]["diagnostic"]["details"]["field"],
+            "promotion_provider.response.schema",
+            "Cook result retains structured terminal failure details"
+        );
         let (diagnosis, diagnosis_exit) = diagnose(DiagnoseArgs {
             run_id: run_id.to_string(),
             full: true,
@@ -731,11 +736,62 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
             diagnosis["root_cause"]["message"],
             "Invalid argument 'promotion_provider.response.schema': expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/command-result/v3"
         );
+        assert_eq!(
+            diagnosis["root_cause"]["details"]["field"], "promotion_provider.response.schema",
+            "diagnose --full retains the structured terminal failure details"
+        );
         assert_ne!(
             diagnosis["root_cause"]["source"], "controller_failure",
             "the later promotion terminal record must outrank the stale controller diagnostic"
         );
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn diagnose_full_preserves_durable_promotion_io_details() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-promotion-io";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id))
+            .expect("persist promotion attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_operation_claims"] = json!([{
+                "operation_key": format!("promote:{run_id}"),
+                "state": "failed",
+                "result": {
+                    "status": "failed",
+                    "code": "internal.io_error",
+                    "message": "IO error",
+                    "details": {
+                        "context": "hydrate Rust gate cache",
+                        "path": "/tmp/promotion-verification/gate-1",
+                        "source_error": "rustup proxy must live under CARGO_HOME"
+                    },
+                    "deepest_cause": {
+                        "code": "internal.io_error",
+                        "message": "IO error"
+                    }
+                }
+            }]);
+        })
+        .expect("persist promotion I/O failure");
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose persists promotion I/O details");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(diagnosis["root_cause"]["class"], "internal.io_error");
+        assert_eq!(
+            diagnosis["root_cause"]["details"],
+            json!({
+                "context": "hydrate Rust gate cache",
+                "path": "/tmp/promotion-verification/gate-1",
+                "source_error": "rustup proxy must live under CARGO_HOME"
+            })
+        );
     });
 }
 
