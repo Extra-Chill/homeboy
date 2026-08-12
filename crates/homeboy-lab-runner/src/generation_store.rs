@@ -3168,6 +3168,7 @@ mod tests {
                 state: RunnerSessionState::Connected,
                 session: Some(b.clone()),
                 stale_daemon: None,
+                configured_job_binary_build_identity: None,
                 daemon_freshness: None,
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
@@ -3195,6 +3196,7 @@ mod tests {
                 state: RunnerSessionState::Connected,
                 session: Some(b.clone()),
                 stale_daemon: None,
+                configured_job_binary_build_identity: None,
                 daemon_freshness: None,
                 active_jobs: vec![homeboy_core::api_jobs::ActiveRunnerJobSummary {
                     runner_id: "runner-a".to_string(),

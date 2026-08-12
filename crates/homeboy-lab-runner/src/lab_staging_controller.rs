@@ -5394,6 +5394,7 @@ mod tests {
                 last_seen_at: None,
                 leaseless_recovery_evidence: None,
             }),
+            configured_job_binary_build_identity: None,
             stale_daemon: None,
             daemon_freshness: Some(homeboy_core::daemon::DaemonFreshnessReport {
                 fresh: false,

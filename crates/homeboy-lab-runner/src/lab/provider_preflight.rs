@@ -817,6 +817,7 @@ mod tests {
             state: crate::RunnerSessionState::Connected,
             session: Some(session),
             stale_daemon: None,
+            configured_job_binary_build_identity: None,
             daemon_freshness: None,
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),

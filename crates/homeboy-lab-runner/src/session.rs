@@ -505,6 +505,9 @@ pub struct RunnerStatusReport {
     pub state: RunnerSessionState,
     pub session: Option<RunnerSession>,
     pub stale_daemon: Option<RunnerStaleDaemonWarning>,
+    /// Immutable identity read from the configured job binary by the
+    /// authoritative direct-SSH status probe.
+    pub configured_job_binary_build_identity: Option<String>,
     pub daemon_freshness: Option<DaemonFreshnessReport>,
     pub active_jobs: Vec<ActiveRunnerJobSummary>,
     pub active_runner_jobs: Vec<RunnerJob>,
@@ -575,7 +578,7 @@ impl Serialize for RunnerStatusReport {
         // complete `generation_inventory` list. Nothing deserializes this
         // report, so trimming the serialized shape is display-only.
         let generation_summary = RunnerGenerationLedgerSummary::from_projection(&generations);
-        let mut state = serializer.serialize_struct("RunnerStatusReport", 17)?;
+        let mut state = serializer.serialize_struct("RunnerStatusReport", 18)?;
         state.serialize_field("runner_id", &self.runner_id)?;
         state.serialize_field("connected", &self.connected)?;
         state.serialize_field("state", &self.state)?;
@@ -585,6 +588,9 @@ impl Serialize for RunnerStatusReport {
         state.serialize_field("generations", &generation_summary)?;
         if let Some(stale_daemon) = &self.stale_daemon {
             state.serialize_field("stale_daemon", stale_daemon)?;
+        }
+        if let Some(identity) = &self.configured_job_binary_build_identity {
+            state.serialize_field("configured_job_binary_build_identity", identity)?;
         }
         if let Some(daemon_freshness) = &self.daemon_freshness {
             state.serialize_field("daemon_freshness", daemon_freshness)?;
@@ -1057,6 +1063,7 @@ mod status_serialization_tests {
             state: RunnerSessionState::Disconnected,
             session: None,
             stale_daemon: None,
+            configured_job_binary_build_identity: None,
             daemon_freshness: None,
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
@@ -1091,6 +1098,20 @@ mod status_serialization_tests {
             value["generations"],
             serde_json::json!({ "total": 0, "draining": 0 })
         );
+    }
+
+    #[test]
+    fn matching_configured_binary_evidence_does_not_create_a_stale_warning() {
+        let mut report = base_report();
+        report.configured_job_binary_build_identity =
+            Some("homeboy 0.339.0+83a9bd058619".to_string());
+
+        assert!(report.stale_daemon.is_none());
+        assert_eq!(
+            report.configured_job_binary_build_identity.as_deref(),
+            Some("homeboy 0.339.0+83a9bd058619")
+        );
+        assert!(report.daemon_fresh_for_admission());
     }
 
     #[test]
@@ -1160,6 +1181,7 @@ mod status_serialization_tests {
             state: RunnerSessionState::Connected,
             session: None,
             stale_daemon: None,
+            configured_job_binary_build_identity: None,
             daemon_freshness: None,
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
