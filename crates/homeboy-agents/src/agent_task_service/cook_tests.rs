@@ -9581,6 +9581,43 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
 }
 
 #[test]
+fn cook_finalization_adopts_validated_review_form_used_for_when_option_is_empty() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-empty-used-for-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(
+            "cook-empty-used-for",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.initial_run_id = run_id.to_string();
+        options.ai_used_for.clear();
+        let plan = options.initial_plan.clone();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::record_cook_attempt(&options.cook_id, 1, run_id).unwrap();
+        seed_review_form_aggregate(run_id, &plan);
+        let promotion = promotion_with_existing_path(run_id, target.path());
+
+        let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("finalization options");
+        assert_eq!(finalization.ai_used_for, test_review_form().used_for);
+        assert_eq!(
+            finalization.review_dossier.ai_assistance.used_for,
+            test_review_form().used_for
+        );
+
+        options.ai_used_for = "Operator-authored disclosure.".to_string();
+        let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("finalization options with override");
+        assert_eq!(finalization.ai_used_for, "Operator-authored disclosure.");
+        assert_eq!(
+            finalization.review_dossier.ai_assistance.used_for,
+            "Operator-authored disclosure."
+        );
+    });
+}
+
+#[test]
 fn manual_finalization_identity_resolves_cook_and_failed_attempt_or_reserves_fresh_id() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-11334";
