@@ -253,7 +253,7 @@ pub fn run_upgrade_with_method(
             check.update_available,
         ) {
             // Even when no binary update is needed, still run extension updates.
-            let (extensions_updated, extensions_skipped) = if skip_extensions {
+            let (extensions_updated, extension_skips) = if skip_extensions {
                 (vec![], vec![])
             } else {
                 update_all_extensions()
@@ -285,6 +285,12 @@ pub fn run_upgrade_with_method(
                 &runners_skipped,
                 Some(previous_version.as_str()),
             );
+            let extensions_status = extension_component_status(
+                !skip_extensions,
+                skip_extensions,
+                &extensions_updated,
+                &extension_skips,
+            );
             return Ok(UpgradeResult {
                 command: "upgrade".to_string(),
                 install_method,
@@ -296,29 +302,42 @@ pub fn run_upgrade_with_method(
                 upgraded: false,
                 outcome: Some("controller_unchanged".to_string()),
                 controller: Some(component_status("unchanged", "controller already current")),
-                extensions: Some(extension_component_status(!skip_extensions, skip_extensions, &extensions_updated, &extensions_skipped)),
-                runners: Some(runner_component_status(runner_disposition, &runners_updated, &runners_skipped, false)),
+                extensions: Some(extensions_status.clone()),
+                runners: Some(runner_component_status(
+                    runner_disposition,
+                    &runners_updated,
+                    &runners_skipped,
+                    false,
+                )),
                 partial,
                 runner_convergence: Some(runner_disposition),
-                message: match runner_disposition {
-                    RunnerConvergenceDisposition::Partial => {
-                        "PARTIAL: controller is already current, but configured runners did not converge"
-                            .to_string()
-                    }
-                    RunnerConvergenceDisposition::Skipped => {
-                        "Already at latest version; runner convergence skipped".to_string()
-                    }
-                    RunnerConvergenceDisposition::NoRunnersConfigured => {
-                        "Already at latest version; no configured runners".to_string()
-                    }
-                    RunnerConvergenceDisposition::Converged => {
-                        "Already at latest version; configured runners converged".to_string()
-                    }
-                },
+                message: format!(
+                    "{}{}",
+                    match runner_disposition {
+                        RunnerConvergenceDisposition::Partial => {
+                            "PARTIAL: controller is already current, but configured runners did not converge"
+                                .to_string()
+                        }
+                        RunnerConvergenceDisposition::Skipped => {
+                            "Already at latest version; runner convergence skipped".to_string()
+                        }
+                        RunnerConvergenceDisposition::NoRunnersConfigured => {
+                            "Already at latest version; no configured runners".to_string()
+                        }
+                        RunnerConvergenceDisposition::Converged => {
+                            "Already at latest version; configured runners converged".to_string()
+                        }
+                    },
+                    extension_partial_clause(Some(&extensions_status)),
+                ),
                 restart_required: false,
                 extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
                 extensions_updated,
-                extensions_skipped,
+                extensions_skipped: extension_skips
+                    .iter()
+                    .map(|skip| skip.extension_id.clone())
+                    .collect(),
+                extension_skips,
                 runners_updated,
                 runners_skipped,
                 // No binary swap happened, so resident services already run the
@@ -388,7 +407,7 @@ pub fn run_upgrade_with_method(
     // Auto-update all installed extensions after the upgrade command completes.
     // This prevents CI/local extension version drift that causes baseline
     // mismatches and inconsistent audit findings.
-    let (extensions_updated, extensions_skipped) = if upgrade_completed && !skip_extensions {
+    let (extensions_updated, extension_skips) = if upgrade_completed && !skip_extensions {
         upgrade_phase("refreshing installed extensions");
         update_all_extensions()
     } else {
@@ -428,6 +447,13 @@ pub fn run_upgrade_with_method(
         new_version.as_deref(),
     );
 
+    let extensions_status = extension_component_status(
+        upgrade_completed,
+        skip_extensions,
+        &extensions_updated,
+        &extension_skips,
+    );
+
     Ok(UpgradeResult {
         command: "upgrade".to_string(),
         install_method,
@@ -446,12 +472,7 @@ pub fn run_upgrade_with_method(
                 "controller installation did not complete"
             },
         )),
-        extensions: Some(extension_component_status(
-            upgrade_completed,
-            skip_extensions,
-            &extensions_updated,
-            &extensions_skipped,
-        )),
+        extensions: Some(extensions_status.clone()),
         runners: Some(runner_component_status(
             runner_disposition,
             &runners_updated,
@@ -471,6 +492,7 @@ pub fn run_upgrade_with_method(
             runner_disposition,
             &runners_updated,
             &runners_skipped,
+            Some(&extensions_status),
         ),
         // Source replacement updates the on-disk executable, but this command
         // exits immediately afterwards. Re-execing only `--version` skips the
@@ -478,7 +500,11 @@ pub fn run_upgrade_with_method(
         restart_required: false,
         extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
         extensions_updated,
-        extensions_skipped,
+        extensions_skipped: extension_skips
+            .iter()
+            .map(|skip| skip.extension_id.clone())
+            .collect(),
+        extension_skips,
         runners_updated,
         runners_skipped,
         services_restarted,
@@ -515,6 +541,7 @@ fn source_upgrade_noop_result(
         restart_required: false,
         extensions_updated: Vec::new(),
         extensions_skipped: Vec::new(),
+        extension_skips: Vec::new(),
         runners_updated: Vec::new(),
         runners_skipped: Vec::new(),
         extensions_unrefreshed: Vec::new(),
@@ -568,6 +595,7 @@ fn runner_preflight_failure_result(
         restart_required: false,
         extensions_updated: Vec::new(),
         extensions_skipped: Vec::new(),
+        extension_skips: Vec::new(),
         runners_updated: Vec::new(),
         runners_skipped,
         extensions_unrefreshed: Vec::new(),
@@ -886,6 +914,7 @@ fn run_targeted_runner_upgrade(
         restart_required: false,
         extensions_updated: Vec::new(),
         extensions_skipped: Vec::new(),
+        extension_skips: Vec::new(),
         runners_updated,
         runners_skipped,
         extensions_unrefreshed: Vec::new(),
@@ -905,7 +934,7 @@ fn extension_component_status(
     attempted: bool,
     skipped_by_flag: bool,
     updated: &[ExtensionUpgradeEntry],
-    skipped: &[String],
+    skipped: &[ExtensionUpgradeSkip],
 ) -> UpgradeComponentStatus {
     let status = if skipped_by_flag {
         "skipped"
@@ -916,10 +945,25 @@ fn extension_component_status(
     } else {
         "partial"
     };
-    component_status(
-        status,
-        &format!("{} updated, {} skipped", updated.len(), skipped.len()),
-    )
+    // A bare count buries a real failure: when anything was skipped, the
+    // summary carries each extension id with the reason it was skipped, so a
+    // `partial` extension outcome is self-explanatory (#12181).
+    let summary = if skipped.is_empty() {
+        format!("{} updated, {} skipped", updated.len(), skipped.len())
+    } else {
+        let detail = skipped
+            .iter()
+            .map(|skip| format!("{}: {}", skip.extension_id, skip.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "{} updated, {} skipped ({})",
+            updated.len(),
+            skipped.len(),
+            detail
+        )
+    };
+    component_status(status, &summary)
 }
 
 fn runner_component_status(
@@ -985,6 +1029,18 @@ fn runner_convergence_disposition(
     RunnerConvergenceDisposition::Converged
 }
 
+/// Human clause appended to the upgrade banner when extensions were only
+/// partially refreshed, so a real extension failure is prominent rather than a
+/// passing count after a success banner (#12181). Empty when the extension
+/// outcome is anything other than `partial` (deliberately skipped, not run,
+/// completed).
+fn extension_partial_clause(extensions: Option<&UpgradeComponentStatus>) -> String {
+    match extensions.filter(|status| status.status == "partial") {
+        Some(status) => format!(". EXTENSIONS PARTIAL: {}", status.summary),
+        None => String::new(),
+    }
+}
+
 fn upgrade_message(
     success: bool,
     new_version: Option<&str>,
@@ -992,18 +1048,18 @@ fn upgrade_message(
     disposition: RunnerConvergenceDisposition,
     updated: &[RunnerUpgradeEntry],
     skipped: &[RunnerUpgradeEntry],
+    extensions: Option<&UpgradeComponentStatus>,
 ) -> String {
     let controller = new_version.unwrap_or("unverified");
     let identity = new_build_identity
         .map(|identity| format!(" ({identity})"))
         .unwrap_or_default();
-    if disposition == RunnerConvergenceDisposition::Partial {
-        return format!(
+    let base = if disposition == RunnerConvergenceDisposition::Partial {
+        format!(
             "PARTIAL: controller upgraded to {controller}{identity}, but {} selected configured runner(s) did not converge",
             updated.len() + skipped.len()
-        );
-    }
-    if success {
+        )
+    } else if success {
         // Report the runner disposition honestly: an explicit skip is never
         // rendered as convergence, and a fleet with no configured runners is
         // distinguished from a verified convergence (#9842).
@@ -1017,6 +1073,15 @@ fn upgrade_message(
         format!("Upgrade command completed but active controller is still {controller}")
     } else {
         "Upgrade command completed but active controller version could not be verified".to_string()
+    };
+    let clause = extension_partial_clause(extensions);
+    if clause.is_empty() {
+        base
+    } else if base.ends_with('.') {
+        // Avoid a doubled period when the base already ends in one.
+        format!("{}{}", base.trim_end_matches('.'), clause)
+    } else {
+        format!("{base}{clause}")
     }
 }
 
@@ -1269,9 +1334,10 @@ pub(crate) fn should_sync_after_upgrade(new_version: Option<&str>) -> bool {
     new_version.is_some()
 }
 
-/// Update all installed extensions. Best-effort — failures are logged and
-/// the extension is added to the skipped list.
-fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
+/// Update all installed extensions. Best-effort — failures are logged, and the
+/// extension is added to the skipped list carrying its error reason so the
+/// structured result can say *why* it was skipped (#12181).
+fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeSkip>) {
     let extension_ids = extension::available_extension_ids();
     if extension_ids.is_empty() {
         return (vec![], vec![]);
@@ -1352,7 +1418,10 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
             }
             Err(e) => {
                 homeboy_core::log_status!("upgrade", "  {} skipped: {}", id, e.message);
-                skipped.push(id.clone());
+                skipped.push(ExtensionUpgradeSkip {
+                    extension_id: id.clone(),
+                    reason: e.message,
+                });
             }
         }
     }
@@ -1381,21 +1450,43 @@ fn warn_unrefreshed_symlinked_extensions(
     );
     homeboy_core::log_status!(
         "upgrade",
-        "  Extension resolution is $HOME-scoped, so a sudo upgrade only refreshes root's copies. Run each recovery command below to bring the symlinked clone(s) current:",
+        "  Extension resolution is $HOME-scoped, so a sudo upgrade only refreshes root's copies. Inspect each clone below and run the recovery command shown:",
     );
     for w in &warnings {
         let behind = w
             .behind
             .map(|n| format!("{} commit(s) behind", n))
             .unwrap_or_else(|| "behind upstream".to_string());
-        homeboy_core::log_status!(
-            "upgrade",
-            "  {} ({}) -> {}: {}",
-            w.extension_id,
-            behind,
-            w.source_path,
-            w.recovery_command,
-        );
+        if w.dirty {
+            let detail = if w.dirty_paths.is_empty() {
+                "worktree state could not be verified".to_string()
+            } else {
+                w.dirty_paths.join(", ")
+            };
+            homeboy_core::log_status!(
+                "upgrade",
+                "  {} ({}, BLOCKED by uncommitted changes: {}) -> {}: {}",
+                w.extension_id,
+                behind,
+                detail,
+                w.source_path,
+                w.recovery_command,
+            );
+            homeboy_core::log_status!(
+                "upgrade",
+                "  Resolve the uncommitted changes in the {} clone before refreshing; a `git pull --ff-only` cannot succeed while the checkout holds them.",
+                w.extension_id,
+            );
+        } else {
+            homeboy_core::log_status!(
+                "upgrade",
+                "  {} ({}) -> {}: {}",
+                w.extension_id,
+                behind,
+                w.source_path,
+                w.recovery_command,
+            );
+        }
     }
 
     warnings
@@ -1414,8 +1505,10 @@ fn warn_unrefreshed_symlinked_extensions(
 /// We do not refresh those clones here: they are owned by a different user and
 /// may carry dirty/unpushed state, so mutating them from a privileged process
 /// is unsafe. Instead we emit a loud, actionable warning with the exact
-/// recovery command. Returns an empty vec when not running under `sudo`, when
-/// the invoking user's config dir is absent, or when nothing is stale.
+/// recovery command. Detection is read-only: it may fetch and inspect, and it
+/// never resets, stashes, checks out, or otherwise mutates a worktree owned by
+/// another user. Returns an empty vec when not running under `sudo`, when the
+/// invoking user's config dir is absent, or when nothing is stale.
 fn detect_unrefreshed_symlinked_extensions(
     refreshed: &[ExtensionUpgradeEntry],
 ) -> Vec<UnrefreshedExtensionWarning> {
@@ -1434,7 +1527,18 @@ fn detect_unrefreshed_symlinked_extensions(
         .join(".config")
         .join(homeboy_product_identity::PRODUCT_IDENTITY.config_dirname)
         .join("extensions");
-    let Ok(entries) = std::fs::read_dir(&extensions_dir) else {
+    detect_unrefreshed_in_extensions_dir(&extensions_dir, &sudo_user, refreshed)
+}
+
+/// The symlink-scan half of [`detect_unrefreshed_symlinked_extensions`],
+/// separated so tests can drive detection against an isolated fixture dir
+/// instead of a real user's home (#12181).
+fn detect_unrefreshed_in_extensions_dir(
+    extensions_dir: &Path,
+    sudo_user: &str,
+    refreshed: &[ExtensionUpgradeEntry],
+) -> Vec<UnrefreshedExtensionWarning> {
+    let Ok(entries) = std::fs::read_dir(extensions_dir) else {
         return Vec::new();
     };
 
@@ -1481,17 +1585,36 @@ fn detect_unrefreshed_symlinked_extensions(
         // Only warn when we can confirm the clone is actually behind. If we
         // can't determine drift, stay quiet rather than crying wolf.
         if behind.is_some_and(|n| n > 0) {
+            // A `git pull --ff-only` is guaranteed to abort when the worktree
+            // holds uncommitted changes, so before emitting that recovery
+            // command check the same generated-metadata tolerance the update
+            // gate uses. A dirty clone is reported as blocked with its
+            // offending paths named; an unreadable status is treated as
+            // blocked rather than risking a command we cannot verify (#12181).
+            let dirty_paths = extension::extension_update_dirty_paths(&git_root, &target);
+            // Unknown status is blocked (like the update gate) rather than
+            // risking a recovery command we cannot verify.
+            let dirty = dirty_paths.as_ref().is_none_or(|paths| !paths.is_empty());
+            let dirty_paths = dirty_paths.unwrap_or_default();
             warnings.push(UnrefreshedExtensionWarning {
                 extension_id,
-                invoking_user: sudo_user.clone(),
+                invoking_user: sudo_user.to_string(),
                 symlink_path: symlink_path.to_string_lossy().to_string(),
                 source_path: git_root.to_string_lossy().to_string(),
                 behind,
-                recovery_command: format!(
-                    "sudo -u {} git -C {} pull --ff-only",
-                    sudo_user,
-                    git_root.display()
-                ),
+                dirty,
+                dirty_paths,
+                recovery_command: if dirty {
+                    // No single command can safely refresh a dirty clone; point
+                    // the user at the state they must resolve first.
+                    format!("sudo -u {} git -C {} status", sudo_user, git_root.display())
+                } else {
+                    format!(
+                        "sudo -u {} git -C {} pull --ff-only",
+                        sudo_user,
+                        git_root.display()
+                    )
+                },
             });
         }
     }
@@ -2325,6 +2448,109 @@ mod symlinked_extension_tests {
         let _guard = SudoUserGuard::set(Some("definitely-not-a-real-user-xyz"));
         assert!(detect_unrefreshed_symlinked_extensions(&[]).is_empty());
     }
+
+    fn git_fixture(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Build a local remote plus a clone of it that is exactly one commit
+    /// behind, and a second clone used only to advance the remote. Returns the
+    /// tempdir (kept alive by the caller) and the behind clone path.
+    fn behind_clone_fixture() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let remote = dir.path().join("remote.git");
+        git_fixture(
+            dir.path(),
+            &["init", "--bare", "-b", "main", &remote.to_string_lossy()],
+        );
+
+        let clone = dir.path().join("clone");
+        git_fixture(dir.path(), &["clone", &remote.to_string_lossy(), "clone"]);
+        git_fixture(&clone, &["config", "user.email", "test@example.com"]);
+        git_fixture(&clone, &["config", "user.name", "test"]);
+        std::fs::write(clone.join("wordpress.txt"), "initial").expect("write initial");
+        git_fixture(&clone, &["add", "-A"]);
+        git_fixture(&clone, &["commit", "-m", "initial"]);
+        git_fixture(&clone, &["push", "-u", "origin", "main"]);
+
+        let upstream = dir.path().join("upstream");
+        git_fixture(
+            dir.path(),
+            &["clone", &remote.to_string_lossy(), "upstream"],
+        );
+        git_fixture(&upstream, &["config", "user.email", "test@example.com"]);
+        git_fixture(&upstream, &["config", "user.name", "test"]);
+        std::fs::write(upstream.join("wordpress.txt"), "advanced").expect("write advanced");
+        git_fixture(&upstream, &["add", "-A"]);
+        git_fixture(&upstream, &["commit", "-m", "advance"]);
+        git_fixture(&upstream, &["push", "origin", "main"]);
+
+        (dir, clone)
+    }
+
+    #[test]
+    fn clean_behind_symlink_gets_pull_ff_only_recovery() {
+        let (dir, clone) = behind_clone_fixture();
+        let extensions_dir = dir.path().join("extensions");
+        std::fs::create_dir_all(&extensions_dir).expect("extensions dir");
+        std::os::unix::fs::symlink(&clone, extensions_dir.join("wordpress"))
+            .expect("symlink extension");
+
+        let warnings = detect_unrefreshed_in_extensions_dir(&extensions_dir, "alice", &[]);
+
+        assert_eq!(warnings.len(), 1);
+        let warning = &warnings[0];
+        assert_eq!(warning.extension_id, "wordpress");
+        assert!(!warning.dirty, "{:?}", warning);
+        assert!(warning.dirty_paths.is_empty(), "{:?}", warning);
+        assert!(
+            warning.recovery_command.contains("pull --ff-only"),
+            "{}",
+            warning.recovery_command
+        );
+    }
+
+    #[test]
+    fn dirty_behind_symlink_never_emits_pull_ff_only_and_names_paths() {
+        let (dir, clone) = behind_clone_fixture();
+        let extensions_dir = dir.path().join("extensions");
+        std::fs::create_dir_all(&extensions_dir).expect("extensions dir");
+        std::os::unix::fs::symlink(&clone, extensions_dir.join("wordpress"))
+            .expect("symlink extension");
+
+        // The user's clone holds an uncommitted change a pull would refuse to
+        // fast-forward over (#12181).
+        std::fs::write(clone.join("notes.txt"), "local edit").expect("write local edit");
+
+        let warnings = detect_unrefreshed_in_extensions_dir(&extensions_dir, "alice", &[]);
+
+        assert_eq!(warnings.len(), 1);
+        let warning = &warnings[0];
+        assert!(warning.dirty, "{:?}", warning);
+        assert_eq!(warning.dirty_paths, vec!["notes.txt".to_string()]);
+        assert!(
+            !warning.recovery_command.contains("pull --ff-only"),
+            "{}",
+            warning.recovery_command
+        );
+        assert!(
+            warning.recovery_command.contains(" status"),
+            "{}",
+            warning.recovery_command
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2369,10 +2595,16 @@ mod convergence_tests {
             Some("0.304.0"),
         );
         assert_eq!(disposition, RunnerConvergenceDisposition::Partial);
-        assert!(
-            upgrade_message(true, Some("0.304.0"), None, disposition, &[runner], &[])
-                .starts_with("PARTIAL: controller upgraded to 0.304.0")
-        );
+        assert!(upgrade_message(
+            true,
+            Some("0.304.0"),
+            None,
+            disposition,
+            &[runner],
+            &[],
+            None
+        )
+        .starts_with("PARTIAL: controller upgraded to 0.304.0"));
     }
 
     #[test]
@@ -2380,7 +2612,7 @@ mod convergence_tests {
         // #9842: --skip-runners must never claim convergence.
         let disposition = runner_convergence_disposition(true, &[], &[], Some("0.310.0"));
         assert_eq!(disposition, RunnerConvergenceDisposition::Skipped);
-        let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[], &[]);
+        let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[], &[], None);
         assert!(message.contains("runner convergence skipped"), "{message}");
         assert!(!message.contains("converged"), "{message}");
     }
@@ -2392,7 +2624,7 @@ mod convergence_tests {
             disposition,
             RunnerConvergenceDisposition::NoRunnersConfigured
         );
-        let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[], &[]);
+        let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[], &[], None);
         assert!(message.contains("no configured runners"), "{message}");
     }
 
@@ -2406,7 +2638,15 @@ mod convergence_tests {
             Some("0.310.0"),
         );
         assert_eq!(disposition, RunnerConvergenceDisposition::Converged);
-        let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[runner], &[]);
+        let message = upgrade_message(
+            true,
+            Some("0.310.0"),
+            None,
+            disposition,
+            &[runner],
+            &[],
+            None,
+        );
         assert!(
             message.contains("configured runners converged"),
             "{message}"
@@ -2435,6 +2675,52 @@ mod convergence_tests {
             extension_component_status(true, false, &[], &[]).status,
             "completed"
         );
+    }
+
+    #[test]
+    fn extension_status_names_each_skip_reason_when_partial() {
+        let skips = vec![ExtensionUpgradeSkip {
+            extension_id: "wordpress".to_string(),
+            reason: "Linked extension source repo has uncommitted changes".to_string(),
+        }];
+        let status = extension_component_status(true, false, &[], &skips);
+        assert_eq!(status.status, "partial");
+        assert_eq!(
+            status.summary,
+            "0 updated, 1 skipped (wordpress: Linked extension source repo has uncommitted changes)"
+        );
+    }
+
+    #[test]
+    fn partial_extension_outcome_is_prominent_in_upgrade_message() {
+        let skips = vec![ExtensionUpgradeSkip {
+            extension_id: "wordpress".to_string(),
+            reason: "Linked extension source repo has uncommitted changes".to_string(),
+        }];
+        let status = extension_component_status(true, false, &[], &skips);
+        let message = upgrade_message(
+            true,
+            Some("0.310.0"),
+            None,
+            RunnerConvergenceDisposition::Converged,
+            &[],
+            &[],
+            Some(&status),
+        );
+        assert!(
+            message.ends_with(". EXTENSIONS PARTIAL: 0 updated, 1 skipped (wordpress: Linked extension source repo has uncommitted changes)"),
+            "{message}"
+        );
+        let plain = upgrade_message(
+            true,
+            Some("0.310.0"),
+            None,
+            RunnerConvergenceDisposition::Converged,
+            &[],
+            &[],
+            Some(&component_status("completed", "1 updated, 0 skipped")),
+        );
+        assert!(!plain.contains("EXTENSIONS PARTIAL"), "{plain}");
     }
 
     #[test]

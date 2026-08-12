@@ -137,6 +137,12 @@ pub struct UpgradeResult {
     pub extensions_updated: Vec<ExtensionUpgradeEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions_skipped: Vec<String>,
+    /// Per-extension reason for each entry in `extensions_skipped`, alongside
+    /// the bare ids, so a `partial` extension outcome carries *why* the
+    /// extension was skipped instead of burying the reason in a log line
+    /// (#12181).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_skips: Vec<ExtensionUpgradeSkip>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runners_updated: Vec<RunnerUpgradeEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -183,6 +189,18 @@ pub struct ServiceRestartEntry {
     pub detail: Option<String>,
 }
 
+/// Why one extension was skipped during the upgrade, mirroring the per-runner
+/// `RunnerExtensionSyncEntry` detail pattern so a `partial` extension outcome
+/// carries its failure reason in the structured result rather than only in a
+/// log line (#12181).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionUpgradeSkip {
+    /// Extension id (e.g. `wordpress`).
+    pub extension_id: String,
+    /// The error message for why the extension was skipped.
+    pub reason: String,
+}
+
 /// A symlinked extension in the invoking user's config dir that a privileged
 /// (sudo) upgrade left stale, because extension resolution is `$HOME`-scoped
 /// and the privileged run only ever sees root's own extension copies.
@@ -199,7 +217,21 @@ pub struct UnrefreshedExtensionWarning {
     /// How many commits the clone is behind its upstream, if determinable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub behind: Option<u32>,
-    /// The exact command the user should run to refresh the clone.
+    /// True when the clone holds uncommitted changes (ignoring the generated
+    /// `.source-url`/`.source-revision` metadata) that would make the recovery
+    /// command fail. Lets a machine consumer distinguish "stale but
+    /// refreshable" from "stale and blocked". Omitted (`false`) for clean
+    /// clones so existing consumers and fixtures keep their shape (#12181).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dirty: bool,
+    /// Repo-relative paths with the uncommitted changes blocking refresh. Only
+    /// populated when `dirty`, so it is omitted for clean clones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirty_paths: Vec<String>,
+    /// The exact command the user should run to bring the clone current. When
+    /// the clone is clean this is `git pull --ff-only`; a dirty clone cannot be
+    /// refreshed by any single command, so this names a read-only status
+    /// inspection and `dirty_paths` names what the user must resolve first.
     pub recovery_command: String,
 }
 
@@ -285,6 +317,91 @@ mod tests {
         assert!(!result.partial);
         assert!(result.runners_updated.is_empty());
         assert!(result.services_pending_restart.is_empty());
+        assert!(result.extension_skips.is_empty());
+    }
+
+    #[test]
+    fn extension_skip_reason_reaches_serialized_result() {
+        let mut result = UpgradeResult {
+            command: "upgrade".to_string(),
+            install_method: InstallMethod::Binary,
+            previous_version: "0.327.5".to_string(),
+            new_version: Some("0.338.0".to_string()),
+            previous_build_identity: None,
+            new_build_identity: None,
+            source_revision: None,
+            upgraded: true,
+            outcome: Some("controller_updated".to_string()),
+            controller: Some(UpgradeComponentStatus {
+                status: "updated".to_string(),
+                summary: "controller installation completed".to_string(),
+            }),
+            extensions: Some(UpgradeComponentStatus {
+                status: "partial".to_string(),
+                summary: "0 updated, 1 skipped (wordpress: Linked extension source repo has uncommitted changes)".to_string(),
+            }),
+            runners: None,
+            partial: false,
+            runner_convergence: None,
+            message: "Controller upgraded to 0.338.0".to_string(),
+            restart_required: false,
+            extensions_updated: Vec::new(),
+            extensions_skipped: vec!["wordpress".to_string()],
+            extension_skips: vec![ExtensionUpgradeSkip {
+                extension_id: "wordpress".to_string(),
+                reason: "Linked extension source repo has uncommitted changes".to_string(),
+            }],
+            runners_updated: Vec::new(),
+            runners_skipped: Vec::new(),
+            extensions_unrefreshed: Vec::new(),
+            services_restarted: Vec::new(),
+            services_pending_restart: Vec::new(),
+        };
+
+        let json = serde_json::to_value(&result).expect("upgrade result serializes");
+        assert_eq!(json["extension_skips"][0]["extension_id"], "wordpress");
+        assert_eq!(
+            json["extension_skips"][0]["reason"],
+            "Linked extension source repo has uncommitted changes"
+        );
+
+        result.extension_skips = Vec::new();
+        let json = serde_json::to_value(&result).expect("upgrade result serializes");
+        assert!(
+            json.get("extension_skips").is_none(),
+            "empty extension_skips is omitted for existing consumers"
+        );
+    }
+
+    #[test]
+    fn unrefreshed_warning_omits_dirty_fields_when_clean() {
+        let warning = UnrefreshedExtensionWarning {
+            extension_id: "wordpress".to_string(),
+            invoking_user: "opencode".to_string(),
+            symlink_path: "/home/opencode/.config/homeboy/extensions/wordpress".to_string(),
+            source_path: "/home/opencode/homeboy-extensions/source/wordpress".to_string(),
+            behind: Some(145),
+            dirty: false,
+            dirty_paths: Vec::new(),
+            recovery_command: "sudo -u opencode git -C /home/opencode/homeboy-extensions/source/wordpress pull --ff-only".to_string(),
+        };
+
+        let json = serde_json::to_value(&warning).expect("warning serializes");
+        assert!(json.get("dirty").is_none(), "{json}");
+        assert!(json.get("dirty_paths").is_none(), "{json}");
+        assert_eq!(
+            json["recovery_command"],
+            "sudo -u opencode git -C /home/opencode/homeboy-extensions/source/wordpress pull --ff-only"
+        );
+
+        let dirty = UnrefreshedExtensionWarning {
+            dirty: true,
+            dirty_paths: vec!["package-lock.json".to_string()],
+            ..warning
+        };
+        let json = serde_json::to_value(&dirty).expect("warning serializes");
+        assert_eq!(json["dirty"], true);
+        assert_eq!(json["dirty_paths"][0], "package-lock.json");
     }
 }
 
