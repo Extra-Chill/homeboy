@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.45] - 2026-08-12
+
+### Fixed
+- use daemon-backed maintenance
+- make runner readiness authoritative
+
 ## [3.34.44] - 2026-08-10
 
 ### Fixed
