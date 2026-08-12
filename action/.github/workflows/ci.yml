@@ -833,9 +833,6 @@ jobs:
       # checks and one red aggregator: a reviewer scanning shard results sees
       # only success, and the real cause is nowhere near the failing check.
       #
-      # Deliberately not mirrored onto baseline-test-shards: like the unsharded
-      # baseline job, a red baseline is informational under differential gating
-      # and must not block a merge.
       - name: Fail candidate Test shard when terminal evidence is not pass
         if: always() && steps.phase.outcome == 'failure'
         run: exit 1
@@ -848,8 +845,6 @@ jobs:
     needs: [candidate-test-shards, candidate-test-plan, plan]
     if: ${{ always() && needs.candidate-test-plan.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
-    outputs:
-      baseline-command: ${{ steps.select.outputs.baseline-command }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -873,7 +868,11 @@ jobs:
           TEST_SHARD_OUTPUT_DIR: candidate-test-results/homeboy-ci-results
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: bash .homeboy-action/scripts/core/shard-tests.sh aggregate
-      - name: Select baseline command from canonical candidate result
+      # Retained for its validation, not its selection: this asserts the
+      # aggregated candidate result is a well-formed v3 command result with a
+      # valid status before anything enforces a verdict from it. The sharded path
+      # has no baseline phase, so its baseline-command output is unconsumed.
+      - name: Validate canonical candidate Test result
         id: select
         env:
           TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
@@ -893,7 +892,7 @@ jobs:
 
   reconcile-test-shards:
     name: Test
-    needs: [candidate-test-result, candidate-test-plan, baseline-test-shards, baseline-test-plan, plan]
+    needs: [candidate-test-result, candidate-test-plan, plan]
     # `!cancelled()` rather than `always()`: this job must still report a verdict
     # when an upstream phase FAILED, but must not manufacture one when the run was
     # CANCELLED. Under `always()`, a cancelled run left `candidate-test-plan.result`
@@ -916,12 +915,6 @@ jobs:
         with:
           name: homeboy-test-inventory-failure-${{ github.run_attempt }}
           path: test-inventory-failure
-      - name: Download baseline Test inventory failure provenance
-        if: needs.candidate-test-plan.result == 'success' && needs.baseline-test-plan.outputs.bootstrap-baseline-red == 'true'
-        uses: actions/download-artifact@v7
-        with:
-          name: homeboy-baseline-test-inventory-failure-${{ github.run_attempt }}
-          path: baseline-test-inventory-failure
       - name: Report candidate Test inventory generation failure
         if: needs.candidate-test-plan.result != 'success'
         run: |
@@ -931,300 +924,29 @@ jobs:
           echo "::error::Test inventory generation failed for '${command}' (inventory=${{ needs.candidate-test-plan.result }}; results=${results}). Inspect Plan candidate Test shards for the underlying command failure."
           find test-inventory-failure/homeboy-ci-results -type f -maxdepth 1 -print -exec cat {} \; 2>/dev/null || true
           exit 1
-      - name: Reconcile baseline Test bootstrap failure
-        if: needs.candidate-test-result.result == 'success' && needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.outputs.bootstrap-baseline-red == 'true'
-        env:
-          REPOSITORY: ${{ github.repository }}
-          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          COMMAND: ${{ needs.plan.outputs.test-command }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          provenance=baseline-test-inventory-failure/provenance.json
-          jq -e --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg command "${COMMAND}" --argjson run_attempt "${RUN_ATTEMPT}" '
-            .schema == "homeboy/test-inventory-provenance/v1"
-            and .phase == "baseline"
-            and .repository == $repository
-            and .candidate_sha == $candidate_sha
-            and .base_sha == $base_sha
-            and .command == $command
-            and .inventory_outcome == "failure"
-            and .planner_outcome == "skipped"
-            and (.run_attempt | type == "number" and . > 0 and . <= $run_attempt)
-            and (.results | type == "object")
-          ' "${provenance}" >/dev/null
-          echo "::warning::Test bootstrap_baseline_red: immutable baseline inventory failed before baseline shards could be planned. Candidate shards remain mandatory; inspect Plan baseline Test shards and the retained baseline inventory provenance."
-      - name: Fail unresolved baseline Test planning failure
-        if: needs.candidate-test-result.result == 'success' && needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result != 'success' && needs.baseline-test-plan.outputs.bootstrap-baseline-red != 'true'
-        run: |
-          echo '::error::Baseline Test planning failed outside the classified inventory-bootstrap path; no differential verdict can be produced.'
-          exit 1
       - uses: actions/download-artifact@v7
         if: needs.candidate-test-result.result == 'success'
         with:
           name: homeboy-candidate-test-results-${{ github.run_attempt }}
           path: candidate-test-results
-      - uses: actions/download-artifact@v7
-        if: needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result == 'success'
-        with:
-          name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
-          path: baseline-test-plan
-      - uses: actions/download-artifact@v7
-        if: needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result == 'success'
-        with:
-          pattern: homeboy-test-shard-baseline-*
-          path: test-shard-artifacts
-      - name: Aggregate complete baseline Test shard evidence
-        if: needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result == 'success'
-        env:
-          TEST_SHARD_ARTIFACT_ROOT: test-shard-artifacts
-          TEST_SHARD_PLAN_FILE: baseline-test-plan/homeboy-test-shard-plan.json
-          TEST_INVENTORY_FILE: baseline-test-plan/homeboy-test-inventory.json
-          TEST_SHARD_PHASE: baseline
-          TEST_SHARD_COMMAND: ${{ needs.candidate-test-result.outputs.baseline-command }}
-          TEST_SHARD_OUTPUT_DIR: homeboy-baseline-results
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: bash .homeboy-action/scripts/core/shard-tests.sh aggregate
-      - name: Apply differential Test result
-        if: needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result == 'success'
-        env:
-          COMMAND: ${{ needs.candidate-test-result.outputs.baseline-command }}
-        run: |
-          source .homeboy-action/scripts/core/lib.sh
-          result_filename="$(command_result_filename "${COMMAND}")"
-          baseline_result="$(jq -r --arg command "${COMMAND}" '.[$command]' homeboy-baseline-results/results.json)"
-          case "${baseline_result}" in
-            pass) baseline_exit=0 ;;
-            timeout) baseline_exit=124 ;;
-            *) baseline_exit=1 ;;
-          esac
-          structured_output=false
-          [ -f "homeboy-baseline-results/${result_filename}" ] && structured_output=true
-          jq -cn --arg command "${COMMAND}" --arg status "${baseline_result}" --argjson exit_code "${baseline_exit}" --argjson structured_output "${structured_output}" \
-            '{($command):{status:$status,exit_code:$exit_code,command:$command,structured_output:$structured_output}}' > homeboy-baseline-results/baseline-status.json
-          python3 .homeboy-action/scripts/core/apply-differential-gate.py "$(cat candidate-test-results/homeboy-ci-results/results.json)" candidate-test-results/homeboy-ci-results homeboy-baseline-results > reconciled-results.json
-          RESULTS="$(cat reconciled-results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
       - name: Report candidate Test aggregation failure
         if: needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'
         run: |
           echo '::error::Candidate Test shard evidence could not be aggregated into a canonical result.'
           exit 1
-      - name: Enforce unreconciled sharded Test result
-        if: needs.candidate-test-result.result == 'success' && (needs.candidate-test-result.outputs.baseline-command == '' || github.event_name != 'pull_request')
+      # The single enforcement path for the sharded Test verdict.
+      #
+      # Deliberately NOT conditioned on a baseline. The sharded Test path has no
+      # baseline phase, so a baseline-shaped condition here is a branch that can
+      # never fire — and the previous `baseline-command == ''` guard meant a
+      # non-empty baseline-command would have left this job green with NO
+      # enforcement step running at all. Every reachable outcome above either
+      # exits non-zero or falls through to exactly this step.
+      - name: Enforce sharded Test result
+        if: needs.candidate-test-result.result == 'success'
         env:
           COMMAND: ${{ needs.plan.outputs.test-command }}
         run: RESULTS="$(cat candidate-test-results/homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
-      - name: Enforce candidate Test result after bootstrap baseline red
-        if: needs.candidate-test-result.result == 'success' && needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.outputs.bootstrap-baseline-red == 'true'
-        env:
-          COMMAND: ${{ needs.plan.outputs.test-command }}
-        run: RESULTS="$(cat candidate-test-results/homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
-
-  baseline-test-plan:
-    name: Plan baseline Test shards
-    needs: [binary, plan, candidate-test-result]
-    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && github.event_name == 'pull_request' && needs.candidate-test-result.outputs.baseline-command != '' }}
-    runs-on: ubuntu-latest
-    outputs:
-      test-matrix: ${{ steps.plan.outputs.matrix }}
-      bootstrap-baseline-red: ${{ steps.bootstrap-baseline-red.outputs.value }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-      - name: Reserve action checkout path
-        run: |
-          if git ls-files --error-unmatch -- .homeboy-action >/dev/null 2>&1 || [ -e .homeboy-action ] || [ -L .homeboy-action ]; then
-            echo '::error::Refusing to overwrite consumer path reserved for the Homeboy Action checkout: .homeboy-action'
-            exit 1
-          fi
-      - uses: actions/checkout@v6
-        with:
-          repository: Extra-Chill/homeboy-action
-          ref: ${{ needs.plan.outputs.action-sha }}
-          path: .homeboy-action
-      - name: Reserve action-owned baseline Test shard paths
-        id: prepare-workspace
-        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
-      - id: candidate-binary
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
-      - name: Install cargo-nextest for Rust baseline shard planning
-        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
-        uses: taiki-e/install-action@nextest
-      - name: Configure baseline Test shards
-        id: inventory
-        continue-on-error: true
-        env:
-          HOMEBOY_TEST_INVENTORY_ONLY: '1'
-          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
-          HOMEBOY_RUST_TEST_RUNNER: nextest
-          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
-          NEXTEST_PROFILE: ci
-        uses: ./.homeboy-action
-        with:
-          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
-          extension: ${{ inputs.extension }}
-          extension-source: ${{ inputs.extension-source }}
-          commands: ${{ needs.candidate-test-result.outputs.baseline-command }}
-          component: ${{ inputs.component }}
-          args: ${{ inputs.args }}
-          scope: full
-          auto-setup: ${{ inputs.auto-setup }}
-          php-version: ${{ inputs.php-version }}
-          node-version: ${{ inputs.node-version }}
-          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
-          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
-          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
-          pr-comment: 'false'
-          auto-issue: 'false'
-      - name: Plan baseline Test shards
-        id: plan
-        if: always() && steps.inventory.outcome == 'success'
-        continue-on-error: true
-        env:
-          TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
-          TEST_SHARD_PLAN_FILE: ${{ github.workspace }}/homeboy-test-shard-plan.json
-          TEST_SHARD_COUNT: ${{ inputs.test-shards }}
-          TEST_COMMAND: ${{ needs.candidate-test-result.outputs.baseline-command }}
-        run: |
-          bash .homeboy-action/scripts/core/shard-tests.sh plan
-          jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}' >> /dev/null
-          echo "matrix=$(jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}')" >> "${GITHUB_OUTPUT}"
-      - name: Classify baseline inventory bootstrap failure
-        id: bootstrap-baseline-red
-        if: always() && steps.inventory.outcome == 'failure' && steps.plan.outcome == 'skipped'
-        run: echo 'value=true' >> "${GITHUB_OUTPUT}"
-      - name: Write baseline Test inventory failure provenance
-        if: always() && steps.bootstrap-baseline-red.outputs.value == 'true'
-        env:
-          REPOSITORY: ${{ github.repository }}
-          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          COMMAND: ${{ needs.plan.outputs.test-command }}
-          INVENTORY_OUTCOME: ${{ steps.inventory.outcome }}
-          PLANNER_OUTCOME: ${{ steps.plan.outcome }}
-          RESULTS: ${{ steps.inventory.outputs.results }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          mkdir -p homeboy-baseline-test-inventory-failure
-          inventory_payload="${RESULTS-}"
-          [ -n "${inventory_payload}" ] || inventory_payload='{}'
-          jq -cn --arg schema 'homeboy/test-inventory-provenance/v1' --arg phase baseline --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg command "${COMMAND}" --arg inventory_outcome "${INVENTORY_OUTCOME}" --arg planner_outcome "${PLANNER_OUTCOME}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${inventory_payload}" \
-            '{schema:$schema,phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,command:$command,inventory_outcome:$inventory_outcome,planner_outcome:$planner_outcome,run_attempt:$run_attempt,results:$results}' > homeboy-baseline-test-inventory-failure/provenance.json
-          cp -R homeboy-ci-results homeboy-baseline-test-inventory-failure/homeboy-ci-results 2>/dev/null || true
-      - name: Upload baseline Test inventory failure provenance
-        if: always() && steps.bootstrap-baseline-red.outputs.value == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: homeboy-baseline-test-inventory-failure-${{ github.run_attempt }}
-          path: homeboy-baseline-test-inventory-failure
-          if-no-files-found: error
-      - name: Fail baseline Test inventory generation
-        if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
-        run: |
-          echo '::error::Baseline Test inventory generation failed; baseline shard execution was not started.'
-          exit 1
-      - name: Upload baseline Test shard plan
-        if: always() && steps.plan.outcome == 'success'
-        uses: actions/upload-artifact@v7
-        with:
-          name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
-          path: |
-            homeboy-test-inventory.json
-            homeboy-test-shard-plan.json
-          if-no-files-found: error
-      - name: Restore consumer Git exclusions
-        if: always() && steps.prepare-workspace.outcome == 'success'
-        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
-
-  baseline-test-shards:
-    name: Baseline Test shard ${{ matrix.shard_id }}
-    needs: [binary, plan, baseline-test-plan, candidate-test-result]
-    if: ${{ always() && needs.binary.result == 'success' && github.event_name == 'pull_request' && needs.candidate-test-result.outputs.baseline-command != '' && needs.baseline-test-plan.result == 'success' }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.baseline-test-plan.outputs.test-matrix) }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-      - name: Reserve action checkout path
-        run: |
-          if git ls-files --error-unmatch -- .homeboy-action >/dev/null 2>&1 || [ -e .homeboy-action ] || [ -L .homeboy-action ]; then
-            echo '::error::Refusing to overwrite consumer path reserved for the Homeboy Action checkout: .homeboy-action'
-            exit 1
-          fi
-      - uses: actions/checkout@v6
-        with:
-          repository: Extra-Chill/homeboy-action
-          ref: ${{ needs.plan.outputs.action-sha }}
-          path: .homeboy-action
-      - name: Reserve action-owned baseline Test shard paths
-        id: prepare-workspace
-        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
-      - id: candidate-binary
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
-      - name: Install cargo-nextest for Rust baseline shard replay
-        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
-        uses: taiki-e/install-action@nextest
-      - uses: actions/download-artifact@v7
-        with:
-          name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
-      - run: jq --arg id '${{ matrix.shard_id }}' '.shards[] | select(.id == $id)' homeboy-test-shard-plan.json > homeboy-test-shard.json
-      - name: Run baseline Test shard ${{ matrix.shard_id }}
-        id: phase
-        continue-on-error: true
-        env:
-          HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json
-          HOMEBOY_RUST_TEST_RUNNER: nextest
-          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
-          NEXTEST_PROFILE: ci
-        uses: ./.homeboy-action
-        with:
-          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
-          extension: ${{ inputs.extension }}
-          extension-source: ${{ inputs.extension-source }}
-          commands: ${{ matrix.command }}
-          component: ${{ inputs.component }}
-          args: ${{ inputs.args }}
-          # The immutable manifest is the shard selector; baseline attribution
-          # must replay its complete assigned membership at the base revision.
-          scope: full
-          auto-setup: ${{ inputs.auto-setup }}
-          php-version: ${{ inputs.php-version }}
-          node-version: ${{ inputs.node-version }}
-          differential-gating: 'true'
-          baseline-commands: none
-          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
-          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
-          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
-          pr-comment: 'false'
-          auto-issue: 'false'
-      - name: Write baseline Test shard provenance
-        if: always()
-        env:
-          RESULTS: ${{ steps.phase.outputs.results }}
-          SHARD_ID: ${{ matrix.shard_id }}
-          COMMAND: ${{ matrix.command }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          mkdir -p differential-phase/baseline
-          results="${RESULTS:-}"; [ -n "${results}" ] || results='{}'
-          jq -cn --arg phase baseline --arg shard_id "${SHARD_ID}" --arg command "${COMMAND}" --arg inventory_digest "$(jq -r .inventory_digest homeboy-test-shard-plan.json)" --arg plan_digest "$(jq -r .plan_digest homeboy-test-shard-plan.json)" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,shard_id:$shard_id,command:$command,inventory_digest:$inventory_digest,plan_digest:$plan_digest,run_attempt:$run_attempt,results:$results}' > differential-phase/baseline/manifest.json
-          cp -R homeboy-ci-results differential-phase/baseline/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/baseline/homeboy-ci-results
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: homeboy-test-shard-baseline-${{ matrix.shard_id }}-${{ github.run_attempt }}
-          path: differential-phase
-      - name: Restore consumer Git exclusions
-        if: always() && steps.prepare-workspace.outcome == 'success'
-        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
 
   reconcile:
     # This is the sole verdict and retains the established required-check name.
