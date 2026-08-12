@@ -1,7 +1,8 @@
 use super::super::lab_selection::{
     authoritative_status_for_preflight, contended_runner_unavailable_error,
-    prepare_lab_runner_for_offload_with, wait_for_contended_runner, wait_for_live_session_with,
-    LabRunnerPreparation, LabRunnerSelection,
+    preflight_lab_runner_availability_from_status, prepare_lab_runner_for_offload_with,
+    wait_for_contended_runner, wait_for_live_session_with, LabRunnerPreparation,
+    LabRunnerSelection,
 };
 use super::*;
 use crate::{RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode};
@@ -110,12 +111,28 @@ fn successful_connect_session_converges_after_transient_disconnection() {
 
 #[test]
 fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this_preflight() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("daemon listener");
+    let address = listener.local_addr().expect("daemon address");
+    let daemon = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("typed job request");
+        let mut request = [0; 4096];
+        let length = stream.read(&mut request).expect("read request");
+        assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /jobs HTTP/1.1"));
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"success\":true,\"data\":{\"body\":{\"active_runner_jobs\":[],\"stale_runner_jobs\":[]}}}",
+            )
+            .expect("typed job response");
+    });
     let mut stale_projection = connected_reverse_status("lab", None);
     stale_projection.connected = false;
     stale_projection.state = super::super::RunnerSessionState::Disconnected;
     stale_projection.session = Some(connected_direct_session(
         "lab",
-        Some("http://127.0.0.1:55626"),
+        Some(&format!("http://{address}")),
     ));
     let session = stale_projection.session.as_mut().expect("direct session");
     session.tunnel_pid = Some(22420);
@@ -138,19 +155,39 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         termination_evidence: None,
         repair_plan: Vec::new(),
     });
-    stale_projection.active_job_state = RunnerActiveJobState::Available;
+    stale_projection.active_job_state = RunnerActiveJobState::NotQueried;
+    assert_eq!(
+        stale_projection.active_job_state,
+        RunnerActiveJobState::NotQueried
+    );
     let mut connect = connected_direct_connect_report("lab");
-    connect.local_url = Some("http://127.0.0.1:55626".to_string());
+    connect.local_url = Some(format!("http://{address}"));
     connect.tunnel_pid = Some(22420);
     connect.remote_daemon_pid = Some(1467759);
 
-    let admitted = authoritative_status_for_preflight(stale_projection, Some(&connect))
-        .expect("successful connect remains authoritative for this preflight");
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+    let (availability, admitted) = preflight_lab_runner_availability_from_status(
+        &selection,
+        |_| Ok(stale_projection.clone()),
+        Some(1),
+        Some(&connect),
+    )
+    .expect("successful connect remains authoritative for this preflight");
 
+    daemon.join().expect("daemon");
     assert!(admitted.connected);
+    assert_eq!(admitted.active_job_state, RunnerActiveJobState::Available);
+    assert!(
+        availability.accepts_jobs,
+        "typed /jobs probe admits the workload"
+    );
     assert_eq!(
         admitted.session.expect("session").local_url.as_deref(),
-        Some("http://127.0.0.1:55626")
+        Some(format!("http://{address}").as_str())
     );
 }
 
@@ -165,8 +202,7 @@ fn true_disconnected_projection_is_not_authorized_without_matching_connect_evide
 
 #[test]
 fn stale_disconnected_projection_rejects_mismatched_connect_evidence() {
-    let mut status = unreachable_health_status("lab", false);
-    status.active_job_state = RunnerActiveJobState::Available;
+    let status = unreachable_health_status("lab", false);
     let connect = connected_direct_connect_report("lab");
 
     let error = authoritative_status_for_preflight(status, Some(&connect))

@@ -2711,6 +2711,23 @@ fn runner_jobs(
     runner_jobs_with_client(runner_id, session, &client, timeout)
 }
 
+/// Probe typed jobs through a direct daemon endpoint whose ownership was
+/// already verified by an operation-scoped caller.
+pub(crate) fn probe_verified_direct_daemon_jobs(
+    runner_id: &str,
+    session: &RunnerSession,
+) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
+    if session.mode != RunnerTunnelMode::DirectSsh || session.local_url.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "verified runner connect has no direct daemon endpoint for typed job admission",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    runner_jobs(runner_id, session)
+}
+
 fn runner_jobs_with_client(
     runner_id: &str,
     session: &RunnerSession,

@@ -13,7 +13,8 @@ use homeboy_core::{Error, ErrorCode, Result};
 
 use super::{
     default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode,
-    RunnerAvailability, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
+    RunnerActiveJobSource, RunnerAvailability, RunnerConnectReport, RunnerStatusReport,
+    RunnerTunnelMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -773,7 +774,7 @@ fn preflight_lab_runner_availability_with(
     preflight_lab_runner_availability_from_status(selection, status_fn, capacity, connect_authority)
 }
 
-fn preflight_lab_runner_availability_from_status(
+pub(super) fn preflight_lab_runner_availability_from_status(
     selection: &LabRunnerSelection,
     status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
     capacity: Option<usize>,
@@ -817,10 +818,6 @@ pub(super) fn authoritative_status_for_preflight(
         || session.mode != RunnerTunnelMode::DirectSsh
         || !same_endpoint
         || !daemon_is_fresh
-        || !matches!(
-            status.active_job_state,
-            super::RunnerActiveJobState::Available
-        )
     {
         return Err(Error::validation_invalid_argument(
             "runner",
@@ -829,8 +826,36 @@ pub(super) fn authoritative_status_for_preflight(
             None,
         ));
     }
+    let (active_jobs, stale_jobs) = crate::connection::probe_verified_direct_daemon_jobs(
+        &connect_authority.runner_id,
+        session,
+    )?;
+    let daemon_active_jobs = status
+        .daemon_freshness
+        .as_ref()
+        .map(|freshness| freshness.active_jobs)
+        .expect("fresh daemon evidence was required above");
+    if daemon_active_jobs != active_jobs.len() {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            format!(
+                "verified daemon reports {daemon_active_jobs} active job(s), but typed /jobs exposed {}",
+                active_jobs.len()
+            ),
+            Some(connect_authority.runner_id.clone()),
+            None,
+        ));
+    }
     status.connected = true;
     status.state = super::RunnerSessionState::Connected;
+    status.active_job_count = active_jobs.len();
+    status.stale_runner_job_count = stale_jobs.len();
+    status.active_runner_jobs = active_jobs.iter().map(Into::into).collect();
+    status.active_jobs = active_jobs;
+    status.stale_runner_jobs = stale_jobs.iter().map(Into::into).collect();
+    status.active_job_state = super::RunnerActiveJobState::Available;
+    status.active_job_source = Some(RunnerActiveJobSource::DirectDaemon);
+    status.active_job_error = None;
     Ok(status)
 }
 
