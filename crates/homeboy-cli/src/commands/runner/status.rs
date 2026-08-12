@@ -1808,6 +1808,7 @@ mod tests {
                 Some("homeboy 0.259.0+daemon".to_string()),
                 Some("homeboy 0.262.0+binary".to_string()),
             )),
+            configured_job_binary_build_identity: None,
             daemon_freshness: None,
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),

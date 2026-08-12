@@ -1827,7 +1827,8 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let session = read_session_for_status(runner_id)?;
     let state = status_session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
-    let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
+    let (stale_daemon, configured_job_binary_build_identity) =
+        stale_daemon_warning(&runner, session.as_ref(), connected)?;
     let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
     let mut daemon_freshness =
         local_daemon_freshness.or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
@@ -1938,6 +1939,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         state,
         session,
         stale_daemon,
+        configured_job_binary_build_identity,
         daemon_freshness,
         active_jobs,
         active_runner_jobs,
@@ -2025,6 +2027,7 @@ pub fn persisted_status_until(
         state,
         session,
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
@@ -3504,24 +3507,24 @@ fn stale_daemon_warning(
     runner: &Runner,
     session: Option<&RunnerSession>,
     connected: bool,
-) -> Result<Option<RunnerStaleDaemonWarning>> {
+) -> Result<(Option<RunnerStaleDaemonWarning>, Option<String>)> {
     if !connected {
-        return Ok(None);
+        return Ok((None, None));
     }
     let Some(session) = session else {
-        return Ok(None);
+        return Ok((None, None));
     };
     // The verification gap is a property of the tunnel, not of the runner
     // transport kind, so it is decided before the SSH-only probe path below.
     if let Some(gap) = tunnel_verification_gap(runner, session) {
-        return Ok(Some(gap));
+        return Ok((Some(gap), None));
     }
     if runner.kind != RunnerKind::Ssh || session.mode != RunnerTunnelMode::DirectSsh {
-        return Ok(None);
+        return Ok((None, None));
     }
     let homeboy = remote_runner_homeboy_path(runner, "runner status stale-daemon diagnostics")?;
     let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
-        return Ok(None);
+        return Ok((None, None));
     };
     // A failed probe read nothing, so there is nothing to compare. Substituting
     // the session's own version here made `versions_match` trivially true and
@@ -3531,16 +3534,20 @@ fn stale_daemon_warning(
     {
         Ok(identity) => identity,
         Err(probe_error) => {
-            return Ok(Some(RunnerStaleDaemonWarning::probe_failed(
-                &runner.id,
-                session.homeboy_version.clone(),
-                session.homeboy_build_identity.clone(),
-                homeboy,
-                probe_error,
-            )));
+            return Ok((
+                Some(RunnerStaleDaemonWarning::probe_failed(
+                    &runner.id,
+                    session.homeboy_version.clone(),
+                    session.homeboy_build_identity.clone(),
+                    homeboy,
+                    probe_error,
+                )),
+                None,
+            ));
         }
     };
     let current_version = current_identity.version.clone();
+    let configured_job_binary_build_identity = current_identity.build_identity.clone();
     let controller_identity = homeboy_product_identity::build_identity();
     let observed_session_version = session
         .local_url
@@ -3588,31 +3595,34 @@ fn stale_daemon_warning(
         controller_commit_comparison,
     );
     if daemon_matches_configured && controller_matches_configured {
-        return Ok(None);
+        return Ok((None, configured_job_binary_build_identity));
     }
-    Ok(Some(
-        RunnerStaleDaemonWarning::new(
-            &runner.id,
-            observed_session_version,
-            current_version,
-            session_identity,
-            current_identity.build_identity,
-        )
-        .with_identity_unverifiable(
-            &runner.id,
-            homeboy,
-            identity_comparison == IdentityComparison::Unverifiable,
-        )
-        .with_controller_compatibility(
-            &runner.id,
-            controller_identity.version,
-            controller_identity.display,
-            controller_version_matches,
-            daemon_matches_configured,
-            controller_reference == ControllerReference::Unverifiable,
-        )
-        .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths)
-        .with_persisted_session_version(&runner.id, session.homeboy_version.clone()),
+    Ok((
+        Some(
+            RunnerStaleDaemonWarning::new(
+                &runner.id,
+                observed_session_version,
+                current_version,
+                session_identity,
+                current_identity.build_identity,
+            )
+            .with_identity_unverifiable(
+                &runner.id,
+                homeboy,
+                identity_comparison == IdentityComparison::Unverifiable,
+            )
+            .with_controller_compatibility(
+                &runner.id,
+                controller_identity.version,
+                controller_identity.display,
+                controller_version_matches,
+                daemon_matches_configured,
+                controller_reference == ControllerReference::Unverifiable,
+            )
+            .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths)
+            .with_persisted_session_version(&runner.id, session.homeboy_version.clone()),
+        ),
+        configured_job_binary_build_identity,
     ))
 }
 

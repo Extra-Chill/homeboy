@@ -287,6 +287,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             ..runner_session_fixture()
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: vec![homeboy::core::api_jobs::ActiveRunnerJobSummary {
             runner_id: "homeboy-lab".to_string(),
@@ -419,6 +420,7 @@ fn direct_runner_status_exposes_the_explicit_generation_reconcile_command() {
             ..runner_session_fixture()
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
@@ -471,6 +473,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             ..runner_session_fixture()
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: Some(DaemonFreshnessReport {
             fresh: false,
             stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
@@ -1007,6 +1010,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
             ..runner_session_fixture()
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
@@ -1072,6 +1076,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
             ..runner_session_fixture()
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
@@ -1156,6 +1161,7 @@ fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
                 true,
             ),
         ),
+        configured_job_binary_build_identity: None,
         daemon_freshness: Some(DaemonFreshnessReport {
             fresh: true,
             stale_reason_code: None,
@@ -1277,6 +1283,7 @@ fn connected_report() -> RunnerStatusReport {
         state: runner::RunnerSessionState::Connected,
         session: None,
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),

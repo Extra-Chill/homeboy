@@ -132,6 +132,7 @@ pub(super) fn reverse_status(runner_id: &str) -> RunnerStatusReport {
             leaseless_recovery_evidence: None,
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),

@@ -18,6 +18,7 @@ fn readiness_report(freshness: DaemonFreshnessReport) -> RunnerStatusReport {
         state: RunnerSessionState::Connected,
         session: None,
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: Some(freshness),
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
