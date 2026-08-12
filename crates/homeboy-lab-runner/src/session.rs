@@ -431,6 +431,12 @@ pub struct RunnerConnectFailureEvidence {
     pub local_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_state: Option<String>,
+    /// The connect lifecycle stage that produced this evidence. Older callers
+    /// can continue reading the existing health fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durability_stage: Option<String>,
+    /// Failed initial health probes and failed durability observations only;
+    /// successful health observations are intentionally omitted.
     pub health_attempt_count: usize,
     pub health_attempts: Vec<String>,
 }
