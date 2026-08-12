@@ -165,6 +165,8 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--acceptance-authority` | `<ACCEPTANCE_AUTHORITY>` | Authority allowed to issue the acceptance verdict |
 | `--acceptance-policy` | `<ACCEPTANCE_POLICY>` | Policy the acceptance authority applies |
 
+Cook result schema: `homeboy/agent-task-cook/v1` retains its existing `status` and nested provider/promotion evidence. It additionally emits `completion` using `homeboy/agent-task-cook-completion/v1`. `completion.candidate_produced` records provider candidate production, while `completion.pr_finalized` is true only when durable finalization evidence identifies a PR. A requested finalization with a durable candidate but no PR reports `completion.state: "candidate_awaiting_finalization"` and its exact `completion.next_action` recovery command. This additive projection is the authoritative end-to-end Cook completion classification; existing serialized fields remain compatible.
+
 ## `homeboy agent-task cook-continue`
 
 ```sh
@@ -917,7 +919,6 @@ Promote a completed generic patch artifact into a managed worktree
 | `--task-id` | `<TASK_ID>` | _no help text_ |
 | `--artifact-id` | `<ARTIFACT_ID>` | _no help text_ |
 | `--dry-run` | flag | _no help text_ |
-| `--full` | flag | Include complete promotion and gate evidence |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
 | `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
@@ -971,7 +972,6 @@ This is the core-owned publication boundary for external runtimes.
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--full` | flag | Include complete finalization and gate evidence |
 | `--recover` | `<RUN_OR_COOK_ID>` | Hydrate finalization from a durable Cook recipe or a validated manual-finalization record |
 | `--run-id` | `<ID>` | _no help text_ |
 | `--path` | `<PATH>` | _no help text_ |
