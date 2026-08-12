@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.21] - 2026-08-12
+
+### Fixed
+- stop publishing a cancelled run as a red Test verdict
+
 ## [2.11.20] - 2026-08-09
 
 ### Fixed
