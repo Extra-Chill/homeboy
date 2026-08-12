@@ -30,9 +30,9 @@
 //! evidence of read-only-ness. Every one of these resolves `mutates: false`
 //! today while this classifier correctly answers `Mutation`:
 //!
-//! - `status --refresh` — `ops_command_spec!(status)` is a bare `command_spec`,
+//! - `status --refresh` — its descriptor is a bare `command_spec`,
 //!   so the manifest has no `--refresh` distinction and no subcommand table
-//! - `daemon start` — `ops_command_spec!(daemon)` likewise declares nothing
+//! - `daemon start` — its descriptor likewise declares nothing
 //! - `runtime promotion-takeover` — `RUNTIME_SUBCOMMAND_SAFETY` declares only
 //!   `refresh`
 //! - `agent-task retry <run> --run` — `AGENT_TASK_SUBCOMMAND_SAFETY` declares no

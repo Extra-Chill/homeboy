@@ -1,15 +1,11 @@
 use serde_json::Value;
 
 use crate::cli_surface::{CommandArgumentProvenance, Commands, Placement};
-use crate::command_contract::{CommandJsonFamily, CommandSpec};
+use crate::command_contract::CommandSpec;
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::output_runtime::{CommandPresentation, CommandRun};
 use super::{adapter, runner};
-
-mod ops;
-mod quality;
-mod workspace;
 
 type JsonRun = (homeboy::core::Result<Value>, i32);
 
@@ -309,7 +305,7 @@ fn agent_task_summary_kind_for_output_mode(
 
 fn dispatch(
     command: Commands,
-    spec: &CommandSpec,
+    _spec: &CommandSpec,
     placement: Placement,
 ) -> (homeboy::core::Result<Value>, i32) {
     if let Commands::Cleanup(args) = command {
@@ -323,11 +319,25 @@ fn dispatch(
         Err(command) => *command,
     };
 
-    match spec.json_family {
-        CommandJsonFamily::Quality => quality::dispatch(command),
-        CommandJsonFamily::Workspace => workspace::dispatch(command),
-        CommandJsonFamily::Ops => ops::dispatch(command),
+    dispatch_registered(command)
+}
+
+pub(crate) fn cleanup_run_auto(
+    args: crate::commands::cleanup::CleanupArgs,
+) -> crate::commands::CmdResult<serde_json::Value> {
+    crate::commands::cleanup::run(args, Placement::Auto)
+}
+
+fn dispatch_registered(command: Commands) -> JsonRun {
+    macro_rules! dispatch_builtin_json_command {
+        ($(($variant:ident, $handler:path, $spec:expr),)*) => {
+            match command {
+                $(Commands::$variant(args) => map($handler(args)),)*
+            }
+        };
     }
+
+    crate::builtin_json_command_descriptors!(dispatch_builtin_json_command)
 }
 
 fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
