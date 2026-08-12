@@ -1874,11 +1874,8 @@ fn queue_or_reuse_worktrees(
     let mut to_create = Vec::new();
     for cook in &plan.cooks {
         let branch = cook.head.as_ref().expect("generated cooks have heads");
-        match (!provider_lifecycle).then(|| worktree::status(&cook.to_worktree)) {
-            Some(Ok(status))
-                if status.record.state == worktree::TaskWorktreeState::Active
-                    && !status.safety.worktree_missing =>
-            {
+        match (!provider_lifecycle).then(|| active_registered_worktree_path(&cook.to_worktree)) {
+            Some(Some(path)) => {
                 reused.push(worktree::WorktreeQueueCreateRow {
                     branch: branch.clone(),
                     handle: cook.to_worktree.clone(),
@@ -1886,7 +1883,7 @@ fn queue_or_reuse_worktrees(
                     command: worktree_create_command(args, branch),
                     retry_after_seconds: None,
                     active_lock_holder: None,
-                    path: Some(status.record.worktree_path),
+                    path: Some(path),
                     error: None,
                 });
             }
@@ -2014,11 +2011,8 @@ fn queue_or_reuse_worktrees_dry_run(
     let mut to_create = Vec::new();
     for cook in &plan.cooks {
         let branch = cook.head.as_ref().expect("generated cooks have heads");
-        match worktree::status(&cook.to_worktree) {
-            Ok(status)
-                if status.record.state == worktree::TaskWorktreeState::Active
-                    && !status.safety.worktree_missing =>
-            {
+        match active_registered_worktree_path(&cook.to_worktree) {
+            Some(path) => {
                 reused.push(worktree::WorktreeQueueCreateRow {
                     branch: branch.clone(),
                     handle: cook.to_worktree.clone(),
@@ -2026,7 +2020,7 @@ fn queue_or_reuse_worktrees_dry_run(
                     command: worktree_create_command(args, branch),
                     retry_after_seconds: None,
                     active_lock_holder: None,
-                    path: Some(status.record.worktree_path),
+                    path: Some(path),
                     error: None,
                 });
             }
@@ -2059,6 +2053,26 @@ fn queue_or_reuse_worktrees_dry_run(
         dry_run: true,
         rows,
     })
+}
+
+fn active_registered_worktree_path(handle: &str) -> Option<String> {
+    if let Ok(status) = worktree::status(handle) {
+        return (status.record.state == worktree::TaskWorktreeState::Active
+            && !status.safety.worktree_missing)
+            .then_some(status.record.worktree_path);
+    }
+    match worktree::resolve_workspace_ref_if_present(handle)
+        .ok()
+        .flatten()?
+    {
+        worktree::WorkspaceRefRecord::Adopted(record)
+            if record.state == worktree::TaskWorktreeState::Active
+                && std::path::Path::new(&record.path).is_dir() =>
+        {
+            Some(record.path)
+        }
+        _ => None,
+    }
 }
 
 fn configured_provider_lifecycle() -> Result<bool> {
