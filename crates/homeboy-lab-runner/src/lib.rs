@@ -236,7 +236,7 @@ pub use connection::{
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,
-    daemon_lab_handoff_capabilities, local_live_session, status_for_admission,
+    daemon_lab_handoff_capabilities, status_for_admission,
 };
 #[allow(
     dead_code,

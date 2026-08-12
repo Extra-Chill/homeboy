@@ -1,8 +1,6 @@
 use super::super::lab_selection::{
-    authoritative_status_for_preflight, contended_runner_unavailable_error,
-    preflight_lab_runner_availability_from_status, prepare_lab_runner_for_offload_with,
-    wait_for_contended_runner, wait_for_live_session_with, LabRunnerPreparation,
-    LabRunnerSelection,
+    authoritative_status_for_preflight, preflight_lab_runner_availability_from_status,
+    prepare_lab_runner_for_offload_with, LabRunnerPreparation, LabRunnerSelection,
 };
 use super::*;
 use crate::{
@@ -10,7 +8,6 @@ use crate::{
     RunnerTunnelProcessStartIdentity,
 };
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
-use homeboy_core::{Error, ErrorCode};
 
 use super::super::session::{RunnerStaleDaemonWarning, RunnerStaleRuntimePath};
 
@@ -81,35 +78,6 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
             reason: "SSH connectivity check failed".to_string()
         }
     );
-}
-
-#[test]
-fn successful_connect_session_converges_after_transient_disconnection() {
-    let probes = std::cell::Cell::new(0);
-    let pauses = std::cell::Cell::new(0);
-    let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
-    let started = std::time::Instant::now();
-
-    let session =
-        wait_for_live_session_with(
-            std::time::Duration::from_millis(150),
-            |_| {
-                let probe = probes.get();
-                probes.set(probe + 1);
-                Ok((probe == 2)
-                    .then(|| connected_direct_session("lab", Some("http://127.0.0.1:1234"))))
-            },
-            || started + elapsed.get(),
-            |duration| {
-                pauses.set(pauses.get() + 1);
-                elapsed.set(elapsed.get() + duration);
-            },
-        )
-        .expect("session convergence");
-
-    assert!(session.is_some());
-    assert_eq!(probes.get(), 3);
-    assert_eq!(pauses.get(), 2);
 }
 
 #[test]
@@ -210,6 +178,177 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         admitted.session.expect("session").local_url.as_deref(),
         Some(format!("http://{address}").as_str())
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_and_cleanup() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("daemon listener");
+    let address = listener.local_addr().expect("daemon address");
+    let daemon = std::thread::spawn(move || {
+        for (path, body) in [
+            (
+                "/health",
+                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+            ),
+            (
+                "/jobs",
+                r#"{"success":true,"data":{"body":{"active_runner_jobs":[],"stale_runner_jobs":[]}}}"#,
+            ),
+        ] {
+            let (mut stream, _) = listener.accept().expect("daemon request");
+            let mut request = [0; 4096];
+            let length = stream.read(&mut request).expect("read request");
+            assert!(String::from_utf8_lossy(&request[..length])
+                .starts_with(&format!("GET {path} HTTP/1.1")));
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
+                    )
+                    .as_bytes(),
+                )
+                .expect("daemon response");
+        }
+    });
+    let tunnel = Arc::new(Mutex::new(None));
+    let session = Arc::new(Mutex::new(None));
+    let mut connected = connected_reverse_status("lab", None);
+    connected.connected = true;
+    connected.state = super::super::RunnerSessionState::Connected;
+    connected.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        restartable: false,
+        lease_id: Some("lease-fresh".to_string()),
+        pid: Some(1467759),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    connected.active_job_state = RunnerActiveJobState::Available;
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+    let initial = RunnerStatusReport {
+        runner_id: "lab".to_string(),
+        connected: false,
+        state: super::super::RunnerSessionState::Disconnected,
+        session: None,
+        stale_daemon: None,
+        daemon_freshness: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_jobs: Vec::new(),
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::NotQueried,
+        active_job_source: None,
+        active_job_error: None,
+        active_job_recovery_evidence: None,
+        session_path: "/tmp/lab.json".to_string(),
+    };
+    let connect_tunnel = Arc::clone(&tunnel);
+    let connect_session = Arc::clone(&session);
+    let prepared = prepare_lab_runner_for_offload_with(
+        &selection,
+        |_| Ok(initial.clone()),
+        |_| {
+            let mut child = Command::new("sh");
+            child.args(["-c", "sleep 60"]);
+            unsafe {
+                child.pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+            let child = child.spawn().expect("spawn owned tunnel");
+            let tunnel_pid = child.id();
+            let tunnel_identity = match homeboy_core::process::process_start_identity(tunnel_pid)
+                .expect("inspect tunnel")
+                .expect("live tunnel identity")
+            {
+                homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                    RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+                }
+                homeboy_core::process::ProcessStartIdentity::Macos {
+                    start_seconds,
+                    start_microseconds,
+                } => RunnerTunnelProcessStartIdentity::Macos {
+                    start_seconds,
+                    start_microseconds,
+                },
+            };
+            let mut session = connected_direct_session("lab", Some(&format!("http://{address}")));
+            session.local_port = Some(address.port());
+            session.tunnel_pid = Some(tunnel_pid);
+            session.tunnel_process_start_identity = Some(tunnel_identity);
+            session.remote_daemon_pid = Some(1467759);
+            session.remote_daemon_lease_id = Some("lease-fresh".to_string());
+            let mut report = connected_direct_connect_report("lab");
+            report.local_url = session.local_url.clone();
+            report.tunnel_pid = Some(tunnel_pid);
+            report.remote_daemon_pid = session.remote_daemon_pid;
+            *connect_tunnel.lock().expect("tunnel lock") = Some(child);
+            *connect_session.lock().expect("session lock") = Some(session);
+            Ok((report, 0))
+        },
+    )
+    .expect("in-process connect authority preparation");
+
+    assert!(matches!(prepared, LabRunnerPreparation::Ready { .. }));
+    let session = session
+        .lock()
+        .expect("session lock")
+        .clone()
+        .expect("prepared session");
+    let tunnel_pid = session.tunnel_pid.expect("tunnel PID");
+    let mut report = connected_direct_connect_report("lab");
+    report.local_url = session.local_url.clone();
+    report.tunnel_pid = Some(tunnel_pid);
+    report.remote_daemon_pid = session.remote_daemon_pid;
+    connected.session = Some(session.clone());
+    let (_, admitted) = preflight_lab_runner_availability_from_status(
+        &selection,
+        |_| Ok(connected.clone()),
+        Some(1),
+        Some(&report),
+    )
+    .expect("live owned tunnel admits after connect returns");
+    assert!(homeboy_core::process::pid_is_running(tunnel_pid));
+    assert_eq!(
+        admitted.session.expect("session").tunnel_pid,
+        Some(tunnel_pid)
+    );
+
+    crate::connection::terminate_tunnel_if_owned(&session);
+    let _ = tunnel
+        .lock()
+        .expect("tunnel lock")
+        .as_mut()
+        .expect("owned tunnel")
+        .wait()
+        .expect("reap tunnel");
+    assert!(!homeboy_core::process::pid_is_running(tunnel_pid));
+    daemon.join().expect("daemon");
 }
 
 #[test]
@@ -421,32 +560,6 @@ fn stale_disconnected_projection_rejects_mismatched_connect_evidence() {
         .expect_err("different endpoint evidence is not admitted");
 
     assert!(error.message.contains("did not converge"));
-}
-
-#[test]
-fn successful_connect_session_convergence_exhausts_its_deadline() {
-    let probes = std::cell::Cell::new(0);
-    let pauses = std::cell::Cell::new(0);
-    let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
-    let started = std::time::Instant::now();
-
-    let session = wait_for_live_session_with(
-        std::time::Duration::from_millis(150),
-        |_| {
-            probes.set(probes.get() + 1);
-            Ok(None)
-        },
-        || started + elapsed.get(),
-        |duration| {
-            pauses.set(pauses.get() + 1);
-            elapsed.set(elapsed.get() + duration);
-        },
-    )
-    .expect("session convergence");
-
-    assert!(session.is_none());
-    assert_eq!(probes.get(), 3);
-    assert_eq!(pauses.get(), 3);
 }
 
 #[test]
@@ -842,103 +955,6 @@ fn concurrent_unreachable_health_handoffs_connect_once() {
 }
 
 #[test]
-fn lease_contender_waits_for_owner_session_without_a_second_connect() {
-    use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Barrier,
-    };
-
-    let connected = Arc::new(AtomicBool::new(false));
-    let connects = Arc::new(AtomicUsize::new(0));
-    let handoff_start = Arc::new(Barrier::new(2));
-    let owner_connected = Arc::clone(&connected);
-    let owner_connects = Arc::clone(&connects);
-    let owner_start = Arc::clone(&handoff_start);
-    let owner = std::thread::spawn(move || {
-        owner_start.wait();
-        owner_connects.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(std::time::Duration::from_millis(75));
-        owner_connected.store(true, Ordering::SeqCst);
-    });
-
-    let contender_connected = Arc::clone(&connected);
-    let contender_start = Arc::clone(&handoff_start);
-    let contender = std::thread::spawn(move || {
-        contender_start.wait();
-        // This is the contender handoff after RuntimePromotionLease::acquire
-        // reports that the owner is reconnecting the shared runner.
-        let session = wait_for_contended_runner(
-            contention_error(),
-            std::time::Duration::from_secs(1),
-            |_| {
-                Ok(contender_connected.load(Ordering::SeqCst).then(|| {
-                    connected_direct_session("lab-lease-contention", Some("http://127.0.0.1:63378"))
-                }))
-            },
-        )
-        .expect("wait succeeds")
-        .expect("owner publishes a healthy session");
-
-        session
-    });
-
-    owner.join().expect("owner");
-    let session = contender.join().expect("contender handoff");
-    assert_eq!(session.runner_id, "lab-lease-contention");
-    assert_eq!(connects.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn non_contention_lease_failure_is_not_retried() {
-    let error = Error::internal_io(
-        "permission denied",
-        Some("read promotion lease".to_string()),
-    );
-    let returned = wait_for_contended_runner(error, std::time::Duration::from_secs(1), |_| {
-        panic!("non-contention errors must not poll or reconnect")
-    })
-    .expect_err("non-contention failure propagates");
-
-    assert_eq!(returned.code, ErrorCode::InternalIoError);
-    assert_eq!(returned.details["context"], "read promotion lease");
-}
-
-#[test]
-fn contended_session_wait_obeys_the_deadline() {
-    let started = std::time::Instant::now();
-    let result = wait_for_contended_runner(
-        contention_error(),
-        std::time::Duration::from_millis(250),
-        |remaining| {
-            std::thread::sleep(remaining);
-            Ok(None)
-        },
-    )
-    .expect("contention wait completes");
-
-    assert!(result.is_none());
-    assert!(started.elapsed() < std::time::Duration::from_millis(750));
-}
-
-#[test]
-fn contended_handoff_failure_preserves_reconnect_lease_evidence() {
-    let error = contended_runner_unavailable_error("lab", contention_error());
-
-    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-    assert_eq!(error.details["reconnect_lease"]["holder_pid"], 42);
-    assert!(error
-        .message
-        .contains("another controller owned its reconnect lease"));
-    assert!(error.details["tried"]
-        .as_array()
-        .expect("remediation list")
-        .iter()
-        .any(|hint| hint
-            .as_str()
-            .is_some_and(|hint| hint.contains("Waited 30s"))));
-}
-
-#[test]
 fn lab_runner_preparation_falls_back_for_stale_default_direct_session_without_daemon_url() {
     let selection = LabRunnerSelection {
         runner_id: "lab".to_string(),
@@ -1300,14 +1316,6 @@ fn current_process_tunnel_identity() -> RunnerTunnelProcessStartIdentity {
             start_microseconds,
         },
     }
-}
-
-fn contention_error() -> Error {
-    Error::new(
-        ErrorCode::RuntimePromotionContended,
-        "runtime promotion is held by pid 42".to_string(),
-        serde_json::json!({ "holder_pid": 42 }),
-    )
 }
 
 fn stale_daemon_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
