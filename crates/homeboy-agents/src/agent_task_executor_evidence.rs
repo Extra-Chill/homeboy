@@ -245,10 +245,9 @@ fn hydrate_structured_runtime_evidence(
         .collect::<Result<Vec<_>, _>>()
         .ok()
         .map(|lines| format!("{}\n", lines.join("\n")));
-    if let (Some(progress), Some(progress_paths)) = (
-        progress,
-        runtime_files.get(RUNTIME_PROGRESS_EVIDENCE_KIND),
-    ) {
+    if let (Some(progress), Some(progress_paths)) =
+        (progress, runtime_files.get(RUNTIME_PROGRESS_EVIDENCE_KIND))
+    {
         for path in progress_paths {
             // A provider-produced progress stream is authoritative. The derived
             // compact stream only fills the empty artifact reserved for it.
