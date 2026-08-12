@@ -1066,6 +1066,31 @@ fn runner_status_actions_preserve_runner_ids_for_every_admission_state() {
     }
 }
 
+#[test]
+fn peer_session_preview_action_satisfies_the_cli_contract() {
+    let action = homeboy::runner::readonly_probe::ReadOnlyProbeDegradation {
+        probe: "runner_peer_session".to_string(),
+        runner_id: Some("homeboy lab".to_string()),
+        reason_code: homeboy::runner::readonly_probe::REASON_PROBE_TRUNCATED,
+        timeout_seconds: 0,
+        elapsed_ms: 0,
+        deadline_ms: 0,
+        follow_up: "homeboy runner peer-sessions 'homeboy lab'".to_string(),
+        follow_up_action: Some(homeboy::core::error::ExecutableAction::new(
+            "runner.peer_sessions.preview",
+            "inspect peer sessions",
+            "homeboy",
+            ["runner", "peer-sessions", "homeboy lab"],
+            homeboy::core::error::ActionSafety::ReadOnly,
+        )),
+        detail: "partial status".to_string(),
+    };
+
+    let action = action.follow_up_action.expect("typed action");
+    Cli::try_parse_from(shlex::split(&action.render_command()).expect("shell argv"))
+        .expect("peer-session cleanup action must satisfy the CLI contract");
+}
+
 fn assert_rendered_runner_action_parses(state: &str, command: &str, pinned_ref: Option<&str>) {
     let argv = shlex::split(command)
         .unwrap_or_else(|| panic!("{state} action must be valid shell text: {command}"));

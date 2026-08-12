@@ -16,6 +16,7 @@
 // ----------------------------------------------------------------------------
 
 pub use crate::daemon_repair_codes;
+pub use crate::peer_session_maintenance;
 pub use crate::runner_capability_inventory;
 pub use crate::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
@@ -55,15 +56,15 @@ pub use crate::{
     LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode,
     LabOffloadWorkspaceModePolicy, LabRunnerCapabilityContract, LabRunnerGateDecision,
     LabRunnerGateMode, LabRunnerHandoff, LabRunnerReadiness, LabRunnerReadinessState,
-    LabRunnerSelectionSource, ManagedRunnerSourceSyncPlan, PlacementReadiness,
-    PlacementReadinessPredicate, PlacementReadinessRequest, PlacementReadinessState,
-    PreparedLabRunnerCapability, RemoteArtifactDownload, ReverseRunnerConnectOptions,
-    ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerActiveJobSource,
-    RunnerActiveJobState, RunnerActiveJobsSnapshot, RunnerAdmissionSummary, RunnerArtifactRef,
-    RunnerAvailability, RunnerBinaryCachePruneEntry, RunnerBinaryCachePruneOptions,
-    RunnerBinaryCachePruneOutput, RunnerBinarySource, RunnerCapabilityInventory,
-    RunnerCapabilityPreflight, RunnerChangedRuntimePath, RunnerConnectReport,
-    RunnerDaemonGenerationStatus, RunnerDevSyncOptions, RunnerDevSyncOutput,
+    LabRunnerSelectionSource, ManagedRunnerSourceSyncPlan, PeerSessionMaintenanceReport,
+    PlacementReadiness, PlacementReadinessPredicate, PlacementReadinessRequest,
+    PlacementReadinessState, PreparedLabRunnerCapability, RemoteArtifactDownload,
+    ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner,
+    RunnerActiveJobSource, RunnerActiveJobState, RunnerActiveJobsSnapshot, RunnerAdmissionSummary,
+    RunnerArtifactRef, RunnerAvailability, RunnerBinaryCachePruneEntry,
+    RunnerBinaryCachePruneOptions, RunnerBinaryCachePruneOutput, RunnerBinarySource,
+    RunnerCapabilityInventory, RunnerCapabilityPreflight, RunnerChangedRuntimePath,
+    RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDevSyncOptions, RunnerDevSyncOutput,
     RunnerDisconnectReport, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
     RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary, RunnerFailureKind,
     RunnerGenerationJobOwners, RunnerJob, RunnerKind, RunnerLifecycleOwner,

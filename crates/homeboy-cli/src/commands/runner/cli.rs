@@ -299,6 +299,19 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         full: bool,
     },
+    /// Inspect and safely remove persisted peer sessions whose local tunnels are proven dead
+    PeerSessions {
+        /// Runner ID
+        id: String,
+
+        /// Continue after this cursor returned by a prior peer-session command
+        #[arg(long)]
+        cursor: Option<String>,
+
+        /// Remove only peer-session snapshots proven dead during this inspection
+        #[arg(long)]
+        apply: bool,
+    },
     /// Reconcile persisted direct-runner generation state and retire verified drained daemons
     Reconcile {
         /// Runner ID

@@ -2787,6 +2787,7 @@ fn runner_jobs_with_client(
             elapsed_ms: started.elapsed().as_millis(),
             deadline_ms: if timed_out { timeout.as_millis() } else { 0 },
             follow_up: crate::readonly_probe::runner_status_follow_up(Some(runner_id)),
+            follow_up_action: None,
             detail: format!(
                 "read-only typed-job probe for runner `{runner_id}` did not complete; active-job state is partial: {}",
                 error.message
@@ -2856,6 +2857,7 @@ fn runner_running_runs_with_client(
             elapsed_ms: started.elapsed().as_millis(),
             deadline_ms: if timed_out { timeout.as_millis() } else { 0 },
             follow_up: crate::readonly_probe::runner_status_follow_up(Some(runner_id)),
+            follow_up_action: None,
             detail: format!(
                 "read-only running-runs probe for runner `{}` did not complete; orphaned child-run detection is partial: {}",
                 runner_id, error.message
@@ -3830,6 +3832,7 @@ mod session_store;
 
 use remote_daemon::*;
 use session_store::*;
+pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
 
 #[cfg(test)]
 mod tests;
