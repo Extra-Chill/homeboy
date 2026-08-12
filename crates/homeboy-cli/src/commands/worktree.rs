@@ -402,10 +402,17 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             retry_after_seconds,
         } => WorktreeOutput::QueueCreate(worktree::queue_create(WorktreeQueueCreateOptions {
             repo,
-            branches,
+            requests: branches
+                .into_iter()
+                .map(|branch| worktree::WorktreeQueueCreateRequest {
+                    branch,
+                    task_url: task_url.clone(),
+                    task_ref: task_ref.clone(),
+                    run_id: None,
+                    provider_lifecycle: None,
+                })
+                .collect(),
             from,
-            task_url,
-            task_ref,
             dry_run,
             retry_after_seconds,
         })?),

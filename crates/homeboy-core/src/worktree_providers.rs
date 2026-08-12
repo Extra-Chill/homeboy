@@ -801,8 +801,38 @@ pub fn plan_apply_enabled_worktree_provider_from_config(
     intent: &WorktreeProviderCreateIntent,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderCreatePlan> {
+    plan_apply_enabled_worktree_provider_from_config_with_id(intent, None, config)
+}
+
+/// Plan a purpose-owned workspace with the same lifecycle-eligible provider
+/// selection that execution uses, without running its ensure command.
+pub fn plan_apply_enabled_worktree_provider_with_lifecycle_from_config(
+    intent: &WorktreeProviderCreateIntent,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderCreatePlan> {
+    let provider_id = select_apply_enabled_worktree_provider_from_config(intent, config)?;
+    plan_apply_enabled_worktree_provider_from_config_with_id(intent, Some(provider_id), config)
+}
+
+fn plan_apply_enabled_worktree_provider_from_config_with_id(
+    intent: &WorktreeProviderCreateIntent,
+    selected_provider_id: Option<String>,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderCreatePlan> {
     match resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None) {
-        Ok(resolution) => return Ok(WorktreeProviderCreatePlan::Existing(resolution)),
+        Ok(resolution) => {
+            if selected_provider_id.as_deref() != Some(resolution.provider_id.as_str())
+                && selected_provider_id.is_some()
+            {
+                return Err(Error::validation_invalid_argument(
+                    "worktree_provider",
+                    "provider selection changed before lifecycle workspace planning",
+                    Some(resolution.provider_id.clone()),
+                    None,
+                ));
+            }
+            return Ok(WorktreeProviderCreatePlan::Existing(resolution));
+        }
         Err(error)
             if error
                 .details
@@ -811,29 +841,36 @@ pub fn plan_apply_enabled_worktree_provider_from_config(
                 == Some("not_found") => {}
         Err(error) => return Err(error),
     }
-    let mut provider_ids = config
-        .worktree_providers
-        .iter()
-        .filter_map(|(id, provider)| {
-            (provider.enabled && provider.apply_enabled && provider.commands.ensure.is_some())
-                .then_some(id.clone())
-        })
-        .collect::<Vec<_>>();
-    provider_ids.sort();
-    let provider_id = match provider_ids.as_slice() {
-        [provider_id] => provider_id.clone(),
-        [] => return Err(Error::validation_invalid_argument(
-            "to_worktree",
-            format!("worktree handle `{}` is missing and no enabled apply-enabled provider configures commands.ensure", intent.handle),
-            Some(intent.handle.clone()),
-            None,
-        )),
-        _ => return Err(Error::validation_invalid_argument(
-            "to_worktree",
-            format!("worktree handle `{}` is missing and multiple providers can ensure it: {}", intent.handle, provider_ids.join(", ")),
-            Some(intent.handle.clone()),
-            None,
-        )),
+    let provider_id = match selected_provider_id {
+        Some(provider_id) => provider_id,
+        None => {
+            let mut provider_ids = config
+                .worktree_providers
+                .iter()
+                .filter_map(|(id, provider)| {
+                    (provider.enabled
+                        && provider.apply_enabled
+                        && provider.commands.ensure.is_some())
+                    .then_some(id.clone())
+                })
+                .collect::<Vec<_>>();
+            provider_ids.sort();
+            match provider_ids.as_slice() {
+                [provider_id] => provider_id.clone(),
+                [] => return Err(Error::validation_invalid_argument(
+                    "to_worktree",
+                    format!("worktree handle `{}` is missing and no enabled apply-enabled provider configures commands.ensure", intent.handle),
+                    Some(intent.handle.clone()),
+                    None,
+                )),
+                _ => return Err(Error::validation_invalid_argument(
+                    "to_worktree",
+                    format!("worktree handle `{}` is missing and multiple providers can ensure it: {}", intent.handle, provider_ids.join(", ")),
+                    Some(intent.handle.clone()),
+                    None,
+                )),
+            }
+        }
     };
     let provider = config
         .worktree_providers
@@ -979,9 +1016,22 @@ fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
     lifecycle: Option<&WorktreeProviderLifecycleIntent>,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderProvision> {
+    // Lifecycle callers select once using the stricter lifecycle eligibility
+    // contract. Keep that exact identity through ensure and postcondition lookup.
+    let lifecycle_provider = lifecycle
+        .map(|_| select_apply_enabled_worktree_provider_from_config(intent, config))
+        .transpose()?;
     match resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None) {
         Ok(resolution) => {
             if let Some(lifecycle) = lifecycle {
+                if lifecycle_provider.as_deref() != Some(&resolution.provider_id) {
+                    return Err(Error::validation_invalid_argument(
+                        "worktree_provider",
+                        "provider selection changed before lifecycle workspace adoption",
+                        Some(resolution.provider_id.clone()),
+                        None,
+                    ));
+                }
                 let provider = config
                     .worktree_providers
                     .get(&resolution.provider_id)
@@ -1019,16 +1069,25 @@ fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
         Err(error) => return Err(error),
     }
 
-    let mut providers = config
-        .worktree_providers
-        .iter()
-        .filter_map(|(id, provider)| {
-            provider
-                .enabled
-                .then_some((id.as_str(), provider))
-                .filter(|(_, provider)| provider.commands.ensure.is_some())
-        })
-        .collect::<Vec<_>>();
+    let mut providers = match lifecycle_provider.as_deref() {
+        Some(provider_id) => vec![(
+            provider_id,
+            config
+                .worktree_providers
+                .get(provider_id)
+                .expect("selected provider is configured"),
+        )],
+        None => config
+            .worktree_providers
+            .iter()
+            .filter_map(|(id, provider)| {
+                provider
+                    .enabled
+                    .then_some((id.as_str(), provider))
+                    .filter(|(_, provider)| provider.commands.ensure.is_some())
+            })
+            .collect::<Vec<_>>(),
+    };
     providers.sort_by_key(|(id, _)| *id);
     if providers.len() > 1 {
         let ids = providers.iter().map(|(id, _)| *id).collect::<Vec<_>>();
@@ -1093,6 +1152,16 @@ fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
     let resolution =
         resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None)
             .map_err(mark_bootstrap_postcondition_failure)?;
+    if lifecycle_provider.as_deref() != Some(resolution.provider_id.as_str())
+        && lifecycle_provider.is_some()
+    {
+        return Err(Error::validation_invalid_argument(
+            "worktree_provider",
+            "provider postcondition resolved a different provider than the lifecycle owner",
+            Some(resolution.provider_id.clone()),
+            None,
+        ));
+    }
     Ok(WorktreeProviderProvision {
         resolution,
         action: "ensured",
@@ -1108,8 +1177,6 @@ pub fn provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
     lifecycle: &WorktreeProviderLifecycleIntent,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderProvision> {
-    let provider_id = select_apply_enabled_worktree_provider_from_config(intent, config)?;
-    validate_lifecycle_provider(&provider_id, config)?;
     provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
         intent,
         Some(lifecycle),
@@ -3281,6 +3348,92 @@ mod tests {
         .expect_err("missing finalizer must reject lifecycle ownership");
         assert!(error.message.contains("no enabled apply-enabled provider"));
         assert!(!marker.path().exists(), "ensure command must not run");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_provision_uses_the_selected_eligible_provider() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let selected_effect = temp.path().join("selected-effect");
+        let competing_effect = temp.path().join("competing-effect");
+        let selected = temp.path().join("selected-provider");
+        let competing = temp.path().join("competing-provider");
+        fs::write(
+            &selected,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-12124\",\"path\":\"{}\",\"branch\":\"fix/12124\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else exit 1; fi\nelse\n  touch '{}'\n  git init -q -b fix/12124 '{}'\nfi\n",
+                selected_effect.display(),
+                workspace.display(),
+                selected_effect.display(),
+                workspace.display(),
+            ),
+        )
+        .expect("write selected provider");
+        fs::write(
+            &competing,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then exit 1; fi\ntouch '{}'\n",
+                competing_effect.display(),
+            ),
+        )
+        .expect("write competing provider");
+        for script in [&selected, &competing] {
+            let mut permissions = fs::metadata(script).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(script, permissions).expect("executable");
+        }
+        let provider = |script: &std::path::Path, apply_enabled| WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve: Some(vec![script.display().to_string(), "resolve".to_string()]),
+                resolve_not_found_exit_codes: vec![1],
+                ensure: Some(vec![script.display().to_string(), "ensure".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+        let mut config = HomeboyConfig::default();
+        config
+            .worktree_providers
+            .insert("selected".to_string(), provider(&selected, true));
+        config
+            .worktree_providers
+            .insert("competing".to_string(), provider(&competing, false));
+        config.settings.insert(
+            WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY.to_string(),
+            serde_json::json!({ "selected": { "finalize": ["finalize"] } }),
+        );
+        let intent = WorktreeProviderCreateIntent {
+            handle: "homeboy@fix-12124".to_string(),
+            repo: "homeboy".to_string(),
+            base: "main".to_string(),
+            head: "fix/12124".to_string(),
+            task_url: "https://github.com/Extra-Chill/homeboy/issues/12124".to_string(),
+        };
+        let lifecycle = WorktreeProviderLifecycleIntent {
+            purpose: "agent_task_cook".to_string(),
+            owner_run_ref: "cook-12124".to_string(),
+            cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+        };
+
+        let provision = provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
+            &intent, &lifecycle, &config,
+        )
+        .expect("selected provider provisions lifecycle worktree");
+
+        assert_eq!(provision.resolution.provider_id, "selected");
+        assert!(selected_effect.exists(), "selected ensure ran");
+        assert!(
+            !competing_effect.exists(),
+            "ineligible provider was not invoked"
+        );
     }
 
     #[cfg(unix)]
