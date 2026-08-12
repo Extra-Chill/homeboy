@@ -240,6 +240,9 @@ fn record_partial_peer_projection(runner_id: &str, reason_code: &'static str, de
         runner_id: Some(runner_id.to_string()),
         reason_code,
         timeout_seconds: 0,
+        elapsed_ms: 0,
+        deadline_ms: 0,
+        follow_up: crate::readonly_probe::runner_status_follow_up(Some(runner_id)),
         detail: format!(
             "{detail}; status is partial. Run `homeboy runner connect {runner_id}` to re-establish and validate the authoritative session."
         ),

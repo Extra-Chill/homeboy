@@ -17,9 +17,11 @@ use crate as extension;
 use homeboy_core::update_check_cache;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 const CACHE_FILENAME: &str = "extension_update_check.json";
 const CHECK_INTERVAL_SECS: u64 = 86400;
+const STARTUP_UPDATE_CHECK_BUDGET: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionUpdateCache {
@@ -95,13 +97,11 @@ pub fn run_startup_check() {
     }
 
     let extension_ids = extension::available_extension_ids();
-    let mut extensions_behind: HashMap<String, usize> = HashMap::new();
-
-    for id in &extension_ids {
-        if let Some(update) = homeboy_core::extension_update_check::check_update_available(id) {
-            extensions_behind.insert(update.extension_id, update.behind_count);
-        }
-    }
+    let extensions_behind = collect_updates_with_budget(
+        &extension_ids,
+        STARTUP_UPDATE_CHECK_BUDGET,
+        homeboy_core::extension_update_check::check_update_available_until,
+    );
 
     write_cache(&ExtensionUpdateCache {
         extensions_behind: extensions_behind.clone(),
@@ -111,6 +111,27 @@ pub fn run_startup_check() {
     if !already_printed && !extensions_behind.is_empty() {
         print_extension_hints(&extensions_behind);
     }
+}
+
+fn collect_updates_with_budget<F>(
+    extension_ids: &[String],
+    budget: Duration,
+    mut check: F,
+) -> HashMap<String, usize>
+where
+    F: FnMut(&str, Instant) -> Option<homeboy_core::extension_update_check::UpdateAvailable>,
+{
+    let deadline = Instant::now() + budget;
+    let mut extensions_behind = HashMap::new();
+    for id in extension_ids {
+        if deadline <= Instant::now() {
+            break;
+        }
+        if let Some(update) = check(id, deadline) {
+            extensions_behind.insert(update.extension_id, update.behind_count);
+        }
+    }
+    extensions_behind
 }
 
 #[cfg(test)]
@@ -154,5 +175,50 @@ mod tests {
         assert_eq!(parsed.extensions_behind.len(), 1);
         assert_eq!(parsed.extensions_behind["wordpress"], 3);
         assert_eq!(parsed.checked_at, 1700000000);
+    }
+
+    #[test]
+    fn startup_budget_skips_probes_after_its_deadline() {
+        let extensions = vec!["one".to_string(), "two".to_string()];
+        let mut calls = 0;
+
+        let updates = collect_updates_with_budget(&extensions, Duration::ZERO, |_, _| {
+            calls += 1;
+            None
+        });
+
+        assert!(updates.is_empty());
+        assert_eq!(calls, 0, "an exhausted startup budget must stay silent");
+    }
+
+    #[test]
+    fn fast_update_probe_keeps_the_startup_path_quiet_and_complete() {
+        let extensions = vec!["one".to_string(), "two".to_string()];
+        let mut calls = Vec::new();
+
+        let updates = collect_updates_with_budget(&extensions, Duration::from_secs(1), |id, _| {
+            calls.push(id.to_string());
+            None
+        });
+
+        assert!(updates.is_empty());
+        assert_eq!(calls, extensions);
+    }
+
+    #[test]
+    fn startup_collection_passes_one_decreasing_deadline_to_each_probe() {
+        let extensions = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        let mut deadlines = Vec::new();
+
+        let updates =
+            collect_updates_with_budget(&extensions, Duration::from_secs(1), |_, deadline| {
+                deadlines.push(deadline);
+                std::thread::sleep(Duration::from_millis(25));
+                None
+            });
+
+        assert!(updates.is_empty());
+        assert_eq!(deadlines.len(), extensions.len());
+        assert!(deadlines.windows(2).all(|pair| pair[0] == pair[1]));
     }
 }

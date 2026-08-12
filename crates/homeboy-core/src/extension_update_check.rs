@@ -3,7 +3,7 @@
 //! core paths/git/error + the core extension store, no extension behavior.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::extension_store::{is_extension_linked, load_extension};
 use crate::git;
@@ -22,6 +22,28 @@ pub fn is_git_url(source: &str) -> bool {
 /// Runs `git fetch` then checks if HEAD is behind the remote tracking branch.
 /// Returns None for linked extensions or if check fails.
 pub fn check_update_available(extension_id: &str) -> Option<UpdateAvailable> {
+    check_update_available_with_timeout(extension_id, EXTENSION_UPDATE_PROBE_TIMEOUT)
+}
+
+/// The startup update check is advisory, but it runs before every normal CLI
+/// command. Keep each extension probe bounded so an unreachable Git transport
+/// or credential helper cannot withhold unrelated command output.
+pub const EXTENSION_UPDATE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn check_update_available_with_timeout(
+    extension_id: &str,
+    timeout: Duration,
+) -> Option<UpdateAvailable> {
+    check_update_available_until(extension_id, Instant::now() + timeout)
+}
+
+/// Probe one extension only until the caller-owned startup deadline. The fetch
+/// and rev-list phases share that deadline rather than each receiving a full
+/// timeout.
+pub fn check_update_available_until(
+    extension_id: &str,
+    deadline: Instant,
+) -> Option<UpdateAvailable> {
     let extension_dir = paths::extension(extension_id).ok()?;
     if !extension_dir.exists() || is_extension_linked(extension_id) {
         return None;
@@ -32,25 +54,17 @@ pub fn check_update_available(extension_id: &str) -> Option<UpdateAvailable> {
         return None;
     }
 
-    // Fetch latest (best-effort, short timeout)
-    Command::new("git")
-        .args(["fetch", "--quiet"])
-        .current_dir(&extension_dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .ok()?;
-
-    // Check how many commits we're behind
-    let output = Command::new("git")
-        .args(["rev-list", "HEAD..@{u}", "--count"])
-        .current_dir(&extension_dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
-    let count_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let count_str = run_update_phases_with_deadline(deadline, |args, timeout| {
+        git::run_git_with_env_timeout(
+            &extension_dir,
+            args,
+            "extension startup update check",
+            &[],
+            timeout,
+        )
+        .ok()
+    })?;
+    let count_str = count_str.trim();
     let behind_count: usize = count_str.parse().ok()?;
 
     if behind_count == 0 {
@@ -67,11 +81,88 @@ pub fn check_update_available(extension_id: &str) -> Option<UpdateAvailable> {
         behind_count,
     })
 }
+
+fn run_update_phases_with_deadline<F>(deadline: Instant, mut run: F) -> Option<String>
+where
+    F: FnMut(&[&str], Duration) -> Option<String>,
+{
+    run(
+        &["fetch", "--quiet"],
+        deadline.checked_duration_since(Instant::now())?,
+    )?;
+    run(
+        &["rev-list", "HEAD..@{u}", "--count"],
+        deadline.checked_duration_since(Instant::now())?,
+    )
+}
 #[derive(Debug, Clone)]
 pub struct UpdateAvailable {
     pub extension_id: String,
     pub installed_version: String,
     pub behind_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support;
+    use std::process::Command;
+    use std::time::Instant;
+
+    #[test]
+    fn startup_update_probe_bounds_a_hung_extension_fetch() {
+        test_support::with_isolated_home(|home| {
+            let extension = paths::extension("slow").expect("extension path");
+            std::fs::create_dir_all(&extension).expect("extension directory");
+            git(&extension, &["init", "-q"]);
+            git(&extension, &["config", "protocol.ext.allow", "always"]);
+            git(&extension, &["remote", "add", "origin", "ext::sleep 10"]);
+
+            let started = Instant::now();
+            let result = check_update_available_with_timeout("slow", Duration::from_millis(50));
+
+            assert!(result.is_none());
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "startup extension update probe exceeded its deadline in {}",
+                home.path().display()
+            );
+        });
+    }
+
+    #[test]
+    fn update_phases_share_one_deadline() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut timeouts = Vec::new();
+
+        let result = run_update_phases_with_deadline(deadline, |args, timeout| {
+            timeouts.push((args[0].to_string(), timeout));
+            std::thread::sleep(Duration::from_millis(20));
+            Some(if args[0] == "rev-list" {
+                "0".to_string()
+            } else {
+                String::new()
+            })
+        });
+
+        assert!(result.is_some());
+        assert_eq!(timeouts.len(), 2);
+        assert!(timeouts[1].1 < timeouts[0].1);
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 pub fn read_source_revision(extension_id: &str) -> Option<String> {
@@ -237,6 +328,7 @@ fn source_metadata_file(extension_dir: &std::path::Path, kind: &str) -> String {
 #[cfg(test)]
 mod cleanliness_tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn modified_and_untracked_status_lines_yield_paths() {

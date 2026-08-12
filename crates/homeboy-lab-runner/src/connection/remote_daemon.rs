@@ -57,10 +57,12 @@ pub(super) fn bounded_remote_homeboy_version(
 ) -> std::result::Result<String, String> {
     let command = remote_homeboy_version_command(homeboy);
     let timeout = crate::readonly_probe::readonly_probe_timeout();
+    let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
     crate::readonly_probe::record_probe_outcome(
         "runner_homeboy_version",
         runner_id,
+        started,
         timeout,
         &output,
     );
@@ -134,10 +136,12 @@ pub(super) fn bounded_remote_homeboy_identity(
 ) -> std::result::Result<RemoteHomeboyIdentity, String> {
     let command = remote_homeboy_identity_command(homeboy);
     let timeout = crate::readonly_probe::readonly_probe_timeout();
+    let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
     let degraded = crate::readonly_probe::record_probe_outcome(
         "runner_homeboy_identity",
         runner_id,
+        started,
         timeout,
         &output,
     );
@@ -1309,11 +1313,13 @@ fn remote_daemon_status_with_timeout(
     runner_id: Option<&str>,
 ) -> std::result::Result<RemoteDaemonStatus, String> {
     let command = format!("{} daemon status", shell::quote_arg(homeboy));
+    let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
     if let Some(runner_id) = runner_id {
         crate::readonly_probe::record_probe_outcome(
             "runner_remote_daemon_status",
             Some(runner_id),
+            started,
             timeout,
             &output,
         );
@@ -1482,10 +1488,12 @@ pub(super) fn probe_remote_daemon_endpoint(
         shell::quote_arg(&format!("http://{}", daemon.address))
     );
     let timeout = crate::readonly_probe::readonly_probe_timeout();
+    let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
     crate::readonly_probe::record_probe_outcome(
         "runner_remote_endpoint_identity",
         runner_id,
+        started,
         timeout,
         &output,
     );
@@ -1528,10 +1536,12 @@ pub(super) fn probe_remote_daemon_endpoint(
         "curl --fail --silent --show-error --max-time 2 {}/jobs",
         shell::quote_arg(&format!("http://{}", daemon.address))
     );
+    let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
     crate::readonly_probe::record_probe_outcome(
         "runner_remote_typed_jobs",
         runner_id,
+        started,
         timeout,
         &output,
     );
