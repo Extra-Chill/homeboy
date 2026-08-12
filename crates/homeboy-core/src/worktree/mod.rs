@@ -29,10 +29,11 @@ pub use types::{
     WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence, WorktreeInventoryOptions,
     WorktreeInventoryOutput, WorktreeInventoryRecord, WorktreeListOutput,
     WorktreeLivenessAuthority, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
-    WorktreeQueueCreateRow, WorktreeQueueCreateStatus, WorktreeQueueLockHolder,
-    WorktreeReconciliationAction, WorktreeReconciliationAuthority, WorktreeReconciliationResult,
-    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
-    TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
+    WorktreeQueueCreateRequest, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
+    WorktreeQueueLockHolder, WorktreeReconciliationAction, WorktreeReconciliationAuthority,
+    WorktreeReconciliationResult, WorktreeRemoveOptions, WorktreeRemoveOutput,
+    WorktreeSafetyReport, WorktreeStatusOutput, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
+    TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
 /// The managed handle a repo and branch pair resolves to. Creation slugifies the
@@ -485,16 +486,16 @@ use store_ops::*;
 
 pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueueCreateOutput> {
     let mut rows = Vec::new();
-    let total = options.branches.len();
-    for (index, branch) in options.branches.iter().enumerate() {
-        let command = worktree_create_command(&options, branch);
-        let handle = worktree_handle(&options.repo, branch);
+    let total = options.requests.len();
+    for (index, request) in options.requests.iter().enumerate() {
+        let command = worktree_create_command(&options, request);
+        let handle = worktree_handle(&options.repo, &request.branch);
 
         if options.dry_run {
-            match planned_create_path(&options.repo, branch, &options.from) {
+            match planned_create_path(&options.repo, &request.branch, &options.from) {
                 Ok(path) => {
                     let mut row = queue_row(
-                        branch,
+                        &request.branch,
                         handle,
                         command,
                         WorktreeQueueCreateStatus::WouldCreate,
@@ -503,8 +504,12 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     rows.push(row);
                 }
                 Err(error) => {
-                    let mut row =
-                        queue_row(branch, handle, command, WorktreeQueueCreateStatus::Failed);
+                    let mut row = queue_row(
+                        &request.branch,
+                        handle,
+                        command,
+                        WorktreeQueueCreateStatus::Failed,
+                    );
                     row.error = Some(error.message);
                     rows.push(row);
                 }
@@ -512,29 +517,57 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
             continue;
         }
 
-        match create(WorktreeCreateOptions {
-            component_id: options.repo.clone(),
-            branch: branch.clone(),
-            from: Some(options.from.clone()),
-            task_url: options.task_url.clone(),
-            run_id: None,
-            cleanup_policy: None,
-        }) {
-            Ok(created) => {
-                let mut row =
-                    queue_row(branch, handle, command, WorktreeQueueCreateStatus::Created);
-                row.path = Some(created.record.worktree_path);
+        let created = if let Some(lifecycle) = &request.provider_lifecycle {
+            let task_url = request.task_url.clone().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "task_url",
+                    "provider-owned queue worktree requires task_url",
+                    Some(handle.clone()),
+                    None,
+                )
+            })?;
+            crate::worktree_providers::provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
+                &crate::worktree_providers::WorktreeProviderCreateIntent {
+                    handle: handle.clone(), repo: options.repo.clone(), base: options.from.clone(),
+                    head: request.branch.clone(), task_url,
+                }, lifecycle, &crate::defaults::load_config(),
+            ).map(|provision| provision.resolution.worktree.path)
+        } else {
+            create(WorktreeCreateOptions {
+                component_id: options.repo.clone(),
+                branch: request.branch.clone(),
+                from: Some(options.from.clone()),
+                task_url: request.task_url.clone(),
+                run_id: request.run_id.clone(),
+                cleanup_policy: None,
+            })
+            .map(|created| created.record.worktree_path)
+        };
+        match created {
+            Ok(path) => {
+                let mut row = queue_row(
+                    &request.branch,
+                    handle,
+                    command,
+                    WorktreeQueueCreateStatus::Created,
+                );
+                row.path = Some(path);
                 rows.push(row);
             }
             Err(error) => {
-                let mut row = queue_row(branch, handle, command, WorktreeQueueCreateStatus::Failed);
+                let mut row = queue_row(
+                    &request.branch,
+                    handle,
+                    command,
+                    WorktreeQueueCreateStatus::Failed,
+                );
                 row.error = Some(error.message);
                 rows.push(row);
-                for queued_branch in options.branches.iter().take(total).skip(index + 1) {
+                for queued_request in options.requests.iter().take(total).skip(index + 1) {
                     rows.push(queue_row(
-                        queued_branch,
-                        worktree_handle(&options.repo, queued_branch),
-                        worktree_create_command(&options, queued_branch),
+                        &queued_request.branch,
+                        worktree_handle(&options.repo, &queued_request.branch),
+                        worktree_create_command(&options, queued_request),
                         WorktreeQueueCreateStatus::Queued,
                     ));
                 }
