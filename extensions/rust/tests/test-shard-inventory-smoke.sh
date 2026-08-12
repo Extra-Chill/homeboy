@@ -25,9 +25,10 @@ PY
 
 PROJECT_DIR="$WORK_DIR/project"
 BIN_DIR="$WORK_DIR/bin"
-mkdir -p "$PROJECT_DIR/src" "$PROJECT_DIR/member/src" "$BIN_DIR" "$WORK_DIR/annotations"
+mkdir -p "$PROJECT_DIR/src/bin" "$PROJECT_DIR/member/src" "$BIN_DIR" "$WORK_DIR/annotations"
 printf '[package]\nname = "shard-smoke"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\nmembers = ["member"]\n' > "$PROJECT_DIR/Cargo.toml"
 printf 'pub fn fixture() {}\n' > "$PROJECT_DIR/src/lib.rs"
+printf 'fn main() {}\n' > "$PROJECT_DIR/src/bin/current_bin.rs"
 printf '[package]\nname = "member-smoke"\nversion = "0.1.0"\nedition = "2021"\n' > "$PROJECT_DIR/member/Cargo.toml"
 printf '#[cfg(test)]\nmod tests { #[test] fn member_works() {} }\n' > "$PROJECT_DIR/member/src/lib.rs"
 
@@ -59,6 +60,11 @@ cat > "$BIN_DIR/test-rlib" <<'EOF'
 [[ " $* " == *' --ignored '* ]] && exit 0
 printf '%s\n' 'rlib::works: test'
 EOF
+cat > "$BIN_DIR/test-bin" <<'EOF'
+#!/usr/bin/env bash
+[[ " $* " == *' --ignored '* ]] && exit 0
+printf '%s\n' 'bin::works: test'
+EOF
 cat > "$BIN_DIR/bench-audit-self" <<'EOF'
 #!/usr/bin/env bash
 if [ -n "${HOMEBOY_BENCH_LIST_LOG:-}" ]; then
@@ -68,7 +74,7 @@ printf '%s\n' "thread 'main' panicked at src/bin/bench-audit-self.rs:44:40:" >&2
 printf '%s\n' 'CARGO_MANIFEST_DIR not set (run via cargo): NotPresent' >&2
 exit 101
 EOF
-chmod +x "$BIN_DIR/test-lib" "$BIN_DIR/test-api" "$BIN_DIR/test-member" "$BIN_DIR/test-proc-macro" "$BIN_DIR/test-rlib" "$BIN_DIR/bench-audit-self"
+chmod +x "$BIN_DIR/test-lib" "$BIN_DIR/test-api" "$BIN_DIR/test-member" "$BIN_DIR/test-proc-macro" "$BIN_DIR/test-rlib" "$BIN_DIR/test-bin" "$BIN_DIR/bench-audit-self"
 
 cat > "$BIN_DIR/cargo" <<'EOF'
 #!/usr/bin/env bash
@@ -76,7 +82,7 @@ set -euo pipefail
 if [ "${1:-}" = '--version' ]; then printf 'cargo 1.80.0\n'; exit 0; fi
 if [ "${1:-}" = 'nextest' ] && [ "${2:-}" = '--version' ]; then printf 'cargo-nextest 0.9.0\n'; exit 0; fi
 if [ "${1:-}" = 'metadata' ]; then
-  printf '{"packages":[{"id":"shard-smoke 0.1.0 (path+file:///fixture)","name":"shard-smoke"},{"id":"member-smoke 0.1.0 (path+file:///fixture/member)","name":"member-smoke"}],"workspace_root":"%s"}\n' "$PWD"
+  printf '{"packages":[{"id":"shard-smoke 0.1.0 (path+file:///fixture)","name":"shard-smoke","manifest_path":"%s/Cargo.toml","targets":[{"name":"shard_smoke","kind":["lib"],"src_path":"%s/src/lib.rs"},{"name":"api","kind":["test"],"src_path":"%s/tests/api.rs"},{"name":"current_bin","kind":["bin"],"src_path":"%s/src/bin/current_bin.rs"}]},{"id":"member-smoke 0.1.0 (path+file:///fixture/member)","name":"member-smoke","manifest_path":"%s/member/Cargo.toml","targets":[{"name":"member_smoke","kind":["lib"],"src_path":"%s/member/src/lib.rs"}]}],"workspace_root":"%s"}\n' "$PWD" "$PWD" "$PWD" "$PWD" "$PWD" "$PWD" "$PWD"
   exit 0
 fi
 if [ "${1:-}" = 'nextest' ] && [ "${2:-}" = 'list' ]; then
@@ -131,6 +137,9 @@ if [[ " $* " == *' --workspace '* && " $* " == *' --no-run '* ]]; then
   printf '{"reason":"compiler-artifact","package_id":"member-smoke 0.1.0 (path+file:///fixture/member)","target":{"name":"member_smoke","kind":["lib"]},"profile":{"test":true},"executable":"%s/test-member"}\n' "$(dirname "$0")"
   printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"macros","kind":["proc-macro"]},"profile":{"test":true},"executable":"%s/test-proc-macro"}\n' "$(dirname "$0")"
   printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"rlib_fixture","kind":["rlib"]},"profile":{"test":true},"executable":"%s/test-rlib"}\n' "$(dirname "$0")"
+  if [ "${HOMEBOY_INCLUDE_CURRENT_BIN:-}" = 1 ]; then
+    printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"current_bin","kind":["bin"]},"profile":{"test":true},"executable":"%s/test-bin"}\n' "$(dirname "$0")"
+  fi
   printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"bench-audit-self","kind":["bin"]},"profile":{"test":false},"executable":"%s/bench-audit-self"}\n' "$(dirname "$0")"
   exit 0
 fi
@@ -195,6 +204,22 @@ fi
 printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n'
 EOF
 chmod +x "$BIN_DIR/cargo"
+
+# #12219: producer candidates can retain a prior lib target shape when the
+# current source is an executable target. Rebind by the source path and retain
+# the exact current inventory identity instead of widening to every test.
+printf '%s\n' '{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"shard-smoke","target_kind":"lib","target":"prior_lib_target","module":null,"path":"src/bin/current_bin.rs"}]}' > "$WORK_DIR/renamed-target-selection.json"
+HOMEBOY_INCLUDE_CURRENT_BIN=1 PATH="$BIN_DIR:$PATH" python3 "$EXTENSION_DIR/scripts/test-shard-inventory.py" --project "$PROJECT_DIR" --runner cargo --output "$WORK_DIR/renamed-target-inventory.json" --changed-selection-file "$WORK_DIR/renamed-target-selection.json" --inventory-only
+python3 - "$WORK_DIR/renamed-target-inventory.json" <<'PY'
+import json
+import sys
+
+inventory = json.load(open(sys.argv[1]))
+assert "fallback_reason" not in inventory, inventory
+assert [test["id"] for test in inventory["tests"]] == [
+    "shard-smoke::bin::current_bin::bin::works",
+], inventory
+PY
 
 cat > "$WORK_DIR/runner-prelude.sh" <<'EOF'
 homeboy_runner_init() {
