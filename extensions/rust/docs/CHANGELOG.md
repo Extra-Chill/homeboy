@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.34.2] - 2026-08-12
+
+### Changed
+- Cook pre-existing candidate baseline
+
 ## [1.34.1] - 2026-08-12
 
 ### Fixed
