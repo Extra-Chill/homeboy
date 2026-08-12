@@ -30,6 +30,7 @@ mod maintenance;
 mod manifest;
 mod manifest_config;
 mod manifest_sidecar;
+pub mod recipe_run;
 mod refactor_protocol;
 // Manifest store relocated to homeboy_core::extension_store (core-level; operates on
 // the contract ExtensionManifest type). Re-exported here for path stability.
@@ -135,6 +136,10 @@ pub use manifest::{
     TraceBrowserSummaryAliasConfig, TraceConfig, VersionPatternConfig,
     DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA, EXTENSION_CONTRACT_PRODUCER_SCHEMA,
     EXTENSION_MATERIALIZATION_SOURCE_SCHEMA, NOTIFICATION_TRANSPORT_SCHEMA,
+};
+pub use recipe_run::{
+    recipe_run_providers, resolve_recipe_run_provider, RecipeRunProviderDescriptor,
+    RecipeRunRequest,
 };
 pub use refactor_protocol::{
     run_refactor_script, run_refactor_script_result, AdjustedItem, ParsedItem,
