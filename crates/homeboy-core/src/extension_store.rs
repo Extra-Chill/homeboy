@@ -2,6 +2,8 @@ use crate::config;
 use crate::error::{Error, ErrorCode, Result};
 use crate::output::MergeOutput;
 use crate::paths;
+use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use homeboy_extension_contract::ExtensionManifest;
@@ -60,13 +62,86 @@ pub fn discover_extensions() -> Vec<DiscoveredExtension> {
         return Vec::new();
     };
 
-    let mut extensions = entries
+    let entries = entries
         .flatten()
-        .filter_map(|entry| discover_extension_entry(entry.path()))
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    let shared_asset_roots = declared_shared_asset_roots(&entries);
+    let mut extensions = entries
+        .into_iter()
+        .filter(|path| {
+            !path
+                .file_name()
+                .is_some_and(|name| shared_asset_roots.contains(name))
+        })
+        .filter_map(discover_extension_entry)
         .collect::<Vec<_>>();
     extensions
         .sort_by(|left, right| discovered_extension_id(left).cmp(discovered_extension_id(right)));
     extensions
+}
+
+#[derive(Deserialize)]
+struct ExtensionRootManifest {
+    #[serde(default)]
+    shared_assets: Vec<SharedAssetDeclaration>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SharedAssetDeclaration {
+    Path(String),
+    Object { path: String },
+}
+
+impl SharedAssetDeclaration {
+    fn path(self) -> String {
+        match self {
+            Self::Path(path) | Self::Object { path } => path,
+        }
+    }
+}
+
+/// Shared assets live beside installed extensions but are declared by a source
+/// root, not extension manifests. Copied installs retain that declaration in
+/// their private metadata; linked installs retain it at their resolved source.
+fn declared_shared_asset_roots(entries: &[PathBuf]) -> BTreeSet<std::ffi::OsString> {
+    entries
+        .iter()
+        .flat_map(|entry| shared_asset_manifest_paths(entry))
+        .flat_map(|manifest| shared_asset_roots_from_manifest(&manifest))
+        .collect()
+}
+
+fn shared_asset_manifest_paths(entry: &Path) -> Vec<PathBuf> {
+    let mut manifests = vec![entry.join(".homeboy-extension-root.json")];
+    if std::fs::symlink_metadata(entry).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        if let Ok(resolved) = std::fs::canonicalize(entry) {
+            if let Some(source_root) = resolved.parent() {
+                manifests.push(source_root.join("homeboy-extension-root.json"));
+            }
+        }
+    }
+    manifests
+}
+
+fn shared_asset_roots_from_manifest(manifest: &Path) -> Vec<std::ffi::OsString> {
+    std::fs::read_to_string(manifest)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<ExtensionRootManifest>(&raw).ok())
+        .into_iter()
+        .flat_map(|manifest| manifest.shared_assets)
+        .filter_map(|asset| {
+            let asset = asset.path();
+            let path = Path::new(&asset);
+            path.components()
+                .next()
+                .and_then(|component| match component {
+                    std::path::Component::Normal(root) => Some(root.to_os_string()),
+                    _ => None,
+                })
+        })
+        .collect()
 }
 
 fn discover_extension_entry(path: PathBuf) -> Option<DiscoveredExtension> {
@@ -352,6 +427,61 @@ mod tests {
     }
 
     #[test]
+    fn discovery_skips_shared_asset_roots_declared_by_a_copied_extension() {
+        crate::test_support::with_isolated_home(|_| {
+            let extensions_dir = paths::extensions().unwrap();
+            let extension_dir = extensions_dir.join("fixture");
+            std::fs::create_dir_all(&extension_dir).unwrap();
+            std::fs::write(
+                extension_dir.join("fixture.json"),
+                r#"{"name":"Fixture","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                extension_dir.join(".homeboy-extension-root.json"),
+                r#"{"shared_assets":["agent-runtimes",{"path":"dependency-adapters"},"scripts/lib"]}"#,
+            )
+            .unwrap();
+            for root in ["agent-runtimes", "dependency-adapters", "scripts"] {
+                std::fs::create_dir_all(extensions_dir.join(root)).unwrap();
+            }
+
+            let discovered = discover_extensions();
+            assert_eq!(discovered.len(), 1);
+            let DiscoveredExtension::Valid(extension) = &discovered[0] else {
+                panic!("fixture extension must be discovered");
+            };
+            assert_eq!(extension.id, "fixture");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_skips_shared_asset_roots_declared_by_a_linked_extension() {
+        crate::test_support::with_isolated_home(|home| {
+            let source_root = home.path().join("source");
+            let source = source_root.join("fixture");
+            std::fs::create_dir_all(&source).unwrap();
+            std::fs::write(
+                source.join("fixture.json"),
+                r#"{"name":"Fixture","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                source_root.join("homeboy-extension-root.json"),
+                r#"{"shared_assets":["scripts/lib"]}"#,
+            )
+            .unwrap();
+            let extensions_dir = paths::extensions().unwrap();
+            std::fs::create_dir_all(&extensions_dir).unwrap();
+            std::os::unix::fs::symlink(&source, extensions_dir.join("fixture")).unwrap();
+            std::fs::create_dir_all(extensions_dir.join("scripts")).unwrap();
+
+            assert_eq!(discover_extensions().len(), 1);
+        });
+    }
+
+    #[test]
     fn discovery_reports_deserialize_incompatible_notification_transport() {
         crate::test_support::with_isolated_home(|_| {
             let extension_dir = paths::extensions().unwrap().join("deserialize");
@@ -506,6 +636,27 @@ mod tests {
             assert_eq!(broken.len(), 1);
             assert_eq!(broken[0].id, "sample-runtime");
             assert_eq!(broken[0].target, target);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_reports_undeclared_broken_extension_links() {
+        crate::test_support::with_isolated_home(|_| {
+            let extensions_dir = paths::extensions().unwrap();
+            std::fs::create_dir_all(&extensions_dir).unwrap();
+            std::os::unix::fs::symlink(
+                extensions_dir.join("missing-extension"),
+                extensions_dir.join("broken-extension"),
+            )
+            .unwrap();
+
+            let discovered = discover_extensions();
+            let DiscoveredExtension::Invalid(failure) = &discovered[0] else {
+                panic!("broken extension link must be reported");
+            };
+            assert_eq!(failure.id, "broken-extension");
+            assert_eq!(failure.category, "target_missing");
         });
     }
 }
