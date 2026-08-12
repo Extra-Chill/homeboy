@@ -332,7 +332,8 @@ pub use session::{
     RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner, RunnerMutationArtifacts,
     RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerSession, RunnerSessionRole,
     RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
-    RunnerTunnelMode, RunnerUnresolvedJobOwner, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
+    RunnerTunnelMode, RunnerTunnelProcessStartIdentity, RunnerUnresolvedJobOwner,
+    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};

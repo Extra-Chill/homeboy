@@ -826,6 +826,33 @@ pub(super) fn authoritative_status_for_preflight(
             None,
         ));
     }
+    let tunnel_pid = session.tunnel_pid.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "verified runner connect has no tunnel PID",
+            Some(connect_authority.runner_id.clone()),
+            None,
+        )
+    })?;
+    let tunnel_identity = session
+        .tunnel_process_start_identity
+        .as_ref()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner",
+                "verified runner connect has no tunnel process start identity",
+                Some(connect_authority.runner_id.clone()),
+                None,
+            )
+        })?;
+    if !crate::connection::tunnel_process_is_owned(tunnel_pid, tunnel_identity) {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "verified runner tunnel is no longer owned; reconnect before admission",
+            Some(connect_authority.runner_id.clone()),
+            None,
+        ));
+    }
     let local_url = verified_loopback_local_url(session, connect_authority)?;
     let health =
         crate::connection::probe_verified_direct_daemon_health(&local_url).map_err(|error| {

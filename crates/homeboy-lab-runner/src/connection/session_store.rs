@@ -33,12 +33,20 @@ fn session_is_live_with_probe(
         return false;
     }
     if let Some(pid) = session.tunnel_pid {
-        if !homeboy_core::process::pid_is_running(pid) {
+        if !tunnel_process_is_owned(
+            pid,
+            session.tunnel_process_start_identity.as_ref(),
+            homeboy_core::process::process_start_identity,
+        ) {
             return false;
         }
     }
     if let Some(proxy_forward) = &session.proxy_forward {
-        if !homeboy_core::process::pid_is_running(proxy_forward.tunnel_pid) {
+        if !tunnel_process_is_owned(
+            proxy_forward.tunnel_pid,
+            proxy_forward.tunnel_process_start_identity.as_ref(),
+            homeboy_core::process::process_start_identity,
+        ) {
             return false;
         }
     }
@@ -65,6 +73,37 @@ fn session_is_live_with_probe(
         }
     }
     false
+}
+
+/// A persisted start identity upgrades PID liveness to exact process ownership.
+/// Legacy sessions without one retain their existing PID-only compatibility.
+pub(crate) fn tunnel_process_is_owned<Inspect>(
+    pid: u32,
+    expected: Option<&RunnerTunnelProcessStartIdentity>,
+    inspect: Inspect,
+) -> bool
+where
+    Inspect:
+        Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
+{
+    let Some(expected) = expected else {
+        return homeboy_core::process::pid_is_running(pid);
+    };
+    inspect(pid).ok().flatten().is_some_and(|actual| {
+        let actual = match actual {
+            homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+            }
+            homeboy_core::process::ProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            } => RunnerTunnelProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            },
+        };
+        &actual == expected
+    })
 }
 
 pub(super) fn reverse_controller_session_is_live(session: &RunnerSession) -> bool {
@@ -851,6 +890,38 @@ mod tests {
             &session,
             Duration::from_millis(100)
         ));
+    }
+
+    #[test]
+    fn recorded_tunnel_identity_rejects_a_reused_pid() {
+        let expected = RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds: 1,
+            start_microseconds: 2,
+        };
+        let reused = homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds: 3,
+            start_microseconds: 4,
+        };
+
+        assert!(!tunnel_process_is_owned(42, Some(&expected), |_| Ok(Some(
+            reused.clone()
+        ))));
+    }
+
+    #[test]
+    fn recorded_tunnel_identity_accepts_the_same_process_instance() {
+        let expected = RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds: 1,
+            start_microseconds: 2,
+        };
+        let actual = homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds: 1,
+            start_microseconds: 2,
+        };
+
+        assert!(tunnel_process_is_owned(42, Some(&expected), |_| Ok(Some(
+            actual.clone()
+        ))));
     }
 
     #[test]

@@ -5,7 +5,10 @@ use super::super::lab_selection::{
     LabRunnerSelection,
 };
 use super::*;
-use crate::{RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode};
+use crate::{
+    RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
+    RunnerTunnelProcessStartIdentity,
+};
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy_core::{Error, ErrorCode};
 
@@ -150,7 +153,8 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         Some(&format!("http://{address}")),
     ));
     let session = stale_projection.session.as_mut().expect("direct session");
-    session.tunnel_pid = Some(22420);
+    session.tunnel_pid = Some(std::process::id());
+    session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
     session.local_port = Some(address.port());
     session.remote_daemon_pid = Some(1467759);
     session.remote_daemon_lease_id = Some("lease-fresh".to_string());
@@ -179,7 +183,7 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
     );
     let mut connect = connected_direct_connect_report("lab");
     connect.local_url = Some(format!("http://{address}"));
-    connect.tunnel_pid = Some(22420);
+    connect.tunnel_pid = Some(std::process::id());
     connect.remote_daemon_pid = Some(1467759);
 
     let selection = LabRunnerSelection {
@@ -209,6 +213,47 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
 }
 
 #[test]
+fn stale_disconnected_projection_rejects_reused_tunnel_identity_before_health() {
+    let mut status = unreachable_health_status("lab", false);
+    let session = status.session.as_mut().expect("session");
+    session.local_url = Some("http://127.0.0.1:55626".to_string());
+    session.local_port = Some(55626);
+    session.tunnel_pid = Some(std::process::id());
+    session.tunnel_process_start_identity = Some(RunnerTunnelProcessStartIdentity::Macos {
+        start_seconds: 1,
+        start_microseconds: 2,
+    });
+    session.remote_daemon_pid = Some(1467759);
+    session.remote_daemon_lease_id = Some("lease-fresh".to_string());
+    status.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        restartable: false,
+        lease_id: Some("lease-fresh".to_string()),
+        pid: Some(1467759),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    let mut connect = connected_direct_connect_report("lab");
+    connect.local_url = Some("http://127.0.0.1:55626".to_string());
+    connect.tunnel_pid = Some(std::process::id());
+    connect.remote_daemon_pid = Some(1467759);
+
+    let error = authoritative_status_for_preflight(status, Some(&connect))
+        .expect_err("reused tunnel identity is rejected before endpoint probing");
+
+    assert!(error.message.contains("tunnel is no longer owned"));
+}
+
+#[test]
 fn stale_disconnected_projection_rejects_mismatched_typed_health() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -233,7 +278,8 @@ fn stale_disconnected_projection_rejects_mismatched_typed_health() {
     ));
     let session = status.session.as_mut().expect("session");
     session.local_port = Some(address.port());
-    session.tunnel_pid = Some(22420);
+    session.tunnel_pid = Some(std::process::id());
+    session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
     session.remote_daemon_pid = Some(1467759);
     session.remote_daemon_lease_id = Some("lease-fresh".to_string());
     status.daemon_freshness = Some(DaemonFreshnessReport {
@@ -255,7 +301,7 @@ fn stale_disconnected_projection_rejects_mismatched_typed_health() {
     });
     let mut connect = connected_direct_connect_report("lab");
     connect.local_url = Some(format!("http://{address}"));
-    connect.tunnel_pid = Some(22420);
+    connect.tunnel_pid = Some(std::process::id());
     connect.remote_daemon_pid = Some(1467759);
     let selection = LabRunnerSelection {
         runner_id: "lab".to_string(),
@@ -312,7 +358,8 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
         ));
         let session = status.session.as_mut().expect("session");
         session.local_port = Some(address.port());
-        session.tunnel_pid = Some(22420);
+        session.tunnel_pid = Some(std::process::id());
+        session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
         session.remote_daemon_pid = Some(1467759);
         session.remote_daemon_lease_id = Some("lease-fresh".to_string());
         status.daemon_freshness = Some(DaemonFreshnessReport {
@@ -334,7 +381,7 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
         });
         let mut connect = connected_direct_connect_report("lab");
         connect.local_url = Some(format!("http://{address}"));
-        connect.tunnel_pid = Some(22420);
+        connect.tunnel_pid = Some(std::process::id());
         connect.remote_daemon_pid = Some(1467759);
         let selection = LabRunnerSelection {
             runner_id: "lab".to_string(),
@@ -1234,6 +1281,24 @@ fn connected_direct_connect_report(runner_id: &str) -> RunnerConnectReport {
         failure_kind: None,
         failure_message: None,
         failure_evidence: None,
+    }
+}
+
+fn current_process_tunnel_identity() -> RunnerTunnelProcessStartIdentity {
+    match homeboy_core::process::process_start_identity(std::process::id())
+        .expect("inspect current process")
+        .expect("current process is live")
+    {
+        homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+            RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+        }
+        homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        } => RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        },
     }
 }
 

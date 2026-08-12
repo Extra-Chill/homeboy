@@ -2739,6 +2739,17 @@ pub(crate) fn probe_verified_direct_daemon_health(
     )
 }
 
+pub(crate) fn tunnel_process_is_owned(
+    pid: u32,
+    identity: &RunnerTunnelProcessStartIdentity,
+) -> bool {
+    session_store::tunnel_process_is_owned(
+        pid,
+        Some(identity),
+        homeboy_core::process::process_start_identity,
+    )
+}
+
 fn runner_jobs_with_client(
     runner_id: &str,
     session: &RunnerSession,
