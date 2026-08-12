@@ -488,6 +488,18 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
             .args([
                 "-C",
                 source.to_str().expect("source path"),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Extra-Chill/homeboy.git",
+            ])
+            .status()
+            .expect("configure source remote");
+        assert!(status.success());
+        let status = Command::new("git")
+            .args([
+                "-C",
+                source.to_str().expect("source path"),
                 "worktree",
                 "add",
                 "-b",
@@ -792,16 +804,29 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 source.to_str().expect("source path"),
                 "fetch",
                 "origin",
-                "main",
             ])
             .status()
             .expect("fetch source base");
+        assert!(status.success());
+        let status = Command::new("git")
+            .args([
+                "-C",
+                source.to_str().expect("source path"),
+                "worktree",
+                "add",
+                "-b",
+                "fixture-promoted",
+                target.to_str().expect("target path"),
+                "main",
+            ])
+            .status()
+            .expect("create declared target worktree");
         assert!(status.success());
         let provider = temp.path().join("worktree-provider.sh");
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\nset -eu\nif [ \"$1\" = resolve ]; then\n  if [ -d '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@promoted\",\"path\":\"{}\",\"branch\":\"fixture-promoted\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  git -C '{}' worktree add -b \"$5\" '{}' \"$4\" >/dev/null\nfi\n",
+                "#!/bin/sh\nset -eu\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}/.git' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@promoted\",\"path\":\"{}\",\"branch\":\"fixture-promoted\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  git -C '{}' worktree add -b \"$5\" '{}' \"$4\" >/dev/null\nfi\n",
                 target.display(),
                 target.display(),
                 source.display(),
@@ -881,7 +906,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         .expect("write promotion provider");
 
         let executor = CommittingExecutor {
-            workspace: source.clone(),
+            workspace: target.clone(),
         };
         let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (value, exit_code) = run_cook_with_executor_and_dispatcher(
@@ -889,7 +914,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 dispatch: DispatchArgs {
                     prompt: Some("commit a change".to_string()),
                     tasks: Vec::new(),
-                    cwd: Some(source.display().to_string()),
+                    cwd: Some(target.display().to_string()),
                     workspace: None,
                     repo: Some("fixture-component".to_string()),
                     task_url: Some(
@@ -921,7 +946,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 attempt_run_id: None,
                 attempt_plan: None,
                 goal: None,
-                to_worktree: Some("fixture@promoted".to_string()),
+                to_worktree: Some(target.display().to_string()),
                 provider_command: None,
                 provider_argv: vec!["sh".to_string(), provider.display().to_string()],
                 gates: VerifyGateArgs {
@@ -984,7 +1009,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         let lifecycle = lifecycle_status(attempt_run_id).expect("local cook lifecycle");
         assert_eq!(
             lifecycle.metadata["worktree_provision"]["action"],
-            "ensured"
+            "existing"
         );
         assert_eq!(lifecycle.lifecycle.provider_runtime.len(), 1);
         assert_eq!(
@@ -1026,7 +1051,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
             request["schema"],
             "homeboy/agent-task-promotion-apply-request/v1"
         );
-        assert_eq!(request["to_workspace"], "fixture@promoted");
+        assert_eq!(request["to_workspace"], target.display().to_string());
         assert_eq!(request["changed_files"], json!(["agent-change.txt"]));
         assert!(request["patch"]
             .as_str()

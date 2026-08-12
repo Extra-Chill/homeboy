@@ -2545,7 +2545,7 @@ fn evidence_command_truncates_large_file_evidence() {
 }
 
 #[test]
-fn terminal_provider_failure_with_large_promotion_evidence_keeps_inspection_bounded() {
+fn terminal_provider_failure_with_large_promotion_evidence_keeps_full_readers_lossless() {
     with_isolated_home(|_| {
         let run_id = "run-cli-promotion-heavy-reader";
         run_loaded_plan(
@@ -2591,17 +2591,11 @@ fn terminal_provider_failure_with_large_promotion_evidence_keeps_inspection_boun
         .expect("logs without a runner");
 
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        let rendered = status_value.to_string();
-        assert!(
-            rendered.len() < 20 * 1024,
-            "full status must deduplicate large diff payloads"
-        );
-        assert!(!rendered.contains(&patch));
-        assert!(rendered.contains("sha256="));
+        assert!(status_value.to_string().contains(&patch));
         assert_eq!(diagnose_value["schema"], "homeboy/agent-task-diagnose/v1");
         assert_eq!(
             diagnose_value["root_cause"]["class"],
-            "agent_task.execution_budget_exhausted"
+            "fixture.classified_failure"
         );
         assert_eq!(logs_value["schema"], "homeboy/agent-task-run-log/v2");
         assert!(!logs_value.to_string().contains(&patch));

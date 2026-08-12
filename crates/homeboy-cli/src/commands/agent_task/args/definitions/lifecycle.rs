@@ -290,6 +290,44 @@ mod tests {
             assert!(help.contains("Migrate `--provider-command"), "{help}");
         }
     }
+
+    #[test]
+    fn promote_and_finalize_pr_parse_full_output() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "promote",
+            "run-a",
+            "--to-worktree",
+            "repo@task",
+            "--full",
+        ])
+        .expect("promote full parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent task")
+        };
+        let AgentTaskCommand::Promote(args) = agent_task.command else {
+            panic!("promote")
+        };
+        assert!(args.full);
+
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "finalize-pr",
+            "--recover",
+            "run-a",
+            "--full",
+        ])
+        .expect("finalize full parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent task")
+        };
+        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
+            panic!("finalize")
+        };
+        assert!(args.full);
+    }
 }
 #[derive(Args, Debug)]
 pub struct ReplayProviderBoundaryArgs {
@@ -376,6 +414,9 @@ pub struct PromoteArgs {
     pub artifact_id: Option<String>,
     #[arg(long)]
     pub dry_run: bool,
+    /// Include complete promotion and gate evidence.
+    #[arg(long)]
+    pub full: bool,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
 }
@@ -407,6 +448,9 @@ pub struct AdoptArgs {
 }
 #[derive(Args, Debug)]
 pub struct FinalizePrArgs {
+    /// Include complete finalization and gate evidence.
+    #[arg(long)]
+    pub full: bool,
     /// Hydrate finalization from a durable Cook recipe or a validated manual-finalization record.
     #[arg(
         long,
