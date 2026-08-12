@@ -351,6 +351,7 @@ pub enum RunnerCommandOutput {
     Preflight(Box<homeboy::runner::runners::PlacementReadiness>),
     Execution(Box<RunnerExecutionCommandOutput>),
     Env(Box<RunnerEnvOutput>),
+    RecipeRunProviders(Box<RecipeRunProvidersOutput>),
     Lifecycle(Box<lifecycle::RunnerLifecycleOutput>),
     JobList(Box<RunnerJobListOutput>),
     Job(Box<RunnerJobOutput>),
@@ -362,6 +363,13 @@ pub enum RunnerCommandOutput {
     Workspace(Box<workspace::RunnerWorkspaceOutput>),
     RefreshPlan(Box<refresh_plan::LabRefreshPlanOutput>),
     Broker(Box<RunnerBrokerOutput>),
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecipeRunProvidersOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
+    pub providers: Vec<homeboy_extension::RecipeRunProviderInventoryEntry>,
 }
 
 /// An authoritative job observation or a retained generation ownership record.

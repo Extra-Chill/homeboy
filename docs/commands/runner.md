@@ -913,6 +913,20 @@ validated workspace-relative paths without shell parsing. Homeboy discovers thes
 descriptors from installed extensions at execution time; product extensions can
 therefore supply providers without being linked into the Homeboy binary.
 
+Inspect the installed provider inventory before dispatching:
+
+```sh
+homeboy runner recipe-providers
+```
+
+The JSON output lists each declaration's provider ID and version, owning extension,
+installed source reference, executable, structural `resolvable` state, and validation
+state. `resolvable` does not probe executable readiness on a selected runner; execution
+uses the normal runner preflight path. Invalid and duplicate declarations remain visible
+but unresolvable; `recipe-run` fails closed for either.
+Unknown provider errors include this exact inventory command and a bounded list of
+available provider IDs.
+
 `--script-file <path>` reads the controller-side source, then materializes it as a private, content-addressed `script-<sha256>.sh` under `${XDG_RUNTIME_DIR:-/tmp}/homeboy-runner-exec/<job-id>/` on the runner. Bash executes that file directly, so `$0` is its runner path. The job exports `HOMEBOY_RUNNER_EXEC_SCRIPT` with the same path and `HOMEBOY_RUNNER_EXEC_SCRIPT_SHA256` as `sha256:<digest>`; the wrapper records the digest in its durable command evidence, makes the file mode `0500`, and removes it when the runner job exits.
 
 `--script-file -` reads stdin verbatim on the controller with the same bounded capture and materialization behavior; it does not stream stdin through `bash -s`. Zero-byte stdin is a validation error before Homeboy builds or submits a runner execution plan. Whitespace-only stdin is valid and is materialized verbatim, including newlines.
