@@ -448,3 +448,76 @@ pub(crate) fn command_json_value<T: Serialize>(value: T) -> homeboy::core::Resul
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod output_projection_tests {
+    use super::status::project_operator_output;
+    use serde_json::json;
+
+    const REALISTIC_OPERATOR_RESPONSE_MAX_BYTES: usize = 24 * 1024;
+
+    fn production_shaped_evidence() -> serde_json::Value {
+        let event = json!({ "timestamp": "2026-08-12T00:00:00Z", "message": "x".repeat(512) });
+        json!({
+            "hydrated_evidence": [{
+                "kind": "provider-transcript",
+                "uri": "file:///tmp/provider-transcript.json",
+                "status": "ok",
+                "content": {
+                    "current_diff": "d".repeat(256 * 1024),
+                    "transcript": "t".repeat(256 * 1024),
+                    "runtime_log": "r".repeat(256 * 1024),
+                    "body": "b".repeat(256 * 1024),
+                    "raw_events": vec![event.clone(); 80],
+                    "resource_timeline": vec![event; 80],
+                }
+            }],
+            "artifact_refs": [{ "kind": "patch", "uri": "file:///tmp/change.patch" }],
+            "next_actions": [{ "command": "homeboy agent-task status run-1 --full" }],
+            "identity": { "run_id": "run-1" },
+            "gates": [{ "name": "check", "status": "passed" }],
+        })
+    }
+
+    #[test]
+    fn default_operator_projection_has_a_fixed_bound_for_huge_evidence() {
+        let mut value = production_shaped_evidence();
+        let original = value.clone();
+
+        project_operator_output(&mut value);
+
+        assert!(
+            serde_json::to_vec(&value)
+                .expect("serialize projection")
+                .len()
+                < REALISTIC_OPERATOR_RESPONSE_MAX_BYTES
+        );
+        let content = &value["hydrated_evidence"][0]["content"];
+        for field in ["current_diff", "transcript", "runtime_log", "body"] {
+            assert!(
+                content[field].is_string(),
+                "{field} keeps its string schema"
+            );
+            assert!(content[field].as_str().unwrap().len() < 256);
+        }
+        assert_eq!(content["raw_events"].as_array().unwrap().len(), 12);
+        assert_eq!(content["raw_events_projection"]["omitted_items"], 68);
+        assert_eq!(content["resource_timeline"].as_array().unwrap().len(), 12);
+        assert_eq!(content["resource_timeline_projection"]["omitted_items"], 68);
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "homeboy agent-task status run-1 --full"
+        );
+        assert_eq!(value["identity"]["run_id"], "run-1");
+        assert_eq!(value["gates"][0]["status"], "passed");
+        assert_eq!(value["artifact_refs"], original["artifact_refs"]);
+    }
+
+    #[test]
+    fn full_projection_is_lossless() {
+        let value = production_shaped_evidence();
+        let expected = value.clone();
+
+        assert_eq!(value, expected);
+    }
+}
