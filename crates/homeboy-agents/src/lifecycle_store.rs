@@ -186,6 +186,24 @@ pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
     write_record_with_aggregate(record, read_mirrored_aggregate(&record.run_id)?)
 }
 
+/// Persist a record while the caller owns the config lock. Terminal workspace
+/// authority is deliberately deferred because it acquires its own lock.
+pub(super) fn write_record_locked_without_terminal_projection(
+    record: &AgentTaskRunRecord,
+) -> Result<AgentTaskRunRecord> {
+    write_record_with_aggregate_without_workspace_authority(
+        record,
+        read_mirrored_aggregate(&record.run_id)?,
+    )
+}
+
+/// Complete terminal projection from committed lifecycle truth after unlocking.
+pub(super) fn project_terminal_record_after_unlock(run_id: &str) -> Result<()> {
+    let record = read_record(run_id)?;
+    super::workspace_authority::persist_terminal_from_record(&record)
+        .and_then(|_| super::release_terminal_record_workspace_owner(&record))
+}
+
 /// Serialize a record read-modify-write so independent lifecycle projections do
 /// not replace metadata written by another controller operation.
 pub(super) fn mutate_record(
@@ -350,8 +368,22 @@ pub(super) fn write_cook_index_attempt(
     recorded_at: String,
     candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
 ) -> Result<AgentTaskCookIndex> {
+    homeboy_core::config::with_config_lock(|| {
+        write_cook_index_attempt_locked(cook_id, attempt, run_id, recorded_at, candidate)
+    })
+}
+
+/// Write one Cook index attempt while the caller owns the config lock.
+pub(super) fn write_cook_index_attempt_locked(
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    recorded_at: String,
+    candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
+) -> Result<AgentTaskCookIndex> {
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
+    validate_cook_index_attempt(&cook_id, attempt, &run_id)?;
     let path = cook_index_path(&cook_id)?;
     let mut index = if path.exists() {
         read_json(&path)?
@@ -364,18 +396,6 @@ pub(super) fn write_cook_index_attempt(
             attempts: Vec::new(),
         }
     };
-    if index
-        .attempts
-        .iter()
-        .any(|entry| entry.run_id == run_id && entry.attempt != attempt)
-    {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "durable Cook index maps this run to a different attempt",
-            Some(run_id),
-            None,
-        ));
-    }
     index.cook_id = cook_id;
     index.attempts.retain(|entry| entry.run_id != run_id);
     index.attempts.push(AgentTaskCookIndexAttempt {
@@ -544,6 +564,45 @@ pub(super) fn record_exists(run_id: &str) -> Result<bool> {
     Ok(ObservationStore::open_initialized()?
         .get_run(run_id)?
         .is_some())
+}
+
+/// Check an existing observation store without creating its directory, running
+/// migrations, or triggering startup repair work.
+pub(super) fn record_exists_readonly(run_id: &str) -> Result<bool> {
+    Ok(ObservationStore::open_readonly()?
+        .get_run(run_id)?
+        .is_some())
+}
+
+pub(super) fn validate_cook_index_attempt(cook_id: &str, attempt: u32, run_id: &str) -> Result<()> {
+    let cook_id = sanitize_run_id(cook_id);
+    let run_id = sanitize_run_id(run_id);
+    let path = cook_index_path(&cook_id)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let index: AgentTaskCookIndex = read_json(&path)?;
+    if index.cook_id != cook_id {
+        return Err(Error::validation_invalid_argument(
+            "cook_id",
+            "durable Cook index belongs to a different Cook",
+            Some(cook_id),
+            None,
+        ));
+    }
+    if index
+        .attempts
+        .iter()
+        .any(|entry| entry.run_id == run_id && entry.attempt != attempt)
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "durable Cook index maps this run to a different attempt",
+            Some(run_id),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn record_lacks_typed_metadata(run_id: &str) -> Result<bool> {

@@ -574,20 +574,20 @@ pub fn retry(
             // Recipe and index are one Cook-owned binding boundary. Serialize
             // concurrent claim observers so neither can overwrite the other's
             // append-only recipe revision between its read and write.
-            config::with_config_lock(|| {
+            let registration = config::with_config_lock(|| {
                 super::record_recipe_attempt(
                     &cook_retry.cook_id,
                     cook_retry.attempt,
                     &retry_run_id,
                     &cook_retry.plan,
                 )?;
-                agent_task_lifecycle::record_cook_attempt(
+                agent_task_lifecycle::record_cook_attempt_locked(
                     &cook_retry.cook_id,
                     cook_retry.attempt,
                     &retry_run_id,
-                )?;
-                Ok(())
+                )
             })?;
+            registration.project_terminal_after_unlock()?;
             let record = agent_task_lifecycle::status(&retry_run_id)?;
             if record.state.is_terminal() {
                 return Ok(AgentTaskRetryServiceResult { record, run: false });

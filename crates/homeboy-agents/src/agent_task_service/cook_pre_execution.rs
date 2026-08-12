@@ -100,8 +100,53 @@ fn ensure_cook_attempt_index(cook_id: &str, run_id: &str) -> Result<()> {
             ));
         }
     }
+    super::cook_recipe::validate_recipe_attempt_record(&recipe, &attempt.run_id, &record)?;
     agent_task_lifecycle::record_cook_attempt(&recipe.cook_id, attempt.attempt, &attempt.run_id)
         .map(|_| ())
+}
+
+/// Recover the latest immutable recipe attempt into its lifecycle record and
+/// Cook index. This controller-only saga never prepares or dispatches a
+/// provider; it only makes a recipe that survived an interrupted initial write
+/// status-addressable again.
+pub fn recover_recipe_attempt(
+    cook_or_attempt_id: &str,
+) -> Result<Option<agent_task_lifecycle::AgentTaskRunRecord>> {
+    let recipe = match super::cook_recipe::load_recipe(cook_or_attempt_id) {
+        Ok(recipe) => recipe,
+        Err(recipe_error) => match super::cook_recipe::load_recipe_for_attempt(cook_or_attempt_id)?
+        {
+            Some(recipe) => recipe,
+            None => return Err(recipe_error),
+        },
+    };
+    let run_id = if recipe.cook_id == cook_or_attempt_id {
+        recipe
+            .attempts
+            .last()
+            .expect("validated recipe has an attempt")
+            .run_id
+            .clone()
+    } else {
+        cook_or_attempt_id.to_string()
+    };
+    let attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_or_attempt_id",
+                "requested run is absent from its immutable Cook recipe",
+                Some(run_id.clone()),
+                None,
+            )
+        })?;
+
+    materialize_cook_attempt(&recipe.cook_id, &attempt.run_id, &attempt.plan)?;
+    let record = agent_task_lifecycle::exact_record(&attempt.run_id)?;
+    super::cook_recipe::validate_recipe_attempt_record(&recipe, &attempt.run_id, &record)?;
+    Ok(Some(record))
 }
 
 pub(crate) fn retryable_pre_execution_failure(
