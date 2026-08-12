@@ -283,8 +283,9 @@ pub(super) fn open_loopback_tunnel(
     local_port: u16,
     remote_host: &str,
     remote_port: u16,
+    loopback_transport: bool,
 ) -> SshTunnelOutput {
-    if is_loopback_host(&server.host) {
+    if loopback_transport {
         return SshTunnelOutput {
             pid: None,
             stderr: String::new(),

@@ -253,7 +253,21 @@ fn open_daemon_tunnel(
     // A loopback runner already shares the controller network namespace, so
     // its published endpoint is the reachable local endpoint. Avoid reserving
     // an unrelated port when no SSH forwarding process is needed.
-    let local_port = if matches!(server.host.as_str(), "localhost" | "127.0.0.1" | "::1") {
+    let loopback_transport = match homeboy_core::server::server_host_resolves_only_to_loopback(
+        &server.host,
+        server.port,
+    ) {
+        Ok(loopback) => loopback,
+        Err(error) => {
+            return Err(Box::new(failed_connect(
+                runner_id,
+                session_path.to_path_buf(),
+                RunnerFailureKind::TunnelFailure,
+                format!("resolve SSH tunnel transport: {error}"),
+            )));
+        }
+    };
+    let local_port = if loopback_transport {
         remote_addr.port()
     } else {
         reserve_loopback_port().map_err(|err| {
@@ -270,6 +284,7 @@ fn open_daemon_tunnel(
         local_port,
         &remote_addr.ip().to_string(),
         remote_addr.port(),
+        loopback_transport,
     );
     if !tunnel.success {
         return Err(Box::new(failed_connect(

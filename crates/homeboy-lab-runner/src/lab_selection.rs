@@ -854,7 +854,7 @@ pub(super) fn authoritative_status_for_preflight_with_transport(
         ));
     }
     match (session.tunnel_pid, connect_authority.tunnel_pid) {
-        (Some(tunnel_pid), Some(_)) => {
+        (Some(tunnel_pid), Some(connect_tunnel_pid)) if tunnel_pid == connect_tunnel_pid => {
             let tunnel_identity =
                 session
                     .tunnel_process_start_identity
@@ -989,10 +989,16 @@ fn configured_direct_ssh_transport_is_loopback(runner_id: &str) -> Result<bool> 
         )
     })?;
     let server = homeboy_core::server::load(&server_id)?;
-    Ok(matches!(
-        server.host.as_str(),
-        "localhost" | "127.0.0.1" | "::1"
-    ))
+    homeboy_core::server::server_host_resolves_only_to_loopback(&server.host, server.port).map_err(
+        |error| {
+            Error::validation_invalid_argument(
+                "runner",
+                format!("resolve configured SSH transport: {error}"),
+                Some(runner_id.to_string()),
+                None,
+            )
+        },
+    )
 }
 
 fn verified_loopback_local_url(

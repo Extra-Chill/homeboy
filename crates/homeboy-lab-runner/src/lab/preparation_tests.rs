@@ -219,6 +219,26 @@ fn mixed_tunnel_evidence_is_rejected_before_endpoint_probing() {
     assert!(error.message.contains("tunnel evidence is mixed"));
 }
 
+#[test]
+fn differing_tunnel_pids_are_rejected_before_identity_verification() {
+    let mut status = unreachable_health_status("lab", false);
+    let session = status.session.as_mut().expect("session");
+    session.tunnel_pid = Some(std::process::id());
+    session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
+    session.remote_daemon_pid = Some(1467759);
+    session.remote_daemon_lease_id = Some("lease-fresh".to_string());
+    status.daemon_freshness = Some(fresh_daemon_freshness());
+    let mut connect = connected_direct_connect_report("lab");
+    connect.local_url = session.local_url.clone();
+    connect.remote_daemon_pid = session.remote_daemon_pid;
+    connect.tunnel_pid = Some(std::process::id().saturating_add(1));
+
+    let error = authoritative_status_for_preflight_with_transport(status, Some(&connect), false)
+        .expect_err("different tunnel PIDs cannot establish ownership");
+
+    assert!(error.message.contains("tunnel evidence is mixed"));
+}
+
 #[cfg(unix)]
 #[test]
 fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_and_cleanup() {
