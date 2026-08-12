@@ -33,7 +33,7 @@ const XDG_ENV_VARS: &[&str] = &[
 /// — preflight probes included — shares one temporary root.
 const TMPDIR_ENV_VARS: &[&str] = &["TMPDIR", "TEMP", "TMP"];
 const GATE_TOOLCHAIN_CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
-const RUST_CACHE_SCHEMA: &str = "homeboy/gate-rust-cache/v1";
+const RUST_CACHE_SCHEMA: &str = "homeboy/gate-rust-cache/v2";
 const RUST_CACHE_LOCK_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub type AgentTaskGateVisibility = HomeboyGateVisibility;
@@ -1728,7 +1728,9 @@ impl SelectedGateEnvironment {
         let marker = cache.join("ready.json");
         let mut state = "hit";
         let mut wait_ms = None;
-        if marker_is_valid(&marker, &identity)? {
+        let toolchain_cargo_relative;
+        if let Some(relative) = valid_marker_toolchain_cargo(&marker, &identity, &cache)? {
+            toolchain_cargo_relative = relative;
         } else {
             let lock_path = cache.join("hydrate.lock");
             let lock = OpenOptions::new()
@@ -1768,15 +1770,20 @@ impl SelectedGateEnvironment {
                 std::thread::sleep(Duration::from_millis(25));
             }
             let waited = started.elapsed().as_millis();
-            if marker_is_valid(&marker, &identity)? {
+            if let Some(relative) = valid_marker_toolchain_cargo(&marker, &identity, &cache)? {
                 state = if waited > 0 { "wait" } else { "hit" };
                 wait_ms = (waited > 0).then_some(waited);
+                toolchain_cargo_relative = relative;
             } else {
-                hydrate_rust_cache(cwd, &cache)?;
+                let relative = hydrate_rust_cache(cwd, &cache)?;
                 fs::write(
                     &marker,
-                    serde_json::to_vec(&json!({"schema": RUST_CACHE_SCHEMA, "identity": identity}))
-                        .expect("serialize Rust cache marker"),
+                    serde_json::to_vec(&json!({
+                        "schema": RUST_CACHE_SCHEMA,
+                        "identity": identity,
+                        "toolchain_cargo_relative": relative,
+                    }))
+                    .expect("serialize Rust cache marker"),
                 )
                 .map_err(|error| {
                     Error::internal_io(
@@ -1787,6 +1794,7 @@ impl SelectedGateEnvironment {
                 })?;
                 state = "hydrated";
                 wait_ms = (waited > 0).then_some(waited);
+                toolchain_cargo_relative = relative;
             }
         }
         let home = self.values.get("HOME").map(PathBuf::from).ok_or_else(|| {
@@ -1810,6 +1818,29 @@ impl SelectedGateEnvironment {
             "RUSTUP_HOME".to_string(),
             overlay.join("rustup").display().to_string(),
         );
+        let toolchain_bin = overlay
+            .join("rustup")
+            .join(&toolchain_cargo_relative)
+            .parent()
+            .expect("validated toolchain Cargo path has a parent")
+            .to_path_buf();
+        let inherited_path = self
+            .values
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(toolchain_bin).chain(std::env::split_paths(&inherited_path)),
+        )
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("configure Rust gate toolchain PATH".to_string()),
+            )
+        })?;
+        self.values
+            .insert("PATH".to_string(), path.to_string_lossy().to_string());
         self.report.rust_cache = Some(AgentTaskGateRustCacheEvidence {
             identity,
             state: state.to_string(),
@@ -1884,9 +1915,13 @@ fn rust_cache_identity(cwd: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn marker_is_valid(marker: &Path, identity: &str) -> Result<bool> {
+fn valid_marker_toolchain_cargo(
+    marker: &Path,
+    identity: &str,
+    cache: &Path,
+) -> Result<Option<PathBuf>> {
     let Ok(bytes) = fs::read(marker) else {
-        return Ok(false);
+        return Ok(None);
     };
     let marker: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
         Error::internal_io(
@@ -1895,22 +1930,32 @@ fn marker_is_valid(marker: &Path, identity: &str) -> Result<bool> {
         )
         .with_hint(rust_cache_repair_command())
     })?;
-    if marker["schema"] == RUST_CACHE_SCHEMA && marker["identity"] == identity {
-        Ok(true)
-    } else {
+    if marker["schema"] != RUST_CACHE_SCHEMA || marker["identity"] != identity {
         Err(Error::internal_io(
             "Rust gate cache marker does not match its content address".to_string(),
             Some("validate Rust gate cache".to_string()),
         )
         .with_hint(rust_cache_repair_command()))
+    } else {
+        let Some(relative) = marker["toolchain_cargo_relative"].as_str() else {
+            return Ok(None);
+        };
+        let relative = PathBuf::from(relative);
+        if relative.is_absolute()
+            || !relative.starts_with("toolchains")
+            || !cache.join("rustup").join(&relative).is_file()
+        {
+            return Ok(None);
+        }
+        Ok(Some(relative))
     }
 }
 
-fn hydrate_rust_cache(cwd: &Path, cache: &Path) -> Result<()> {
+fn hydrate_rust_cache(cwd: &Path, cache: &Path) -> Result<PathBuf> {
     hydrate_rust_cache_with_timeout(cwd, cache, RUST_CACHE_LOCK_TIMEOUT)
 }
 
-fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) -> Result<()> {
+fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) -> Result<PathBuf> {
     let environment = BTreeMap::from([
         ("HOME".to_string(), cache.join("home").display().to_string()),
         (
@@ -1922,62 +1967,124 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
             cache.join("rustup").display().to_string(),
         ),
     ]);
-    for (program, arguments) in [
-        ("rustup", vec!["toolchain", "install"]),
-        ("cargo", vec!["fetch", "--locked"]),
-    ] {
-        let mut process = Command::new(program);
-        process
-            .current_dir(cwd)
-            .args(arguments)
-            .env_clear()
-            .envs(&environment);
-        let path = std::env::var_os("PATH").ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "PATH",
-                "unavailable for Rust gate cache hydration",
-                None,
-                None,
-            )
-        })?;
-        process.env("PATH", path);
-        homeboy_core::engine::command::isolate_process_tree(&mut process);
-        let mut child = process.spawn().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("hydrate Rust gate cache with {program}")),
-            )
-        })?;
-        let started = Instant::now();
-        let mut timed_out = false;
-        let output = homeboy_core::engine::command::wait_with_bounded_output_until_cancelled(
-            &mut child,
-            GATE_TOOLCHAIN_CAPTURE_LIMIT_BYTES,
-            || {
-                timed_out = started.elapsed() >= timeout;
-                timed_out
-            },
+    let rustup = run_rust_cache_command(
+        cwd,
+        cache,
+        &environment,
+        "install_toolchain",
+        Path::new("rustup"),
+        &["toolchain", "install"],
+        timeout,
+    )?;
+    drop(rustup);
+    let resolved = run_rust_cache_command(
+        cwd,
+        cache,
+        &environment,
+        "resolve_toolchain_cargo",
+        Path::new("rustup"),
+        &["which", "cargo"],
+        timeout,
+    )?;
+    let cargo = PathBuf::from(String::from_utf8_lossy(&resolved.stdout).trim());
+    let rustup_home = cache.join("rustup");
+    let relative = cargo.strip_prefix(&rustup_home).map_err(|_| {
+        Error::internal_io(
+            format!(
+                "Rust cache hydration resolved Cargo outside isolated RUSTUP_HOME: {}",
+                cargo.display()
+            ),
+            Some("resolve_toolchain_cargo".to_string()),
         )
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("hydrate Rust gate cache".to_string()),
-            )
-        })?
-        .into_output();
-        if timed_out || !output.status.success() {
-            return Err(Error::internal_io(
-                format!(
-                    "{program} cache hydration {}: {}",
-                    if timed_out { "timed out" } else { "failed" },
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-                Some("hydrate Rust gate cache".to_string()),
-            )
-            .with_hint(rust_cache_repair_command()));
-        }
+        .with_hint(rust_cache_repair_command())
+    })?;
+    if !relative.starts_with("toolchains") || !cargo.is_file() {
+        return Err(Error::internal_io(
+            format!(
+                "Rust cache hydration resolved an invalid toolchain Cargo executable: {}",
+                cargo.display()
+            ),
+            Some("resolve_toolchain_cargo".to_string()),
+        )
+        .with_hint(rust_cache_repair_command()));
     }
-    Ok(())
+    run_rust_cache_command(
+        cwd,
+        cache,
+        &environment,
+        "fetch_locked",
+        &cargo,
+        &["fetch", "--locked"],
+        timeout,
+    )?;
+    Ok(relative.to_path_buf())
+}
+
+fn run_rust_cache_command(
+    cwd: &Path,
+    cache: &Path,
+    environment: &BTreeMap<String, String>,
+    phase: &str,
+    program: &Path,
+    arguments: &[&str],
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    let mut process = Command::new(program);
+    process
+        .current_dir(cwd)
+        .args(arguments)
+        .env_clear()
+        .envs(environment)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let path = std::env::var_os("PATH").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "PATH",
+            "unavailable for Rust gate cache hydration",
+            None,
+            None,
+        )
+    })?;
+    process.env("PATH", path);
+    homeboy_core::engine::command::isolate_process_tree(&mut process);
+    let mut child = process.spawn().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("Rust gate cache hydration phase {phase}")),
+        )
+    })?;
+    let started = Instant::now();
+    let mut timed_out = false;
+    let output = homeboy_core::engine::command::wait_with_bounded_output_until_cancelled(
+        &mut child,
+        GATE_TOOLCHAIN_CAPTURE_LIMIT_BYTES,
+        || {
+            timed_out = started.elapsed() >= timeout;
+            timed_out
+        },
+    )
+    .map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("hydrate Rust gate cache".to_string()),
+        )
+    })?
+    .into_output();
+    if timed_out || !output.status.success() {
+        return Err(Error::internal_io(
+            format!(
+                "Rust gate cache hydration phase {phase} {} (cache {}, command `{} {}`): {}",
+                if timed_out { "timed out" } else { "failed" },
+                cache.display(),
+                program.display(),
+                arguments.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some(format!("Rust gate cache hydration phase {phase}")),
+        )
+        .with_hint(rust_cache_repair_command()));
+    }
+    Ok(output)
 }
 
 /// Clone controller-owned cache bytes into a gate-owned overlay. Symlinks are
@@ -4431,15 +4538,28 @@ mod tests {
             "[toolchain]\nchannel = \"1.95.0\"\n",
         )
         .expect("toolchain");
-        for tool in ["rustup", "cargo"] {
-            let path = bin.path().join(tool);
-            fs::write(
-                &path,
-                format!(
-                    "#!/bin/sh\n/bin/mkdir -p \"$CARGO_HOME/registry\" \"$RUSTUP_HOME/toolchains\"\nprintf '%s\\n' {tool} >> \"$CARGO_HOME/registry/hydration.log\"\n/bin/sleep 0.1\n"
-                ),
-            )
-            .expect("tool fixture");
+        let direct_cargo = bin.path().join("direct-cargo");
+        fs::write(
+            &direct_cargo,
+            "#!/bin/sh\nprintf '%s\\n' cargo >> \"$CARGO_HOME/registry/hydration.log\"\n",
+        )
+        .expect("direct cargo fixture");
+        let rustup = bin.path().join("rustup");
+        fs::write(
+            &rustup,
+            format!(
+                "#!/bin/sh\nif test \"$1\" = toolchain; then\n  /bin/mkdir -p \"$CARGO_HOME/registry\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin\"\n  /bin/cp \"{}\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\n  printf '%s\\n' rustup >> \"$CARGO_HOME/registry/hydration.log\"\nelif test \"$1\" = which; then\n  printf '%s\\n' \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\nfi\n/bin/sleep 0.1\n",
+                direct_cargo.display()
+            ),
+        )
+        .expect("rustup fixture");
+        let cargo = bin.path().join("cargo");
+        fs::write(
+            &cargo,
+            "#!/bin/sh\necho 'host rustup proxy must not execute' >&2\nexit 70\n",
+        )
+        .expect("host cargo proxy fixture");
+        for path in [&direct_cargo, &rustup, &cargo] {
             let mut permissions = fs::metadata(&path).expect("tool metadata").permissions();
             permissions.set_mode(0o755);
             fs::set_permissions(path, permissions).expect("tool executable");
@@ -4509,6 +4629,19 @@ mod tests {
             assert!(value.starts_with(repeated.values.get("HOME").expect("isolated HOME")));
             assert!(!value.starts_with(root.path().to_string_lossy().as_ref()));
         }
+        let cargo_on_path = std::env::split_paths(&std::ffi::OsString::from(
+            repeated.values.get("PATH").expect("gate PATH"),
+        ))
+        .next()
+        .expect("toolchain bin on PATH")
+        .join("cargo");
+        assert!(cargo_on_path.is_file());
+        assert!(cargo_on_path.starts_with(
+            repeated
+                .values
+                .get("RUSTUP_HOME")
+                .expect("isolated RUSTUP_HOME")
+        ));
         assert_eq!(
             repeated.report.rust_cache.expect("hit evidence").state,
             "hit"
@@ -4556,7 +4689,8 @@ mod tests {
 
         let marker = tempfile::NamedTempFile::new().expect("marker");
         fs::write(marker.path(), "not json").expect("corrupt marker");
-        assert!(marker_is_valid(marker.path(), "identity").is_err());
+        let cache = tempfile::tempdir().expect("cache");
+        assert!(valid_marker_toolchain_cargo(marker.path(), "identity", cache.path()).is_err());
 
         let root = tempfile::tempdir().expect("cache root");
         let mut permissions = fs::metadata(root.path()).expect("metadata").permissions();
