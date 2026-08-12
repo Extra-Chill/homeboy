@@ -17,7 +17,7 @@ use crate::lab_contract::{
     LabCommandContract, LabRigWorkloadArguments, LabRunnerWorkloadCapability, LabSourcePathMode,
     LabWorkspaceModePolicy,
 };
-use crate::plan::HomeboyPlan;
+use crate::plan::{HomeboyPlan, PlanKind, PlanStep};
 
 /// Per-job overrides carried into a Lab offload.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -90,8 +90,32 @@ struct NoopProvider;
 impl LabOffloadProvider for NoopProvider {
     fn execute_lab_offload(
         &self,
-        _request: crate::lab_routing::LabRoutingRequest<'_>,
+        request: crate::lab_routing::LabRoutingRequest<'_>,
     ) -> Result<LabOffloadOutcome> {
+        if request.command.is_none()
+            && request.placement_decision.selected
+                == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+        {
+            // Selecting local execution for an uncontracted command never needs
+            // runner behavior, so core can return its typed routing outcome even
+            // when this process has no runner layer to register.
+            let mut plan = HomeboyPlan::builder_for_description(PlanKind::LabOffload, "command")
+                .mode("lab_offload")
+                .build();
+            plan.steps.push(
+                PlanStep::disabled_with_reason(
+                    "lab.select_runner",
+                    "lab.select_runner",
+                    "command has no Lab contract",
+                )
+                .build(),
+            );
+            return Ok(LabOffloadOutcome::RunLocal {
+                plan,
+                metadata: None,
+                messages: Vec::new(),
+            });
+        }
         Err(Error::internal_unexpected(
             "runner subsystem is unavailable: cannot execute a Lab offload",
         ))
@@ -113,4 +137,48 @@ pub(crate) fn execute_lab_offload(
     request: crate::lab_routing::LabRoutingRequest<'_>,
 ) -> Result<LabOffloadOutcome> {
     active_provider().execute_lab_offload(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noop_provider_returns_local_outcome_for_uncontracted_local_decision() {
+        let args = ["homeboy".to_string(), "status".to_string()];
+        let outcome = NoopProvider
+            .execute_lab_offload(crate::lab_routing::LabRoutingRequest {
+                placement_decision: crate::lab_routing::compatibility_placement_decision(
+                    homeboy_lab_runner_contract::Placement::Auto,
+                    None,
+                    false,
+                ),
+                command: None,
+                normalized_args: &args,
+                explicit_runner: None,
+                placement: homeboy_lab_runner_contract::Placement::Auto,
+                allow_local_fallback: false,
+                allow_dirty_lab_workspace: false,
+                skip_deps_hydration: false,
+                preserve_workspace_on_failure: false,
+                capture_patch: false,
+                mutation_flag: None,
+                timeout: None,
+                placement_outcome_target: None,
+                detach_after_handoff: false,
+                output_file_requested: false,
+                read_only_polling: false,
+                local_output_file: None,
+                durable_agent_task_plan: None,
+                durable_run_id: None,
+                source_path: None,
+                verified_cook_baseline: None,
+                require_controller_git_bundle: false,
+                reuse_compatible_snapshot: false,
+                job_overrides: LabJobOverrides::default(),
+            })
+            .expect("local placement does not require a runner provider");
+
+        assert!(matches!(outcome, LabOffloadOutcome::RunLocal { .. }));
+    }
 }
