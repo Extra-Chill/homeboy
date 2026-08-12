@@ -165,6 +165,8 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--acceptance-authority` | `<ACCEPTANCE_AUTHORITY>` | Authority allowed to issue the acceptance verdict |
 | `--acceptance-policy` | `<ACCEPTANCE_POLICY>` | Policy the acceptance authority applies |
 
+Cook result schema: `homeboy/agent-task-cook/v1` retains its existing `status` and nested provider/promotion evidence. It additionally emits `completion` using `homeboy/agent-task-cook-completion/v1`. `completion.candidate_produced` records provider candidate production, while `completion.pr_finalized` is true only when durable finalization evidence identifies a PR. A requested finalization with a durable candidate but no PR reports `completion.state: "candidate_awaiting_finalization"` and its exact `completion.next_action` recovery command. This additive projection is the authoritative end-to-end Cook completion classification; existing serialized fields remain compatible.
+
 ## `homeboy agent-task cook-continue`
 
 ```sh

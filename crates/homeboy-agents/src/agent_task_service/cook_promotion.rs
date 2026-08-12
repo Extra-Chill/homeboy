@@ -2387,13 +2387,12 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
     let model = outcome.selected_model();
     let requested_model = outcome.metadata["model_identity"]["requested"].as_str();
     let resolved_model = outcome.metadata["model_identity"]["resolved"].as_str();
-    let provider_reported_model = outcome.metadata["model_identity"]["provider_reported"]
-        .as_str();
+    let provider_reported_model = outcome.metadata["model_identity"]["provider_reported"].as_str();
     if model.is_none()
         && provider_reported_model.is_none()
-        && requested_model.zip(resolved_model).is_some_and(|(requested, resolved)| {
-            requested != resolved
-        })
+        && requested_model
+            .zip(resolved_model)
+            .is_some_and(|(requested, resolved)| requested != resolved)
     {
         return Err(Error::validation_invalid_argument(
             "provider_model",
@@ -2695,10 +2694,10 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
             invocation_run_ids.push(run_id.to_string());
         }
     }
+    let selected_candidate = cook_selected_candidate_provenance(&cook_id, &invocation_run_ids);
     let failure_context = (exit_code != 0)
         .then(|| cook_failure_context(&cook_id, latest_run_id.as_deref(), status))
         .flatten();
-    let selected_candidate = cook_selected_candidate_provenance(&cook_id, &invocation_run_ids);
     AgentTaskRunResult {
         value: AgentTaskCookReport {
             schema: "homeboy/agent-task-cook/v1",
