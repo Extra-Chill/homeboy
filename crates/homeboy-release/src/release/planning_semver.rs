@@ -171,28 +171,76 @@ pub(super) fn validate_release_version_floor(
     None
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ReleaseVersionBaseline {
+    pub source: String,
+    pub authoritative: String,
+    pub tag: Option<String>,
+}
+
+/// Resolve the version from which Homeboy may safely advance a release.
+///
+/// A higher tag only becomes authoritative when it is reachable from HEAD. This
+/// makes an externally-created release recoverable without treating an orphaned
+/// tag as permission to rewrite source files.
+pub(super) fn release_version_baseline(
+    scope: &ReleaseScope,
+    current_version: &str,
+) -> Result<ReleaseVersionBaseline> {
+    let current_version_semver = semver::Version::parse(current_version).map_err(|_| {
+        Error::validation_invalid_argument(
+            "version",
+            format!("Invalid version format: {current_version}"),
+            None,
+            None,
+        )
+    })?;
+    let Some(latest_tag) = scope.latest_tag_any()? else {
+        return Ok(ReleaseVersionBaseline {
+            source: current_version.to_string(),
+            authoritative: current_version.to_string(),
+            tag: None,
+        });
+    };
+    let tag_version = git::extract_version_from_tag(&latest_tag)
+        .expect("latest release tag is selected from parseable versions");
+    let tag_version_semver = semver::Version::parse(&tag_version)
+        .expect("latest release tag is selected from parseable versions");
+
+    if tag_version_semver > current_version_semver {
+        if scope.latest_tag()?.as_deref() != Some(latest_tag.as_str()) {
+            return Err(Error::validation_invalid_argument(
+                "tag",
+                format!(
+                    "Latest release tag {latest_tag} is ahead of source version {current_version} but is not reachable from HEAD. Refusing to reconcile an orphaned release identity."
+                ),
+                None,
+                Some(vec![
+                    format!("Inspect the tag: git show --no-patch --decorate {latest_tag}"),
+                    "Check out or merge the tagged release commit, or remove the orphaned tag deliberately before rerunning release.".to_string(),
+                ]),
+            ));
+        }
+        return Ok(ReleaseVersionBaseline {
+            source: current_version.to_string(),
+            authoritative: tag_version,
+            tag: Some(latest_tag),
+        });
+    }
+
+    Ok(ReleaseVersionBaseline {
+        source: current_version.to_string(),
+        authoritative: current_version.to_string(),
+        tag: None,
+    })
+}
+
 pub(super) fn release_version_floor_base(
     scope: &ReleaseScope,
     current_version: &str,
 ) -> Result<(String, Option<String>)> {
-    let Some(latest_tag) = scope.latest_tag_any()? else {
-        return Ok((current_version.to_string(), None));
-    };
-    let Some(tag_version) = git::extract_version_from_tag(&latest_tag) else {
-        return Ok((current_version.to_string(), None));
-    };
-    let Ok(tag_version_semver) = semver::Version::parse(&tag_version) else {
-        return Ok((current_version.to_string(), None));
-    };
-    let Ok(current_version_semver) = semver::Version::parse(current_version) else {
-        return Ok((current_version.to_string(), None));
-    };
-
-    if tag_version_semver > current_version_semver {
-        Ok((tag_version, Some(latest_tag)))
-    } else {
-        Ok((current_version.to_string(), None))
-    }
+    let baseline = release_version_baseline(scope, current_version)?;
+    Ok((baseline.authoritative, baseline.tag))
 }
 
 pub(super) fn validate_current_version_tag_reachable(
@@ -334,7 +382,7 @@ fn commit_range(latest_tag: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_semver_recommendation, low_confidence_bump_warning, release_version_floor_base,
+        build_semver_recommendation, low_confidence_bump_warning, release_version_baseline,
         resolve_tag_and_commits, validate_current_version_tag_reachable,
         validate_release_version_floor,
     };
@@ -653,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn release_version_floor_base_uses_unreachable_higher_tag() {
+    fn release_version_baseline_rejects_unreachable_higher_tag() {
         let temp = git_repo();
         let dir = temp.path();
         commit_file(dir, "README.md", "initial", "chore: initial");
@@ -671,11 +719,11 @@ mod tests {
             ..Default::default()
         };
         let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
-        let (floor, floor_tag) = release_version_floor_base(&release_scope, "0.1.0")
-            .expect("version floor should resolve");
+        let error = release_version_baseline(&release_scope, "0.1.0")
+            .expect_err("orphaned higher tag must not become authoritative");
 
-        assert_eq!(floor, "0.2.0");
-        assert_eq!(floor_tag.as_deref(), Some("v0.2.0"));
+        assert!(error.message.contains("v0.2.0"));
+        assert!(error.message.contains("not reachable from HEAD"));
     }
 
     #[test]
