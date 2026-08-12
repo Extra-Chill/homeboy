@@ -32,6 +32,14 @@ the daemon through an SSH `-L 127.0.0.1:<local>:127.0.0.1:<remote>` tunnel.
 Session metadata is stored at `~/.config/homeboy/runner-sessions/<id>.json` so
 `status` and `disconnect` can inspect or close the local tunnel later.
 
+Before a direct-SSH connect is reported as successful, Homeboy captures the
+local tunnel process start identity and observes it through a bounded
+post-establishment window while the exact remote lease/PID continues answering
+`/health`. A failed observation cleans only that exact owned child. Connect
+failure evidence may add `durability_stage`; existing health attempt fields are
+preserved. `health_attempt_count` and `health_attempts` contain failed initial
+health probes and failed durability observations, not successful observations.
+
 ## Rolling Generations
 
 The runner-layer rolling-generation primitive models daemon replacement as

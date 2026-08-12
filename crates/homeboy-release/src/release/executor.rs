@@ -115,6 +115,28 @@ pub(crate) struct PlannedReleaseVersion<'a> {
     pub(crate) to: &'a str,
 }
 
+pub(crate) fn run_version_reconcile(
+    component: &Component,
+    source_version: &str,
+    authoritative_version: &str,
+) -> Result<ReleaseStepResult> {
+    let targets = version::reconcile_component_version_targets(
+        component,
+        source_version,
+        authoritative_version,
+    )?;
+    Ok(step_success(
+        "version.reconcile",
+        "version.reconcile",
+        Some(serde_json::json!({
+            "source_version": source_version,
+            "authoritative_version": authoritative_version,
+            "targets": targets,
+        })),
+        Vec::new(),
+    ))
+}
+
 /// Fail closed when the on-disk source version no longer matches the version the
 /// plan was built against.
 ///

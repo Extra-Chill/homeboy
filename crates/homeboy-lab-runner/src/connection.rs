@@ -149,8 +149,9 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
     let Some(proxy) = controller_proxy_from_env()? else {
         return Ok(None);
     };
-    let tunnel = remote_daemon::open_reverse_proxy_tunnel(server, &proxy.host, proxy.port);
+    let mut tunnel = remote_daemon::open_reverse_proxy_tunnel(server, &proxy.host, proxy.port);
     if !tunnel.success {
+        tunnel.contain_child();
         return Err(Error::validation_invalid_argument(
             "controller_proxy",
             format!(
@@ -162,11 +163,12 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
         ));
     }
     let tunnel_pid = tunnel.pid.expect("remote SSH forward has a child process");
-    let tunnel_process_start_identity = capture_tunnel_process_start_identity(Some(tunnel_pid))?;
     let port = tunnel.stderr.parse::<u16>().map_err(|_| {
-        terminate_tunnel_if_owned_parts(tunnel_pid, tunnel_process_start_identity.as_ref());
+        tunnel.contain_child();
         Error::internal_unexpected("controller proxy forward returned no allocated port")
     })?;
+    let tunnel_process_start_identity = tunnel.process_start_identity.clone();
+    tunnel.release_child();
     Ok(Some(RunnerProxyForward {
         runner_url: format!("{}://127.0.0.1:{port}", proxy.scheme),
         tunnel_pid,
@@ -197,7 +199,7 @@ pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String
             ));
         }
         if let Some(forward) = session.proxy_forward.as_ref() {
-            if homeboy_core::process::pid_is_running(forward.tunnel_pid) {
+            if proxy_forward_is_owned(forward, homeboy_core::process::process_start_identity) {
                 return Ok(forward.runner_url.clone());
             }
         }
@@ -253,6 +255,32 @@ pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String
         }
         Ok(forward.runner_url)
     })
+}
+
+fn proxy_forward_is_owned<Inspect>(forward: &RunnerProxyForward, inspect: Inspect) -> bool
+where
+    Inspect:
+        Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
+{
+    let Some(expected) = forward.tunnel_process_start_identity.as_ref() else {
+        return false;
+    };
+    let actual = inspect(forward.tunnel_pid)
+        .ok()
+        .flatten()
+        .map(|identity| match identity {
+            homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+            }
+            homeboy_core::process::ProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            } => RunnerTunnelProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            },
+        });
+    actual.as_ref() == Some(expected)
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
@@ -534,7 +562,7 @@ fn cleanup_direct_generation_with<Fallback, Tunnel>(
 ) -> Result<()>
 where
     Fallback: FnMut(u32) -> Result<()>,
-    Tunnel: FnMut(u32),
+    Tunnel: FnMut(&RunnerSession),
 {
     let cleanup_result = match graceful_stop {
         Ok(()) => Ok(()),
@@ -548,9 +576,7 @@ where
             None => Err(graceful_error),
         },
     };
-    if let Some(pid) = session.tunnel_pid {
-        terminate_tunnel(pid);
-    }
+    terminate_tunnel(session);
     cleanup_result
 }
 
@@ -2712,6 +2738,67 @@ fn runner_jobs(
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build active job client: {err}")))?;
     runner_jobs_with_client(runner_id, session, &client, timeout)
+}
+
+/// Probe typed jobs through a direct daemon endpoint whose ownership was
+/// already verified by an operation-scoped caller.
+pub(crate) fn probe_verified_direct_daemon_jobs(
+    runner_id: &str,
+    session: &RunnerSession,
+) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
+    if session.mode != RunnerTunnelMode::DirectSsh || session.local_url.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "verified runner connect has no direct daemon endpoint for typed job admission",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    runner_jobs(runner_id, session)
+}
+
+/// Re-probe the typed health endpoint before a one-operation admission relies
+/// on a connect result that status has not yet projected as live.
+pub(crate) fn probe_verified_direct_daemon_health(
+    local_url: &str,
+) -> std::result::Result<connection_daemon::DaemonHealthReport, String> {
+    connection_daemon::daemon_health_report_with_timeout(
+        local_url,
+        crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+pub(crate) fn tunnel_process_is_owned(
+    pid: u32,
+    identity: &RunnerTunnelProcessStartIdentity,
+) -> bool {
+    session_store::tunnel_process_is_owned(
+        pid,
+        Some(identity),
+        homeboy_core::process::process_start_identity,
+    )
+}
+
+pub(crate) fn tunnel_process_ownership(
+    pid: u32,
+    identity: &RunnerTunnelProcessStartIdentity,
+) -> session_store::TunnelProcessOwnership {
+    session_store::tunnel_process_ownership(
+        pid,
+        Some(identity),
+        homeboy_core::process::process_start_identity,
+    )
+}
+
+pub(crate) fn tunnel_process_is_owned_with_observation(
+    pid: u32,
+    identity: &RunnerTunnelProcessStartIdentity,
+) -> (bool, String) {
+    let ownership = tunnel_process_ownership(pid, identity);
+    (
+        ownership == session_store::TunnelProcessOwnership::Owned,
+        format!("{ownership:?}"),
+    )
 }
 
 fn runner_jobs_with_client(

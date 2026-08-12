@@ -24,6 +24,33 @@ pub(in crate::release) fn build_release_steps(
     warnings: &mut Vec<String>,
     hints: &mut Vec<String>,
 ) -> Result<Vec<PlanStep>> {
+    build_release_steps_with_reconciliation(
+        component,
+        extensions,
+        current_version,
+        new_version,
+        changelog_plan,
+        options,
+        release_scope,
+        warnings,
+        hints,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::release) fn build_release_steps_with_reconciliation(
+    component: &Component,
+    extensions: &[ExtensionManifest],
+    current_version: &str,
+    new_version: &str,
+    changelog_plan: &ReleaseChangelogPlan,
+    options: &ReleaseOptions,
+    release_scope: &ReleaseScope,
+    warnings: &mut Vec<String>,
+    hints: &mut Vec<String>,
+    reconcile_from: Option<&str>,
+) -> Result<Vec<PlanStep>> {
     let mut steps = Vec::new();
     let publish_targets = get_publish_targets(extensions);
 
@@ -83,11 +110,29 @@ pub(in crate::release) fn build_release_steps(
         string_config("name", tag_name.clone()),
     ));
 
+    let changelog_need = if let Some(source_version) = reconcile_from {
+        steps.push(ready_step(
+            "version.reconcile",
+            "version.reconcile",
+            format!(
+                "Reconcile version targets {} → {} from reachable release tag",
+                source_version, current_version
+            ),
+            vec!["preflight.tag_availability".to_string()],
+            StepConfig::new()
+                .string("from", source_version)
+                .string("to", current_version),
+        ));
+        "version.reconcile"
+    } else {
+        "preflight.tag_availability"
+    };
+
     steps.extend(build_changelog_steps(
         changelog_plan,
         current_version,
         new_version,
-        "preflight.tag_availability",
+        changelog_need,
     ));
 
     let version_config = StepConfig::new()
