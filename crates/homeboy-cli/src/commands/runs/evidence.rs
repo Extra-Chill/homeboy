@@ -33,8 +33,7 @@ pub type RunsEvidenceOutput = RunEvidenceReport<RunSummary>;
 
 pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
-    let run = require_run(&store, run_id)?;
-    let mut artifacts = runs_service::list_artifacts_for_run(&store, &run.id)?;
+    let (run, mut artifacts) = runs_service::load_run_with_artifacts(&store, run_id)?;
     artifacts.extend(runs_service::related_lab_artifacts_for_runner_job(
         &store, &run,
     )?);
