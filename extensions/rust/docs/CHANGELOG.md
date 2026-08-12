@@ -2,6 +2,12 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.34.1] - 2026-08-12
+
+### Fixed
+- make a widened changed-test selection attributable
+- leave durable evidence when a test shard is truncated
+
 ## [1.34.0] - 2026-08-12
 
 ### Added
