@@ -7,9 +7,26 @@
 //! provider: core owns extension install/repair, the agent-task layer validates
 //! provider discovery.
 //!
+//! The check has two halves, and only one of them is agent-task behavior:
+//!
+//! - **Is the declaration well-formed?** A malformed
+//!   `agent_runtimes[].agent_task_executors[]` entry is malformed whether or not
+//!   the agent-task subsystem is present, so this is validated unconditionally
+//!   against the shared declaration contract.
+//! - **Is the declared provider discoverable?** This reads the extension's
+//!   agent-task executor provider catalog, which *is* agent-task behavior, so it
+//!   stays inverted behind the provider below.
+//!
+//! Collapsing both halves into the inverted hook is what regressed #12206: with
+//! no provider registered the no-op validated *nothing*, so an extension
+//! declaring a provider that cannot be parsed installed silently instead of
+//! being rejected and rolled back.
+//!
 //! With no provider registered (no agent-task subsystem present) the no-op
-//! validates nothing (an install without the agent-task subsystem has no
-//! agent-task providers to discover).
+//! still validates no *discoverability* — an install without the agent-task
+//! subsystem has no agent-task providers to discover.
+
+use homeboy_extension_contract::agent_task_executor_declaration::parse_agent_task_executor_declaration;
 
 use crate::Result;
 
@@ -41,8 +58,31 @@ homeboy_engine_primitives::provider_registry! {
     with: fn with_provider,
 }
 
-/// Validate an installed extension's agent-runtime provider discovery via the
-/// registered validator (or the no-op when the agent-task subsystem is absent).
+/// Validate an installed extension's agent-runtime provider discovery.
+///
+/// Declaration well-formedness is checked unconditionally; discoverability is
+/// delegated to the registered validator (or the no-op when the agent-task
+/// subsystem is absent).
 pub fn validate_installed_extension_provider_discovery(extension_id: &str) -> Result<()> {
+    validate_declared_agent_task_executors(extension_id)?;
     with_provider(|p| p.validate_installed_extension_provider_discovery(extension_id))
+}
+
+/// Reject an extension that declares an agent-task executor which cannot be
+/// parsed, independently of whether the agent-task subsystem is registered.
+///
+/// A manifest that cannot be loaded at all is left to the caller's own manifest
+/// handling rather than reported here as a provider-declaration fault.
+fn validate_declared_agent_task_executors(extension_id: &str) -> Result<()> {
+    let Ok(extension) = crate::extension_store::load_extension(extension_id) else {
+        return Ok(());
+    };
+
+    for runtime in &extension.agent_runtimes {
+        for declared in &runtime.agent_task_executors {
+            parse_agent_task_executor_declaration(&extension.id, &runtime.id, declared)?;
+        }
+    }
+
+    Ok(())
 }
