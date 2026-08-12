@@ -1551,6 +1551,7 @@ pub(super) fn failed_connect(
                 remote_address: None,
                 local_address: None,
                 tunnel_state: Some("not_established".to_string()),
+                durability_stage: None,
                 health_attempt_count: 0,
                 health_attempts: Vec::new(),
             }),
