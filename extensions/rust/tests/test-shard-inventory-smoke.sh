@@ -1357,6 +1357,117 @@ PY
   fi
 done
 
+# Shard planning runs the inventory in --inventory-only mode. When a changed-test
+# selection no longer matches, widening to the full inventory is the right
+# fail-safe -- but it multiplies every downstream shard's work, so it has to be
+# attributable. Discarding the reason produced a plan indistinguishable from a
+# deliberate full-scope run (Extra-Chill/homeboy#12219).
+cat > "$WORK_DIR/changed-selection-stale.json" <<'EOF'
+{
+  "schema": "homeboy/rust-changed-test-selection/v2",
+  "candidates": [
+    {"package": "shard-smoke", "target_kind": "test", "target": "deleted_integration_target", "module": null, "path": null}
+  ]
+}
+EOF
+
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_TEST_INVENTORY_ONLY=1 \
+HOMEBOY_TEST_INVENTORY_FILE="$WORK_DIR/widened-inventory.json" \
+HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORK_DIR/changed-selection-stale.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/widened.out" 2> "$WORK_DIR/widened.err"
+WIDENED_EXIT=$?
+set -e
+
+python3 - "$WORK_DIR/widened-inventory.json" "$WORK_DIR/widened.err" "$WIDENED_EXIT" <<'PY'
+import json
+import sys
+
+assert int(sys.argv[3]) == 0, "widening is a fail-safe, not a failure"
+inventory = json.load(open(sys.argv[1]))
+
+# The fail-safe itself is unchanged: planning still covers everything.
+assert len(inventory["tests"]) == 7, inventory["tests"]
+
+# ...but it now says why it widened, naming the candidate that stopped matching.
+reason = inventory.get("fallback_reason")
+assert reason, "the widened inventory must carry its fallback reason"
+assert "deleted_integration_target" in reason, reason
+
+# And the planner announces it, so an inflated plan is explained at the point of
+# planning instead of inferred later from an unexpectedly large shard.
+stderr = open(sys.argv[2], encoding="utf-8").read()
+assert "deleted_integration_target" in stderr, stderr
+assert "widened to the full inventory" in stderr, stderr
+PY
+printf 'PASS: a widened changed-selection is attributable in the shard plan\n'
+
+# The narrowing path must keep working: a selection that does match still
+# projects a smaller inventory and reports no fallback.
+cat > "$WORK_DIR/changed-selection-live.json" <<'EOF'
+{
+  "schema": "homeboy/rust-changed-test-selection/v2",
+  "candidates": [
+    {"package": "member-smoke", "target_kind": "lib", "target": "member_smoke", "module": null, "path": null}
+  ]
+}
+EOF
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_TEST_INVENTORY_ONLY=1 \
+HOMEBOY_TEST_INVENTORY_FILE="$WORK_DIR/narrowed-inventory.json" \
+HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORK_DIR/changed-selection-live.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/narrowed.out" 2> "$WORK_DIR/narrowed.err"
+
+python3 - "$WORK_DIR/narrowed-inventory.json" "$WORK_DIR/narrowed.err" <<'PY'
+import json
+import sys
+
+inventory = json.load(open(sys.argv[1]))
+assert "fallback_reason" not in inventory, inventory
+names = sorted(test["name"] for test in inventory["tests"])
+assert names == ["member::member_works"], names
+assert "widened to the full inventory" not in open(sys.argv[2], encoding="utf-8").read()
+PY
+printf 'PASS: a matching changed-selection still narrows the shard plan\n'
+
+# The replay path reported the same widening through `jq -r '.fallback_reason'`
+# with no file argument, so jq read stdin instead of the shard data and the
+# reason came out empty. Same widening, same silence, different line.
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE="$WORK_DIR/changed-selection-stale.json" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/replay-widened-results.json" \
+HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/replay-widened.out" 2> "$WORK_DIR/replay-widened.err"
+
+python3 - "$WORK_DIR/replay-widened.err" <<'PY'
+import sys
+
+stderr = open(sys.argv[1], encoding="utf-8").read()
+assert "Running the full test command." in stderr, stderr
+# The reason must precede it rather than an empty string.
+assert "deleted_integration_target" in stderr, stderr
+PY
+printf 'PASS: the replay path names the reason it widened\n'
+
 printf 'pub fn changed_fixture() {}\n' >> "$PROJECT_DIR/src/lib.rs"
 if PATH="$BIN_DIR:$PATH" python3 "$EXTENSION_DIR/scripts/test-shard-inventory.py" --project "$PROJECT_DIR" --runner cargo --output "$WORK_DIR/stale-workspace.out" --manifest "$WORK_DIR/manifest.json" >/dev/null 2>&1; then
   printf 'Expected workspace change to reject the stale manifest\n' >&2

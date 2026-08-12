@@ -842,12 +842,22 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
         cp "$SHARD_DATA" "$HOMEBOY_TEST_INVENTORY_FILE"
     fi
     if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = "1" ]; then
+        # Inventory-only is the shard *planner*. A changed-selection that widened
+        # to the full inventory here multiplies every downstream shard's work, so
+        # it must be announced at the point of planning rather than inferred later
+        # from an unexpectedly large plan (Extra-Chill/homeboy#12219).
+        if jq -e '.fallback_reason? // empty' "$SHARD_DATA" >/dev/null; then
+            echo "$(jq -r '.fallback_reason' "$SHARD_DATA") Test shard planning widened to the full inventory." >&2
+        fi
         cat "$SHARD_DATA"
         rm -f "$SHARD_DATA"
         exit 0
     fi
     if [ -n "${HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE:-}" ] && jq -e '.fallback_reason? // empty' "$SHARD_DATA" >/dev/null; then
-        echo "$(jq -r '.fallback_reason') Running the full test command." >&2
+        # `jq -r '.fallback_reason'` without a file argument reads stdin, not the
+        # shard data, so this diagnostic reported an empty reason and the widening
+        # looked unexplained on this path too.
+        echo "$(jq -r '.fallback_reason' "$SHARD_DATA") Running the full test command." >&2
         rm -f "$SHARD_DATA"
         unset HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE
         exec bash "$0" "$@"
