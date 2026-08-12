@@ -4,7 +4,7 @@ use clap::Parser;
 use std::collections::BTreeMap;
 
 #[test]
-fn deploy_head_requires_apply_for_real_deploy() {
+fn deploy_head_requires_dangerous_confirmation_for_real_deploy() {
     let result = run(deploy_args(|args| {
         args.target_id = Some("project-a".to_string());
         args.component_ids = vec!["component-a".to_string()];
@@ -12,16 +12,16 @@ fn deploy_head_requires_apply_for_real_deploy() {
     }));
 
     let err = match result {
-        Ok(_) => panic!("--head real deploy should require --apply"),
+        Ok(_) => panic!("--head real deploy should require --confirm-dangerous"),
         Err(err) => err,
     };
     assert!(err
         .message
-        .contains("Real deploys with --head require explicit --apply"));
+        .contains("Real deploys with --head require explicit --confirm-dangerous"));
 }
 
 #[test]
-fn deploy_force_requires_apply_for_real_deploy() {
+fn deploy_force_requires_dangerous_confirmation_for_real_deploy() {
     let result = run(deploy_args(|args| {
         args.target_id = Some("project-a".to_string());
         args.component_ids = vec!["component-a".to_string()];
@@ -29,16 +29,16 @@ fn deploy_force_requires_apply_for_real_deploy() {
     }));
 
     let err = match result {
-        Ok(_) => panic!("--force real deploy should require --apply"),
+        Ok(_) => panic!("--force real deploy should require --confirm-dangerous"),
         Err(err) => err,
     };
     assert!(err
         .message
-        .contains("Real deploys with --force require explicit --apply"));
+        .contains("Real deploys with --force require explicit --confirm-dangerous"));
 }
 
 #[test]
-fn deploy_head_dry_run_does_not_require_apply() {
+fn deploy_head_dry_run_does_not_require_dangerous_confirmation() {
     let result = run(deploy_args(|args| {
         args.target_id = Some("missing-project".to_string());
         args.component_ids = vec!["component-a".to_string()];
@@ -47,14 +47,18 @@ fn deploy_head_dry_run_does_not_require_apply() {
     }));
 
     let err = match result {
-        Ok(_) => panic!("dry-run should pass apply boundary before project lookup"),
+        Ok(_) => panic!(
+            "dry-run should pass the dangerous-mode confirmation boundary before project lookup"
+        ),
         Err(err) => err,
     };
-    assert!(!err.message.contains("requires explicit --apply"));
+    assert!(!err
+        .message
+        .contains("requires explicit --confirm-dangerous"));
 }
 
 #[test]
-fn deploy_ref_requires_apply_for_real_deploy() {
+fn deploy_ref_requires_dangerous_confirmation_for_real_deploy() {
     let result = run(deploy_args(|args| {
         args.target_id = Some("project-a".to_string());
         args.component_ids = vec!["component-a".to_string()];
@@ -62,12 +66,12 @@ fn deploy_ref_requires_apply_for_real_deploy() {
     }));
 
     let err = match result {
-        Ok(_) => panic!("--ref real deploy should require --apply"),
+        Ok(_) => panic!("--ref real deploy should require --confirm-dangerous"),
         Err(err) => err,
     };
     assert!(err
         .message
-        .contains("Real deploys with --ref require explicit --apply"));
+        .contains("Real deploys with --ref require explicit --confirm-dangerous"));
 }
 
 #[test]
@@ -150,7 +154,7 @@ fn release_set_rejects_multi_target_modes() {
 }
 
 #[test]
-fn release_set_requires_apply_before_preflight() {
+fn release_set_requires_dangerous_confirmation_before_preflight() {
     let manifest = tempfile::NamedTempFile::new().expect("manifest file");
     std::fs::write(
         manifest.path(),
@@ -162,12 +166,12 @@ fn release_set_requires_apply_before_preflight() {
     });
 
     let error = match run(args) {
-        Ok(_) => panic!("release set must require --apply"),
+        Ok(_) => panic!("release set must require --confirm-dangerous"),
         Err(error) => error,
     };
     assert!(error
         .message
-        .contains("--release-set require explicit --apply"));
+        .contains("--release-set require explicit --confirm-dangerous"));
 }
 
 #[test]
@@ -279,16 +283,33 @@ fn skip_deps_hydration_cli_flag_propagates_to_deploy_config() {
 }
 
 #[test]
-fn deploy_apply_does_not_grant_stale_or_downgrade_consent() {
-    let cli = Cli::try_parse_from(["homeboy", "deploy", "project-a", "component-a", "--apply"])
-        .expect("--apply should parse");
+fn deploy_confirm_dangerous_does_not_grant_stale_or_downgrade_consent() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "deploy",
+        "project-a",
+        "component-a",
+        "--confirm-dangerous",
+    ])
+    .expect("--confirm-dangerous should parse");
 
     let Commands::Deploy(args) = cli.command else {
         panic!("expected deploy command");
     };
-    assert!(args.apply);
+    assert!(args.confirm_dangerous);
     assert!(!args.allow_stale_source);
     assert!(!args.allow_downgrade);
+}
+
+#[test]
+fn deploy_rejects_old_apply_spelling() {
+    let result = Cli::try_parse_from(["homeboy", "deploy", "project-a", "component-a", "--apply"]);
+    let error = match result {
+        Ok(_) => panic!("--apply must be rejected by clap after the rename"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("unexpected argument"));
+    assert!(error.to_string().contains("--apply"));
 }
 
 #[test]
@@ -430,7 +451,7 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         outdated: false,
         behind_upstream: false,
         dry_run: false,
-        apply: false,
+        confirm_dangerous: false,
         check: false,
         force: false,
         projects: None,

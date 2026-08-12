@@ -228,7 +228,7 @@ pub(super) fn deploy_components(
     };
 
     // Dry-run is an approval artifact, so it must reject a non-default --head
-    // source unless the same explicit --force approval required by apply exists.
+    // source unless the same explicit --force approval required by --confirm-dangerous exists.
     if config.head && !config.skip_build {
         warn_non_default_branch(&local_build_components, config)?;
     }
@@ -471,7 +471,7 @@ pub(super) fn deploy_components(
                 None,
                 Some(vec![
                     "Review the bounded content_manifest differences with `homeboy deploy --check` first".to_string(),
-                    "Use the existing explicit --force --apply boundary only after that review".to_string(),
+                    "Use the existing explicit --force --confirm-dangerous boundary only after that review".to_string(),
                 ]),
             ));
         }
