@@ -39,6 +39,31 @@ const installedSettings = Object.fromEntries(installedManifest.settings.map((set
 assert.equal(installedSettings.wp_codebox_bin, cliPath);
 assert.equal(installedSettings.wp_codebox_core_module, coreModulePath);
 
+// Machine mode must write the same override values to a flat, machine-scoped
+// file without touching the tracked manifest, so setup in a linked extension
+// source checkout cannot dirty wordpress.json with machine-local paths.
+const manifestBefore = fs.readFileSync(manifestPath, 'utf8');
+const machineOverridesPath = path.join(tempDir, 'machine-overrides.json');
+const machineResult = spawnSync(process.execPath, [
+	path.join(rootDir, 'wordpress', 'scripts', 'build', 'persist-wp-codebox-overrides.mjs'),
+	'--machine',
+	machineOverridesPath,
+	manifestPath,
+], {
+	env: {
+		...process.env,
+		WP_CODEBOX_CLI: cliPath,
+		WP_CODEBOX_CORE_MODULE: coreModulePath,
+	},
+	encoding: 'utf8',
+});
+assert.equal(machineResult.status, 0, machineResult.stderr || machineResult.stdout);
+
+const machineOverrides = JSON.parse(fs.readFileSync(machineOverridesPath, 'utf8'));
+assert.equal(machineOverrides.wp_codebox_bin, cliPath);
+assert.equal(machineOverrides.wp_codebox_core_module, coreModulePath);
+assert.equal(fs.readFileSync(manifestPath, 'utf8'), manifestBefore, 'machine mode must not rewrite the manifest');
+
 const { resolveRuntimeProvider } = require('../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const runtime = resolveRuntimeProvider('wp-codebox', {
 	repoRoot: rootDir,

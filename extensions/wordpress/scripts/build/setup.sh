@@ -115,6 +115,15 @@ install_wp_codebox() {
         esac
     }
 
+    # Machine-scoped override file under the homeboy-managed cache install root.
+    # Setup persists the resolved wp_codebox_bin / wp_codebox_core_module here
+    # instead of rewriting the tracked wordpress.json manifest, so a linked
+    # extension source checkout never gets dirtied by machine-local paths.
+    wp_codebox_override_file() {
+        local install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+        printf '%s\n' "${install_root}/wp-codebox-overrides.json"
+    }
+
     configure_explicit_overrides() {
         local explicit_bin=""
         local explicit_core_module=""
@@ -151,7 +160,10 @@ install_wp_codebox() {
         fi
 
         if [ "${configured_bin}" -eq 1 ] && { [ "${configured_core_module}" -eq 1 ] || resolve_core_module_from_known_locations; } && probe_wp_codebox_runtime "${HOMEBOY_WP_CODEBOX_BIN}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${HOMEBOY_WP_CODEBOX_BIN}")"; then
-            node "${EXTENSION_PATH}/scripts/build/persist-wp-codebox-overrides.mjs" "${EXTENSION_PATH}/wordpress.json"
+            # Persist machine-local overrides to the untracked cache override
+            # file rather than the tracked wordpress.json manifest so setup does
+            # not dirty a linked extension source checkout.
+            node "${EXTENSION_PATH}/scripts/build/persist-wp-codebox-overrides.mjs" --machine "$(wp_codebox_override_file)" "${EXTENSION_PATH}/wordpress.json"
             return 0
         fi
 
@@ -286,7 +298,23 @@ EOF
     fi
 
     git -C "${repo_dir}" fetch --quiet origin "${ref}"
-    git -C "${repo_dir}" checkout --quiet FETCH_HEAD
+
+    # ${repo_dir} is a homeboy-managed cache clone that homeboy itself cloned
+    # under ${install_root}, so it can never hold user work. Converge it the
+    # same deterministic way as the sibling scripts/update-wp-codebox-cache.sh:
+    # hard-reset to the fetched ref and drop untracked build residue (stale
+    # dist output, node_modules left by an earlier npm ci) that would poison a
+    # rebuild. This is safe ONLY for this owned cache; do not copy the pattern
+    # to the extension source checkout or any other repo that can hold user
+    # work.
+    git -C "${repo_dir}" reset --hard --quiet FETCH_HEAD || {
+        echo "Failed to reset WP Codebox cache checkout to FETCH_HEAD: ${repo_dir}" >&2
+        exit 1
+    }
+    git -C "${repo_dir}" clean -ffdx --quiet || {
+        echo "Failed to clean untracked build residue from WP Codebox cache checkout: ${repo_dir}" >&2
+        exit 1
+    }
 
     if [ ! -f "${repo_dir}/package-lock.json" ] && [ ! -f "${repo_dir}/npm-shrinkwrap.json" ]; then
         echo "WP Codebox source install requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci: ${source}" >&2
@@ -359,8 +387,20 @@ if [ -f "composer.json" ]; then
     fi
 fi
 
-# Install npm dependencies (Blueprint validation helpers, ESLint).
+# Install npm dependencies (Blueprint validation helpers, ESLint). npm ci is
+# lockfile-preserving by contract, but a version-skewed lockfile can still be
+# normalised in place. Snapshot the tracked lockfile before the install and
+# restore it if the install rewrote it, so setup never dirties a linked
+# extension source checkout. Only a modification this script itself just caused
+# is reverted — a deliberate pre-existing user edit is captured by the snapshot
+# and restored verbatim.
 if [ -f "package.json" ]; then
+    lockfile_snapshot=""
+    if [ -f "package-lock.json" ]; then
+        lockfile_snapshot="$(mktemp)"
+        cp "${EXTENSION_PATH}/package-lock.json" "${lockfile_snapshot}"
+    fi
+
     echo "Installing npm dependencies..."
     if [ -f "package-lock.json" ]; then
         npm ci --quiet --no-fund --no-audit 2>&1 || {
@@ -370,6 +410,14 @@ if [ -f "package.json" ]; then
         npm install --quiet --no-fund --no-audit 2>&1 || {
             echo "Warning: npm install failed — extension Node tooling may not be available"
         }
+    fi
+
+    if [ -n "${lockfile_snapshot}" ]; then
+        if ! cmp -s "${lockfile_snapshot}" "${EXTENSION_PATH}/package-lock.json"; then
+            echo "Restoring package-lock.json rewritten by npm; setup must not dirty the extension source checkout" >&2
+            cp "${lockfile_snapshot}" "${EXTENSION_PATH}/package-lock.json"
+        fi
+        rm -f "${lockfile_snapshot}"
     fi
 fi
 
