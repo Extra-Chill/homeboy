@@ -18,12 +18,13 @@ override through the provider contract or task conversion options:
   runtime id, model fields, and provider-plugin guidance consumed by the WP
   Codebox runtime contract.
 
-`recipe_run_providers` declares `wordpress.wp-codebox.recipe-run` for Homeboy's
-generic remote recipe-run command. It uses the runtime CLI descriptor's canonical
-`wp-codebox` executable with argv `recipe-run --recipe {recipe} --artifacts
-{artifacts} --json`; Homeboy resolves the executable on the selected runner and
-owns workspace materialization, run persistence, and artifact promotion. This
-provider requires Homeboy support from [#12131](https://github.com/Extra-Chill/homeboy/issues/12131).
+The installed WordPress extension manifest declares
+`wordpress.wp-codebox.recipe-run` for Homeboy's generic remote recipe-run command.
+It uses the runtime CLI descriptor's canonical `wp-codebox` executable with argv
+`recipe-run --recipe {recipe} --artifacts {artifacts} --json`; Homeboy resolves the
+executable on the selected runner and owns workspace materialization, run
+persistence, and artifact promotion. This provider requires Homeboy support from
+[#12131](https://github.com/Extra-Chill/homeboy/issues/12131).
 
 The JavaScript executor consumes these manifest fields as product policy. Callers
 can supply generic manifest values through the runtime package contract.
