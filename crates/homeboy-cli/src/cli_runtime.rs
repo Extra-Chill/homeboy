@@ -1608,6 +1608,12 @@ fn preflight_hot_command(
                         .ok()
                         .flatten()
                         .is_some());
+            let auto_local_capacity_fallback = resource_policy::admits_auto_local_capacity_fallback(
+                hot_command,
+                &resources,
+                lab_readiness.as_ref(),
+                cli.placement,
+            );
             let explicit_runner_placement = explicit_runner_placement(cli, hot_command);
             // An explicit runner resolves workload placement before resource
             // guidance. Controller pressure still matters for handoff overhead,
@@ -1651,6 +1657,7 @@ fn preflight_hot_command(
                         warning.as_ref()
                     },
                     cli.placement.is_explicit_local_override(),
+                    auto_local_capacity_fallback,
                     lab_readiness.as_ref(),
                     runner_hosted,
                 );
@@ -1672,7 +1679,7 @@ fn preflight_hot_command(
                         &std::env::args().collect::<Vec<_>>(),
                         selected_lab_runner,
                     ),
-                    runner_admits_offload,
+                    runner_admits_offload || auto_local_capacity_fallback,
                 ) {
                     if review_test_deferred_workload_eligible(cli, warning, runner_admits_offload) {
                         return None;

@@ -31,6 +31,8 @@ use super::{
     DaemonTerminationClassification, DaemonTerminationEvidence, DAEMON_STARTUP_TOKEN_ENV,
 };
 
+const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
+
 /// Enumerate foreground daemon processes without inferring ownership from a
 /// command substring. A candidate is an owner only when its explicit HOME
 /// environment resolves to this durable store and its executable is the active
@@ -2422,6 +2424,12 @@ fn spawn_and_wait_for_lease_attempt(
 /// Keep the daemon and its workload children alive when a transient launcher
 /// connection, such as direct SSH, disconnects.
 fn detach_from_launcher_session(command: &mut Command) {
+    // The hermetic Cargo runner owns the test binary's process group and reaps
+    // it on cancellation. Test daemons must remain in that group; a `setsid`
+    // here would reparent a cancelled fixture to PID 1 and leak it forever.
+    if cfg!(debug_assertions) && std::env::var_os(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV).is_some() {
+        return;
+    }
     crate::process::detach_from_caller_session(command);
 }
 

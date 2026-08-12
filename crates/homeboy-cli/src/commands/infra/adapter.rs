@@ -190,12 +190,6 @@ mod tests {
         .is_ok());
 
         assert!(command_adapter(
-            parsed_command(&["homeboy", "observe", "demo", "--watch-process", "sleep"]),
-            CommandOutputFileMode::None,
-        )
-        .is_ok());
-
-        assert!(command_adapter(
             parsed_command(&["homeboy", "contract", "manifest"]),
             CommandOutputFileMode::None,
         )
@@ -256,10 +250,6 @@ mod tests {
         let commands = [
             ("fleet", parsed_command(&["homeboy", "fleet", "list"])),
             (
-                "observe",
-                parsed_command(&["homeboy", "observe", "demo", "--watch-process", "sleep"]),
-            ),
-            (
                 "contract",
                 parsed_command(&["homeboy", "contract", "manifest"]),
             ),
@@ -280,6 +270,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn trace_observe_output_descriptor_matches_registered_command_contract() {
+        let command = parsed_command(&[
+            "homeboy",
+            "trace",
+            "observe",
+            "demo",
+            "--watch-process",
+            "sleep",
+        ]);
+        let spec = crate::command_contract::registered_command("trace").unwrap();
+
+        assert_eq!(
+            command.output_descriptor(spec, false),
+            spec.output_descriptor(CommandOutputFileMode::None)
+        );
     }
 
     #[test]

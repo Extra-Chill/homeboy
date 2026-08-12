@@ -106,14 +106,24 @@ for context in "${contexts[@]}"; do
     continue
   fi
 
+  # Anchored: an unanchored `title: ${title}` is a SUBSTRING match, and
+  # `comment-section-title: Test` satisfied it. That made the declaration check
+  # for `homeboy / Test` vacuous — it passed with the Test job repointed at a
+  # foreign workflow and no longer running `review test` at all (#10997).
   title="${context#homeboy / }"
   if grep -Fq 'name: homeboy / ${{ matrix.title }}' "${ci_workflow}" \
-    && grep -Fq "title: ${title}" "${ci_workflow}"; then
+    && grep -Eq "^[[:space:]]+title: ${title}[[:space:]]*$" "${ci_workflow}"; then
     continue
   fi
 
+  # `homeboy / Test` is the caller job name plus the called reconciliation job
+  # name, so no literal `name: homeboy / Test` exists to match. Accept the
+  # reusable-workflow call instead — at a floating major OR a pinned commit SHA.
+  # This branch previously required `@v2` and had therefore been dead since the
+  # pin became a full SHA, which is why the broken title match above was the
+  # only thing keeping this context green.
   if [ "${context}" = "homeboy / Test" ] \
-    && grep -Fq 'uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2' "${ci_workflow}" \
+    && grep -Eq 'uses: Extra-Chill/homeboy-action/\.github/workflows/ci\.yml@(v[0-9]+|[0-9a-f]{40})' "${ci_workflow}" \
     && grep -Fq 'commands: review test' "${ci_workflow}"; then
     continue
   fi
