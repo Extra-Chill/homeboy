@@ -1106,12 +1106,22 @@ mod tests {
             assert!(root
                 .finalized_root
                 .join("blobs")
-                .join(value.artifacts[0].sha256.as_deref().expect("transcript digest"))
+                .join(
+                    value.artifacts[0]
+                        .sha256
+                        .as_deref()
+                        .expect("transcript digest")
+                )
                 .is_file());
             assert!(root
                 .finalized_root
                 .join("blobs")
-                .join(value.artifacts[1].sha256.as_deref().expect("runtime digest"))
+                .join(
+                    value.artifacts[1]
+                        .sha256
+                        .as_deref()
+                        .expect("runtime digest")
+                )
                 .is_file());
         });
     }
