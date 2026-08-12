@@ -128,19 +128,16 @@ fn invoke(
         .take()
         .expect("piped stdin")
         .write_all(&request)
-        .map_err(|_| {
-            InvokeError::Fatal(resolver_error("could not send the resolver request"))
-        })?;
+        .map_err(|_| InvokeError::Fatal(resolver_error("could not send the resolver request")))?;
     let stdout = child.stdout.take().expect("piped stdout");
     let reader = thread::spawn(move || read_bounded(stdout));
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|_| {
-                InvokeError::Fatal(resolver_error("could not wait for a notification route resolver"))
-            })?
-        {
+        if let Some(status) = child.try_wait().map_err(|_| {
+            InvokeError::Fatal(resolver_error(
+                "could not wait for a notification route resolver",
+            ))
+        })? {
             // A resolver parent can exit while a descendant retains stdout.
             // Reap its group before joining the reader so that cannot bypass
             // the aggregate deadline by withholding EOF.
@@ -157,11 +154,11 @@ fn invoke(
         }
         thread::sleep(Duration::from_millis(10));
     };
-    let (stdout, oversized) = reader
-        .join()
-        .map_err(|_| {
-            InvokeError::Fatal(resolver_error("notification route resolver output reader failed"))
-        })?;
+    let (stdout, oversized) = reader.join().map_err(|_| {
+        InvokeError::Fatal(resolver_error(
+            "notification route resolver output reader failed",
+        ))
+    })?;
     if oversized {
         return Err(InvokeError::Fatal(resolver_error(
             "notification route resolver output exceeded its limit",
@@ -172,11 +169,12 @@ fn invoke(
             "notification route resolver exited unsuccessfully",
         )));
     }
-    let response: NotificationRouteResolverResponse = serde_json::from_slice(&stdout).map_err(|_| {
-        InvokeError::Fatal(resolver_error(
-            "notification route resolver returned malformed output",
-        ))
-    })?;
+    let response: NotificationRouteResolverResponse =
+        serde_json::from_slice(&stdout).map_err(|_| {
+            InvokeError::Fatal(resolver_error(
+                "notification route resolver returned malformed output",
+            ))
+        })?;
     if response.schema != NOTIFICATION_ROUTE_RESOLVER_SCHEMA {
         return Err(InvokeError::Fatal(resolver_error(
             "notification route resolver returned an unsupported schema",
