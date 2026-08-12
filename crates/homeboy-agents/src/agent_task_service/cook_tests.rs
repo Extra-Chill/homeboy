@@ -2515,6 +2515,23 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     );
     assert!(request.instructions.contains("reviewer-facing PR dossier"));
     assert!(request.instructions.contains("A successful response"));
+    assert_eq!(
+        request.metadata["publication"],
+        serde_json::json!({
+            "capability": "unavailable",
+            "owner": "controller",
+            "status": "not_attempted"
+        })
+    );
+    assert!(request
+        .instructions
+        .contains("non-publishable attempt workspace"));
+    assert!(request
+        .instructions
+        .contains("do not push, create a pull request"));
+    assert!(request
+        .instructions
+        .contains("controller-owned publication"));
 
     project_initial_finalizing_review_form_contract(&mut options);
     assert_eq!(
