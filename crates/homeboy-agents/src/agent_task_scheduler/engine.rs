@@ -1244,22 +1244,41 @@ where
     }
 }
 
-fn persist_resolved_provider_model(outcome: &mut AgentTaskOutcome, request: &AgentTaskRequest) {
-    let Some(model) = request
+pub(crate) fn persist_resolved_provider_model(
+    outcome: &mut AgentTaskOutcome,
+    request: &AgentTaskRequest,
+) {
+    let provider_reported = outcome.selected_model().map(str::to_string);
+    let requested = request.metadata["model_selection"]["requested"]
+        .as_str()
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string);
+    let resolved = request
         .executor
         .model()
         .filter(|model| !model.trim().is_empty())
-    else {
-        return;
-    };
+        .map(str::to_string);
     if !outcome.metadata.is_object() {
         outcome.metadata = serde_json::json!({});
     }
-    outcome
+    let metadata = outcome
         .metadata
         .as_object_mut()
-        .expect("outcome metadata object")
-        .insert("model".to_string(), serde_json::json!(model));
+        .expect("outcome metadata object");
+    // Keep each authority distinct: dispatch intent, selected runtime, and the
+    // provider's response must never overwrite one another.
+    metadata.insert(
+        "model_identity".to_string(),
+        serde_json::json!({
+            "requested": requested,
+            "resolved": resolved,
+            "provider_reported": provider_reported,
+            "actual": provider_reported,
+        }),
+    );
+    if let Some(actual) = provider_reported {
+        metadata.insert("model".to_string(), serde_json::json!(actual));
+    }
 }
 
 #[derive(Debug, Clone)]
