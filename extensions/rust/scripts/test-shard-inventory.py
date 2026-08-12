@@ -269,6 +269,16 @@ def validate(manifest_path, current):
     return [known[identity] for identity in selected]
 
 
+def matching_tests(current, package, target_kind, target, module):
+    return [
+        test for test in current["tests"]
+        if test["package"] == package
+        and test["target_kind"] == target_kind
+        and test["target"] == target
+        and (module is None or test["name"] == module or test["name"].startswith(f"{module}::"))
+    ]
+
+
 def resolve_changed_selection(selection_path, current, project):
     try:
         selection = json.loads(Path(selection_path).read_text())
@@ -303,33 +313,38 @@ def resolve_changed_selection(selection_path, current, project):
                 if source == manifest_parent or manifest_parent in source.parents:
                     package = metadata_package["name"]
                     break
-        matches = [
-            test for test in current["tests"]
-            if test["package"] == package
-            and test["target_kind"] == target_kind
-            and test["target"] == target
-            and (module is None or test["name"] == module or test["name"].startswith(f"{module}::"))
-        ]
-        # A renamed explicit integration target can retain the same source path
-        # while its target name changes. Resolve that current target through
-        # Cargo metadata before deciding that the candidate is stale.
+        matches = matching_tests(current, package, target_kind, target, module)
+        # Changed-scope candidates describe the source that led to selection;
+        # their package/target fields may predate Cargo target renames or kind
+        # changes. Rebind a failed candidate to Cargo's current target identity
+        # by source path, preserving the exact current inventory record.
         if not matches and isinstance(path, str) and path:
             for metadata_package in metadata["packages"]:
                 if metadata_package["name"] != package:
                     continue
                 for metadata_target in metadata_package["targets"]:
-                    if target_kind in metadata_target["kind"] and (
-                        target_kind == "lib" or Path(metadata_target["src_path"]).resolve() == source
-                    ):
-                        target = metadata_target["name"]
-                        matches = [
-                            test for test in current["tests"]
-                            if test["package"] == package
-                            and test["target_kind"] == target_kind
-                            and test["target"] == target
-                            and (module is None or test["name"] == module or test["name"].startswith(f"{module}::"))
-                        ]
+                    kinds = metadata_target["kind"]
+                    manifest_parent = Path(metadata_package["manifest_path"]).resolve().parent
+                    is_lib_source = (
+                        "lib" in kinds
+                        and source.is_relative_to(manifest_parent / "src")
+                        and not source.is_relative_to(manifest_parent / "src" / "bin")
+                    )
+                    if Path(metadata_target["src_path"]).resolve() != source and not is_lib_source:
+                        continue
+                    for current_kind in kinds:
+                        current_matches = matching_tests(
+                            current, package, current_kind, metadata_target["name"], module
+                        )
+                        if current_matches:
+                            target_kind = current_kind
+                            target = metadata_target["name"]
+                            matches = current_matches
+                            break
+                    if matches:
                         break
+                if matches:
+                    break
         if not matches:
             return {"fallback_reason": f"Changed test selection no longer matches {package}::{target_kind}::{target}."}
         selected.update({test["id"]: test for test in matches})
