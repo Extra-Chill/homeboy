@@ -867,12 +867,22 @@ pub(super) fn authoritative_status_for_preflight_with_transport(
                             None,
                         )
                     })?;
-            if !crate::connection::tunnel_process_is_owned(tunnel_pid, tunnel_identity) {
-                return Err(Error::validation_invalid_argument(
-                    "runner",
-                    "verified runner tunnel is no longer owned; reconnect before admission",
-                    Some(connect_authority.runner_id.clone()),
-                    None,
+            let (owned, ownership) = crate::connection::tunnel_process_is_owned_with_observation(
+                tunnel_pid,
+                tunnel_identity,
+            );
+            if !owned {
+                return Err(Error::new(
+                    ErrorCode::ValidationInvalidArgument,
+                    "Invalid argument 'runner': verified runner tunnel is no longer owned; reconnect before admission",
+                    serde_json::json!({
+                        "field": "runner",
+                        "id": connect_authority.runner_id,
+                        "problem": "verified runner tunnel is no longer owned; reconnect before admission",
+                        "tunnel_ownership": ownership,
+                        "session_tunnel_pid": tunnel_pid,
+                        "connect_tunnel_pid": connect_tunnel_pid,
+                    }),
                 ));
             }
         }

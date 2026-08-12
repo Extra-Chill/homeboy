@@ -299,6 +299,7 @@ pub(super) fn open_loopback_tunnel(
             batch_mode: true,
             connect_timeout: true,
             exit_on_forward_failure: true,
+            disable_multiplexing: true,
             port_flag: Some(homeboy_core::server::ssh_args::SshPortFlag::Lowercase),
             ..homeboy_core::server::ssh_args::SshArgOptions::default()
         },
@@ -344,6 +345,7 @@ pub(super) fn open_reverse_proxy_tunnel(
             batch_mode: true,
             connect_timeout: true,
             exit_on_forward_failure: true,
+            disable_multiplexing: true,
             port_flag: Some(homeboy_core::server::ssh_args::SshPortFlag::Lowercase),
             ..homeboy_core::server::ssh_args::SshArgOptions::default()
         },

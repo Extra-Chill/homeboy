@@ -2777,6 +2777,28 @@ pub(crate) fn tunnel_process_is_owned(
     )
 }
 
+pub(crate) fn tunnel_process_ownership(
+    pid: u32,
+    identity: &RunnerTunnelProcessStartIdentity,
+) -> session_store::TunnelProcessOwnership {
+    session_store::tunnel_process_ownership(
+        pid,
+        Some(identity),
+        homeboy_core::process::process_start_identity,
+    )
+}
+
+pub(crate) fn tunnel_process_is_owned_with_observation(
+    pid: u32,
+    identity: &RunnerTunnelProcessStartIdentity,
+) -> (bool, String) {
+    let ownership = tunnel_process_ownership(pid, identity);
+    (
+        ownership == session_store::TunnelProcessOwnership::Owned,
+        format!("{ownership:?}"),
+    )
+}
+
 fn runner_jobs_with_client(
     runner_id: &str,
     session: &RunnerSession,

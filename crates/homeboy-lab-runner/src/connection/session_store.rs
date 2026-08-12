@@ -7,6 +7,14 @@ pub(super) fn session_is_live(session: &RunnerSession) -> bool {
     session_is_live_with_timeout(session, Duration::from_secs(2))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TunnelProcessOwnership {
+    Owned,
+    ProcessAbsent,
+    KernelIdentityUnavailable,
+    KernelIdentityMismatch,
+}
+
 pub(super) fn session_is_live_with_timeout(session: &RunnerSession, timeout: Duration) -> bool {
     session_is_live_with_probe(session, timeout, |session, probe_timeout| {
         let Some(local_url) = session.local_url.as_deref() else {
@@ -86,24 +94,49 @@ where
     Inspect:
         Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
 {
+    matches!(
+        tunnel_process_ownership(pid, expected, inspect),
+        TunnelProcessOwnership::Owned
+    )
+}
+
+pub(crate) fn tunnel_process_ownership<Inspect>(
+    pid: u32,
+    expected: Option<&RunnerTunnelProcessStartIdentity>,
+    inspect: Inspect,
+) -> TunnelProcessOwnership
+where
+    Inspect:
+        Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
+{
     let Some(expected) = expected else {
-        return homeboy_core::process::pid_is_running(pid);
+        return homeboy_core::process::pid_is_running(pid)
+            .then_some(TunnelProcessOwnership::Owned)
+            .unwrap_or(TunnelProcessOwnership::ProcessAbsent);
     };
-    inspect(pid).ok().flatten().is_some_and(|actual| {
-        let actual = match actual {
-            homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
-                RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+    match inspect(pid) {
+        Ok(None) => TunnelProcessOwnership::ProcessAbsent,
+        Err(_) => TunnelProcessOwnership::KernelIdentityUnavailable,
+        Ok(Some(actual)) => {
+            let actual = match actual {
+                homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                    RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+                }
+                homeboy_core::process::ProcessStartIdentity::Macos {
+                    start_seconds,
+                    start_microseconds,
+                } => RunnerTunnelProcessStartIdentity::Macos {
+                    start_seconds,
+                    start_microseconds,
+                },
+            };
+            if &actual == expected {
+                TunnelProcessOwnership::Owned
+            } else {
+                TunnelProcessOwnership::KernelIdentityMismatch
             }
-            homeboy_core::process::ProcessStartIdentity::Macos {
-                start_seconds,
-                start_microseconds,
-            } => RunnerTunnelProcessStartIdentity::Macos {
-                start_seconds,
-                start_microseconds,
-            },
-        };
-        &actual == expected
-    })
+        }
+    }
 }
 
 pub(super) fn reverse_controller_session_is_live(session: &RunnerSession) -> bool {
@@ -922,6 +955,31 @@ mod tests {
         assert!(tunnel_process_is_owned(42, Some(&expected), |_| Ok(Some(
             actual.clone()
         ))));
+    }
+
+    #[test]
+    fn tunnel_ownership_classifies_absent_unavailable_and_reused_processes() {
+        let expected = RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds: 1,
+            start_microseconds: 2,
+        };
+        assert_eq!(
+            tunnel_process_ownership(42, Some(&expected), |_| Ok(None)),
+            TunnelProcessOwnership::ProcessAbsent
+        );
+        assert_eq!(
+            tunnel_process_ownership(42, Some(&expected), |_| Err("denied".to_string())),
+            TunnelProcessOwnership::KernelIdentityUnavailable
+        );
+        assert_eq!(
+            tunnel_process_ownership(42, Some(&expected), |_| Ok(Some(
+                homeboy_core::process::ProcessStartIdentity::Macos {
+                    start_seconds: 3,
+                    start_microseconds: 4,
+                }
+            ))),
+            TunnelProcessOwnership::KernelIdentityMismatch
+        );
     }
 
     #[test]
