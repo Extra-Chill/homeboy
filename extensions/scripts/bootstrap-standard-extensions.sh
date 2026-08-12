@@ -15,8 +15,7 @@ usage() {
     cat <<'USAGE'
 Usage: scripts/bootstrap-standard-extensions.sh [options]
 
-Install the standard Homeboy extension set on the local machine or an SSH
-reachable remote runner.
+Install the standard Homeboy extension set locally or on a Homeboy runner.
 
 Options:
   --target <runner-id>        Runner ID such as example-runner. Omit for local bootstrap.
@@ -118,7 +117,7 @@ REMOTE_SCRIPT
 if [ -n "$TARGET" ]; then
     RUNNER_ID="$TARGET"
     CONTROLLER_HOMEBOY_BIN="${HOMEBOY_CONTROLLER_BIN:-homeboy}"
-    RUNNER_ARGS=(runner exec "$RUNNER_ID" --script-file - --raw --env "HOMEBOY_BIN=$HOMEBOY_BIN" --env "REPO=$REPO" --env "EXTENSIONS=$EXTENSIONS" --env "REPLACE_EXISTING=$REPLACE_EXISTING" --ssh)
+    RUNNER_ARGS=(runner exec "$RUNNER_ID" --script-file - --raw --env "HOMEBOY_BIN=$HOMEBOY_BIN" --env "REPO=$REPO" --env "EXTENSIONS=$EXTENSIONS" --env "REPLACE_EXISTING=$REPLACE_EXISTING")
 
     if [ "$DRY_RUN" -eq 1 ]; then
         RUNNER_ARGS+=(--dry-run)

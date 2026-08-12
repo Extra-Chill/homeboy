@@ -142,9 +142,16 @@ case "$DRY_RUN_OUTPUT" in
         ;;
 esac
 case "$DRY_RUN_OUTPUT" in
-    *"--env REQUESTED_REF=fixture-ref"*"--env CACHE_DIR="*"--env NPM_BIN=npm --ssh --dry-run example-runner"*) ;;
+    *"--env REQUESTED_REF=fixture-ref"*"--env CACHE_DIR="*"--env NPM_BIN=npm --dry-run example-runner"*) ;;
     *)
-        echo "Dry-run did not preserve runner environment, SSH dispatch, and target" >&2
+        echo "Dry-run did not preserve daemon-backed runner environment and target" >&2
+        echo "$DRY_RUN_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+case "$DRY_RUN_OUTPUT" in
+    *"--ssh"*)
+        echo "Dry-run unexpectedly requested diagnostic SSH" >&2
         echo "$DRY_RUN_OUTPUT" >&2
         exit 1
         ;;

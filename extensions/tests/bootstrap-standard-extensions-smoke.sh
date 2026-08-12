@@ -11,7 +11,22 @@ if [ ! -f "$SCRIPT" ]; then
     exit 1
 fi
 
-OUTPUT="$($SCRIPT --target local --extensions "nodejs rust" --repo "https://example.com/extensions.git" --homeboy /opt/homeboy/bin/homeboy --dry-run)"
+FAKE_HOMEBOY="$TMP_DIR/homeboy"
+LOG_FILE="$TMP_DIR/homeboy.log"
+cat > "$FAKE_HOMEBOY" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$HOMEBOY_FAKE_LOG"
+case "$1 $2" in
+    "extension install") exit 0 ;;
+    "extension show") exit 0 ;;
+    "extension list") printf 'nodejs\nrust\n' ; exit 0 ;;
+    *) cat ;;
+esac
+FAKE
+chmod +x "$FAKE_HOMEBOY"
+
+OUTPUT="$(HOMEBOY_CONTROLLER_BIN="$FAKE_HOMEBOY" HOMEBOY_FAKE_LOG="$LOG_FILE" "$SCRIPT" --target local --extensions "nodejs rust" --repo "https://example.com/extensions.git" --homeboy /opt/homeboy/bin/homeboy --dry-run)"
 
 case "$OUTPUT" in
     *'INSTALL_ARGS=(extension install "$REPO" --id "$EXTENSION_ID")'*'"$HOMEBOY_BIN" "${INSTALL_ARGS[@]}"'*) ;;
@@ -50,21 +65,26 @@ case "$HELP_OUTPUT" in
         ;;
 esac
 
-FAKE_HOMEBOY="$TMP_DIR/homeboy"
-LOG_FILE="$TMP_DIR/homeboy.log"
-cat > "$FAKE_HOMEBOY" <<'FAKE'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >> "$HOMEBOY_FAKE_LOG"
-case "$1 $2" in
-    "extension install") exit 0 ;;
-    "extension show") exit 0 ;;
-    "extension list") printf 'nodejs\nrust\n' ; exit 0 ;;
-    *) exit 2 ;;
+: > "$LOG_FILE"
+HOMEBOY_CONTROLLER_BIN="$FAKE_HOMEBOY" HOMEBOY_FAKE_LOG="$LOG_FILE" "$SCRIPT" --target homeboy-lab --extensions "nodejs rust" --repo "https://example.com/extensions.git" --homeboy /opt/homeboy/bin/homeboy --dry-run >/dev/null
+TARGET_CALL="$(<"$LOG_FILE")"
+case "$TARGET_CALL" in
+    *"runner exec homeboy-lab --script-file - --raw --env HOMEBOY_BIN=/opt/homeboy/bin/homeboy --env REPO=https://example.com/extensions.git --env EXTENSIONS=nodejs rust --env REPLACE_EXISTING=0 --dry-run"*) ;;
+    *)
+        echo "Targeted dry-run did not preserve runner and environment arguments" >&2
+        echo "$TARGET_CALL" >&2
+        exit 1
+        ;;
 esac
-FAKE
-chmod +x "$FAKE_HOMEBOY"
+case "$TARGET_CALL" in
+    *"--ssh"*)
+        echo "Targeted dry-run unexpectedly requested diagnostic SSH" >&2
+        echo "$TARGET_CALL" >&2
+        exit 1
+        ;;
+esac
 
+: > "$LOG_FILE"
 HOMEBOY_FAKE_LOG="$LOG_FILE" "$SCRIPT" --extensions "nodejs rust" --repo "https://example.com/extensions.git" --homeboy "$FAKE_HOMEBOY" >/dev/null
 
 EXPECTED_LOG="$TMP_DIR/expected.log"

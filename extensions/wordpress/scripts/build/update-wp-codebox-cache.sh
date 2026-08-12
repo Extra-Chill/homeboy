@@ -156,7 +156,7 @@ if [ -z "$TARGET" ]; then
     exit 0
 fi
 
-RUNNER_ARGS=(runner exec --script-file - --raw --env "SOURCE=$SOURCE" --env "REQUESTED_REF=$REF" --env "CACHE_DIR=$CACHE_DIR" --env "NPM_BIN=$NPM_BIN" --ssh)
+RUNNER_ARGS=(runner exec --script-file - --raw --env "SOURCE=$SOURCE" --env "REQUESTED_REF=$REF" --env "CACHE_DIR=$CACHE_DIR" --env "NPM_BIN=$NPM_BIN")
 
 if [ "$DRY_RUN" -eq 1 ]; then
     RUNNER_ARGS+=(--dry-run)
