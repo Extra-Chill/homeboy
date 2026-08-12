@@ -29,6 +29,7 @@ use super::args::{
     AgentTaskCookArgs, CookContinueArgs, LifecycleReadArgs, PromotionProviderArgs, RetryArgs,
     RunArgs, RunPlanArgs, SubmitArgs,
 };
+use super::gate_contract::validate_gate_contracts;
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -1559,6 +1560,21 @@ where
 {
     let args = resolve_cook_destination(args)?;
     validate_cook_request_with_provenance(&args, provenance)?;
+    let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
+        args.to_worktree
+            .as_deref()
+            .map(Path::new)
+            .filter(|path| path.is_dir())
+    });
+    let gate_contract_validation = validate_gate_contracts(
+        args.gates
+            .verify
+            .iter()
+            .chain(&args.gates.private_verify)
+            .cloned(),
+        gate_workspace,
+        &crate::cli_runtime::current_augmented_command_contract(),
+    )?;
     // Before any external effect: a backend that cannot execute must say so now
     // rather than after a workspace exists and an execution has been spent
     // (#11479).
@@ -1613,6 +1629,9 @@ where
         record_cook_provision(&mut initial_plan, provision);
         record_cook_goal(&mut initial_plan, args.goal.as_deref());
     }
+    initial_plan.metadata["gate_contract_validation"] =
+        serde_json::to_value(gate_contract_validation)
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     resolve_cook_execution_budget(&args, &mut initial_plan)?;
     if !no_progress {
         eprintln!(
