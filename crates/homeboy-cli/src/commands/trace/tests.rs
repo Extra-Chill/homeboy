@@ -29,6 +29,77 @@ fn trace_accepts_allow_local_evidence_alias() {
 }
 
 #[test]
+fn trace_observe_parses_shared_duration_and_probe_arguments() {
+    let cli = TestCli::try_parse_from([
+        "trace",
+        "observe",
+        "component",
+        "--duration",
+        "250ms",
+        "--tail-log",
+        "/tmp/app.log",
+        "--grep",
+        "error",
+        "--watch-process",
+        "homeboy",
+        "--watch-process-interval",
+        "50ms",
+        "--probe",
+        r#"{"type":"port.snapshot","port":3000}"#,
+    ])
+    .expect("passive trace args parse");
+
+    let Some(TraceSubcommand::Observe(args)) = cli.trace.command else {
+        panic!("expected trace observe subcommand");
+    };
+    assert_eq!(args.comp.component.as_deref(), Some("component"));
+    assert_eq!(args.duration, std::time::Duration::from_millis(250));
+    assert_eq!(
+        args.watch_process_interval,
+        std::time::Duration::from_millis(50)
+    );
+    assert_eq!(args.tail_logs.len(), 1);
+    assert_eq!(args.probes.len(), 1);
+}
+
+#[test]
+fn trace_observe_preserves_passive_run_and_artifact_schema() {
+    with_isolated_home(|home| {
+        let target = home.path().join("target");
+        fs::create_dir_all(&target).expect("target dir");
+        let (output, code) = run(TraceArgs {
+            command: Some(TraceSubcommand::Observe(PassiveTraceArgs {
+                comp: PositionalComponentArgs {
+                    component: None,
+                    path: Some(target.to_string_lossy().to_string()),
+                },
+                duration: std::time::Duration::from_millis(5),
+                tail_logs: Vec::new(),
+                grep: None,
+                watch_processes: vec!["unlikely-homeboy-observe-test-process".to_string()],
+                watch_process_interval: std::time::Duration::from_millis(1),
+                probes: Vec::new(),
+            })),
+            ..trace_args_for_rig("unused", "unused", "unused")
+        })
+        .expect("passive trace run");
+        assert_eq!(code, 0);
+        let TraceCommandOutput::Passive(output) = output else {
+            panic!("expected passive trace output");
+        };
+        assert_eq!(output.command, "observe");
+        let artifact = fs::read_to_string(&output.artifact_path).expect("trace artifact");
+        assert!(artifact.contains("\"scenario_id\": \"observe\""));
+        let run = ObservationStore::open_initialized()
+            .expect("store")
+            .get_run(&output.run_id)
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(run.kind, "observe");
+    });
+}
+
+#[test]
 fn trace_rejects_target_compare_flags_without_compare_command() {
     let cli = TestCli::try_parse_from([
         "trace",
@@ -109,6 +180,7 @@ fn lab_dispatch_observation_persists_trace_run_before_remote_execution() {
 
 fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> TraceArgs {
     TraceArgs {
+        command: None,
         comp: PositionalComponentArgs {
             component: Some(component_id.to_string()),
             path: None,
@@ -167,6 +239,7 @@ fn rig_trace_run_uses_rig_owned_workload_extension_without_component_link() {
         write_trace_rig(home, "studio-rig", "studio", component_dir.path());
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -268,6 +341,7 @@ fn trace_run_persists_observation_history() {
         write_trace_rig(home, "studio-rig", "studio", component_dir.path());
 
         let (_output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -444,6 +518,7 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
         write_trace_rig(home, "studio-rig", "studio", component_dir.path());
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -549,6 +624,7 @@ fn trace_repeat_loads_span_metadata_and_reports_unknown_ids() {
         write_trace_rig_with_span_metadata(home, "studio-rig", "studio", component_dir.path());
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -736,6 +812,7 @@ fn trace_repeat_reports_overlay_touched_files_at_top_level() {
         write_trace_rig(home, "studio-rig", "studio", component_dir.path());
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -825,6 +902,7 @@ fn trace_run_resolves_named_variants_and_reports_unknown_names() {
         );
 
         let valid_args = TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -947,6 +1025,7 @@ fn trace_compare_variant_writes_experiment_bundle() {
         let output_dir = tempfile::TempDir::new().expect("output dir");
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("compare-variant".to_string()),
                 path: None,
@@ -1033,6 +1112,7 @@ fn trace_compare_variant_resolves_named_variants() {
         let output_dir = tempfile::TempDir::new().expect("output dir");
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("compare-variant".to_string()),
                 path: None,
@@ -1134,6 +1214,7 @@ fn trace_compare_variant_reports_unknown_named_variants() {
         let output_dir = tempfile::TempDir::new().expect("output dir");
 
         let err = match run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("compare-variant".to_string()),
                 path: None,
@@ -1204,6 +1285,7 @@ fn trace_repeat_counts_failed_runs_as_span_failures() {
         write_trace_rig(home, "studio-rig", "studio", component_dir.path());
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -1287,6 +1369,7 @@ fn failed_trace_run_persists_observation_history() {
         write_trace_rig(home, "studio-rig", "studio", component_dir.path());
 
         let (_output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,

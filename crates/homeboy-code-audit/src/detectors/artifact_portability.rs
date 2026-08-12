@@ -382,7 +382,7 @@ mod tests {
                 .start_run(
                     NewRunRecord::builder("observe")
                         .component_id("demo")
-                        .command("homeboy observe demo")
+                        .command("homeboy trace observe demo")
                         .cwd_path(&cwd)
                         .build(),
                 )
@@ -416,7 +416,7 @@ mod tests {
                 .contains("/tmp/homeboy-run-abc/trace.json"));
             assert!(findings[0]
                 .description
-                .contains("command `homeboy observe demo`"));
+                .contains("command `homeboy trace observe demo`"));
             assert!(findings[0].description.contains("field `artifact.path`"));
             assert!(findings[0].suggestion.contains("Suggested portable ref"));
         });
@@ -602,7 +602,7 @@ mod tests {
                 .start_run(
                     NewRunRecord::builder("observe")
                         .component_id("demo")
-                        .command("homeboy observe demo")
+                        .command("homeboy trace observe demo")
                         .cwd_path(&cwd)
                         .metadata(serde_json::json!({
                             "cleanup": "completed",
@@ -699,7 +699,7 @@ mod tests {
                     .start_run(
                         NewRunRecord::builder("observe")
                             .component_id("demo")
-                            .command(format!("homeboy observe demo --run {index}"))
+                            .command(format!("homeboy trace observe demo --run {index}"))
                             .cwd_path(&cwd)
                             .metadata(serde_json::json!({
                                 "evidence": {
@@ -742,7 +742,7 @@ mod tests {
                     .start_run(
                         NewRunRecord::builder("observe")
                             .component_id("demo")
-                            .command(format!("homeboy observe demo --run {index}"))
+                            .command(format!("homeboy trace observe demo --run {index}"))
                             .cwd_path(&cwd)
                             .metadata(serde_json::json!({
                                 "evidence": {

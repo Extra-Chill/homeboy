@@ -58,7 +58,7 @@ pub use report::{
     TraceClassificationSummaryOutput, TraceCommandOutput, TraceCompareClassificationSummaryOutput,
     TraceCompareMetricOutput, TraceCompareOutput, TraceCompareRunOrderOutput,
     TraceCompareSpanOutput, TraceGuardrailOutput, TraceListOutput, TraceMetricGuardrailOutput,
-    TraceOverlayLocksOutput, TraceProfileListItem, TraceResolvedProfileOutput,
+    TraceOverlayLocksOutput, TracePassiveOutput, TraceProfileListItem, TraceResolvedProfileOutput,
     TraceRunOrderEntryOutput, TraceScenarioMatrixAxisOutput, TraceScenarioMatrixCellOutput,
     TraceScenarioMatrixOutput, TraceSpanMetadata, TraceVariantMatrixOutput,
     TraceVariantMatrixRunOutput,

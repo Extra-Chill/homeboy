@@ -6,7 +6,7 @@ use crate::command_contract::{
 
 use crate::cli_surface::Commands;
 
-use crate::commands::{contract, fleet, observe};
+use crate::commands::{contract, fleet};
 
 pub(crate) type JsonHandlerResult = (homeboy::core::Result<Value>, i32);
 pub(crate) type JsonCommandExecutor<Args> = fn(Args) -> JsonHandlerResult;
@@ -117,12 +117,6 @@ pub(crate) fn command_adapter(
                 .expect("fleet adapter supports JSON execution");
             Ok(BoundCommandAdapter::bind(args, executor))
         }
-        Commands::Observe(args) => {
-            let executor = observe::adapter(output_file_mode)
-                .execute_json
-                .expect("observe adapter supports JSON execution");
-            Ok(BoundCommandAdapter::bind(args, executor))
-        }
         Commands::Contract(args) => {
             let executor = contract::adapter(output_file_mode)
                 .execute_json
@@ -139,7 +133,6 @@ pub(crate) fn output_descriptor(
 ) -> Option<CommandOutputDescriptor> {
     match command {
         Commands::Fleet(_) => Some(fleet::adapter(output_file_mode).output_descriptor()),
-        Commands::Observe(_) => Some(observe::adapter(output_file_mode).output_descriptor()),
         Commands::Contract(_) => Some(contract::adapter(output_file_mode).output_descriptor()),
         _ => None,
     }

@@ -80,6 +80,7 @@ fn trace_matrix_reports_failed_cells_and_cell_artifacts() {
         let output_dir = tempfile::TempDir::new().expect("matrix output dir");
 
         let ((output, _artifact_output), exit_code) = run_outputs(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("matrix".to_string()),
                 path: None,

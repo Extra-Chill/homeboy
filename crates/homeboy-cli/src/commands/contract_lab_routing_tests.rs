@@ -23,6 +23,21 @@ fn non_workload_command_has_no_workload_arguments() {
 }
 
 #[test]
+fn trace_observe_stays_local_to_the_observed_target() {
+    assert!(parsed_command(&[
+        "homeboy",
+        "trace",
+        "observe",
+        "component",
+        "--watch-process",
+        "homeboy",
+    ])
+    .lab_route_contract()
+    .expect("route contract")
+    .is_none());
+}
+
+#[test]
 fn runner_resident_agent_task_reads_are_low_noise_polling() {
     for args in [
         ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),

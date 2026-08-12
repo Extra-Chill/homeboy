@@ -6,9 +6,8 @@ under the Homeboy run directory.
 
 Use `trace` when Homeboy owns scenario execution and assertions. Rig-owned
 trace workloads can compose passive `TraceProbeConfig` capture without a second
-collector. The legacy `observe` command translates its flags into that same
-typed Trace contract for passive timeline capture against an already-running
-target.
+collector. `trace observe` captures a passive timeline against an already-running
+target using that same typed Trace contract.
 
 ## Usage
 
@@ -32,7 +31,32 @@ homeboy trace <component> <scenario> --baseline
 homeboy trace <component> <scenario> --ratchet
 homeboy trace --profile studio-window-close
 homeboy trace list --profiles
+homeboy trace observe <component> --duration 30s --tail-log /path/to/app.log --grep 'invalid_grant'
+homeboy trace observe <component> --duration 5m --watch-process 'node .*serve' --watch-process-interval 1s
+homeboy trace observe <component> --duration 30s --probe '{"type":"http.poll","url":"http://127.0.0.1:3000/health","assert-status":200}'
 ```
+
+## Passive Capture
+
+`trace observe` samples or tails a system that is already running and persists
+timeline evidence. It does not drive a scenario or own target lifecycle. It
+requires at least one `--tail-log`, `--watch-process`, or `--probe`.
+
+The command preserves the established passive capture persistence schema: an
+observation-store run with kind `observe`, a trace artifact with scenario id
+`observe`, and the existing JSON response fields. Inspect it with:
+
+```sh
+homeboy runs list --kind observe
+homeboy runs show <run-id>
+homeboy runs artifacts <run-id>
+```
+
+`--duration` and `--watch-process-interval` use Trace's shared duration parser.
+`--probe` accepts portable `TraceProbeConfig` JSON (`log.tail`,
+`process.snapshot`, `file.watch`, `port.snapshot`, `http.poll`, `http.egress`,
+and `cmd.run`). `http.egress` starts a local proxy and emits a
+`http.egress proxy.ready` event with `proxy_url`.
 
 ## Profiles
 

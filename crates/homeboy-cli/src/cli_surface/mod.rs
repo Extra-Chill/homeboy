@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use crate::commands::{
     activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db,
-    deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, observe, project,
-    refactor, release, report, review, rig, runner, runs, runtime, schedule, self_cmd, server,
-    source, ssh, stack, status, trace, triage, tunnel, upgrade, worktree,
+    deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project, refactor,
+    release, report, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh,
+    stack, status, trace, triage, tunnel, upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -187,8 +187,6 @@ pub enum Commands {
         after_help = "Command-shaped trace modes:\n  homeboy trace list --profiles\n  homeboy trace <component> list\n  homeboy trace compare before.json after.json\n  homeboy trace compare <component> <scenario> --baseline-target <target> --candidate <target>\n  homeboy trace matrix <component> <scenario> --axis name=value1,value2\n  homeboy trace compare-variant --rig <rig-id> --scenario <scenario>\n  homeboy trace compare-bundle --component <component> --scenario <scenario>\n  homeboy trace overlay-locks --stale"
     )]
     Trace(trace::TraceArgs),
-    /// Passively observe a running system and persist timeline evidence
-    Observe(observe::ObserveArgs),
     /// Database operations
     Db(db::DbArgs),
     /// Manage component dependencies
@@ -900,7 +898,7 @@ mod tests {
         assert!(surface.contains_path(&["review", "ci", "list"]));
         assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
         assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
-        assert!(surface.contains_path(&["observe"]));
+        assert!(surface.contains_path(&["trace", "observe"]));
     }
 
     #[test]
@@ -913,7 +911,7 @@ mod tests {
         assert!(surface.contains_path(&["review", "ci", "list"]));
         assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
         assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
-        assert!(surface.contains_path(&["observe"]));
+        assert!(surface.contains_path(&["trace", "observe"]));
     }
 
     #[test]

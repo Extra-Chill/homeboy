@@ -22,6 +22,7 @@ JSON
         .expect("write trace workload");
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("shell-only".to_string()),
                 path: Some(component_dir.path().to_string_lossy().to_string()),

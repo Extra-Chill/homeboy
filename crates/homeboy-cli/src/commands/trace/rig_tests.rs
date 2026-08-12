@@ -27,6 +27,7 @@ fn set_trace_rig_resources(home: &tempfile::TempDir, rig_id: &str, resources: se
 
 fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> TraceArgs {
     TraceArgs {
+        command: None,
         comp: PositionalComponentArgs {
             component: Some(component_id.to_string()),
             path: None,

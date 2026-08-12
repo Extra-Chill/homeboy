@@ -22,6 +22,7 @@ fn trace_run_expands_phase_chain_into_adjacent_and_total_spans() {
         write_trace_rig(home, "studio-rig", "studio", component_dir.path());
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -111,6 +112,7 @@ fn trace_run_expands_named_workload_phase_preset() {
         write_trace_rig_with_phase_preset(home, "preset-rig", "studio", component_dir.path());
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -191,6 +193,7 @@ fn trace_aggregate_spans_uses_workload_default_phase_preset() {
         write_trace_rig_with_phase_preset(home, "preset-rig", "studio", component_dir.path());
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -264,6 +267,7 @@ fn trace_run_expands_phase_template_defaults_and_metadata() {
         write_trace_rig_with_phase_template(home, "template-rig", "studio", component_dir.path());
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,
@@ -372,6 +376,7 @@ fn trace_run_rejects_unknown_phase_template_reference() {
         .expect("write rig");
 
         let error = match run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("studio".to_string()),
                 path: None,

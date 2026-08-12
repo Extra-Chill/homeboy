@@ -33,6 +33,7 @@ fn trace_compare_variant_interleaves_run_order_and_reports_focus_spans() {
         let output_dir = tempfile::TempDir::new().expect("output dir");
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("compare-variant".to_string()),
                 path: None,
@@ -180,6 +181,7 @@ fn trace_compare_variant_uses_component_arg_for_multi_component_named_variants()
         let output_dir = tempfile::TempDir::new().expect("output dir");
 
         let (output, exit_code) = run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("compare-variant".to_string()),
                 path: None,
@@ -276,6 +278,7 @@ fn trace_compare_variant_reports_unknown_named_variant_for_component_arg() {
         let output_dir = tempfile::TempDir::new().expect("output dir");
 
         let err = match run(TraceArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("compare-variant".to_string()),
                 path: None,
