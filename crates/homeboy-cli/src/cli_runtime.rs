@@ -553,7 +553,7 @@ impl CliRuntime {
         };
         let mut cli = compiled.value;
         let command_provenance = compiled.provenance;
-        let notification_route =
+        let mut notification_route =
             match crate::core::notification_route_resolver::resolve_from_cli_or_env(
                 cli.notification_transport.as_deref(),
                 cli.notification_route.as_deref(),
@@ -621,6 +621,24 @@ impl CliRuntime {
                         &command_identity,
                     );
                     return std::process::ExitCode::from(2);
+                }
+                if notification_route.is_none() {
+                    notification_route = match crate::core::notification_route_resolver::resolve_installed() {
+                        Ok(route) => route,
+                        Err(err) => {
+                            output_runtime::emit_json_result_for_identity(
+                                Err(err),
+                                output_file.as_deref(),
+                                2,
+                                &command_identity,
+                            );
+                            return std::process::ExitCode::from(2);
+                        }
+                    };
+                    if let Some(route) = &notification_route {
+                        cli.notification_transport = Some(route.transport.clone());
+                        cli.notification_route = Some(route.route.clone());
+                    }
                 }
             }
         }
