@@ -151,9 +151,6 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
     };
     let tunnel = remote_daemon::open_reverse_proxy_tunnel(server, &proxy.host, proxy.port);
     if !tunnel.success {
-        if let Some(pid) = tunnel.pid {
-            terminate_pid(pid);
-        }
         return Err(Error::validation_invalid_argument(
             "controller_proxy",
             format!(
@@ -165,14 +162,15 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
         ));
     }
     let tunnel_pid = tunnel.pid.expect("remote SSH forward has a child process");
+    let tunnel_process_start_identity = capture_tunnel_process_start_identity(Some(tunnel_pid))?;
     let port = tunnel.stderr.parse::<u16>().map_err(|_| {
-        terminate_pid(tunnel_pid);
+        terminate_tunnel_if_owned_parts(tunnel_pid, tunnel_process_start_identity.as_ref());
         Error::internal_unexpected("controller proxy forward returned no allocated port")
     })?;
     Ok(Some(RunnerProxyForward {
         runner_url: format!("{}://127.0.0.1:{port}", proxy.scheme),
         tunnel_pid,
-        tunnel_process_start_identity: capture_tunnel_process_start_identity(Some(tunnel_pid))?,
+        tunnel_process_start_identity,
     }))
 }
 
@@ -362,7 +360,7 @@ pub(crate) fn rotate_daemon_generation(
         inspected_freshness: None,
     };
     let session_path = session_path(runner_id)?;
-    let (local_port, tunnel_pid, local_url, daemon) =
+    let (local_port, tunnel_pid, tunnel_process_start_identity, local_url, daemon) =
         match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
             server: &server,
             homeboy: candidate_homeboy,
@@ -412,7 +410,7 @@ pub(crate) fn rotate_daemon_generation(
                 let _ = client.execute(&command);
             }
             if let Some(pid) = tunnel_pid {
-                terminate_pid(pid);
+                terminate_tunnel_if_owned_parts(pid, tunnel_process_start_identity.as_ref());
             }
             // The candidate was never activated. Remove any retained entry for
             // this generation just as the preceding startup-validation path
@@ -432,7 +430,7 @@ pub(crate) fn rotate_daemon_generation(
         local_port: Some(local_port),
         local_url: Some(local_url),
         tunnel_pid,
-        tunnel_process_start_identity: capture_tunnel_process_start_identity(tunnel_pid)?,
+        tunnel_process_start_identity,
         proxy_forward: current.proxy_forward.clone(),
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id: daemon.lease_id,
@@ -1154,15 +1152,16 @@ fn connect_with_orphan_adoption_and_live_lease(
         runner_id,
         session_path: &session_path,
     });
-    let (local_port, tunnel_pid, local_url, daemon) = match connection {
-        Ok(connection) => connection,
-        Err(report) => {
-            let (mut report, exit_code) = *report;
-            attach_state_loss_recovery(&mut report, state_loss_recovery);
-            attach_leaseless_recovery(&mut report, leaseless_recovery, recovery_evidence);
-            return Ok((report, exit_code));
-        }
-    };
+    let (local_port, tunnel_pid, tunnel_process_start_identity, local_url, daemon) =
+        match connection {
+            Ok(connection) => connection,
+            Err(report) => {
+                let (mut report, exit_code) = *report;
+                attach_state_loss_recovery(&mut report, state_loss_recovery);
+                attach_leaseless_recovery(&mut report, leaseless_recovery, recovery_evidence);
+                return Ok((report, exit_code));
+            }
+        };
     // Proxy exposure belongs to explicitly requesting jobs. Connecting a runner
     // must not capture an ambient controller endpoint or create an idle tunnel.
     let proxy_forward = None;
@@ -1181,7 +1180,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             error,
             state_loss_recovery,
             tunnel_pid,
-            session_store::terminate_pid,
+            tunnel_process_start_identity.as_ref(),
         ));
     }
     let connection_warning = daemon
@@ -1199,7 +1198,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         local_port: Some(local_port),
         local_url: Some(local_url),
         tunnel_pid,
-        tunnel_process_start_identity: capture_tunnel_process_start_identity(tunnel_pid)?,
+        tunnel_process_start_identity,
         proxy_forward,
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id,
@@ -1235,7 +1234,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             error,
             state_loss_recovery,
             session.tunnel_pid,
-            session_store::terminate_pid,
+            session.tunnel_process_start_identity.as_ref(),
         ));
     }
 
@@ -1531,19 +1530,16 @@ fn attach_state_loss_recovery(
     report.state_loss_recovery = recovery;
 }
 
-fn session_write_failure_report<Terminate>(
+fn session_write_failure_report(
     runner_id: &str,
     session_path: PathBuf,
     error: Error,
     recovery: Option<DaemonStateLossRecoveryResult>,
     tunnel_pid: Option<u32>,
-    terminate: Terminate,
-) -> (RunnerConnectReport, i32)
-where
-    Terminate: FnOnce(u32),
-{
+    tunnel_process_start_identity: Option<&RunnerTunnelProcessStartIdentity>,
+) -> (RunnerConnectReport, i32) {
     if let Some(pid) = tunnel_pid {
-        terminate(pid);
+        terminate_tunnel_if_owned_parts(pid, tunnel_process_start_identity);
     }
     let (mut report, exit_code) = failed_connect(
         runner_id,
@@ -2102,7 +2098,7 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
         inspected_freshness: None,
     };
     let session_path = session_path(runner_id)?;
-    let (local_port, tunnel_pid, local_url, daemon) =
+    let (local_port, tunnel_pid, tunnel_process_start_identity, local_url, daemon) =
         connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
             server: &server,
             homeboy: "",
@@ -2123,15 +2119,6 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
                 None,
             )
         })?;
-    let tunnel_process_start_identity = match capture_tunnel_process_start_identity(tunnel_pid) {
-        Ok(identity) => identity,
-        Err(error) => {
-            if let Some(pid) = tunnel_pid {
-                terminate_pid(pid);
-            }
-            return Err(error);
-        }
-    };
     let session = RunnerSession {
         local_port: Some(local_port),
         local_url: Some(local_url),
@@ -2247,12 +2234,7 @@ fn capture_tunnel_process_start_identity(
 
 pub(crate) fn terminate_tunnel_if_owned(session: &RunnerSession) {
     if let Some(pid) = session.tunnel_pid {
-        terminate_tunnel_with_identity(
-            pid,
-            session.tunnel_process_start_identity.as_ref(),
-            homeboy_core::process::process_start_identity,
-            terminate_pid,
-        );
+        terminate_tunnel_if_owned_parts(pid, session.tunnel_process_start_identity.as_ref());
     }
     if let Some(proxy_forward) = &session.proxy_forward {
         terminate_tunnel_with_identity(
@@ -2262,6 +2244,18 @@ pub(crate) fn terminate_tunnel_if_owned(session: &RunnerSession) {
             terminate_pid,
         );
     }
+}
+
+pub(super) fn terminate_tunnel_if_owned_parts(
+    pid: u32,
+    expected_identity: Option<&RunnerTunnelProcessStartIdentity>,
+) {
+    terminate_tunnel_with_identity(
+        pid,
+        expected_identity,
+        homeboy_core::process::process_start_identity,
+        terminate_pid,
+    );
 }
 
 fn terminate_tunnel_with_identity<Inspect, Terminate>(
