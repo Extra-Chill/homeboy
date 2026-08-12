@@ -2167,6 +2167,16 @@ version = "0.0.0"
     fn synthetic_snapshot_uses_recorded_source_identity_for_parity() {
         let source = tempdir().expect("source");
         git(source.path(), &["init"]);
+        // `git notes add` below authors an object, so it needs an identity just
+        // as much as `git commit` does. Set it repo-locally right after `init`
+        // rather than per-command: a CI runner has no global git identity, so
+        // any authoring command that misses an inline `-c` fails with "Author
+        // identity unknown" / "empty ident name".
+        git(source.path(), &["config", "user.name", "Homeboy Snapshot"]);
+        git(
+            source.path(),
+            &["config", "user.email", "homeboy-snapshot@localhost"],
+        );
         write_source_manifest(source.path(), "1.2.3");
         git(source.path(), &["add", "."]);
         let commit = Command::new("git")
