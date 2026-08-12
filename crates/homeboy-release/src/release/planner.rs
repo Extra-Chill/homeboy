@@ -5,12 +5,12 @@ use homeboy_core::engine::validation::ValidationCollector;
 use homeboy_core::error::{Error, Result};
 
 use super::context::{load_component, resolve_extensions};
-use super::plan_steps::{build_preflight_steps, build_release_steps};
+use super::plan_steps::{build_preflight_steps, build_release_steps_with_reconciliation};
 use super::planning_changelog::{build_changelog_plan, generate_changelog_entries};
 use super::planning_policy::release_skip_plan;
 use super::planning_semver::{
     build_semver_recommendation, current_version_tag_at_head, current_version_tag_name,
-    release_version_floor_base, validate_current_version_tag_reachable,
+    release_version_baseline, validate_current_version_tag_reachable,
     validate_release_version_floor,
 };
 use super::planning_worktree::validate_release_worktree;
@@ -114,23 +114,36 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         .unwrap_or_default()
     };
 
+    let version_baseline = if let Some(ref info) = version_info {
+        if options.pipeline.head {
+            None
+        } else {
+            v.capture(
+                release_version_baseline(&release_scope, &info.version),
+                "tag",
+            )
+        }
+    } else {
+        None
+    };
     let new_version = if let Some(ref info) = version_info {
         if options.pipeline.head {
             Some(info.version.clone())
         } else {
-            let (version_floor_base, floor_tag) = v
-                .capture(
-                    release_version_floor_base(&release_scope, &info.version),
-                    "tag",
-                )
-                .unwrap_or_else(|| (info.version.clone(), None));
-            if let Some(tag) = floor_tag {
+            let baseline = version_baseline.clone().unwrap_or_else(|| {
+                super::planning_semver::ReleaseVersionBaseline {
+                    source: info.version.clone(),
+                    authoritative: info.version.clone(),
+                    tag: None,
+                }
+            });
+            if let Some(tag) = baseline.tag.as_deref() {
                 warnings.push(format!(
-                    "Latest release tag {} is ahead of source version {}; planning the next release from {} to avoid reusing an existing tag.",
-                    tag, info.version, version_floor_base
+                    "Reconciling source version targets from {} to reachable release tag {} before planning the next release from {}.",
+                    info.version, tag, baseline.authoritative
                 ));
             }
-            match version::increment_version(&version_floor_base, &options.bump_type) {
+            match version::increment_version(&baseline.authoritative, &options.bump_type) {
                 Some(ver) => Some(ver),
                 None => {
                     v.push(
@@ -151,7 +164,10 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
             semver_recommendation
                 .as_ref()
                 .and_then(|rec| rec.latest_tag.as_deref()),
-            &info.version,
+            version_baseline
+                .as_ref()
+                .map(|baseline| baseline.authoritative.as_str())
+                .unwrap_or(&info.version),
             next_version,
         ) {
             v.push("version", &message, None);
@@ -196,16 +212,22 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     }
 
     let mut steps = build_preflight_steps(options, semver_recommendation.as_ref(), &extensions);
-    steps.extend(build_release_steps(
+    steps.extend(build_release_steps_with_reconciliation(
         &component,
         &extensions,
-        &version_info.version,
+        version_baseline
+            .as_ref()
+            .map(|baseline| baseline.authoritative.as_str())
+            .unwrap_or(&version_info.version),
         &new_version,
         &changelog_plan,
         options,
         &release_scope,
         &mut warnings,
         &mut hints,
+        version_baseline.as_ref().and_then(|baseline| {
+            (baseline.source != baseline.authoritative).then_some(baseline.source.as_str())
+        }),
     )?);
 
     if options.dry_run {
@@ -728,5 +750,73 @@ mod tests {
             guard_stale_primary_at_head("demo", local.to_str().expect("path"), "v1.0.0").is_ok(),
             "an up-to-date checkout at the tag must still skip cleanly"
         );
+    }
+
+    #[test]
+    fn dry_run_plans_reachable_external_release_reconciliation_without_mutation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        std::fs::write(
+            dir.join("homeboy.json"),
+            r#"{"id":"fixture","type":"fixture","version_targets":[{"file":"VERSION","pattern":"([0-9]+\\.[0-9]+\\.[0-9]+)"},{"file":"package.json","pattern":"\"version\"\\s*:\\s*\"([0-9.]+)\""}],"changelog_target":"CHANGELOG.md"}"#,
+        ).expect("config");
+        std::fs::write(dir.join("VERSION"), "1.2.3\n").expect("version");
+        std::fs::write(dir.join("package.json"), r#"{"version":"1.2.3"}"#).expect("package");
+        std::fs::write(dir.join("CHANGELOG.md"), "# Changelog\n").expect("changelog");
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "test@example.com"]);
+        git(dir, &["config", "user.name", "Test"]);
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-qm", "chore: initial"]);
+        git(dir, &["tag", "v1.2.4"]);
+        std::fs::write(dir.join("work.txt"), "fix\n").expect("work");
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-qm", "fix: follow-up"]);
+
+        let plan = plan(
+            "fixture",
+            &ReleaseOptions {
+                path_override: Some(dir.to_string_lossy().to_string()),
+                bump_type: "patch".to_string(),
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .expect("reachable external release plans");
+
+        let reconcile = plan
+            .plan
+            .steps
+            .iter()
+            .find(|step| step.id == "version.reconcile")
+            .expect("dry-run exposes reconciliation");
+        assert_eq!(
+            reconcile.inputs.get("from"),
+            Some(&serde_json::json!("1.2.3"))
+        );
+        assert_eq!(
+            reconcile.inputs.get("to"),
+            Some(&serde_json::json!("1.2.4"))
+        );
+        let version = plan
+            .plan
+            .steps
+            .iter()
+            .find(|step| step.id == "version")
+            .expect("version step");
+        assert_eq!(
+            version.inputs.get("from"),
+            Some(&serde_json::json!("1.2.4"))
+        );
+        assert_eq!(version.inputs.get("to"), Some(&serde_json::json!("1.2.5")));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("VERSION"))
+                .expect("unmutated version")
+                .trim(),
+            "1.2.3"
+        );
+        assert!(std::fs::read_to_string(dir.join("package.json"))
+            .expect("unmutated package")
+            .contains("1.2.3"));
     }
 }

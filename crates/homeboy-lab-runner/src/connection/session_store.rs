@@ -7,6 +7,14 @@ pub(super) fn session_is_live(session: &RunnerSession) -> bool {
     session_is_live_with_timeout(session, Duration::from_secs(2))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TunnelProcessOwnership {
+    Owned,
+    ProcessAbsent,
+    KernelIdentityUnavailable,
+    KernelIdentityMismatch,
+}
+
 pub(super) fn session_is_live_with_timeout(session: &RunnerSession, timeout: Duration) -> bool {
     session_is_live_with_probe(session, timeout, |session, probe_timeout| {
         let Some(local_url) = session.local_url.as_deref() else {
@@ -33,12 +41,20 @@ fn session_is_live_with_probe(
         return false;
     }
     if let Some(pid) = session.tunnel_pid {
-        if !homeboy_core::process::pid_is_running(pid) {
+        if !tunnel_process_is_owned(
+            pid,
+            session.tunnel_process_start_identity.as_ref(),
+            homeboy_core::process::process_start_identity,
+        ) {
             return false;
         }
     }
     if let Some(proxy_forward) = &session.proxy_forward {
-        if !homeboy_core::process::pid_is_running(proxy_forward.tunnel_pid) {
+        if !tunnel_process_is_owned(
+            proxy_forward.tunnel_pid,
+            proxy_forward.tunnel_process_start_identity.as_ref(),
+            homeboy_core::process::process_start_identity,
+        ) {
             return false;
         }
     }
@@ -65,6 +81,62 @@ fn session_is_live_with_probe(
         }
     }
     false
+}
+
+/// A persisted start identity upgrades PID liveness to exact process ownership.
+/// Legacy sessions without one retain their existing PID-only compatibility.
+pub(crate) fn tunnel_process_is_owned<Inspect>(
+    pid: u32,
+    expected: Option<&RunnerTunnelProcessStartIdentity>,
+    inspect: Inspect,
+) -> bool
+where
+    Inspect:
+        Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
+{
+    matches!(
+        tunnel_process_ownership(pid, expected, inspect),
+        TunnelProcessOwnership::Owned
+    )
+}
+
+pub(crate) fn tunnel_process_ownership<Inspect>(
+    pid: u32,
+    expected: Option<&RunnerTunnelProcessStartIdentity>,
+    inspect: Inspect,
+) -> TunnelProcessOwnership
+where
+    Inspect:
+        Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
+{
+    let Some(expected) = expected else {
+        return homeboy_core::process::pid_is_running(pid)
+            .then_some(TunnelProcessOwnership::Owned)
+            .unwrap_or(TunnelProcessOwnership::ProcessAbsent);
+    };
+    match inspect(pid) {
+        Ok(None) => TunnelProcessOwnership::ProcessAbsent,
+        Err(_) => TunnelProcessOwnership::KernelIdentityUnavailable,
+        Ok(Some(actual)) => {
+            let actual = match actual {
+                homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                    RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+                }
+                homeboy_core::process::ProcessStartIdentity::Macos {
+                    start_seconds,
+                    start_microseconds,
+                } => RunnerTunnelProcessStartIdentity::Macos {
+                    start_seconds,
+                    start_microseconds,
+                },
+            };
+            if &actual == expected {
+                TunnelProcessOwnership::Owned
+            } else {
+                TunnelProcessOwnership::KernelIdentityMismatch
+            }
+        }
+    }
 }
 
 pub(super) fn reverse_controller_session_is_live(session: &RunnerSession) -> bool {
@@ -854,6 +926,63 @@ mod tests {
     }
 
     #[test]
+    fn recorded_tunnel_identity_rejects_a_reused_pid() {
+        let expected = RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds: 1,
+            start_microseconds: 2,
+        };
+        let reused = homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds: 3,
+            start_microseconds: 4,
+        };
+
+        assert!(!tunnel_process_is_owned(42, Some(&expected), |_| Ok(Some(
+            reused.clone()
+        ))));
+    }
+
+    #[test]
+    fn recorded_tunnel_identity_accepts_the_same_process_instance() {
+        let expected = RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds: 1,
+            start_microseconds: 2,
+        };
+        let actual = homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds: 1,
+            start_microseconds: 2,
+        };
+
+        assert!(tunnel_process_is_owned(42, Some(&expected), |_| Ok(Some(
+            actual.clone()
+        ))));
+    }
+
+    #[test]
+    fn tunnel_ownership_classifies_absent_unavailable_and_reused_processes() {
+        let expected = RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds: 1,
+            start_microseconds: 2,
+        };
+        assert_eq!(
+            tunnel_process_ownership(42, Some(&expected), |_| Ok(None)),
+            TunnelProcessOwnership::ProcessAbsent
+        );
+        assert_eq!(
+            tunnel_process_ownership(42, Some(&expected), |_| Err("denied".to_string())),
+            TunnelProcessOwnership::KernelIdentityUnavailable
+        );
+        assert_eq!(
+            tunnel_process_ownership(42, Some(&expected), |_| Ok(Some(
+                homeboy_core::process::ProcessStartIdentity::Macos {
+                    start_seconds: 3,
+                    start_microseconds: 4,
+                }
+            ))),
+            TunnelProcessOwnership::KernelIdentityMismatch
+        );
+    }
+
+    #[test]
     fn controller_sessions_have_distinct_paths_and_share_a_lease_record() {
         let first = paths::runner_controller_session_file("lab", "controller-a").expect("path");
         let second = paths::runner_controller_session_file("lab", "controller-b").expect("path");
@@ -1422,6 +1551,7 @@ pub(super) fn failed_connect(
                 remote_address: None,
                 local_address: None,
                 tunnel_state: Some("not_established".to_string()),
+                durability_stage: None,
                 health_attempt_count: 0,
                 health_attempts: Vec::new(),
             }),

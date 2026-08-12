@@ -1534,7 +1534,7 @@ fn rejected_fresh_state_loss_envelope_is_retired_before_plain_connect_retries() 
 /// authenticate B. It must never create an unjournaled C.
 #[cfg(unix)]
 #[test]
-fn recovery_retry_reattaches_journaled_b_after_two_lost_health_requests() {
+fn recovery_retry_reattaches_journaled_b_after_four_lost_health_requests() {
     test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let generation_count = home.path().join("daemon-generations");
@@ -1543,7 +1543,7 @@ fn recovery_retry_reattaches_journaled_b_after_two_lost_health_requests() {
         let health_requests = Arc::new(AtomicUsize::new(0));
         let health_requests_for_server = Arc::clone(&health_requests);
         let endpoint = std::thread::spawn(move || {
-            for request_number in 0..7 {
+            for request_number in 0..10 {
                 let (mut stream, _) = listener.accept().expect("endpoint request");
                 let mut request = [0; 4096];
                 let length = stream.read(&mut request).expect("read endpoint request");
@@ -1554,7 +1554,7 @@ fn recovery_retry_reattaches_journaled_b_after_two_lost_health_requests() {
                 }
                 if request.starts_with("GET /health ") {
                     let health_request = health_requests_for_server.fetch_add(1, Ordering::SeqCst);
-                    if health_request < 2 {
+                    if health_request < 4 {
                         // Simulate a controller response loss after B started.
                         drop(stream);
                         continue;
@@ -1629,8 +1629,8 @@ esac
         let evidence = first.failure_evidence.expect("known B failure evidence");
         assert_eq!(evidence.known_remote_lease_id.as_deref(), Some("lease-b"));
         assert_eq!(evidence.known_remote_pid, Some(4242));
-        assert_eq!(evidence.health_attempt_count, 2);
-        assert_eq!(evidence.health_attempts.len(), 2);
+        assert_eq!(evidence.health_attempt_count, 4);
+        assert_eq!(evidence.health_attempts.len(), 4);
         assert_eq!(
             evidence.recovery_command,
             "homeboy runner connect local-runner"
@@ -1666,7 +1666,7 @@ esac
             std::fs::read_to_string(&generation_count).expect("generation count"),
             "1"
         );
-        assert_eq!(health_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(health_requests.load(Ordering::SeqCst), 7);
         assert!(!journal_dir.join("pending-replacement.json").exists());
         assert!(!journal_dir.join("replacement-operation.json").exists());
         endpoint.join().expect("endpoint");
@@ -1690,7 +1690,7 @@ fn normal_start_response_loss_replays_b_without_creating_c() {
         let health_requests = Arc::new(AtomicUsize::new(0));
         let health_requests_for_server = Arc::clone(&health_requests);
         let endpoint = std::thread::spawn(move || {
-            for request_number in 0..4 {
+            for request_number in 0..5 {
                 let (mut stream, _) = listener.accept().expect("endpoint request");
                 let mut request = [0; 4096];
                 let length = stream.read(&mut request).expect("read endpoint request");
@@ -1846,7 +1846,7 @@ esac
             "1",
             "replay must return B rather than starting C"
         );
-        assert_eq!(health_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(health_requests.load(Ordering::SeqCst), 3);
         assert!(
             !old_replay.exists(),
             "the obsolete absolute Homeboy path must not execute the replay"

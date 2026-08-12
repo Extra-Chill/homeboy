@@ -191,10 +191,10 @@ fn source_upgrade_timeout_terminates_the_entire_child_process_group() {
         .trim()
         .parse::<i32>()
         .expect("numeric pid");
-    // The shell is the process-group leader and timeout termination must
-    // remove its background child as well as reap the direct child.
+    // The shell is the process-group leader and timeout termination must stop
+    // its background child as well as reap the direct child.
     for _ in 0..40 {
-        if unsafe { libc::kill(child_pid, 0) } != 0 {
+        if !homeboy_core::process::pid_is_running(child_pid as u32) {
             return;
         }
         std::thread::sleep(Duration::from_millis(25));

@@ -1851,7 +1851,7 @@ fn test_open_loopback_tunnel_noops_for_local_runner() {
         runner: None,
     };
 
-    let tunnel = open_loopback_tunnel(&server, 49100, "127.0.0.1", 49200);
+    let tunnel = open_loopback_tunnel(&server, 49100, "127.0.0.1", 49200, true);
 
     assert!(tunnel.success);
     assert_eq!(tunnel.pid, None);

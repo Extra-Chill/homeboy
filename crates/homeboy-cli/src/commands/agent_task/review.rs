@@ -310,7 +310,6 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         }
         value["candidate_selection"] = selection;
     }
-    super::status::bound_full_reader_payload(&mut value);
     Ok((compact_review(value, args.full), 0))
 }
 

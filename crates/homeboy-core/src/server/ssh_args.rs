@@ -16,6 +16,9 @@ pub struct SshArgOptions<'a> {
     pub connect_timeout: bool,
     pub keepalive: bool,
     pub exit_on_forward_failure: bool,
+    /// Persistent forwards must be owned by their spawned SSH child rather
+    /// than absorbed by a configured ControlMaster.
+    pub disable_multiplexing: bool,
     pub legacy_scp: bool,
     pub port_flag: Option<SshPortFlag>,
     pub command: Option<&'a str>,
@@ -103,7 +106,12 @@ fn client_connection_args(
         push_option(&mut args, "StrictHostKeyChecking=no");
     }
 
-    if let Some(session) = session {
+    if options.disable_multiplexing {
+        // `ControlMaster=no` still attaches to an existing socket when
+        // ControlPath is set. `none` makes this child own its forward.
+        push_option(&mut args, "ControlMaster=no");
+        push_option(&mut args, "ControlPath=none");
+    } else if let Some(session) = session {
         // A managed session is established explicitly by `server connect`. Command
         // clients attach to that socket rather than starting a competing master.
         // `-o ControlPath` is understood by both ssh and scp; scp's `-S` means
@@ -230,5 +238,31 @@ mod tests {
                 .join("control-resolved.example.test-2222-deploy")
                 .display()
         )));
+    }
+
+    #[test]
+    fn persistent_forward_options_bypass_a_managed_controlmaster() {
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "runner",
+            "host": "example.test",
+            "user": "deploy",
+            "auth": {
+                "mode": "key_plus_password_controlmaster",
+                "control_path": "/tmp/homeboy-control",
+                "persist": "1h"
+            }
+        }))
+        .expect("server");
+
+        let args = server_option_args(
+            &server,
+            SshArgOptions {
+                disable_multiplexing: true,
+                ..SshArgOptions::default()
+            },
+        );
+
+        assert!(args.contains(&"ControlPath=none".to_string()));
+        assert!(!args.iter().any(|arg| arg.contains("/tmp/homeboy-control")));
     }
 }

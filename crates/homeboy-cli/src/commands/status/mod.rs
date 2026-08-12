@@ -925,9 +925,8 @@ mod tests {
                 .trim()
                 .parse()
                 .expect("numeric pid");
-            assert_ne!(
-                unsafe { libc::kill(pid, 0) },
-                0,
+            assert!(
+                !homeboy::core::process::pid_is_running(pid as u32),
                 "status must terminate Git descendants"
             );
         });

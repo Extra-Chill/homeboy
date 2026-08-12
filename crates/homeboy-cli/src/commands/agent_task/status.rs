@@ -39,7 +39,6 @@ use crate::commands::utils::response::{
 const COMPACT_REF_LIMIT: usize = 12;
 const COMPACT_TASK_LIMIT: usize = 12;
 const COMPACT_TEXT_LIMIT: usize = 512;
-const FULL_TEXT_LIMIT: usize = 4 * 1024;
 
 /// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
 /// attempt readers, even when a newer Cook attempt produced no patch.
@@ -205,7 +204,6 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     if args.full {
         let aggregate = completed_run_aggregate(run_id).and_then(Result::ok);
         attach_full_status_candidate(&mut value, aggregate.as_ref(), run_id);
-        bound_full_reader_payload(&mut value);
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, run_id);
         preserve_controller_owner_placement(&mut value, run_id);
@@ -648,26 +646,87 @@ mod runner_probe_tests {
     }
 }
 
-/// Full recovery output remains a local reader: retain a stable digest for a
-/// large value instead of repeating multi-attempt patches in every projection.
-pub(super) fn bound_full_reader_payload(value: &mut Value) {
+const OPERATOR_HEAVY_FIELDS: &[&str] = &[
+    "diff",
+    "patch",
+    "stdout",
+    "stderr",
+    "current_diff",
+    "transcript",
+    "runtime_log",
+];
+const OPERATOR_HEAVY_COLLECTIONS: &[&str] =
+    &["raw_events", "resource_timeline", "cook_resource_timeline"];
+
+/// Project only explicitly heavy evidence fields. This preserves every other
+/// payload type and collection, including actions, identities, gates, and refs.
+pub(crate) fn project_operator_output(value: &mut Value) {
+    project_operator_value(value, false);
+}
+
+fn project_operator_value(value: &mut Value, evidence_content: bool) {
     match value {
-        Value::String(text) if text.len() > FULL_TEXT_LIMIT => {
-            let digest = content_hash::sha256_hex(text.as_bytes());
-            *text = format!("[omitted {} bytes; sha256={digest}]", text.len());
-        }
         Value::Array(items) => {
             for item in items {
-                bound_full_reader_payload(item);
+                project_operator_value(item, evidence_content);
             }
         }
         Value::Object(fields) => {
-            for item in fields.values_mut() {
-                bound_full_reader_payload(item);
+            let hydrated_evidence = fields.contains_key("kind")
+                && fields.contains_key("uri")
+                && fields.contains_key("status")
+                && fields.contains_key("content");
+            let collection_keys = fields
+                .keys()
+                .filter(|key| OPERATOR_HEAVY_COLLECTIONS.contains(&key.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in collection_keys {
+                project_heavy_collection(fields, &key);
+            }
+            for (key, item) in fields.iter_mut() {
+                if OPERATOR_HEAVY_FIELDS.contains(&key.as_str())
+                    || (evidence_content && key == "body")
+                {
+                    if let Value::String(text) = item {
+                        if text.len() > COMPACT_TEXT_LIMIT {
+                            let digest = content_hash::sha256_hex(text.as_bytes());
+                            *text = format!("[omitted {} bytes; sha256={digest}]", text.len());
+                        }
+                    }
+                    continue;
+                }
+                if OPERATOR_HEAVY_COLLECTIONS.contains(&key.as_str()) {
+                    continue;
+                }
+                project_operator_value(item, hydrated_evidence && key == "content");
             }
         }
         _ => {}
     }
+}
+
+/// Known event streams retain their array/item schema. The owning evidence
+/// object receives additive metadata describing the omitted durable events.
+fn project_heavy_collection(fields: &mut serde_json::Map<String, Value>, key: &str) {
+    let Some(items) = fields.get_mut(key).and_then(Value::as_array_mut) else {
+        return;
+    };
+    if items.len() <= COMPACT_REF_LIMIT {
+        return;
+    }
+    let total_items = items.len();
+    let digest = content_hash::sha256_hex(serde_json::to_vec(items).as_deref().unwrap_or_default());
+    items.truncate(COMPACT_REF_LIMIT);
+    fields.insert(
+        format!("{key}_projection"),
+        json!({
+            "total_items": total_items,
+            "returned_items": COMPACT_REF_LIMIT,
+            "omitted_items": total_items - COMPACT_REF_LIMIT,
+            "sha256": digest,
+        }),
+    );
 }
 
 fn is_missing_agent_task_run_metadata_error(error: &homeboy::core::Error) -> bool {
@@ -1149,7 +1208,6 @@ pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
     };
     let mut value = serde_json::to_value(log).unwrap_or(Value::Null);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
-    bound_full_reader_payload(&mut value);
     Ok((value, 0))
 }
 
@@ -1369,7 +1427,6 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         retry.action.as_ref(),
         retry.continuation.as_ref(),
     );
-    bound_full_reader_payload(&mut value);
     preserve_controller_owner_placement(&mut value, run_id);
     Ok((value, 0))
 }

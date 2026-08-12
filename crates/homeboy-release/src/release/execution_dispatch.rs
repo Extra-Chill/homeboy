@@ -106,6 +106,19 @@ pub(super) fn execute_release_plan_step(
             };
             executor::run_version(context.component, &mut context.state, bump, planned).map(Some)
         }
+        "version.reconcile" => {
+            let from = step
+                .inputs
+                .get("from")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| Error::internal_unexpected("version.reconcile step missing from"))?;
+            let to = step
+                .inputs
+                .get("to")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| Error::internal_unexpected("version.reconcile step missing to"))?;
+            executor::run_version_reconcile(context.component, from, to).map(Some)
+        }
         "release.prepare" => Ok(Some(
             executor::prepare::run_prepare(
                 context.extensions,
@@ -2219,7 +2232,7 @@ mod tests {
     }
 
     #[test]
-    fn planned_release_tag_name_floors_against_unreachable_higher_tag() {
+    fn planned_release_tag_name_rejects_unreachable_higher_tag() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path();
         run_in(root, &["git", "init", "-q"]);
@@ -2269,9 +2282,11 @@ mod tests {
             publish_failed: false,
         };
 
-        let tag = planned_release_tag_name(&context).expect("planned tag");
+        let error = planned_release_tag_name(&context)
+            .expect_err("orphaned higher tag must not establish the next release identity");
 
-        assert_eq!(tag, "fixture-v0.2.1");
+        assert!(error.message.contains("fixture-v0.2.0"));
+        assert!(error.message.contains("not reachable from HEAD"));
     }
 
     #[test]
