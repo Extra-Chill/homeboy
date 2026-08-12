@@ -83,6 +83,9 @@ fn record_unavailable(git_diagnostic: &str) {
         runner_id: None,
         reason_code: REASON_PROBE_UNAVAILABLE,
         timeout_seconds: 0,
+        elapsed_ms: 0,
+        deadline_ms: 0,
+        follow_up: readonly_probe::runner_status_follow_up(None),
         detail: unavailable_detail(git_diagnostic),
     });
 }

@@ -2726,6 +2726,7 @@ fn runner_jobs_with_client(
     client: &Client,
     timeout: Duration,
 ) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
+    let started = Instant::now();
     let result: Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> = (|| {
         let (body, source) = if let Some(local_url) = session.local_url.as_deref() {
             let data = daemon_get(client, local_url, "/jobs")?;
@@ -2784,7 +2785,14 @@ fn runner_jobs_with_client(
             } else {
                 crate::readonly_probe::REASON_PROBE_UNAVAILABLE
             },
-            timeout_seconds: if timed_out { timeout.as_secs() } else { 0 },
+            timeout_seconds: if timed_out {
+                timeout.as_secs().max(1)
+            } else {
+                0
+            },
+            elapsed_ms: started.elapsed().as_millis(),
+            deadline_ms: if timed_out { timeout.as_millis() } else { 0 },
+            follow_up: crate::readonly_probe::runner_status_follow_up(Some(runner_id)),
             detail: format!(
                 "read-only typed-job probe for runner `{runner_id}` did not complete; active-job state is partial: {}",
                 error.message
@@ -2819,11 +2827,48 @@ fn runner_running_runs(session: &RunnerSession) -> Result<Vec<RunSummary>> {
     let Some(local_url) = session.local_url.as_deref() else {
         return Ok(Vec::new());
     };
+    let timeout = crate::readonly_probe::readonly_probe_timeout();
     let client = Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build runner runs client: {err}")))?;
-    let data = daemon_get(&client, local_url, "/runs?status=running&limit=1000")?;
+    runner_running_runs_with_client(&session.runner_id, local_url, &client, timeout)
+}
+
+fn runner_running_runs_with_client(
+    runner_id: &str,
+    local_url: &str,
+    client: &Client,
+    timeout: Duration,
+) -> Result<Vec<RunSummary>> {
+    let started = Instant::now();
+    let data = daemon_get(client, local_url, "/runs?status=running&limit=1000").map_err(|error| {
+        let timed_out = error.details["request_timeout"]
+            .as_bool()
+            .unwrap_or_else(|| error.message.to_ascii_lowercase().contains("timed out"));
+        crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
+            probe: "runner_running_runs".to_string(),
+            runner_id: Some(runner_id.to_string()),
+            reason_code: if timed_out {
+                crate::readonly_probe::REASON_PROBE_TIMEOUT
+            } else {
+                crate::readonly_probe::REASON_PROBE_UNAVAILABLE
+            },
+            timeout_seconds: if timed_out {
+                timeout.as_secs().max(1)
+            } else {
+                0
+            },
+            elapsed_ms: started.elapsed().as_millis(),
+            deadline_ms: if timed_out { timeout.as_millis() } else { 0 },
+            follow_up: crate::readonly_probe::runner_status_follow_up(Some(runner_id)),
+            detail: format!(
+                "read-only running-runs probe for runner `{}` did not complete; orphaned child-run detection is partial: {}",
+                runner_id, error.message
+            ),
+        });
+        error
+    })?;
     let runs: Vec<RunSummary> =
         serde_json::from_value(data["body"]["runs"].clone()).map_err(|err| {
             Error::internal_json(
