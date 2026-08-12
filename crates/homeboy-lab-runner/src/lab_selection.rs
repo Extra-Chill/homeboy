@@ -45,11 +45,29 @@ pub(super) struct LabRunnerSelection {
     pub(super) mode: RunnerTunnelMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) enum LabRunnerPreparation {
-    Ready,
-    FallBackLocal { reason: String },
+    Ready {
+        connect_authority: Option<RunnerConnectReport>,
+    },
+    FallBackLocal {
+        reason: String,
+    },
 }
+
+impl PartialEq for LabRunnerPreparation {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ready { .. }, Self::Ready { .. }) => true,
+            (Self::FallBackLocal { reason: left }, Self::FallBackLocal { reason: right }) => {
+                left == right
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for LabRunnerPreparation {}
 
 /// A side-effect-free placement question. Wrappers call this before durable run
 /// creation and setup; execution rechecks the same live admission facts.
@@ -691,7 +709,7 @@ pub fn prepare_explicit_lab_runner_for_offload(runner_id: &str) -> Result<()> {
         mode: runner_status_tunnel_mode(runner_id),
     };
     match prepare_lab_runner_for_offload(&selection)? {
-        LabRunnerPreparation::Ready => Ok(()),
+        LabRunnerPreparation::Ready { .. } => Ok(()),
         LabRunnerPreparation::FallBackLocal { reason } => Err(Error::internal_unexpected(format!(
             "explicit Lab runner preparation unexpectedly requested local fallback: {reason}"
         ))),
@@ -703,8 +721,10 @@ pub(super) fn preflight_lab_runner_availability(
     selection: &LabRunnerSelection,
     detach_after_handoff: bool,
     has_durable_agent_task_plan: bool,
+    connect_authority: Option<&RunnerConnectReport>,
 ) -> Result<RunnerStatusReport> {
-    let (availability, status) = preflight_lab_runner_availability_with(selection, status)?;
+    let (availability, status) =
+        preflight_lab_runner_availability_with(selection, status, connect_authority)?;
     if availability.accepts_jobs {
         return Ok(status);
     }
@@ -747,17 +767,20 @@ pub(super) fn allows_detached_reverse_capacity_queue(
 fn preflight_lab_runner_availability_with(
     selection: &LabRunnerSelection,
     status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
+    connect_authority: Option<&RunnerConnectReport>,
 ) -> Result<(RunnerAvailability, RunnerStatusReport)> {
     let capacity = load(&selection.runner_id)?.settings.concurrency_limit;
-    preflight_lab_runner_availability_from_status(selection, status_fn, capacity)
+    preflight_lab_runner_availability_from_status(selection, status_fn, capacity, connect_authority)
 }
 
 fn preflight_lab_runner_availability_from_status(
     selection: &LabRunnerSelection,
     status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
     capacity: Option<usize>,
+    connect_authority: Option<&RunnerConnectReport>,
 ) -> Result<(RunnerAvailability, RunnerStatusReport)> {
-    let status = status_fn(&selection.runner_id)?;
+    let status =
+        authoritative_status_for_preflight(status_fn(&selection.runner_id)?, connect_authority)?;
     let availability = RunnerAvailability::from_status_parts(
         selection.runner_id.clone(),
         status.connected,
@@ -767,6 +790,48 @@ fn preflight_lab_runner_availability_from_status(
         capacity,
     );
     Ok((availability, status))
+}
+
+pub(super) fn authoritative_status_for_preflight(
+    mut status: RunnerStatusReport,
+    connect_authority: Option<&RunnerConnectReport>,
+) -> Result<RunnerStatusReport> {
+    let Some(connect_authority) = connect_authority else {
+        return Ok(status);
+    };
+    let session = status.session.as_ref().ok_or_else(|| {
+        Error::internal_unexpected(
+            "runner connect succeeded but the subsequent status omitted its session",
+        )
+    })?;
+    let same_endpoint = session.local_url == connect_authority.local_url
+        && session.tunnel_pid == connect_authority.tunnel_pid
+        && session.remote_daemon_pid == connect_authority.remote_daemon_pid;
+    let daemon_is_fresh = status.daemon_freshness.as_ref().is_some_and(|freshness| {
+        freshness.fresh
+            && freshness.pid == connect_authority.remote_daemon_pid
+            && freshness.lease_id == session.remote_daemon_lease_id
+            && status.admission_blocking_stale_daemon().is_none()
+    });
+    if !connect_authority.connected
+        || session.mode != RunnerTunnelMode::DirectSsh
+        || !same_endpoint
+        || !daemon_is_fresh
+        || !matches!(
+            status.active_job_state,
+            super::RunnerActiveJobState::Available
+        )
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "runner connect evidence did not converge to a matching fresh daemon and available job admission",
+            Some(connect_authority.runner_id.clone()),
+            None,
+        ));
+    }
+    status.connected = true;
+    status.state = super::RunnerSessionState::Connected;
+    Ok(status)
 }
 
 pub(super) fn fail_if_no_default_runner_accepts_jobs(command: &LabOffloadCommand) -> Result<()> {
@@ -1341,7 +1406,9 @@ pub(super) fn prepare_lab_runner_for_offload_with(
             selection.runner_id,
             status_tunnel_mode(&status).label()
         );
-        return Ok(LabRunnerPreparation::Ready);
+        return Ok(LabRunnerPreparation::Ready {
+            connect_authority: None,
+        });
     }
 
     if status_tunnel_mode(&status) == RunnerTunnelMode::Reverse {
@@ -1373,11 +1440,15 @@ pub(super) fn prepare_lab_runner_for_offload_with(
     // Another concurrent handoff may have connected the runner while this one
     // waited; always re-check before creating another tunnel/session.
     if status_fn(&selection.runner_id)?.connected {
-        return Ok(LabRunnerPreparation::Ready);
+        return Ok(LabRunnerPreparation::Ready {
+            connect_authority: None,
+        });
     }
     let (report, _) = connect_fn(&selection.runner_id)?;
     if report.connected {
-        return Ok(LabRunnerPreparation::Ready);
+        return Ok(LabRunnerPreparation::Ready {
+            connect_authority: Some(report),
+        });
     }
 
     let reason = report
@@ -2436,6 +2507,7 @@ mod placement_readiness_tests {
             &selection,
             |_| Ok(observed.clone()),
             Some(1),
+            None,
         )
         .expect("preflight");
 
@@ -2462,6 +2534,7 @@ mod placement_readiness_tests {
             &selection,
             |_| Ok(observed.clone()),
             Some(1),
+            None,
         )
         .expect("preflight");
 

@@ -1,7 +1,7 @@
 use super::super::lab_selection::{
-    contended_runner_unavailable_error, prepare_lab_runner_for_offload_with,
-    wait_for_contended_runner, wait_for_live_session_with, LabRunnerPreparation,
-    LabRunnerSelection,
+    authoritative_status_for_preflight, contended_runner_unavailable_error,
+    prepare_lab_runner_for_offload_with, wait_for_contended_runner, wait_for_live_session_with,
+    LabRunnerPreparation, LabRunnerSelection,
 };
 use super::*;
 use crate::{RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode};
@@ -109,6 +109,73 @@ fn successful_connect_session_converges_after_transient_disconnection() {
 }
 
 #[test]
+fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this_preflight() {
+    let mut stale_projection = connected_reverse_status("lab", None);
+    stale_projection.connected = false;
+    stale_projection.state = super::super::RunnerSessionState::Disconnected;
+    stale_projection.session = Some(connected_direct_session(
+        "lab",
+        Some("http://127.0.0.1:55626"),
+    ));
+    let session = stale_projection.session.as_mut().expect("direct session");
+    session.tunnel_pid = Some(22420);
+    session.remote_daemon_pid = Some(1467759);
+    session.remote_daemon_lease_id = Some("lease-fresh".to_string());
+    stale_projection.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        restartable: false,
+        lease_id: Some("lease-fresh".to_string()),
+        pid: Some(1467759),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    stale_projection.active_job_state = RunnerActiveJobState::Available;
+    let mut connect = connected_direct_connect_report("lab");
+    connect.local_url = Some("http://127.0.0.1:55626".to_string());
+    connect.tunnel_pid = Some(22420);
+    connect.remote_daemon_pid = Some(1467759);
+
+    let admitted = authoritative_status_for_preflight(stale_projection, Some(&connect))
+        .expect("successful connect remains authoritative for this preflight");
+
+    assert!(admitted.connected);
+    assert_eq!(
+        admitted.session.expect("session").local_url.as_deref(),
+        Some("http://127.0.0.1:55626")
+    );
+}
+
+#[test]
+fn true_disconnected_projection_is_not_authorized_without_matching_connect_evidence() {
+    let status = unreachable_health_status("lab", false);
+
+    let admitted = authoritative_status_for_preflight(status, None).expect("ordinary status");
+
+    assert!(!admitted.connected);
+}
+
+#[test]
+fn stale_disconnected_projection_rejects_mismatched_connect_evidence() {
+    let mut status = unreachable_health_status("lab", false);
+    status.active_job_state = RunnerActiveJobState::Available;
+    let connect = connected_direct_connect_report("lab");
+
+    let error = authoritative_status_for_preflight(status, Some(&connect))
+        .expect_err("different endpoint evidence is not admitted");
+
+    assert!(error.message.contains("did not converge"));
+}
+
+#[test]
 fn successful_connect_session_convergence_exhausts_its_deadline() {
     let probes = std::cell::Cell::new(0);
     let pauses = std::cell::Cell::new(0);
@@ -171,7 +238,7 @@ fn lab_runner_preparation_uses_already_connected_runner() {
     )
     .expect("prepared");
 
-    assert_eq!(prepared, LabRunnerPreparation::Ready);
+    assert!(matches!(prepared, LabRunnerPreparation::Ready { .. }));
 }
 
 #[test]
@@ -201,7 +268,7 @@ fn lab_runner_preparation_accepts_explicit_connected_reverse_runner_with_unavail
     )
     .expect("prepared");
 
-    assert_eq!(prepared, LabRunnerPreparation::Ready);
+    assert!(matches!(prepared, LabRunnerPreparation::Ready { .. }));
 }
 
 #[test]
@@ -230,7 +297,7 @@ fn lab_runner_preparation_accepts_default_connected_reverse_runner_with_unavaila
     )
     .expect("prepared");
 
-    assert_eq!(prepared, LabRunnerPreparation::Ready);
+    assert!(matches!(prepared, LabRunnerPreparation::Ready { .. }));
 }
 
 #[test]
@@ -518,10 +585,10 @@ fn concurrent_unreachable_health_handoffs_connect_once() {
         .collect();
 
     for handoff in handoffs {
-        assert_eq!(
+        assert!(matches!(
             handoff.join().expect("handoff thread").expect("handoff"),
-            LabRunnerPreparation::Ready
-        );
+            LabRunnerPreparation::Ready { .. }
+        ));
     }
     assert_eq!(connects.load(Ordering::SeqCst), 1);
 }
@@ -773,7 +840,7 @@ fn lab_runner_preparation_connects_disconnected_runner() {
     )
     .expect("prepared");
 
-    assert_eq!(prepared, LabRunnerPreparation::Ready);
+    assert!(matches!(prepared, LabRunnerPreparation::Ready { .. }));
 }
 
 #[test]
