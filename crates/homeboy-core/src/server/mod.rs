@@ -225,6 +225,7 @@ pub struct ServerSessionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServerAuthMode {
+    KeyControlmaster,
     KeyPlusPasswordControlmaster,
 }
 
@@ -331,7 +332,10 @@ impl ConfigEntity for Server {
 
     fn validate(&self) -> Result<()> {
         if let Some(auth) = self.auth.as_ref() {
-            if auth.mode == ServerAuthMode::KeyPlusPasswordControlmaster {
+            if matches!(
+                auth.mode,
+                ServerAuthMode::KeyControlmaster | ServerAuthMode::KeyPlusPasswordControlmaster
+            ) {
                 match auth.session.persist.as_deref() {
                     Some(persist) => {
                         if auth.session.persist_source
@@ -374,7 +378,10 @@ impl ConfigEntity for Server {
 
     fn post_load(&mut self, _stored_json: &str) {
         if let Some(auth) = self.auth.as_mut() {
-            if auth.mode == ServerAuthMode::KeyPlusPasswordControlmaster {
+            if matches!(
+                auth.mode,
+                ServerAuthMode::KeyControlmaster | ServerAuthMode::KeyPlusPasswordControlmaster
+            ) {
                 if auth.session.persist.is_none() {
                     auth.session.persist_source =
                         Some(ManagedSshSessionPersistSource::LegacyDefault);
@@ -407,10 +414,6 @@ impl ConfigEntity for Server {
             });
 
         if let Some(auth) = self.auth.as_mut() {
-            if auth.mode != ServerAuthMode::KeyPlusPasswordControlmaster {
-                return;
-            }
-
             auth.session.legacy_persist_loaded =
                 was_legacy_default && auth.session.persist.is_none();
             if auth.session.persist.is_none() {
@@ -475,6 +478,16 @@ mod tests {
     fn managed_session_requires_explicit_persist_for_new_configurations() {
         assert!(managed_server(None).validate().is_err());
         assert!(managed_server(Some("30m")).validate().is_ok());
+    }
+
+    #[test]
+    fn key_controlmaster_requires_an_explicit_persist_lifetime() {
+        let mut server = managed_server(Some("4h"));
+        server.auth.as_mut().expect("auth").mode = ServerAuthMode::KeyControlmaster;
+        assert!(server.validate().is_ok());
+
+        server.auth.as_mut().expect("auth").session.persist = None;
+        assert!(server.validate().is_err());
     }
 
     #[test]

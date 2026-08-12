@@ -136,6 +136,12 @@ Note: The exact key name depends on the key file path hash.
 
 When `forward_agent` is enabled in server configuration, SSH keys from your local agent are forwarded to the remote server.
 
+For agents that cannot sign while the controller is locked, configure
+`auth.mode: key_controlmaster` with an explicit `auth.persist` lifetime and run
+`homeboy server connect <server>` while the key is available. Homeboy commands
+then reuse that authenticated control socket until its configured idle lifetime
+expires.
+
 ### Benefits
 
 - Remote servers can use your local SSH keys

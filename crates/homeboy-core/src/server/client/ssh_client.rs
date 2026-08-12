@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 
 use super::super::session::ensure_control_path_parent;
 use super::super::ssh_args::{client_ssh_args, SshArgOptions, SshPortFlag};
-use super::super::{ManagedSshSession, ManagedSshSessionOutput, Server, ServerAuthMode};
+use super::super::{ManagedSshSession, ManagedSshSessionOutput, Server};
 use super::host::{is_local_host, is_transient_ssh_error};
 use super::local_exec::{
     execute_local_command, execute_local_command_in_dir_with_timeout,
@@ -129,19 +129,14 @@ impl SshClient {
             );
         }
 
-        let auth = match &server.auth {
-            Some(auth) if auth.mode == ServerAuthMode::KeyPlusPasswordControlmaster => {
-                Some(ManagedSshSession::from_auth(auth))
-            }
-            _ => None,
-        };
+        let session = server.auth.as_ref().map(ManagedSshSession::from_auth);
 
         Ok(Self {
             host: server.host.clone(),
             user: server.user.clone(),
             port: server.port,
             identity_file,
-            auth,
+            auth: session,
             is_local,
             env: server.env.clone(),
         })

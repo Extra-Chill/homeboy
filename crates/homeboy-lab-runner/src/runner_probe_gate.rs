@@ -16,16 +16,10 @@
 //! `ssh_args::client_connection_args` does inject
 //! `ControlMaster=auto` / `ControlPath` / `ControlPersist` — but only when
 //! `SshClient::auth` is `Some`, and `SshClient::from_server` only populates
-//! `auth` for servers whose `auth.mode` is
-//! [`ServerAuthMode::KeyPlusPasswordControlmaster`](homeboy_core::server::ServerAuthMode).
-//! Multiplexing is therefore coupled to a *password-recovery auth mode*, not to
-//! connection reuse. An ordinary key-authenticated Lab runner — the common
-//! shape, and the one in the incident — gets **no** `ControlPath` at all, so
-//! every probe is a full TCP connect plus key exchange plus a login shell. The
-//! multiplexing that exists is real; it simply is not on the code path that
-//! stormed. Decoupling multiplexing from the auth mode is a separate change
-//! with its own blast radius (control-socket lifetime, forwarding, interactive
-//! sessions); this module bounds the storm at the source instead — fewer
+//! `auth` only for servers with an explicit managed-session mode. Both key-only
+//! and password-recovery sessions can opt in; an unconfigured runner still gets
+//! no `ControlPath` and every probe is a full TCP connect plus key exchange plus
+//! a login shell. This module bounds that residual storm at the source — fewer
 //! connections beats cheaper connections.
 //!
 //! ### What this module guarantees

@@ -14,7 +14,7 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
   "identity_file": "string",
   "kind": "string",
   "auth": {
-    "mode": "key_plus_password_controlmaster",
+    "mode": "key_controlmaster | key_plus_password_controlmaster",
     "control_path": "string",
     "persist": "string",
     "persist_source": "configured | migrated | legacy_default (engine-owned output)"
@@ -145,6 +145,24 @@ Precedence for both is the same: a truthy environment value (`1`, `true`, `yes`,
 `require_fresh_runtime_overlay` escalates only builds *proven* stale. An overlay whose freshness cannot be established — no containing checkout, no artifacts, or an unreadable source history — is reported as unknown and never refused. Freshness itself is derived from the artifact's newest file mtime against the containing checkout's history, which is an indication rather than a proof: a freshly created checkout rewrites mtimes and makes every artifact in it look newly built. Set this on runners where silently executing a stale build is worse than a failed dispatch.
 
 ## Managed SSH Sessions
+
+Key-authenticated servers can keep an explicitly bounded authenticated session
+available for unattended work:
+
+```json
+{
+  "auth": {
+    "mode": "key_controlmaster",
+    "control_path": "~/.ssh/controlmasters/%h-%p-%r",
+    "persist": "8h"
+  }
+}
+```
+
+Run `homeboy server connect <server_id>` while the key is available. Later
+commands attach to that control socket instead of requesting another key
+signature. This is useful for hardware-backed or interactive key agents that
+cannot sign while the controller session is locked.
 
 Servers that accept a key and then require an operator-entered password can opt into managed control-master reuse:
 
