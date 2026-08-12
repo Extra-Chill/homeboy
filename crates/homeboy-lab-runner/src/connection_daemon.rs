@@ -178,14 +178,15 @@ fn endpoint_identity_matches(
     expected_version: &str,
     expected_identity: &str,
 ) -> bool {
+    let Ok(response) = daemon_http_body(local_url) else {
+        return false;
+    };
     let identity_matches = expected_identity.trim().is_empty()
-        || daemon_http_identity(local_url)
-            .ok()
+        || daemon_identity_from_body(&response.body)
             .is_some_and(|identity| identity.trim() == expected_identity.trim());
     let version_matches = expected_version.trim().is_empty()
-        || daemon_http_version(local_url)
-            .ok()
-            .is_some_and(|version| versions_match(&version, expected_version));
+        || daemon_version_from_body(&response.body)
+            .is_some_and(|version| versions_match(version, expected_version));
     identity_matches && version_matches
 }
 

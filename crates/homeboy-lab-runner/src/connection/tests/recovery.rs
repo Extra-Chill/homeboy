@@ -1543,7 +1543,7 @@ fn recovery_retry_reattaches_journaled_b_after_four_lost_health_requests() {
         let health_requests = Arc::new(AtomicUsize::new(0));
         let health_requests_for_server = Arc::clone(&health_requests);
         let endpoint = std::thread::spawn(move || {
-            for request_number in 0..11 {
+            for request_number in 0..10 {
                 let (mut stream, _) = listener.accept().expect("endpoint request");
                 let mut request = [0; 4096];
                 let length = stream.read(&mut request).expect("read endpoint request");
@@ -1690,7 +1690,7 @@ fn normal_start_response_loss_replays_b_without_creating_c() {
         let health_requests = Arc::new(AtomicUsize::new(0));
         let health_requests_for_server = Arc::clone(&health_requests);
         let endpoint = std::thread::spawn(move || {
-            for request_number in 0..4 {
+            for request_number in 0..5 {
                 let (mut stream, _) = listener.accept().expect("endpoint request");
                 let mut request = [0; 4096];
                 let length = stream.read(&mut request).expect("read endpoint request");
@@ -1846,7 +1846,7 @@ esac
             "1",
             "replay must return B rather than starting C"
         );
-        assert_eq!(health_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(health_requests.load(Ordering::SeqCst), 3);
         assert!(
             !old_replay.exists(),
             "the obsolete absolute Homeboy path must not execute the replay"

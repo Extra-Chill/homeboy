@@ -2387,13 +2387,12 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
     let model = outcome.selected_model();
     let requested_model = outcome.metadata["model_identity"]["requested"].as_str();
     let resolved_model = outcome.metadata["model_identity"]["resolved"].as_str();
-    let provider_reported_model = outcome.metadata["model_identity"]["provider_reported"]
-        .as_str();
+    let provider_reported_model = outcome.metadata["model_identity"]["provider_reported"].as_str();
     if model.is_none()
         && provider_reported_model.is_none()
-        && requested_model.zip(resolved_model).is_some_and(|(requested, resolved)| {
-            requested != resolved
-        })
+        && requested_model
+            .zip(resolved_model)
+            .is_some_and(|(requested, resolved)| requested != resolved)
     {
         return Err(Error::validation_invalid_argument(
             "provider_model",
