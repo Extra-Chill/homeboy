@@ -937,6 +937,27 @@ pub struct AgentTaskCookReport {
     pub failure_context: Option<AgentTaskCookFailureContext>,
 }
 
+/// The end-to-end publication state of a Cook candidate.
+///
+/// Provider success is evidence that a candidate was produced; it is not proof
+/// that the requested PR exists. This additive v1 projection leaves the legacy
+/// `status` and `finalization` payloads intact for persisted consumers.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskCookCompletion {
+    pub schema: &'static str,
+    /// The selected provider candidate, when one was durably produced.
+    pub candidate_produced: bool,
+    /// Whether this Cook requested controller-side PR finalization.
+    pub finalization_requested: bool,
+    /// `true` only when durable finalization evidence identifies a PR.
+    pub pr_finalized: bool,
+    /// Closed end-to-end outcome vocabulary for consumers that must not treat
+    /// a provider-only success as Cook completion.
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<AgentTaskCookRecoveryAction>,
+}
+
 /// The closed-vocabulary classification emitted beside an open `status`
 /// string.
 ///
@@ -1039,6 +1060,8 @@ impl serde::Serialize for AgentTaskCookReport {
             moving_base_recovery: Option<&'a MovingBaseCookRecovery>,
             #[serde(skip_serializing_if = "Option::is_none")]
             failure_context: Option<&'a AgentTaskCookFailureContext>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            completion: Option<AgentTaskCookCompletion>,
             // Additive. `status` above is unchanged and remains the field
             // callers match on.
             lifecycle_status: RunLifecycleStatus,
@@ -1047,6 +1070,7 @@ impl serde::Serialize for AgentTaskCookReport {
         }
 
         let lifecycle = self.lifecycle();
+        let completion = self.completion();
         let wire = Wire {
             schema: self.schema,
             cook_id: &self.cook_id,
@@ -1064,6 +1088,7 @@ impl serde::Serialize for AgentTaskCookReport {
             terminal_failure_classification: self.terminal_failure_classification.as_ref(),
             moving_base_recovery: self.moving_base_recovery.as_ref(),
             failure_context: self.failure_context.as_ref(),
+            completion,
             lifecycle_status: lifecycle.lifecycle_status,
             terminal: lifecycle.terminal,
             retryable: lifecycle.retryable,
@@ -1077,6 +1102,75 @@ impl AgentTaskCookReport {
     pub fn lifecycle(&self) -> RunLifecycleProjection {
         RunLifecycleProjection::from_status_and_disposition(&self.status, self.disposition)
     }
+
+    /// Project the Cook's end-to-end PR completion separately from provider
+    /// output and raw legacy status strings.
+    pub fn completion(&self) -> Option<AgentTaskCookCompletion> {
+        let candidate_produced = self
+            .selected_candidate
+            .as_ref()
+            .is_some_and(|candidate| !candidate["incomplete"].as_bool().unwrap_or(false));
+        let finalization_requested = !matches!(
+            self.status.as_str(),
+            "green_no_finalize" | "intentional_no_change"
+        );
+        cook_completion(
+            candidate_produced,
+            finalization_requested,
+            self.finalization.as_ref(),
+            self.selected_candidate
+                .as_ref()
+                .and_then(|candidate| candidate["run_id"].as_str()),
+        )
+    }
+}
+
+/// A finalization receipt is completion evidence only when it names the PR it
+/// published. Older receipt shapes remain serialized unchanged, but cannot make
+/// a Cook look complete without that durable identity.
+pub fn cook_finalization_is_pr_receipt(finalization: &Value) -> bool {
+    matches!(
+        finalization["status"].as_str(),
+        Some("review_ready" | "draft_published")
+    ) && (finalization["pr_number"].is_u64()
+        || finalization["pr"]["number"].is_u64()
+        || finalization["pr_url"].as_str().is_some()
+        || finalization["pr"]["url"].as_str().is_some())
+}
+
+/// Project durable candidate and publication facts for both immediate Cook
+/// reports and record readers.
+pub fn cook_completion(
+    candidate_produced: bool,
+    finalization_requested: bool,
+    finalization: Option<&Value>,
+    recovery_run_id: Option<&str>,
+) -> Option<AgentTaskCookCompletion> {
+    let pr_finalized = finalization.is_some_and(cook_finalization_is_pr_receipt);
+    let state = if pr_finalized {
+        "pr_finalized"
+    } else if candidate_produced && finalization_requested {
+        "candidate_awaiting_finalization"
+    } else if candidate_produced {
+        "candidate_produced"
+    } else {
+        return None;
+    };
+    let next_action = (state == "candidate_awaiting_finalization")
+        .then_some(recovery_run_id)
+        .flatten()
+        .map(|run_id| AgentTaskCookRecoveryAction {
+            action: "finalize_pr".to_string(),
+            command: format!("homeboy agent-task finalize-pr --recover {run_id}"),
+        });
+    Some(AgentTaskCookCompletion {
+        schema: "homeboy/agent-task-cook-completion/v1",
+        candidate_produced,
+        finalization_requested,
+        pr_finalized,
+        state,
+        next_action,
+    })
 }
 
 /// `skip_serializing_if` predicate for a borrowed slice field.
@@ -1616,6 +1710,75 @@ mod run_lifecycle_projection_tests {
             value["retryable"], false,
             "a partially failed batch must not be advertised as blanket-retryable"
         );
+    }
+
+    #[test]
+    fn candidate_without_requested_pr_finalization_is_not_a_completed_cook() {
+        let mut candidate = report("completed", CookDisposition::Terminal);
+        candidate.selected_candidate = Some(serde_json::json!({
+            "run_id": "cook-projection-attempt-1",
+            "incomplete": false,
+        }));
+
+        let serialized = serde_json::to_value(&candidate).expect("serialize");
+        assert_eq!(
+            serialized["status"], "completed",
+            "legacy status is preserved"
+        );
+        assert_eq!(
+            serialized["completion"]["state"],
+            "candidate_awaiting_finalization"
+        );
+        assert_eq!(serialized["completion"]["pr_finalized"], false);
+        assert_eq!(
+            serialized["completion"]["next_action"]["command"],
+            "homeboy agent-task finalize-pr --recover cook-projection-attempt-1"
+        );
+
+        let batch = cook_batch_result(
+            "batch-projection".to_string(),
+            vec![cell("completed", Some(candidate))],
+        );
+        assert_eq!(batch.value.succeeded, 0);
+        assert_eq!(batch.value.failed, 1);
+        assert_eq!(batch.value.status, "failed");
+        assert_eq!(batch.exit_code, 1);
+    }
+
+    #[test]
+    fn finalized_pr_requires_a_durable_pr_identity() {
+        let mut candidate = report("review_ready", CookDisposition::Terminal);
+        candidate.selected_candidate = Some(serde_json::json!({
+            "run_id": "cook-projection-attempt-1",
+            "incomplete": false,
+        }));
+        candidate.finalization = Some(serde_json::json!({
+            "status": "review_ready",
+            "pr_number": 12162,
+        }));
+
+        let completion = candidate.completion().expect("candidate completion");
+        assert_eq!(completion.state, "pr_finalized");
+        assert!(completion.pr_finalized);
+        assert!(completion.next_action.is_none());
+    }
+
+    #[test]
+    fn finalization_status_without_pr_identity_is_not_cook_completion() {
+        let mut candidate = report("review_ready", CookDisposition::Terminal);
+        candidate.selected_candidate = Some(serde_json::json!({
+            "run_id": "cook-projection-attempt-1",
+            "incomplete": false,
+        }));
+        // Legacy receipts can establish that finalization was attempted, but
+        // cannot establish publication without the PR identity.
+        candidate.finalization = Some(serde_json::json!({
+            "status": "review_ready",
+        }));
+
+        let completion = candidate.completion().expect("candidate completion");
+        assert_eq!(completion.state, "candidate_awaiting_finalization");
+        assert!(!completion.pr_finalized);
     }
 }
 
@@ -2187,6 +2350,18 @@ fn cook_batch_result(
     let total = cooks.len();
     let mut totals = crate::agent_task_batch::AgentTaskBatchTotals::default();
     for cell in &cooks {
+        // A provider-success cell can retain its legacy zero exit code while a
+        // Cook that requested a PR is still incomplete. Aggregate completion
+        // follows the explicit end-to-end projection, not provider evidence.
+        if cell
+            .result
+            .as_ref()
+            .and_then(AgentTaskCookReport::completion)
+            .is_some_and(|completion| completion.state == "candidate_awaiting_finalization")
+        {
+            totals.failed += 1;
+            continue;
+        }
         match CookStatus::from_status(&cell.status) {
             CookStatus::Queued => totals.queued += 1,
             CookStatus::Running | CookStatus::InFlight => totals.running += 1,
