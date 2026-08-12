@@ -1928,6 +1928,82 @@ fn list_latest_accepts_list_filters_and_rejects_pagination_selectors() {
             .is_err()
     );
     assert!(Cli::try_parse_from(["homeboy", "agent-task", "list", "--latest", "--full",]).is_err());
+    assert!(
+        Cli::try_parse_from(["homeboy", "agent-task", "list", "--latest", "--limit", "1",])
+            .is_err()
+    );
+}
+
+#[test]
+fn list_latest_selects_the_newest_complete_filtered_match_or_an_empty_result() {
+    with_isolated_home(|_| {
+        let mut matching = test_plan();
+        matching.group_key = Some("homeboy".to_string());
+        matching.tasks[0].group_key = Some("homeboy".to_string());
+        matching.tasks[0].workspace.root = Some("/work/homeboy".to_string());
+        matching.tasks[0].workspace.task_url =
+            Some("https://github.com/Extra-Chill/homeboy/issues/12242".to_string());
+        matching.tasks[0].parent_plan_id = Some("batch-12242".to_string());
+        agent_task_lifecycle::submit_plan(&matching, Some("run-filtered-match-old"))
+            .expect("persist older matching run");
+        agent_task_lifecycle::submit_plan(&matching, Some("run-filtered-match-new"))
+            .expect("persist newer matching run");
+
+        for index in 0..1001 {
+            agent_task_lifecycle::submit_plan(
+                &test_plan(),
+                Some(&format!("run-unmatched-{index:04}")),
+            )
+            .expect("persist newer non-match");
+        }
+
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "list",
+            "--latest",
+            "--repo",
+            "homeboy",
+            "--worktree",
+            "/work/homeboy",
+            "--task-url",
+            "https://github.com/Extra-Chill/homeboy/issues/12242",
+            "--state",
+            "queued",
+            "--run-placement",
+            "local",
+            "--parent-id",
+            "batch-12242",
+        ])
+        .expect("filtered latest list parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let (result, exit_code) = super::super::run(agent_task).expect("filtered latest runs");
+        assert_eq!(exit_code, 0);
+        assert_eq!(result["filter"], "latest");
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["runs"][0]["run_id"], "run-filtered-match-new");
+
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "list",
+            "--latest",
+            "--repo",
+            "missing-repo",
+        ])
+        .expect("no-match latest list parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let (result, exit_code) = super::super::run(agent_task).expect("no-match latest runs");
+        assert_eq!(exit_code, 0);
+        assert_eq!(result["filter"], "latest");
+        assert_eq!(result["count"], 0);
+        assert_eq!(result["total"], 0);
+        assert_eq!(result["runs"], json!([]));
+    });
 }
 
 #[test]

@@ -369,7 +369,7 @@ homeboy agent-task list [OPTIONS]
 
 List durable runs, newest first.
 
-Discovery returns a finite agent-facing page by default; use `--limit` for a different page or `--full` for every matching record. Use `--latest` to return only the newest record matching the supplied list filters.
+Discovery returns a finite agent-facing page by default; use `--limit` for a different page or `--full` for every matching record. Use `--latest` to search complete durable history and return only the newest record matching the supplied list filters.
 
 | Option | Value | Description |
 | --- | --- | --- |

@@ -261,6 +261,20 @@ pub fn discover_runs_with_options(
     discovery_report(filter, options, records, record_health)
 }
 
+/// Find the newest run matching list filters without treating a bounded display
+/// snapshot as the complete search corpus.
+pub fn discover_filtered_latest_run(
+    options: AgentTaskDiscoveryOptions,
+) -> Result<AgentTaskDiscoveryReport> {
+    let (records, record_health) = agent_task_lifecycle::read_all_records_with_health()?;
+    discovery_report(
+        AgentTaskDiscoveryFilter::Latest,
+        options,
+        records,
+        record_health,
+    )
+}
+
 fn discovery_report(
     filter: AgentTaskDiscoveryFilter,
     options: AgentTaskDiscoveryOptions,
