@@ -1,6 +1,6 @@
 use std::fs;
 
-use homeboy::commands::report::{
+use homeboy::commands::runs::report::{
     compare_report_artifacts_from_args, compare_report_artifacts_with_store, ReportCompareArgs,
 };
 use homeboy::core::observation::{NewRunRecord, ObservationStore};

@@ -253,7 +253,6 @@ pub mod raw_output;
 pub mod refactor;
 pub mod refs;
 pub mod release;
-pub mod report;
 pub mod resources;
 pub mod review;
 pub mod rig;

@@ -96,7 +96,7 @@ Minimal example:
 
 The same array can also be nested under `metadata.preview.origin_evidence` when
 the capture belongs to a preview lifecycle record instead of a bench or trace
-result sidecar. `homeboy report performance-digest` renders those rows in a
+result sidecar. `homeboy runs report performance-digest` renders those rows in a
 `Browser Origin Evidence` section.
 
 Unknown fields are allowed at the sidecar envelope level so existing benchmark

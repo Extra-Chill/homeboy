@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use homeboy::commands::report::{
+use homeboy::commands::runs::report::{
     browser_evidence_compare_from_args, browser_evidence_compare_from_dirs,
     browser_evidence_compare_from_dirs_with_visual_and_adapters, BrowserEvidenceCompareArgs,
     VisualCompareOptions,

@@ -6,7 +6,7 @@ use super::super::types::{
 };
 use super::BrowserEvidenceSample;
 
-pub(in crate::commands::report::browser_evidence_compare) fn compare_variants(
+pub(in crate::commands::runs::report::browser_evidence_compare) fn compare_variants(
     baseline: &[BrowserEvidenceSample],
     candidate: &[BrowserEvidenceSample],
 ) -> Vec<BrowserEvidenceVariantComparison> {

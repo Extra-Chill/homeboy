@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::commands::{
     activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db,
     deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project, refactor,
-    release, report, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh,
-    stack, status, trace, triage, tunnel, upgrade, worktree,
+    release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, stack,
+    status, trace, triage, tunnel, upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -223,8 +223,6 @@ pub enum Commands {
     Git(git::GitArgs),
     /// Plan release workflows
     Release(release::ReleaseArgs),
-    /// Render reports from Homeboy structured output artifacts
-    Report(report::ReportArgs),
     /// Run scoped audit + lint + test umbrella against PR-style changes
     Review(review::ReviewArgs),
     /// Structural refactoring (rename terms across codebase)
@@ -241,7 +239,7 @@ pub enum Commands {
     Worktree(worktree::WorktreeArgs),
     /// Manage private service tunnel declarations
     Tunnel(tunnel::TunnelArgs),
-    /// Inspect persisted observation runs and artifacts
+    /// Inspect persisted observation runs, artifacts, and typed evidence projections
     Runs(runs::RunsArgs),
     /// Inspect the active Homeboy binary; `self identity` reports its local build identity
     #[command(name = "self")]
@@ -1387,6 +1385,7 @@ mod tests {
             ["homeboy", "refactor", "homeboy", "--all"].as_slice(),
             [
                 "homeboy",
+                "runs",
                 "report",
                 "failure-digest",
                 "--output-dir",

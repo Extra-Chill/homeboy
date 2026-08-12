@@ -12,7 +12,7 @@ use super::types::{
 use super::CmdResult;
 use super::{
     bench, compare, distribution, dossier, drift, evidence, findings, fuzz_compare, handlers,
-    hotspots, latest, loop_sync, proof, query, reconcile, refs, resources, watch,
+    hotspots, latest, loop_sync, proof, query, reconcile, refs, report, resources, watch,
 };
 
 impl RunsArgs {
@@ -114,6 +114,7 @@ impl RunsArgs {
 
     pub fn is_markdown_mode(&self) -> bool {
         matches!(self.command, RunsCommand::Compare(ref compare) if compare::is_table_mode(compare))
+            || matches!(self.command, RunsCommand::Report(ref report_args) if report::is_markdown_mode(report_args))
     }
 
     pub fn is_bundle_export(&self) -> bool {
@@ -262,6 +263,9 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Resources(args) => resources::runs_resources(args),
         RunsCommand::Drift(args) => drift::runs_drift(args),
         RunsCommand::LoopSync(args) => loop_sync::loop_sync(args),
+        RunsCommand::Report(args) => {
+            report::run(args).map(|(output, exit_code)| (RunsOutput::Report(output), exit_code))
+        }
     }
 }
 
@@ -273,6 +277,7 @@ pub fn global_runner_error(args: &RunsArgs, runner_id: &str) -> Error {
 pub fn run_markdown(args: RunsArgs) -> CmdResult<String> {
     match args.command {
         RunsCommand::Compare(args) => compare::run_markdown(args),
+        RunsCommand::Report(args) => report::run_markdown(args),
         _ => Err(Error::validation_invalid_argument(
             "output_mode",
             "Only `homeboy runs compare --format=table` supports table output",
@@ -330,6 +335,26 @@ mod presentation_tests {
         assert!(
             !parse(&["runs", "show", "run-1", "--json", "--format=json"]).show_summary_eligible()
         );
+    }
+
+    #[test]
+    fn report_subcommands_parse_under_runs() {
+        let report = parse(&[
+            "runs",
+            "report",
+            "failure-digest",
+            "--output-dir",
+            "artifacts",
+            "--results",
+            r#"{"audit":"pass"}"#,
+        ]);
+        assert!(report.is_markdown_mode());
+
+        let json = parse(&[
+            "runs", "report", "compare", "--old", "old.json", "--new", "new.json", "--format",
+            "json",
+        ]);
+        assert!(!json.is_markdown_mode());
     }
 
     #[test]

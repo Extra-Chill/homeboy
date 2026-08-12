@@ -721,7 +721,7 @@ fn browser_proof_for_runs(
         return Ok(None);
     }
     let visual_options = visual_compare_options(args, output_dir)?;
-    let report = crate::commands::report::browser_evidence_compare_from_dirs_with_visual(
+    let report = crate::commands::runs::report::browser_evidence_compare_from_dirs_with_visual(
         &baseline_dirs,
         &candidate_dirs,
         baseline_label,
@@ -777,7 +777,7 @@ fn browser_proof_run_refs(
 fn visual_compare_options(
     args: &TraceArgs,
     output_dir: &Path,
-) -> homeboy::core::Result<Option<crate::commands::report::VisualCompareOptions>> {
+) -> homeboy::core::Result<Option<crate::commands::runs::report::VisualCompareOptions>> {
     if !args.visual_compare {
         return Ok(None);
     }
@@ -786,7 +786,7 @@ fn visual_compare_options(
             "--visual-compare-provider".to_string(),
         ]));
     };
-    Ok(Some(crate::commands::report::VisualCompareOptions {
+    Ok(Some(crate::commands::runs::report::VisualCompareOptions {
         artifacts_dir: args
             .visual_artifacts_dir
             .clone()
@@ -798,7 +798,7 @@ fn visual_compare_options(
 }
 
 fn has_promoted_browser_evidence(
-    report: &crate::commands::report::BrowserEvidenceCompareReport,
+    report: &crate::commands::runs::report::BrowserEvidenceCompareReport,
 ) -> bool {
     report.variants.iter().any(|variant| {
         !variant.browser_metrics.is_empty()

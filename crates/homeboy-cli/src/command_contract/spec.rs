@@ -953,6 +953,18 @@ const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
 
 const RUNS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
+        &[
+            "report failure-digest",
+            "report performance-digest",
+            "report bench-coverage",
+            "report browser-evidence-compare",
+            "report matrix-artifacts",
+            "report compare",
+        ],
+        CommandSafetySpec::read_only(),
+        "renders read-only evidence projections from supplied or persisted artifacts",
+    ),
+    paths_safety(
         &["reconcile"],
         with_dry_run(mutating_safety(), "--dry-run"),
         "marks orphaned running records stale unless --dry-run is passed",

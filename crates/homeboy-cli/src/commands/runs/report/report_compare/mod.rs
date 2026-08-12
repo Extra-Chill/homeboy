@@ -1,4 +1,4 @@
-//! `homeboy report compare` — the clap surface plus the artifact-diff engine.
+//! `homeboy runs report compare` — the clap surface plus the artifact-diff engine.
 //!
 //! The engine and its markdown renderer used to sit in `homeboy-core` as two
 //! top-level modules (`report_compare`, `report_compare_render`) even though

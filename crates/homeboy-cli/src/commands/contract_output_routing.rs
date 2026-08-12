@@ -7,7 +7,7 @@
 
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandSpec;
-use crate::commands::{adapter, file, logs, report, review, runner, runtime, ssh, trace};
+use crate::commands::{adapter, file, logs, review, runner, runtime, ssh, trace};
 
 use crate::command_contract::{
     CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,
@@ -96,11 +96,6 @@ impl Commands {
             Commands::Runtime(args) if runtime::is_plain_mode(args) => {
                 raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }
-            Commands::Report(args) if report::is_markdown_mode(args) => workspace_descriptor(
-                CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
-                output_file_mode,
-                CommandOutputContractKind::JsonEnvelope,
-            ),
             Commands::Bench(args) => args.output_descriptor(output_file_mode),
             Commands::Fuzz(args) => args.output_descriptor(output_file_mode),
             Commands::Runner(args) if runner::is_compact_exec_stdout(args) => {
@@ -177,7 +172,7 @@ fn markdown_or_json_response(markdown: bool) -> CommandResponseMode {
 mod tests {
     use super::*;
     use crate::cli_surface::Cli;
-    use clap::{CommandFactory, FromArgMatches};
+    use clap::{CommandFactory, FromArgMatches, Parser};
 
     #[test]
     fn representative_default_output_descriptors_come_from_command_registry() {
@@ -198,5 +193,41 @@ mod tests {
                 spec.name
             );
         }
+    }
+
+    #[test]
+    fn runs_report_preserves_markdown_and_json_output_routing() {
+        let spec = crate::command_contract::COMMAND_SPECS
+            .iter()
+            .find(|spec| spec.name == "runs")
+            .expect("runs command spec");
+        let markdown = Cli::try_parse_from([
+            "homeboy",
+            "runs",
+            "report",
+            "failure-digest",
+            "--output-dir",
+            "artifacts",
+            "--results",
+            r#"{"audit":"pass"}"#,
+        ])
+        .expect("markdown report invocation should parse");
+        assert_eq!(
+            markdown
+                .command
+                .output_descriptor(spec, false)
+                .response_mode,
+            CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
+        );
+
+        let json = Cli::try_parse_from([
+            "homeboy", "runs", "report", "compare", "--old", "old.json", "--new", "new.json",
+            "--format", "json",
+        ])
+        .expect("JSON report invocation should parse");
+        assert_eq!(
+            json.command.output_descriptor(spec, false).response_mode,
+            CommandResponseMode::Json
+        );
     }
 }
