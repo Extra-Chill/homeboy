@@ -4542,6 +4542,10 @@ fi
         with_isolated_home(|_| {
             let mut config = homeboy::core::defaults::load_config();
             config.agent_task.default_backend = Some("sandbox".to_string());
+            config.worktree_providers.clear();
+            config.settings.remove(
+                homeboy::core::worktree_providers::WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY,
+            );
             homeboy::core::defaults::save_config(&config)
                 .expect("configure fixture default backend");
             let worktrees = tempfile::tempdir().expect("managed worktree fixtures");
