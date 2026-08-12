@@ -1822,8 +1822,8 @@ impl SelectedGateEnvironment {
         let overlay = home
             .join(".homeboy-rust-cache")
             .join(uuid::Uuid::new_v4().to_string());
-        copy_tree_without_symlinks(&cache.join("cargo"), &overlay.join("cargo"))?;
-        copy_tree_without_symlinks(&cache.join("rustup"), &overlay.join("rustup"))?;
+        copy_tree_preserving_safe_symlinks(&cache.join("cargo"), &overlay.join("cargo"))?;
+        copy_tree_preserving_safe_symlinks(&cache.join("rustup"), &overlay.join("rustup"))?;
         self.values.insert(
             "CARGO_HOME".to_string(),
             overlay.join("cargo").display().to_string(),
@@ -2167,10 +2167,10 @@ fn run_rust_cache_command(
     Ok(output)
 }
 
-/// Clone controller-owned cache bytes into a gate-owned overlay. Symlinks are
-/// rejected on both sides so a gate cannot turn a later write into a controller
-/// cache mutation.
-fn copy_tree_without_symlinks(source: &Path, destination: &Path) -> Result<()> {
+/// Clone controller-owned cache bytes into a gate-owned overlay. Links may only
+/// resolve within the authoritative source tree, and absolute links are rebased
+/// so the gate never retains a path back into controller-owned cache state.
+fn copy_tree_preserving_safe_symlinks(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -2184,21 +2184,41 @@ fn copy_tree_without_symlinks(source: &Path, destination: &Path) -> Result<()> {
         )
         .with_hint(rust_cache_repair_command()));
     }
+    let source_root = source.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("resolve Rust cache root {}", source.display())),
+        )
+        .with_hint(rust_cache_repair_command())
+    })?;
+    copy_rust_cache_tree(source, destination, &source_root, destination)
+}
+
+fn copy_rust_cache_tree(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<()> {
     fs::create_dir_all(destination).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("create Rust overlay {}", destination.display())),
         )
     })?;
-    for entry in fs::read_dir(source).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("read Rust cache {}", source.display())),
-        )
-    })? {
-        let entry = entry.map_err(|error| {
+    let mut entries = fs::read_dir(source)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read Rust cache {}", source.display())),
+            )
+        })?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| {
             Error::internal_io(error.to_string(), Some("read Rust cache entry".to_string()))
         })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let file_type = entry.file_type().map_err(|error| {
@@ -2208,14 +2228,19 @@ fn copy_tree_without_symlinks(source: &Path, destination: &Path) -> Result<()> {
             )
         })?;
         if file_type.is_symlink() {
-            return Err(Error::internal_io(
-                "Rust cache contains a symlink".to_string(),
-                Some("copy Rust gate cache".to_string()),
-            )
-            .with_hint(rust_cache_repair_command()));
-        }
-        if file_type.is_dir() {
-            copy_tree_without_symlinks(&source_path, &destination_path)?;
+            copy_safe_rust_cache_symlink(
+                &source_path,
+                &destination_path,
+                source_root,
+                destination_root,
+            )?;
+        } else if file_type.is_dir() {
+            copy_rust_cache_tree(
+                &source_path,
+                &destination_path,
+                source_root,
+                destination_root,
+            )?;
         } else if file_type.is_file() {
             fs::copy(&source_path, &destination_path).map_err(|error| {
                 Error::internal_io(
@@ -2232,6 +2257,82 @@ fn copy_tree_without_symlinks(source: &Path, destination: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn copy_safe_rust_cache_symlink(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<()> {
+    let target = fs::read_link(source).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("read Rust cache symlink {}", source.display())),
+        )
+    })?;
+    let resolved = source.canonicalize().map_err(|error| {
+        let kind = if error.raw_os_error() == Some(libc::ELOOP) {
+            "cycle"
+        } else if error.kind() == std::io::ErrorKind::NotFound {
+            "dangling target"
+        } else {
+            "unresolvable target"
+        };
+        Error::internal_io(
+            format!(
+                "Rust cache symlink {} has a {kind}: {}",
+                source.display(),
+                target.display()
+            ),
+            Some("copy Rust gate cache".to_string()),
+        )
+        .with_hint(rust_cache_repair_command())
+    })?;
+    let relative = resolved.strip_prefix(source_root).map_err(|_| {
+        Error::internal_io(
+            format!(
+                "Rust cache symlink {} escapes its source root: {}",
+                source.display(),
+                resolved.display()
+            ),
+            Some("copy Rust gate cache".to_string()),
+        )
+        .with_hint(rust_cache_repair_command())
+    })?;
+    let overlay_target = if target.is_absolute() {
+        destination_root.join(relative)
+    } else {
+        target
+    };
+    create_rust_cache_symlink(&overlay_target, destination, resolved.is_dir()).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("copy Rust cache symlink {}", source.display())),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn create_rust_cache_symlink(
+    target: &Path,
+    link: &Path,
+    _target_is_dir: bool,
+) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_rust_cache_symlink(
+    target: &Path,
+    link: &Path,
+    target_is_dir: bool,
+) -> std::io::Result<()> {
+    if target_is_dir {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
 }
 
 fn rust_cache_repair_command() -> String {
@@ -4890,13 +4991,71 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rust_gate_cache_rejects_symlinked_content_and_bounds_stalled_hydration() {
+    fn rust_gate_cache_preserves_safe_symlinks_and_rejects_unsafe_content() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
         let source = tempfile::tempdir().expect("source");
         let overlay = tempfile::tempdir().expect("overlay");
-        symlink("/tmp", source.path().join("escape")).expect("cache symlink");
-        assert!(copy_tree_without_symlinks(source.path(), overlay.path()).is_err());
+        fs::create_dir_all(source.path().join("bin")).expect("cache bin");
+        let rustup = source.path().join("bin/rustup");
+        fs::write(&rustup, "#!/bin/sh\nprintf 'rustup\\n'\n").expect("rustup proxy");
+        let mut permissions = fs::metadata(&rustup)
+            .expect("rustup metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&rustup, permissions).expect("rustup executable");
+        symlink("rustup", source.path().join("bin/cargo")).expect("normal cargo proxy");
+        symlink(&rustup, source.path().join("absolute-rustup")).expect("absolute safe link");
+        copy_tree_preserving_safe_symlinks(source.path(), overlay.path()).expect("copy cache");
+        assert_eq!(
+            fs::read_link(overlay.path().join("bin/cargo")).expect("relative cargo link"),
+            PathBuf::from("rustup")
+        );
+        assert_eq!(
+            fs::read_link(overlay.path().join("absolute-rustup")).expect("absolute rustup link"),
+            overlay.path().join("bin/rustup")
+        );
+        assert_eq!(
+            Command::new(overlay.path().join("bin/cargo"))
+                .output()
+                .expect("execute copied cargo proxy")
+                .stdout,
+            b"rustup\n"
+        );
+
+        let reused_overlay = tempfile::tempdir().expect("reused overlay");
+        copy_tree_preserving_safe_symlinks(source.path(), reused_overlay.path())
+            .expect("reuse cache");
+        assert_eq!(
+            fs::read_link(reused_overlay.path().join("bin/cargo")).expect("reused cargo link"),
+            PathBuf::from("rustup")
+        );
+
+        for (name, target, expected) in [
+            ("escape", PathBuf::from("/tmp"), "escapes its source root"),
+            ("dangling", PathBuf::from("missing"), "dangling target"),
+            ("cycle-a", PathBuf::from("cycle-b"), "cycle"),
+        ] {
+            let malicious = tempfile::tempdir().expect("malicious cache");
+            symlink(&target, malicious.path().join(name)).expect("malicious symlink");
+            if name == "cycle-a" {
+                symlink("cycle-a", malicious.path().join("cycle-b")).expect("cycle link");
+            }
+            let error = copy_tree_preserving_safe_symlinks(
+                malicious.path(),
+                tempfile::tempdir().expect("malicious overlay").path(),
+            )
+            .expect_err("reject malicious cache link");
+            let diagnostic = error.details["error"].as_str().unwrap_or_default();
+            assert!(diagnostic.contains(name), "{diagnostic}");
+            assert!(diagnostic.contains(expected), "{diagnostic}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_gate_cache_bounds_stalled_hydration() {
+        use std::os::unix::fs::PermissionsExt;
 
         let _guard = env_mutex();
         let bin = tempfile::tempdir().expect("tool bin");
