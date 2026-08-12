@@ -765,7 +765,14 @@ fn preflight_lab_runner_availability_with(
     connect_authority: Option<&RunnerConnectReport>,
 ) -> Result<(RunnerAvailability, RunnerStatusReport)> {
     let capacity = load(&selection.runner_id)?.settings.concurrency_limit;
-    preflight_lab_runner_availability_from_status(selection, status_fn, capacity, connect_authority)
+    let loopback_transport = configured_direct_ssh_transport_is_loopback(&selection.runner_id)?;
+    preflight_lab_runner_availability_from_status_with_transport(
+        selection,
+        status_fn,
+        capacity,
+        connect_authority,
+        loopback_transport,
+    )
 }
 
 pub(super) fn preflight_lab_runner_availability_from_status(
@@ -774,8 +781,27 @@ pub(super) fn preflight_lab_runner_availability_from_status(
     capacity: Option<usize>,
     connect_authority: Option<&RunnerConnectReport>,
 ) -> Result<(RunnerAvailability, RunnerStatusReport)> {
-    let status =
-        authoritative_status_for_preflight(status_fn(&selection.runner_id)?, connect_authority)?;
+    preflight_lab_runner_availability_from_status_with_transport(
+        selection,
+        status_fn,
+        capacity,
+        connect_authority,
+        false,
+    )
+}
+
+pub(super) fn preflight_lab_runner_availability_from_status_with_transport(
+    selection: &LabRunnerSelection,
+    status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
+    capacity: Option<usize>,
+    connect_authority: Option<&RunnerConnectReport>,
+    loopback_transport: bool,
+) -> Result<(RunnerAvailability, RunnerStatusReport)> {
+    let status = authoritative_status_for_preflight_with_transport(
+        status_fn(&selection.runner_id)?,
+        connect_authority,
+        loopback_transport,
+    )?;
     let availability = RunnerAvailability::from_status_parts(
         selection.runner_id.clone(),
         status.connected,
@@ -788,8 +814,16 @@ pub(super) fn preflight_lab_runner_availability_from_status(
 }
 
 pub(super) fn authoritative_status_for_preflight(
+    status: RunnerStatusReport,
+    connect_authority: Option<&RunnerConnectReport>,
+) -> Result<RunnerStatusReport> {
+    authoritative_status_for_preflight_with_transport(status, connect_authority, false)
+}
+
+pub(super) fn authoritative_status_for_preflight_with_transport(
     mut status: RunnerStatusReport,
     connect_authority: Option<&RunnerConnectReport>,
+    loopback_transport: bool,
 ) -> Result<RunnerStatusReport> {
     let Some(connect_authority) = connect_authority else {
         return Ok(status);
@@ -800,7 +834,6 @@ pub(super) fn authoritative_status_for_preflight(
         )
     })?;
     let same_endpoint = session.local_url == connect_authority.local_url
-        && session.tunnel_pid == connect_authority.tunnel_pid
         && session.remote_daemon_pid == connect_authority.remote_daemon_pid;
     let daemon_is_fresh = status.daemon_freshness.as_ref().is_some_and(|freshness| {
         freshness.fresh
@@ -820,32 +853,46 @@ pub(super) fn authoritative_status_for_preflight(
             None,
         ));
     }
-    let tunnel_pid = session.tunnel_pid.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "runner",
-            "verified runner connect has no tunnel PID",
-            Some(connect_authority.runner_id.clone()),
-            None,
-        )
-    })?;
-    let tunnel_identity = session
-        .tunnel_process_start_identity
-        .as_ref()
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
+    match (session.tunnel_pid, connect_authority.tunnel_pid) {
+        (Some(tunnel_pid), Some(_)) => {
+            let tunnel_identity =
+                session
+                    .tunnel_process_start_identity
+                    .as_ref()
+                    .ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "runner",
+                            "verified runner connect has no tunnel process start identity",
+                            Some(connect_authority.runner_id.clone()),
+                            None,
+                        )
+                    })?;
+            if !crate::connection::tunnel_process_is_owned(tunnel_pid, tunnel_identity) {
+                return Err(Error::validation_invalid_argument(
+                    "runner",
+                    "verified runner tunnel is no longer owned; reconnect before admission",
+                    Some(connect_authority.runner_id.clone()),
+                    None,
+                ));
+            }
+        }
+        (None, None) if loopback_transport && session.tunnel_process_start_identity.is_none() => {}
+        (None, None) => {
+            return Err(Error::validation_invalid_argument(
                 "runner",
-                "verified runner connect has no tunnel process start identity",
+                "verified runner connect has no tunnel PID for a non-loopback SSH transport",
                 Some(connect_authority.runner_id.clone()),
                 None,
-            )
-        })?;
-    if !crate::connection::tunnel_process_is_owned(tunnel_pid, tunnel_identity) {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            "verified runner tunnel is no longer owned; reconnect before admission",
-            Some(connect_authority.runner_id.clone()),
-            None,
-        ));
+            ));
+        }
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "verified runner connect tunnel evidence is mixed",
+                Some(connect_authority.runner_id.clone()),
+                None,
+            ));
+        }
     }
     let local_url = verified_loopback_local_url(session, connect_authority)?;
     let health =
@@ -926,6 +973,26 @@ pub(super) fn authoritative_status_for_preflight(
     status.active_job_source = Some(RunnerActiveJobSource::DirectDaemon);
     status.active_job_error = None;
     Ok(status)
+}
+
+fn configured_direct_ssh_transport_is_loopback(runner_id: &str) -> Result<bool> {
+    let runner = load(runner_id)?;
+    if runner.kind != super::RunnerKind::Ssh {
+        return Ok(false);
+    }
+    let server_id = runner.server_id.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "SSH runner has no server identity",
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    let server = homeboy_core::server::load(&server_id)?;
+    Ok(matches!(
+        server.host.as_str(),
+        "localhost" | "127.0.0.1" | "::1"
+    ))
 }
 
 fn verified_loopback_local_url(

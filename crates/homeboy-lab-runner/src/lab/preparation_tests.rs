@@ -1,5 +1,7 @@
 use super::super::lab_selection::{
-    authoritative_status_for_preflight, preflight_lab_runner_availability_from_status,
+    authoritative_status_for_preflight, authoritative_status_for_preflight_with_transport,
+    preflight_lab_runner_availability_from_status,
+    preflight_lab_runner_availability_from_status_with_transport,
     prepare_lab_runner_for_offload_with, reconnect_after_compatible_lease_with,
     LabRunnerPreparation, LabRunnerSelection,
 };
@@ -123,8 +125,6 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         Some(&format!("http://{address}")),
     ));
     let session = stale_projection.session.as_mut().expect("direct session");
-    session.tunnel_pid = Some(std::process::id());
-    session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
     session.local_port = Some(address.port());
     session.remote_daemon_pid = Some(1467759);
     session.remote_daemon_lease_id = Some("lease-fresh".to_string());
@@ -153,7 +153,6 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
     );
     let mut connect = connected_direct_connect_report("lab");
     connect.local_url = Some(format!("http://{address}"));
-    connect.tunnel_pid = Some(std::process::id());
     connect.remote_daemon_pid = Some(1467759);
 
     let selection = LabRunnerSelection {
@@ -161,11 +160,12 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         source: LabRunnerSelectionSource::Explicit,
         mode: RunnerTunnelMode::DirectSsh,
     };
-    let (availability, admitted) = preflight_lab_runner_availability_from_status(
+    let (availability, admitted) = preflight_lab_runner_availability_from_status_with_transport(
         &selection,
         |_| Ok(stale_projection.clone()),
         Some(1),
         Some(&connect),
+        true,
     )
     .expect("successful connect remains authoritative for this preflight");
 
@@ -180,6 +180,43 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         admitted.session.expect("session").local_url.as_deref(),
         Some(format!("http://{address}").as_str())
     );
+}
+
+#[test]
+fn non_loopback_transport_rejects_missing_tunnel_pid() {
+    let mut status = unreachable_health_status("lab", false);
+    let session = status.session.as_mut().expect("session");
+    session.remote_daemon_pid = Some(1467759);
+    session.remote_daemon_lease_id = Some("lease-fresh".to_string());
+    status.daemon_freshness = Some(fresh_daemon_freshness());
+    let mut connect = connected_direct_connect_report("lab");
+    connect.local_url = session.local_url.clone();
+    connect.remote_daemon_pid = session.remote_daemon_pid;
+
+    let error = authoritative_status_for_preflight_with_transport(status, Some(&connect), false)
+        .expect_err("remote SSH requires an owned tunnel");
+
+    assert!(error.message.contains("no tunnel PID for a non-loopback"));
+}
+
+#[test]
+fn mixed_tunnel_evidence_is_rejected_before_endpoint_probing() {
+    let mut status = unreachable_health_status("lab", false);
+    let session = status.session.as_mut().expect("session");
+    session.tunnel_pid = Some(std::process::id());
+    session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
+    session.remote_daemon_pid = Some(1467759);
+    session.remote_daemon_lease_id = Some("lease-fresh".to_string());
+    status.daemon_freshness = Some(fresh_daemon_freshness());
+    let mut connect = connected_direct_connect_report("lab");
+    connect.local_url = session.local_url.clone();
+    connect.remote_daemon_pid = session.remote_daemon_pid;
+    connect.tunnel_pid = None;
+
+    let error = authoritative_status_for_preflight_with_transport(status, Some(&connect), true)
+        .expect_err("mixed tunnel evidence cannot establish ownership");
+
+    assert!(error.message.contains("tunnel evidence is mixed"));
 }
 
 #[cfg(unix)]
@@ -1431,6 +1468,26 @@ fn restartable_daemon_freshness() -> DaemonFreshnessReport {
         restartable: true,
         lease_id: Some("lease".to_string()),
         pid: None,
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    }
+}
+
+fn fresh_daemon_freshness() -> DaemonFreshnessReport {
+    DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        restartable: false,
+        lease_id: Some("lease-fresh".to_string()),
+        pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
         adoption_command: None,
