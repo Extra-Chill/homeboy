@@ -1,4 +1,5 @@
 use super::CommandOutput;
+use crate::server::{ssh_args, Server};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
@@ -24,6 +25,62 @@ pub fn server_host_resolves_only_to_loopback(host: &str, port: u16) -> Result<bo
             .map_err(|_| format!("resolve server host `{host}` timed out"))?
             .map_err(|error| format!("resolve server host `{host}`: {error}"))
     })
+}
+
+/// Determine whether a direct SSH transport stays local after OpenSSH expands
+/// the configured host alias. ProxyJump and ProxyCommand always make the
+/// transport remote, even when the final hostname resolves to loopback.
+pub fn server_uses_loopback_transport(server: &Server) -> Result<bool, String> {
+    let mut command = std::process::Command::new("ssh");
+    command.arg("-G").args(ssh_args::server_option_args(
+        server,
+        ssh_args::SshArgOptions {
+            disable_multiplexing: true,
+            port_flag: Some(ssh_args::SshPortFlag::Lowercase),
+            ..ssh_args::SshArgOptions::default()
+        },
+    ));
+    command.arg(format!("{}@{}", server.user, server.host));
+    let output = command
+        .output()
+        .map_err(|error| format!("expand SSH configuration: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "expand SSH configuration: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    server_uses_loopback_transport_from_ssh_config(
+        &String::from_utf8_lossy(&output.stdout),
+        |host, port| server_host_resolves_only_to_loopback(host, port),
+    )
+}
+
+fn server_uses_loopback_transport_from_ssh_config(
+    config: &str,
+    resolves_only_to_loopback: impl FnOnce(&str, u16) -> Result<bool, String>,
+) -> Result<bool, String> {
+    let mut hostname = None;
+    let mut port = None;
+    let mut proxy = false;
+    for line in config.lines() {
+        let Some((key, value)) = line.split_once(' ') else {
+            continue;
+        };
+        match key {
+            "hostname" => hostname = Some(value),
+            "port" => port = value.parse::<u16>().ok(),
+            "proxyjump" | "proxycommand" if !matches!(value, "none" | "") => proxy = true,
+            _ => {}
+        }
+    }
+    if proxy {
+        return Ok(false);
+    }
+    let hostname =
+        hostname.ok_or_else(|| "expand SSH configuration returned no hostname".to_string())?;
+    let port = port.ok_or_else(|| "expand SSH configuration returned no port".to_string())?;
+    resolves_only_to_loopback(hostname, port)
 }
 
 fn server_host_resolves_only_to_loopback_with(
@@ -155,7 +212,9 @@ pub const TRANSIENT_SSH_STDERR_PATTERNS: [&str; 10] = [
 
 #[cfg(test)]
 mod tests {
-    use super::server_host_resolves_only_to_loopback_with;
+    use super::{
+        server_host_resolves_only_to_loopback_with, server_uses_loopback_transport_from_ssh_config,
+    };
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
@@ -189,6 +248,35 @@ mod tests {
         .expect_err("failed resolution is not loopback evidence");
 
         assert!(error.contains("name service unavailable"));
+    }
+
+    #[test]
+    fn ssh_config_alias_to_remote_host_requires_a_tunnel() {
+        let config = "hostname 192.0.2.1\nport 22\nproxyjump none\nproxycommand none\n";
+        assert!(
+            !server_uses_loopback_transport_from_ssh_config(config, |_, _| Ok(false))
+                .expect("classify")
+        );
+    }
+
+    #[test]
+    fn ssh_config_true_local_alias_bypasses_a_tunnel() {
+        let config = "hostname 127.0.0.1\nport 2222\nproxyjump none\nproxycommand none\n";
+        assert!(
+            server_uses_loopback_transport_from_ssh_config(config, |host, port| {
+                Ok(host == "127.0.0.1" && port == 2222)
+            })
+            .expect("classify")
+        );
+    }
+
+    #[test]
+    fn ssh_proxy_semantics_require_a_tunnel_even_for_loopback_destination() {
+        let config = "hostname 127.0.0.1\nport 22\nproxyjump bastion.example\nproxycommand none\n";
+        assert!(
+            !server_uses_loopback_transport_from_ssh_config(config, |_, _| Ok(true))
+                .expect("classify")
+        );
     }
 }
 

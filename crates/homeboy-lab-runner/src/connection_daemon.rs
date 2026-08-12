@@ -253,10 +253,7 @@ fn open_daemon_tunnel(
     // A loopback runner already shares the controller network namespace, so
     // its published endpoint is the reachable local endpoint. Avoid reserving
     // an unrelated port when no SSH forwarding process is needed.
-    let loopback_transport = match homeboy_core::server::server_host_resolves_only_to_loopback(
-        &server.host,
-        server.port,
-    ) {
+    let loopback_transport = match homeboy_core::server::server_uses_loopback_transport(server) {
         Ok(loopback) => loopback,
         Err(error) => {
             return Err(Box::new(failed_connect(
@@ -279,7 +276,7 @@ fn open_daemon_tunnel(
             ))
         })?
     };
-    let tunnel = open_loopback_tunnel(
+    let mut tunnel = open_loopback_tunnel(
         server,
         local_port,
         &remote_addr.ip().to_string(),
@@ -297,27 +294,11 @@ fn open_daemon_tunnel(
 
     // Capture the local process identity before readiness can cause a fast SSH
     // child to exit and be reaped. Session cleanup relies on this exact identity.
-    let (tunnel_process_start_identity, tunnel_ready) =
-        match capture_identity_before_tunnel_readiness(
-            tunnel.pid,
-            super::capture_tunnel_process_start_identity,
-            || wait_for_tcp(local_port, Duration::from_secs(5)),
-        ) {
-            Ok(identity) => identity,
-            Err(error) => {
-                return Err(Box::new(failed_connect(
-                    runner_id,
-                    session_path.to_path_buf(),
-                    RunnerFailureKind::TunnelFailure,
-                    error.message,
-                )));
-            }
-        };
+    let tunnel_process_start_identity = tunnel.process_start_identity.clone();
+    let tunnel_ready = wait_for_tcp(local_port, Duration::from_secs(5));
 
     if !tunnel_ready {
-        if let Some(pid) = tunnel.pid {
-            super::terminate_tunnel_if_owned_parts(pid, tunnel_process_start_identity.as_ref());
-        }
+        tunnel.contain_child();
         return Err(Box::new(failed_connect(
             runner_id,
             session_path.to_path_buf(),
@@ -328,6 +309,7 @@ fn open_daemon_tunnel(
             ),
         )));
     }
+    tunnel.release_child();
     Ok((
         local_port,
         tunnel.pid,

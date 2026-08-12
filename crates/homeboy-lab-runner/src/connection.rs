@@ -149,8 +149,9 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
     let Some(proxy) = controller_proxy_from_env()? else {
         return Ok(None);
     };
-    let tunnel = remote_daemon::open_reverse_proxy_tunnel(server, &proxy.host, proxy.port);
+    let mut tunnel = remote_daemon::open_reverse_proxy_tunnel(server, &proxy.host, proxy.port);
     if !tunnel.success {
+        tunnel.contain_child();
         return Err(Error::validation_invalid_argument(
             "controller_proxy",
             format!(
@@ -162,11 +163,12 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
         ));
     }
     let tunnel_pid = tunnel.pid.expect("remote SSH forward has a child process");
-    let tunnel_process_start_identity = capture_tunnel_process_start_identity(Some(tunnel_pid))?;
     let port = tunnel.stderr.parse::<u16>().map_err(|_| {
-        terminate_tunnel_if_owned_parts(tunnel_pid, tunnel_process_start_identity.as_ref());
+        tunnel.contain_child();
         Error::internal_unexpected("controller proxy forward returned no allocated port")
     })?;
+    let tunnel_process_start_identity = tunnel.process_start_identity.clone();
+    tunnel.release_child();
     Ok(Some(RunnerProxyForward {
         runner_url: format!("{}://127.0.0.1:{port}", proxy.scheme),
         tunnel_pid,

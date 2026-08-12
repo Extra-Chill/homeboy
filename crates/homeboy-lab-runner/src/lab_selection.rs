@@ -999,16 +999,14 @@ fn configured_direct_ssh_transport_is_loopback(runner_id: &str) -> Result<bool> 
         )
     })?;
     let server = homeboy_core::server::load(&server_id)?;
-    homeboy_core::server::server_host_resolves_only_to_loopback(&server.host, server.port).map_err(
-        |error| {
-            Error::validation_invalid_argument(
-                "runner",
-                format!("resolve configured SSH transport: {error}"),
-                Some(runner_id.to_string()),
-                None,
-            )
-        },
-    )
+    homeboy_core::server::server_uses_loopback_transport(&server).map_err(|error| {
+        Error::validation_invalid_argument(
+            "runner",
+            format!("resolve configured SSH transport: {error}"),
+            Some(runner_id.to_string()),
+            None,
+        )
+    })
 }
 
 fn verified_loopback_local_url(

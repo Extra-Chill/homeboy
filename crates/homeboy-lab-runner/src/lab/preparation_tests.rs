@@ -341,8 +341,15 @@ fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_a
             }
             let child = child.spawn().expect("spawn owned tunnel");
             let tunnel_pid = child.id();
-            let tunnel_identity = match homeboy_core::process::process_start_identity(tunnel_pid)
-                .expect("inspect tunnel")
+            let tunnel_identity = match (0..10)
+                .find_map(|_| {
+                    let identity = homeboy_core::process::process_start_identity(tunnel_pid)
+                        .expect("inspect tunnel");
+                    if identity.is_none() {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    identity
+                })
                 .expect("live tunnel identity")
             {
                 homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {

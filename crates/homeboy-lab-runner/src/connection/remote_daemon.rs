@@ -274,8 +274,51 @@ fn build_commit(identity: &str) -> Option<String> {
 
 pub(super) struct SshTunnelOutput {
     pub(super) pid: Option<u32>,
+    pub(super) process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
     pub(super) stderr: String,
     pub(super) success: bool,
+    child: Option<std::process::Child>,
+}
+
+impl SshTunnelOutput {
+    pub(super) fn release_child(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+
+    pub(super) fn contain_child(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            contain_tunnel_child(&mut child);
+        }
+    }
+}
+
+fn capture_tunnel_identity(
+    child: &mut std::process::Child,
+) -> std::result::Result<RunnerTunnelProcessStartIdentity, String> {
+    let pid = child.id();
+    match homeboy_core::process::process_start_identity(pid) {
+        Ok(Some(homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks })) => {
+            Ok(RunnerTunnelProcessStartIdentity::Linux { starttime_ticks })
+        }
+        Ok(Some(homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        })) => Ok(RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        }),
+        Ok(None) => Err("new SSH forward exited before identity capture".to_string()),
+        Err(error) => Err(format!("capture SSH forward identity: {error}")),
+    }
+}
+
+fn contain_tunnel_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 pub(super) fn open_loopback_tunnel(
@@ -288,8 +331,10 @@ pub(super) fn open_loopback_tunnel(
     if loopback_transport {
         return SshTunnelOutput {
             pid: None,
+            process_start_identity: None,
             stderr: String::new(),
             success: true,
+            child: None,
         };
     }
 
@@ -319,15 +364,31 @@ pub(super) fn open_loopback_tunnel(
         .stderr(std::process::Stdio::null());
     let child = spawn_tunnel_process(&mut command);
     match child {
-        Ok(child) => SshTunnelOutput {
-            pid: Some(child.id()),
-            stderr: String::new(),
-            success: true,
+        Ok(mut child) => match capture_tunnel_identity(&mut child) {
+            Ok(identity) => SshTunnelOutput {
+                pid: Some(child.id()),
+                process_start_identity: Some(identity),
+                stderr: String::new(),
+                success: true,
+                child: Some(child),
+            },
+            Err(error) => {
+                contain_tunnel_child(&mut child);
+                SshTunnelOutput {
+                    pid: None,
+                    process_start_identity: None,
+                    stderr: error,
+                    success: false,
+                    child: None,
+                }
+            }
         },
         Err(err) => SshTunnelOutput {
             pid: None,
+            process_start_identity: None,
             stderr: format!("SSH tunnel error: {}", err),
             success: false,
+            child: None,
         },
     }
 }
@@ -366,16 +427,34 @@ pub(super) fn open_reverse_proxy_tunnel(
     let Ok(mut child) = spawn_tunnel_process(&mut command) else {
         return SshTunnelOutput {
             pid: None,
+            process_start_identity: None,
             stderr: "SSH proxy forward could not start".to_string(),
             success: false,
+            child: None,
         };
     };
     let pid = child.id();
+    let identity = match capture_tunnel_identity(&mut child) {
+        Ok(identity) => identity,
+        Err(error) => {
+            contain_tunnel_child(&mut child);
+            return SshTunnelOutput {
+                pid: None,
+                process_start_identity: None,
+                stderr: error,
+                success: false,
+                child: None,
+            };
+        }
+    };
     let Some(stderr) = child.stderr.take() else {
+        contain_tunnel_child(&mut child);
         return SshTunnelOutput {
-            pid: Some(pid),
+            pid: None,
+            process_start_identity: None,
             stderr: "SSH proxy forward did not expose stderr".to_string(),
             success: false,
+            child: None,
         };
     };
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -394,19 +473,31 @@ pub(super) fn open_reverse_proxy_tunnel(
     match receiver.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(port)) => SshTunnelOutput {
             pid: Some(pid),
+            process_start_identity: Some(identity),
             stderr: port.to_string(),
             success: true,
+            child: Some(child),
         },
-        Ok(Err(stderr)) => SshTunnelOutput {
-            pid: Some(pid),
-            stderr,
-            success: false,
-        },
-        Err(_) => SshTunnelOutput {
-            pid: Some(pid),
-            stderr: "SSH proxy forward did not report an allocated remote port".to_string(),
-            success: false,
-        },
+        Ok(Err(stderr)) => {
+            contain_tunnel_child(&mut child);
+            SshTunnelOutput {
+                pid: None,
+                process_start_identity: None,
+                stderr,
+                success: false,
+                child: None,
+            }
+        }
+        Err(_) => {
+            contain_tunnel_child(&mut child);
+            SshTunnelOutput {
+                pid: None,
+                process_start_identity: None,
+                stderr: "SSH proxy forward did not report an allocated remote port".to_string(),
+                success: false,
+                child: None,
+            }
+        }
     }
 }
 
@@ -421,7 +512,7 @@ pub(super) fn allocated_remote_port(line: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod proxy_forward_tests {
-    use super::allocated_remote_port;
+    use super::{allocated_remote_port, contain_tunnel_child, spawn_tunnel_process};
 
     #[test]
     fn reads_the_port_allocated_by_openssh() {
@@ -433,6 +524,20 @@ mod proxy_forward_tests {
             allocated_remote_port("debug1: forwarding established"),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_forward_setup_reaps_the_identity_owned_child() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 60"]);
+        let mut child = spawn_tunnel_process(&mut command).expect("spawn child");
+        let pid = child.id();
+        assert!(homeboy_core::process::pid_is_running(pid));
+
+        contain_tunnel_child(&mut child);
+
+        assert!(!homeboy_core::process::pid_is_running(pid));
     }
 }
 
