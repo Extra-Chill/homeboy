@@ -70,6 +70,35 @@ rust_cargo_test_threads() {
     esac
 }
 
+# Shard replay parallelism.
+#
+# The `--test-threads 1` here was hard-coded and did NOT come from the
+# `rust_cargo_test_threads` setting, whose own default is 0 (nextest's default
+# parallelism). So the setting said "parallel" while shard replay ran serial
+# regardless, and nothing could change it without editing this file.
+#
+# Serializing test FUNCTIONS also does not buy what it looks like it buys.
+# homeboy-core/src/test_support.rs documents the outcome directly: the HOME
+# repoint "is held for this guard's entire lifetime, but that only serializes
+# writers. Readers never take it -- including worker threads a test spawns inside
+# itself, which is why running the suite with --test-threads=1 did not stop the
+# failures". The hazard was fixed properly instead, by a process-local
+# `set_home_root_override` read under a mutex (Extra-Chill/homeboy#7505, #11266),
+# and nextest already runs every test in its own process.
+#
+# This makes the value configurable and keeps 1 as the shard default, so nothing
+# changes until a caller asks. See Extra-Chill/homeboy#11751 W1-9.
+rust_nextest_shard_threads() {
+    local value
+    value="${HOMEBOY_RUST_NEXTEST_SHARD_THREADS:-$(rust_cargo_test_threads || true)}"
+    case "$value" in
+        '') printf '1' ;;
+        *[!0-9]*) printf '1' ;;
+        0) printf 'num-cpus' ;;
+        *) printf '%s' "$value" ;;
+    esac
+}
+
 rust_test_scope_json() {
     python3 - "${HOMEBOY_TEST_SCOPE_KIND:-workspace}" "${HOMEBOY_TEST_SCOPE_MESSAGE:-}" "${HOMEBOY_TEST_RUNNER_ARGS:-}" <<'PY'
 import json
@@ -984,7 +1013,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
                 rust_nextest_cleanup 1
                 exit 1
             fi
-            homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${NEXTEST_RUN_SOURCE_ARGS[@]}" --test-threads 1 --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
+            homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${NEXTEST_RUN_SOURCE_ARGS[@]}" --test-threads "$(rust_nextest_shard_threads)" --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
             if ! NEXTEST_BATCH_FAILED_NAMES="$(mktemp)"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
