@@ -236,8 +236,19 @@ fi
 if [ "$(grep -c "continue-on-error: true" "${WORKFLOW}")" -lt 6 ]; then
   printf 'FAIL: inventory planning transport is not isolated from normal Test verdict enforcement\n'; exit 1
 fi
-if [ "$(grep -c "HOMEBOY_RUST_NEXTEST_FALLBACK: '0'" "${WORKFLOW}")" -ne 2 ] || [ "$(grep -c 'NEXTEST_PROFILE: ci' "${WORKFLOW}")" -ne 2 ]; then
+# Three NEXTEST_PROFILE declarations, not two: the archive is BUILT with the
+# same profile the shards RUN with. A profile mismatch between build and replay
+# would silently change which binaries nextest produces versus expects.
+if [ "$(grep -c "HOMEBOY_RUST_NEXTEST_FALLBACK: '0'" "${WORKFLOW}")" -ne 2 ] || [ "$(grep -c 'NEXTEST_PROFILE: ci' "${WORKFLOW}")" -ne 3 ]; then
   printf 'FAIL: Rust shard jobs do not require nextest with the CI profile\n'; exit 1
+fi
+
+# The archive must be produced once and consumed by the shards. If either side
+# disappears, every shard silently reverts to a full-workspace compile -- the
+# 7.8-minutes-to-run-4-seconds shape this replaced (homeboy#10997).
+grep -F 'cargo nextest archive --workspace --archive-file' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate Test shards are not built once into an archive\n'; exit 1; }
+if [ "$(grep -c 'HOMEBOY_RUST_NEXTEST_ARCHIVE' "${WORKFLOW}")" -ne 2 ]; then
+  printf 'FAIL: the Test archive is not both produced for inventory and consumed by shard replay\n'; exit 1
 fi
 if [ "$(grep -c 'HOMEBOY_RUST_TEST_RUNNER: nextest' "${WORKFLOW}")" -ne 2 ]; then
   printf 'FAIL: Rust shard jobs do not explicitly select nextest\n'; exit 1

@@ -656,6 +656,40 @@ jobs:
       - name: Install cargo-nextest for Rust shard planning
         if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
         uses: taiki-e/install-action@nextest
+      # Compile the test binaries ONCE, here, in the job that had to compile them
+      # anyway to enumerate tests.
+      #
+      # `nextest run -E <filter>` filters what EXECUTES, not what COMPILES, so
+      # with `--workspace` every shard rebuilt the entire workspace to run its own
+      # slice. Measured on Extra-Chill/homeboy shard-1: 7.8 minutes of compilation
+      # for a 4.046s run of 30 tests, repeated in all four shards plus here — five
+      # identical debug compiles per run.
+      #
+      # Not `continue-on-error`: a compile failure here is a real, terminal
+      # candidate failure, and the inventory step below cannot succeed without it.
+      - name: Build the candidate Test archive
+        id: test-archive
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        env:
+          NEXTEST_PROFILE: ci
+        run: |
+          archive="${{ github.workspace }}/homeboy-test-archive.tar.zst"
+          cargo nextest archive --workspace --archive-file "${archive}"
+          echo "path=${archive}" >> "$GITHUB_OUTPUT"
+          # Surfaced because it is the variable that decides whether shipping the
+          # archive is cheaper than recompiling it: if transfer approaches the
+          # per-shard compile it replaces, this stops paying.
+          bytes="$(stat -c %s "${archive}")"
+          printf '## Candidate Test archive\n\n| Field | Value |\n| --- | --- |\n| Size | %s |\n| Shards served | %s |\n' \
+            "$(numfmt --to=iec --suffix=B "${bytes}")" "${{ inputs.test-shards }}" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Upload the candidate Test archive
+        if: steps.test-archive.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-archive-${{ github.run_attempt }}
+          path: ${{ steps.test-archive.outputs.path }}
+          retention-days: 1
+          if-no-files-found: error
       - name: Configure candidate Test shards
         id: inventory
         continue-on-error: true
@@ -664,6 +698,7 @@ jobs:
           HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
           HOMEBOY_RUST_TEST_RUNNER: nextest
           HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+          HOMEBOY_RUST_NEXTEST_ARCHIVE: ${{ steps.test-archive.outputs.path }}
           NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
         with:
@@ -769,6 +804,15 @@ jobs:
       - name: Install cargo-nextest for Rust shard replay
         if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
         uses: taiki-e/install-action@nextest
+      # Prebuilt by Plan candidate Test shards. Absent (non-Rust callers), the
+      # extension falls back to compiling the workspace exactly as before.
+      - name: Download the candidate Test archive
+        id: test-archive
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: homeboy-test-archive-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/homeboy-test-archive
       - uses: actions/download-artifact@v7
         with:
           name: homeboy-test-shard-plan-${{ github.run_attempt }}
@@ -781,6 +825,7 @@ jobs:
           HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json
           HOMEBOY_RUST_TEST_RUNNER: nextest
           HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+          HOMEBOY_RUST_NEXTEST_ARCHIVE: ${{ steps.test-archive.outcome == 'success' && format('{0}/homeboy-test-archive/homeboy-test-archive.tar.zst', github.workspace) || '' }}
           NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
         with:
