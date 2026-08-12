@@ -894,7 +894,15 @@ jobs:
   reconcile-test-shards:
     name: Test
     needs: [candidate-test-result, candidate-test-plan, baseline-test-shards, baseline-test-plan, plan]
-    if: ${{ always() && needs.plan.outputs.test-shards-enabled == 'true' }}
+    # `!cancelled()` rather than `always()`: this job must still report a verdict
+    # when an upstream phase FAILED, but must not manufacture one when the run was
+    # CANCELLED. Under `always()`, a cancelled run left `candidate-test-plan.result`
+    # at `cancelled`, which tripped the `!= 'success'` inventory-failure branch below;
+    # that branch then downloaded a provenance artifact the cancelled plan job had
+    # never uploaded, and the resulting `Artifact not found` failed the job. A
+    # cancellation was therefore published as a red `Test` check carrying no test
+    # verdict at all (Extra-Chill/homeboy#10997).
+    if: ${{ !cancelled() && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
