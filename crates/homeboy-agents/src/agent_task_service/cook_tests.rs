@@ -3435,7 +3435,7 @@ fn reconstruction_restores_a_materialized_pending_workspace_from_the_durable_pla
 
 #[cfg(unix)]
 #[test]
-fn split_only_provider_revalidates_before_dispatch_without_legacy_commands() {
+fn split_only_provider_is_authoritative_without_source_override_or_legacy_commands() {
     use std::os::unix::fs::PermissionsExt;
 
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -3525,14 +3525,14 @@ fn split_only_provider_revalidates_before_dispatch_without_legacy_commands() {
         let mut options =
             batch_cook_options("split-only", Arc::new(AcceptedDetachedAttemptDispatcher));
         options.to_worktree = "fixture@split-only".to_string();
-        options.source_worktree_path = Some(workspace.clone());
+        options.source_worktree_path = None;
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "existing",
             "workspace_identity": { "schema": "homeboy/worktree-provider-identity/v1", "provider_id": "fixture", "token": "opaque", "handle": "fixture@split-only", "path": workspace, "branch": "split-only", "primary": false, "latency_ms": 0, "budget_ms": 0 }
         });
 
         validate_cook_workspace(&options)
-            .expect("split-only provider passes mandatory dispatch revalidation");
+            .expect("provider-owned workspace passes mandatory dispatch revalidation");
     });
 }
 

@@ -5213,30 +5213,24 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         .into()
     };
     homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
-    let source = source.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "workspace",
-            "Cook requires the provider workspace to be the declared task worktree",
-            Some(options.to_worktree.clone()),
-            Some(vec!["Create or select the task worktree through the configured workspace provider, then retry Cook.".to_string()]),
-        )
-    })?;
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
     if let Some(continuation) = continuation {
         authenticate_tracked_promotion_continuation(&target, &continuation)?;
     }
-    let source = std::fs::canonicalize(source).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(source.display().to_string()))
-    })?;
-    if source != target {
-        return Err(Error::validation_invalid_argument(
-            "workspace",
-            "Cook provider workspace differs from its declared task worktree; refusing provider execution",
-            Some(options.to_worktree.clone()),
-            Some(vec!["Re-run Cook without a source CWD override so Homeboy binds the declared task worktree.".to_string()]),
-        ));
+    if let Some(source) = source {
+        let source = std::fs::canonicalize(source).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(source.display().to_string()))
+        })?;
+        if source != target {
+            return Err(Error::validation_invalid_argument(
+                "workspace",
+                "Cook provider workspace differs from its declared task worktree; refusing provider execution",
+                Some(options.to_worktree.clone()),
+                Some(vec!["Re-run Cook without a source CWD override so Homeboy binds the declared task worktree.".to_string()]),
+            ));
+        }
     }
     Ok(())
 }
