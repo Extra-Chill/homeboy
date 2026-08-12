@@ -375,6 +375,7 @@ mod tests {
             restart_required: false,
             extensions_updated: Vec::new(),
             extensions_skipped: Vec::new(),
+            extension_skips: Vec::new(),
             runners_updated: Vec::new(),
             runners_skipped: Vec::new(),
             extensions_unrefreshed: Vec::new(),

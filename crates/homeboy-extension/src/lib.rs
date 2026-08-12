@@ -104,8 +104,9 @@ pub use homeboy_extension_contract::{DeployArchiveInstallPolicy, DeployRequiredH
 pub use lifecycle::source_metadata::SourceMetadataRepair;
 pub use lifecycle::source_metadata::{resolve_source_url, resolve_source_url_read_only};
 pub use lifecycle::{
-    derive_id_from_url, install, install_for_component, install_with_revision, refresh, slugify_id,
-    uninstall, update, InstallForComponentResult, InstallResult, RefreshResult, UpdateResult,
+    derive_id_from_url, extension_update_dirty_paths, install, install_for_component,
+    install_with_revision, refresh, slugify_id, uninstall, update, InstallForComponentResult,
+    InstallResult, RefreshResult, UpdateResult,
 };
 pub use maintenance::{exec_tool, update_all};
 pub use manifest::{

@@ -32,13 +32,19 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
         return update_linked_extension(extension_id, &extension_dir, force);
     }
 
-    if !force && !is_extension_update_workdir_clean(&extension_dir, &extension_dir) {
-        return Err(Error::validation_invalid_argument(
-            "extension_id",
-            "Extension has uncommitted changes; update may overwrite them. Use --force to proceed.",
-            Some(extension_id.to_string()),
-            None,
-        ));
+    if !force {
+        if let Err(dirty_paths) = is_extension_update_workdir_clean(&extension_dir, &extension_dir)
+        {
+            return Err(Error::validation_invalid_argument(
+                "extension_id",
+                format!(
+                    "Extension has uncommitted changes ({}); update may overwrite them. Use --force to proceed, which applies the update over the listed changes.",
+                    dirty_path_detail(&dirty_paths),
+                ),
+                Some(extension_id.to_string()),
+                None,
+            ));
+        }
     }
 
     let source = source_metadata::resolve_source_url(extension_id)?;
@@ -174,9 +180,32 @@ pub(crate) fn read_source_requested_ref(extension_dir: &Path) -> Option<String> 
     homeboy_core::extension_update_check::read_source_metadata_value(extension_dir, "requested-ref")
 }
 
-pub(crate) fn is_extension_update_workdir_clean(git_root: &Path, extension_dir: &Path) -> bool {
+/// The extension update gate. `Ok(())` when the worktree holds nothing an
+/// update would overwrite; `Err(dirty_paths)` names the repo-relative paths
+/// that block it. An unreadable git status also refuses (with no names) so an
+/// update never proceeds over unknown state. Only generated metadata Homeboy
+/// itself writes (`.source-url`, `.source-revision`) is tolerated.
+pub(crate) fn is_extension_update_workdir_clean(
+    git_root: &Path,
+    extension_dir: &Path,
+) -> std::result::Result<(), Vec<String>> {
+    match extension_update_dirty_paths(git_root, extension_dir) {
+        Some(paths) if paths.is_empty() => Ok(()),
+        Some(paths) => Err(paths),
+        None => Err(Vec::new()),
+    }
+}
+
+/// Repo-relative paths with changes an extension update would overwrite,
+/// ignoring the generated metadata paths Homeboy itself writes
+/// (`.source-url`, `.source-revision`). `Some` when the worktree state is
+/// known (empty means clean enough to refresh); `None` when it cannot be
+/// determined. Public so the upgrade path can reuse the exact gate tolerance
+/// when deciding whether a symlinked clone can be refreshed with a plain
+/// `pull --ff-only` (#12181).
+pub fn extension_update_dirty_paths(git_root: &Path, extension_dir: &Path) -> Option<Vec<String>> {
     if !git::is_git_repo(&git_root.to_string_lossy()) {
-        return true;
+        return Some(Vec::new());
     }
 
     let Ok(output) = Command::new("git")
@@ -184,10 +213,10 @@ pub(crate) fn is_extension_update_workdir_clean(git_root: &Path, extension_dir: 
         .current_dir(git_root)
         .output()
     else {
-        return false;
+        return None;
     };
     if !output.status.success() {
-        return false;
+        return None;
     }
 
     let extension_rel = extension_dir
@@ -196,11 +225,12 @@ pub(crate) fn is_extension_update_workdir_clean(git_root: &Path, extension_dir: 
         .map(|path| path.to_string_lossy().replace('\\', "/"));
     let status = String::from_utf8_lossy(&output.stdout);
 
-    status.lines().all(|line| {
-        dirty_path_from_status_line(line).is_some_and(|path| {
-            is_generated_extension_metadata_path(&path, extension_rel.as_deref())
-        })
-    })
+    let dirty = status
+        .lines()
+        .filter_map(dirty_path_from_status_line)
+        .filter(|path| !is_generated_extension_metadata_path(path, extension_rel.as_deref()))
+        .collect();
+    Some(dirty)
 }
 
 fn dirty_path_from_status_line(line: &str) -> Option<String> {
@@ -210,6 +240,17 @@ fn dirty_path_from_status_line(line: &str) -> Option<String> {
         .map(|(_, new_path)| new_path)
         .unwrap_or(path);
     Some(path.trim_matches('"').replace('\\', "/"))
+}
+
+/// Human detail for the dirty paths blocking an update. Falls back to an
+/// explicit "cannot be verified" when the gate refused without names (e.g. git
+/// status unavailable), so the message never names an empty list.
+fn dirty_path_detail(dirty_paths: &[String]) -> String {
+    if dirty_paths.is_empty() {
+        "state could not be verified".to_string()
+    } else {
+        dirty_paths.join(", ")
+    }
 }
 
 fn is_generated_extension_metadata_path(path: &str, extension_rel: Option<&str>) -> bool {
@@ -273,16 +314,20 @@ fn update_linked_extension(
         )),
         None => {
             let result = (|| {
-                if !force && !is_extension_update_workdir_clean(&git_root, &source_dir) {
-                    return Err(Error::validation_invalid_argument(
-                        "extension_id",
-                        format!(
-                            "Linked extension source repo has uncommitted changes for {}. Use --force to proceed.",
-                            extension_id,
-                        ),
-                        Some(extension_id.to_string()),
-                        None,
-                    ));
+                if !force {
+                    if let Err(dirty_paths) = is_extension_update_workdir_clean(&git_root, &source_dir)
+                    {
+                        return Err(Error::validation_invalid_argument(
+                            "extension_id",
+                            format!(
+                                "Linked extension source repo has uncommitted changes for {}: {}. Use --force to proceed, which applies the update over the listed changes.",
+                                extension_id,
+                                dirty_path_detail(&dirty_paths),
+                            ),
+                            Some(extension_id.to_string()),
+                            None,
+                        ));
+                    }
                 }
 
                 git::update_to_remote_default_branch(&git_root)?;
