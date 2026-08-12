@@ -593,6 +593,10 @@ impl HomeGuard {
         // they read it under a lock instead of racing this `setenv` from
         // worker threads a test spawns inside itself (#7505).
         crate::paths::set_home_root_override(Some(context.home().to_path_buf()));
+        // Reset hooks may read path-dependent state while clearing their caches.
+        // Run them again after switching roots so they cannot retain values from
+        // the preceding test home.
+        reset_cached_test_state();
         // Preserve the legacy in-process data fallback while the subprocess
         // context uses explicit paths. Unit tests assert this resolver's XDG
         // behavior, so an inherited explicit data root must not override it.
