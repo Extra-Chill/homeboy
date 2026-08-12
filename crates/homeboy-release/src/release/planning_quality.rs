@@ -721,6 +721,8 @@ mod tests {
             timed_out: false,
             child_resource: None,
             extension_phase_timings: Vec::new(),
+            // This helper models captured process output; it did not resolve a Cargo target.
+            cargo_target: None,
         }
     }
 

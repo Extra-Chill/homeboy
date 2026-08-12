@@ -446,12 +446,11 @@ impl CliRuntime {
         // detached bounded pass keeps command startup independent of remote I/O.
         schedule_controller_fallback_reconciliation();
         // Deferred records outlive their worker. Startup restarts the singleton
-        // so expired claims recover without another deferral request.
+        // so expired claims recover without another deferral request. The
+        // deferred-workload family itself is exempt: the worker would restart
+        // itself, and `reconcile` would spawn the worker it is about to judge.
         if command_capability == CommandCapability::Mutation
-            && !matches!(
-                normalized.get(1..3),
-                Some([command, subcommand]) if command == "deferred-workload" && subcommand == "worker"
-            )
+            && normalized.get(1).map(String::as_str) != Some("deferred-workload")
         {
             let _ = crate::commands::deferred_workload::restart_worker_if_pending();
         }

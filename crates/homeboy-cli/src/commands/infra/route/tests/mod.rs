@@ -9,6 +9,10 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+/// The remote every Cook fixture checkout carries. Its repository name is the
+/// `homeboy` component these tests request, so destination validation resolves.
+pub(super) const FIXTURE_REPOSITORY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
+
 pub(super) fn git_init(path: &Path) {
     let output = Command::new("git")
         .args(["init", "-b", "main"])
@@ -20,6 +24,38 @@ pub(super) fn git_init(path: &Path) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Give a fixture checkout the remote that binds it to a repository identity.
+///
+/// Cook resolves and validates its destination repository from the checkout's
+/// configured remote (#11987). A bare `git init` has none, so a fixture without
+/// this is not a checkout Cook can accept.
+pub(super) fn git_add_remote(path: &Path, remote_url: &str) {
+    let output = Command::new("git")
+        .args(["remote", "add", "origin", remote_url])
+        .current_dir(path)
+        .output()
+        .expect("add fixture remote");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Register the configured component a fixture checkout's remote maps to, so
+/// Cook can infer its repository instead of demanding an explicit `--repo`.
+pub(super) fn register_component(id: &str, path: &Path, remote_url: &str) {
+    homeboy::core::component::write_standalone_component_config(
+        &homeboy::core::component::Component {
+            id: id.to_string(),
+            local_path: path.display().to_string(),
+            remote_url: Some(remote_url.to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("register fixture component");
 }
 
 pub(super) struct EnvGuard {

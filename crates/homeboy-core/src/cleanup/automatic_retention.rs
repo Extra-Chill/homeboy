@@ -356,7 +356,9 @@ mod tests {
         let data = TempDir::new().unwrap();
         let cargo = TempDir::new().unwrap();
         let now = SystemTime::now();
-        let lease = acquire_shared_cargo_target_in(cargo.path(), "active", now).unwrap();
+        let lease =
+            acquire_shared_cargo_target_in(cargo.path(), "active", now - Duration::from_secs(1))
+                .unwrap();
         fs::write(lease.target_dir().join("artifact"), b"payload").unwrap();
         let other = store(cargo.path(), "other", 8, now);
         let output = run_automatic_cargo_retention_in(

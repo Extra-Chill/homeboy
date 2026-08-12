@@ -1741,7 +1741,7 @@ fn artifacts_command_derives_viewer_links_from_public_artifact_url_metadata() {
 fn artifacts_command_suppresses_viewer_links_when_public_url_is_unreachable() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
-        let public_artifact_base = serve_public_artifact_base_once(404);
+        let public_artifact_base = serve_public_artifact_base(404, 2);
         let _artifact_url = EnvGuard::set(
             homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
             &public_artifact_base,

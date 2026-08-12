@@ -80,10 +80,12 @@ pub struct OperationClaim {
 /// Writes a durable `running` lease keyed by `operation_key` when none exists,
 /// returning [`ClaimOutcome::Acquired`]. If the operation already completed, the
 /// recorded result is returned via [`ClaimOutcome::AlreadyCompleted`] and no
-/// lease is taken. If a still-fresh lease is held by another pass,
-/// [`ClaimOutcome::LeaseHeld`] is returned. A lease whose deadline has elapsed
-/// is reclaimable and is re-leased to this pass (the caller is expected to
-/// reconcile any partially-applied external effect via Git/PR lookup first).
+/// lease is taken. If a live owner holds the claim, [`ClaimOutcome::LeaseHeld`]
+/// is returned even after the nominal deadline: a provider dispatch can outlive
+/// the lease interval, and must retain ownership for its full lifecycle. An
+/// expired claim without a live owner is reclaimable and is re-leased to this
+/// pass (the caller is expected to reconcile any partially-applied external
+/// effect via Git/PR lookup first).
 pub fn claim_cook_operation(
     run_id: &str,
     operation_key: &str,
@@ -114,17 +116,24 @@ pub fn claim_cook_operation(
                 );
                 return false;
             }
-            // A fresh lease with a live local owner is never adopted. A dead
-            // controller cannot complete the effect, so its claim is safe to
-            // reconcile immediately instead of waiting for its wall-clock TTL.
+            // A live local owner is never adopted, including after the nominal
+            // lease deadline. Provider dispatch and Cook can exceed a fixed
+            // operation lease; reclaiming it while the owner still runs would
+            // allow a second consumer to dispatch the same attempt.
+            if existing["state"] != json!("failed") && claim_owner_is_live(existing) {
+                outcome = ClaimOutcome::LeaseHeld;
+                return false;
+            }
+            // A dead owner is recoverable immediately. Ownerless historical
+            // claims retain their compatibility lease until it expires.
             if existing["state"] != json!("failed")
+                && existing.get("owner_pid").is_none()
                 && !lease_is_expired(existing, &now)
-                && claim_owner_is_live(existing)
             {
                 outcome = ClaimOutcome::LeaseHeld;
                 return false;
             }
-            // Expired or dead-owner lease: reclaim it for this pass.
+            // Reclaim the recoverable claim for this pass.
         }
 
         let claim = json!({
@@ -297,18 +306,23 @@ pub fn operation_claim(run_id: &str, operation_key: &str) -> Result<Option<Opera
         .and_then(project_claim))
 }
 
-/// Whether the `(run_id, operation_key)` operation has a still-fresh in-flight
-/// lease that another controller pass owns. Callers use this to decide between
-/// waiting and reconciling an interrupted effect via Git/PR lookup.
+/// Whether the `(run_id, operation_key)` operation has an in-flight owner that
+/// another controller pass must not re-enter. A live owner remains active past
+/// its nominal deadline; ownerless historical claims remain active only until
+/// that deadline. Callers use this to decide between waiting and reconciling an
+/// interrupted effect via Git/PR lookup.
 pub fn operation_lease_is_active(run_id: &str, operation_key: &str) -> Result<bool> {
     let now = now_timestamp();
     Ok(
         operation_claim(run_id, operation_key)?.is_some_and(|claim| {
             claim.state == ClaimState::Running
-                && claim
-                    .lease_deadline
-                    .as_deref()
-                    .is_none_or(|deadline| deadline > now.as_str())
+                && match claim.owner_pid {
+                    Some(pid) => owner_pid_is_valid(pid as u64) && process_is_live(pid),
+                    None => claim
+                        .lease_deadline
+                        .as_deref()
+                        .is_none_or(|deadline| deadline > now.as_str()),
+                }
         }),
     )
 }

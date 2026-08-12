@@ -37,6 +37,28 @@ pub enum ComponentLifecycle {
     Retired,
 }
 
+/// Explicit execution resources a component asks Homeboy to manage.
+///
+/// Resources are opt-in: component scripts remain opaque shell commands and
+/// Homeboy never infers requirements by parsing their text.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ComponentManagedExecution {
+    /// Lease a shared Cargo target for each Homeboy-managed capability run when
+    /// the caller has not selected `CARGO_TARGET_DIR` explicitly.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shared_cargo_target: bool,
+}
+
+impl ComponentManagedExecution {
+    pub fn is_default(&self) -> bool {
+        !self.shared_cargo_target
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 impl ComponentLifecycle {
     /// True only for `Active`. `Bundled` and `Retired` components are not
     /// independently deployable.
@@ -129,6 +151,9 @@ pub struct Component {
     /// then extension-claimed behavior, then not-applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts: Option<ComponentScriptsConfig>,
+    /// Explicit managed execution resources for component capabilities.
+    #[serde(default, skip_serializing_if = "ComponentManagedExecution::is_default")]
+    pub managed_execution: ComponentManagedExecution,
     /// Component-scoped environment variables applied to Homeboy-managed
     /// capability runs for this component. Per-run env overrides win on conflict.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -249,6 +274,8 @@ struct RawComponent {
     scopes: Option<ScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scripts: Option<ComponentScriptsConfig>,
+    #[serde(default, skip_serializing_if = "ComponentManagedExecution::is_default")]
+    managed_execution: ComponentManagedExecution,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -309,6 +336,7 @@ impl From<RawComponent> for Component {
             docs_dirs: raw.docs_dirs,
             scopes: raw.scopes,
             scripts: raw.scripts,
+            managed_execution: raw.managed_execution,
             env: raw.env,
             audit: raw.audit,
             dependency_stack: raw.dependency_stack,
@@ -359,6 +387,7 @@ impl From<Component> for RawComponent {
             docs_dirs: c.docs_dirs,
             scopes: c.scopes,
             scripts: c.scripts,
+            managed_execution: c.managed_execution,
             env: c.env,
             audit: c.audit,
             dependency_stack: c.dependency_stack,
@@ -440,6 +469,7 @@ impl Component {
             docs_dirs: Vec::new(),
             scopes: None,
             scripts: None,
+            managed_execution: ComponentManagedExecution::default(),
             env: BTreeMap::new(),
             audit: None,
             dependency_stack: Vec::new(),

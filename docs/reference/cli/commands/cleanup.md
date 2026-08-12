@@ -56,7 +56,7 @@ Inspect or remove declared reconstructable artifacts across repo worktrees
 | `--path` | `<PATH>` | Resolve managed worktrees from this checkout instead of the current directory |
 | `--temp-root` | `<PATH>` | Also scan this temp root for detached Homeboy build artifacts. Repeatable |
 | `--sort` | `<SORT>` | Sort artifact candidates before reporting or applying cleanup Values: `discovery`, `size`. |
-| `--limit` | `<N>` | Limit artifact candidates reported or removed after sorting |
+| `--limit` | `<N>` | Limit artifact candidates reported or removed after sorting. A positive limit ensures a continuation always makes progress |
 | `--merged-only` | flag | Only reclaim artifacts from worktrees whose branch is already merged into its upstream. Preserves in-progress cooks' build dirs |
 | `--min-age-days` | `<DAYS>` | Only reclaim artifacts untouched for at least this many days. Composes with any age floor a declaration owner sets; the stricter one wins |
 | `--include-active-worktrees` | flag | Also reclaim extension-declared artifacts from checkouts registered as active task worktrees. Those are protected by default because removing an install tree leaves a live checkout unusable until it is rehydrated |

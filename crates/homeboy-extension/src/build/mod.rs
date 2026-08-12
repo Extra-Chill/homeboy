@@ -172,6 +172,8 @@ pub struct BuildOutput {
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_scope: Option<BuildChangedScopeReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cargo_target: Option<homeboy_core::CargoTargetEvidence>,
     pub success: bool,
 }
 
@@ -466,6 +468,7 @@ fn execute_build_component(
                 artifact_inputs: Vec::new(),
                 extension_phase_timings: Vec::new(),
                 changed_scope: changed_scope.map(|decision| decision.report),
+                cargo_target: None,
                 success: true,
             },
             0,
@@ -481,6 +484,11 @@ fn execute_build_component(
         .unwrap_or_default();
     let build_cmd = command_with_args(&build_cmd, &build_args);
 
+    // Every directly-owned component build reaches this executor, including
+    // dependency and artifact-input rebuilds. Admit its declared reconstructable
+    // output before either a pre-build hook or the build command can allocate.
+    homeboy_core::cleanup::admit_reconstructable_artifact_work(vec![validated_path.clone()])?;
+
     // Run pre-build script if extension provides one
     if let Some((exit_code, stderr)) = run_pre_build_scripts(build_context)? {
         if exit_code != 0 {
@@ -494,6 +502,7 @@ fn execute_build_component(
                     artifact_inputs: Vec::new(),
                     extension_phase_timings: Vec::new(),
                     changed_scope: changed_scope.clone().map(|decision| decision.report),
+                    cargo_target: None,
                     success: false,
                 },
                 exit_code,
@@ -558,6 +567,7 @@ fn execute_build_component(
     };
 
     let success = runner_output.success;
+    let cargo_target = runner_output.cargo_target.clone();
     let artifact_inputs = if success {
         apply_artifact_inputs(comp)?
     } else {
@@ -574,6 +584,7 @@ fn execute_build_component(
             artifact_inputs,
             extension_phase_timings: runner_output.extension_phase_timings,
             changed_scope: changed_scope.map(|decision| decision.report),
+            cargo_target,
             success,
         },
         runner_output.exit_code,
@@ -880,6 +891,36 @@ mod tests {
     }
 
     #[test]
+    fn component_build_refuses_before_scripts_when_adaptive_reserve_is_unmet() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("component root");
+            let initialized = std::process::Command::new("git")
+                .args(["init", "--quiet", root.path().to_str().expect("utf8 root")])
+                .status()
+                .expect("start git");
+            assert!(initialized.success(), "initialize component repository");
+            homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
+                retention: homeboy_core::defaults::RetentionConfig {
+                    reconstructable_artifact_reserve_bytes: u64::MAX,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("save pressure policy");
+            let component: Component = serde_json::from_value(serde_json::json!({
+                "id": "pressure-fixture",
+                "local_path": root.path(),
+                "scripts": { "build": ["false"] },
+            }))
+            .expect("component");
+
+            let error = execute_build_component(&component, None)
+                .expect_err("capacity admission must run before the build script");
+            assert!(error.is_storage_exhausted());
+        });
+    }
+
+    #[test]
     fn is_json_input_detects_json() {
         assert!(is_json_input(r#"{"componentIds": ["a"]}"#));
         assert!(is_json_input(r#"  {"componentIds": ["a"]}"#));
@@ -991,6 +1032,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             extension_phase_timings: Vec::new(),
             changed_scope: None,
+            cargo_target: None,
             success: true,
         }));
 

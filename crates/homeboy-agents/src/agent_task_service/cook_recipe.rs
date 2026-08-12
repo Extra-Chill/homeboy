@@ -942,7 +942,11 @@ pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool
 /// Explicit operator recovery may rearm a continuation that previously failed
 /// before Cook execution. Automatic scheduling keeps failed entries terminal.
 pub fn rearm_failed_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool> {
-    enqueue_terminal_continuation_with_recovery(cook_id, run_id, true)
+    let rearmed = enqueue_terminal_continuation_with_recovery(cook_id, run_id, true)?;
+    if rearmed && agent_task_lifecycle::run_record_exists(run_id)? {
+        agent_task_lifecycle::clear_cook_controller_failure(run_id)?;
+    }
+    Ok(rearmed)
 }
 
 fn enqueue_terminal_continuation_with_recovery(
@@ -2447,7 +2451,10 @@ mod tests {
     #[test]
     fn explicit_recovery_rearms_failed_continuation_but_not_completed_work() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            write_recipe(&recipe()).unwrap();
+            let recipe = recipe();
+            write_recipe(&recipe).unwrap();
+            agent_task_lifecycle::submit_plan(&recipe.attempts[0].plan, Some("run"))
+                .expect("materialize run record");
             enqueue_terminal_continuation("cook", "run").unwrap();
             claim_continuation()
                 .unwrap()
@@ -2460,10 +2467,23 @@ mod tests {
                 CookContinuationState::Failed
             );
             assert!(!enqueue_terminal_continuation("cook", "run").unwrap());
+            agent_task_lifecycle::record_cook_controller_failure(
+                "run",
+                &serde_json::json!({ "code": "controller.failure", "message": "stale" }),
+            )
+            .expect("persist controller failure");
             assert!(rearm_failed_terminal_continuation("cook", "run").unwrap());
             assert_eq!(
                 continuation_state("cook", "run").unwrap(),
                 CookContinuationState::Pending
+            );
+            assert!(
+                agent_task_lifecycle::exact_record("run")
+                    .expect("read rearmed record")
+                    .metadata
+                    .get("cook_controller_failure")
+                    .is_none(),
+                "a durable rearm clears the stale controller cause before later terminal phases"
             );
             let claim = claim_continuation_for("cook", "run")
                 .unwrap()
@@ -2532,7 +2552,7 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_cook_exit_fails_the_claim_instead_of_completing_it() {
+    fn recipe_only_recovery_rearms_a_failed_continuation_without_a_run_record() {
         homeboy_core::test_support::with_isolated_home(|_| {
             write_recipe(&recipe()).unwrap();
             enqueue_terminal_continuation("cook", "run").unwrap();
@@ -2548,6 +2568,11 @@ mod tests {
                 .unwrap()
                 .contains("status 7"));
             assert!(rearm_failed_terminal_continuation("cook", "run").unwrap());
+            assert!(!agent_task_lifecycle::run_record_exists("run").unwrap());
+            assert_eq!(
+                continuation_state("cook", "run").unwrap(),
+                CookContinuationState::Pending
+            );
         });
     }
 
