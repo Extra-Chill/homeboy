@@ -290,9 +290,34 @@ impl SshTunnelOutput {
     }
 
     pub(super) fn contain_child(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            contain_tunnel_child(&mut child);
+        if let (Some(mut child), Some(identity)) =
+            (self.child.take(), self.process_start_identity.as_ref())
+        {
+            let _ = homeboy_core::process::terminate_verified_isolated_process_group_and_reap(
+                &mut child,
+                &into_process_start_identity(identity),
+                Duration::from_millis(200),
+            );
         }
+    }
+}
+
+fn into_process_start_identity(
+    identity: &RunnerTunnelProcessStartIdentity,
+) -> homeboy_core::process::ProcessStartIdentity {
+    match identity {
+        RunnerTunnelProcessStartIdentity::Linux { starttime_ticks } => {
+            homeboy_core::process::ProcessStartIdentity::Linux {
+                starttime_ticks: *starttime_ticks,
+            }
+        }
+        RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        } => homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds: *start_seconds,
+            start_microseconds: *start_microseconds,
+        },
     }
 }
 
@@ -317,8 +342,13 @@ fn capture_tunnel_identity(
 }
 
 fn contain_tunnel_child(child: &mut std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+    if let Ok(Some(identity)) = homeboy_core::process::process_start_identity(child.id()) {
+        let _ = homeboy_core::process::terminate_verified_isolated_process_group_and_reap(
+            child,
+            &identity,
+            Duration::from_millis(200),
+        );
+    }
 }
 
 pub(super) fn open_loopback_tunnel(
@@ -513,6 +543,7 @@ pub(super) fn allocated_remote_port(line: &str) -> Option<u16> {
 #[cfg(test)]
 mod proxy_forward_tests {
     use super::{allocated_remote_port, contain_tunnel_child, spawn_tunnel_process};
+    use std::time::Duration;
 
     #[test]
     fn reads_the_port_allocated_by_openssh() {
@@ -528,16 +559,31 @@ mod proxy_forward_tests {
 
     #[cfg(unix)]
     #[test]
-    fn failed_forward_setup_reaps_the_identity_owned_child() {
+    fn failed_proxy_forward_setup_reaps_its_dedicated_group() {
+        let descendant = tempfile::NamedTempFile::new().expect("descendant pid file");
         let mut command = std::process::Command::new("sh");
-        command.args(["-c", "sleep 60"]);
+        command.args([
+            "-c",
+            &format!("sleep 60 & echo $! > {}; wait", descendant.path().display()),
+        ]);
         let mut child = spawn_tunnel_process(&mut command).expect("spawn child");
         let pid = child.id();
         assert!(homeboy_core::process::pid_is_running(pid));
 
+        let descendant_pid = (0..20)
+            .find_map(|_| {
+                let pid = std::fs::read_to_string(descendant.path())
+                    .ok()
+                    .and_then(|value| value.trim().parse().ok());
+                std::thread::sleep(Duration::from_millis(10));
+                pid
+            })
+            .expect("descendant PID");
+
         contain_tunnel_child(&mut child);
 
         assert!(!homeboy_core::process::pid_is_running(pid));
+        assert!(!homeboy_core::process::pid_is_running(descendant_pid));
     }
 }
 
