@@ -1911,20 +1911,23 @@ fn list_latest_accepts_list_filters_and_rejects_pagination_selectors() {
     assert!(args.latest);
     assert_eq!(args.repo.as_deref(), Some("homeboy"));
     assert_eq!(args.worktree.as_deref(), Some("homeboy@fix-12242"));
-    assert_eq!(args.task_url.as_deref(), Some("https://github.com/Extra-Chill/homeboy/issues/12242"));
-    assert_eq!(args.submitted_after.as_deref(), Some("2026-01-01T00:00:00Z"));
+    assert_eq!(
+        args.task_url.as_deref(),
+        Some("https://github.com/Extra-Chill/homeboy/issues/12242")
+    );
+    assert_eq!(
+        args.submitted_after.as_deref(),
+        Some("2026-01-01T00:00:00Z")
+    );
     assert_eq!(args.state.as_deref(), Some("failed"));
     assert_eq!(args.run_placement.as_deref(), Some("runner"));
     assert_eq!(args.parent_id.as_deref(), Some("batch-12242"));
 
-    assert!(Cli::try_parse_from([
-        "homeboy", "agent-task", "list", "--latest", "--cursor", "1",
-    ])
-    .is_err());
-    assert!(Cli::try_parse_from([
-        "homeboy", "agent-task", "list", "--latest", "--full",
-    ])
-    .is_err());
+    assert!(
+        Cli::try_parse_from(["homeboy", "agent-task", "list", "--latest", "--cursor", "1",])
+            .is_err()
+    );
+    assert!(Cli::try_parse_from(["homeboy", "agent-task", "list", "--latest", "--full",]).is_err());
 }
 
 #[test]
