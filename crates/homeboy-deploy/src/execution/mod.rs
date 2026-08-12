@@ -847,6 +847,109 @@ mod tests {
         }
     }
 
+    /// A component that is eligible for release-asset reuse, so these tests
+    /// isolate the ref/tag decision rather than the eligibility preconditions.
+    fn release_asset_component() -> Component {
+        Component {
+            id: "example".to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("build/example.zip".to_string()),
+            ..Component::default()
+        }
+    }
+
+    fn deploy_config_with_ref(requested_ref: Option<&str>, tagged: bool) -> DeployConfig {
+        DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            skip_deps_hydration: false,
+            expected_version: None,
+            no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
+            head: false,
+            requested_ref: requested_ref.map(str::to_string),
+            requested_refs: Default::default(),
+            resolved_refs: Default::default(),
+            preflighted_source_paths: Default::default(),
+            preflighted_component_identities: Default::default(),
+            prepared_projection: None,
+            tagged,
+            prepared_artifact: None,
+            resume_run_id: None,
+        }
+    }
+
+    /// The regression: an exact tag ref used to force `local_build`, which ships
+    /// locally rebuilt bytes instead of the canonical release package and then
+    /// reads back as `remote_modified` against it (#12215).
+    #[test]
+    fn tag_valued_ref_reuses_the_canonical_release_asset() {
+        let component = release_asset_component();
+        let config = deploy_config_with_ref(Some("v0.55.1"), false);
+
+        match release_artifact_plan(&component, &config, false, false) {
+            ReleaseArtifactPlan::Reuse { tag, url } => {
+                // The asset is bound to the requested ref, not to whatever the
+                // latest local tag happens to be.
+                assert_eq!(tag, "v0.55.1");
+                assert!(url.contains("v0.55.1"), "{url}");
+                assert!(url.ends_with("example.zip"), "{url}");
+            }
+            ReleaseArtifactPlan::LocalBuild { reason } => {
+                panic!("tag-valued --ref must reuse the release asset, got local_build: {reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn branch_valued_ref_still_builds_locally() {
+        let component = release_asset_component();
+
+        for branch in ["main", "release/v0.55.1", "vnext"] {
+            let config = deploy_config_with_ref(Some(branch), false);
+            assert!(
+                !should_try_download_release_artifact(&component, &config, false, false),
+                "branch ref '{branch}' must build locally"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_sha_valued_ref_still_builds_locally() {
+        let component = release_asset_component();
+        let config =
+            deploy_config_with_ref(Some("9b780f558f0e4a1b2c3d4e5f60718293a4b5c6d7"), false);
+
+        assert!(!should_try_download_release_artifact(
+            &component, &config, false, false
+        ));
+    }
+
+    /// `--tagged` is the escape hatch for "I want a local build of this tag",
+    /// including when the tag has a reusable asset, so it must outrank `--ref`.
+    #[test]
+    fn tagged_outranks_a_tag_valued_ref() {
+        let component = release_asset_component();
+        let config = deploy_config_with_ref(Some("v0.55.1"), true);
+
+        match release_artifact_plan(&component, &config, false, false) {
+            ReleaseArtifactPlan::LocalBuild { reason } => {
+                assert!(reason.contains("--tagged"), "{reason}")
+            }
+            ReleaseArtifactPlan::Reuse { tag, .. } => {
+                panic!("--tagged must force a local build, got release asset reuse for {tag}")
+            }
+        }
+    }
+
     fn write_zip(path: &std::path::Path, files: &[(&str, &str)]) {
         let file = std::fs::File::create(path).expect("zip file");
         let mut zip = zip::ZipWriter::new(file);
