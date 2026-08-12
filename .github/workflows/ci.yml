@@ -229,16 +229,18 @@ jobs:
     name: homeboy
     needs: [pr-state, ci-capacity-admission]
     if: ${{ needs.pr-state.outputs.active == 'true' }}
-    # v2.11.22, DEREFERENCED to its commit. These tags are annotated, so the tag
+    # v2.11.23, DEREFERENCED to its commit. These tags are annotated, so the tag
     # ref's own object SHA is a tag object, which `uses:` cannot resolve — pinning
     # one fails the whole workflow at startup with zero jobs scheduled (#12153).
     # Always pin `git rev-parse v<tag>^{commit}`.
     #
     # Carries homeboy-action#372 (jq-portable exact shard partitioning),
     # homeboy-action#376 (a cancelled run no longer publishes a red `Test`
-    # verdict), and homeboy-action#377 (the unreachable sharded baseline phase is
-    # removed, closing a latent no-enforcement green). All refs #10997.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@5e028c09159f574c8e0d9b6fa229530a13926317
+    # verdict), homeboy-action#377 (the unreachable sharded baseline phase is
+    # removed, closing a latent no-enforcement green), and homeboy-action#378,
+    # which builds the test binaries once into a nextest archive instead of
+    # recompiling the workspace in every shard. All refs #10997.
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@5e8b3fb5388351bb1a0d73cf283f08eed02ffbae
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
