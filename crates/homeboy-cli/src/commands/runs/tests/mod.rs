@@ -189,6 +189,40 @@ fn run_list_reads_durable_record_without_reconciliation() {
     });
 }
 
+#[test]
+fn run_list_does_not_classify_terminal_runs_as_stale() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        for status in [
+            RunStatus::Pass,
+            RunStatus::Fail,
+            RunStatus::Error,
+            RunStatus::Skipped,
+            RunStatus::Stale,
+            RunStatus::HandedOff,
+        ] {
+            let run = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
+                ))
+                .expect("run");
+            store.finish_run(&run.id, status, None).expect("finish run");
+        }
+
+        let (output, _) = list_runs(list_args(), "runs.list").expect("list");
+        let RunsOutput::List(output) = output else {
+            panic!("expected list output");
+        };
+
+        assert!(output.stale_runs.is_none());
+        assert!(output.actionable.next_actions.is_empty());
+    });
+}
+
 fn list_args() -> RunsListArgs {
     RunsListArgs {
         runner: None,

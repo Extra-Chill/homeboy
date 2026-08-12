@@ -1,6 +1,7 @@
 use super::*;
 use crate::daemon_repair;
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
+use homeboy_lab_runner_contract::LabCapabilityVersion;
 use std::io::{BufRead, BufReader};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -90,6 +91,11 @@ fn parse_remote_homeboy_version(
 pub(super) struct RemoteHomeboyIdentity {
     pub(super) version: String,
     pub(super) build_identity: Option<String>,
+    /// The daemon-recovery capabilities the remote advertised in its typed
+    /// self-identity report. `None` means the remote is an older binary that
+    /// never advertised the field; controllers must fall back to scraping the
+    /// long-option help text for those recovery contracts.
+    pub(super) daemon_recovery_capabilities: Option<Vec<LabCapabilityVersion>>,
 }
 
 /// Read the immutable identity of the remote Homeboy executable on a lifecycle
@@ -111,6 +117,7 @@ pub(super) fn remote_homeboy_identity(
     Ok(RemoteHomeboyIdentity {
         version: normalize_homeboy_version_owned(&version),
         build_identity: None,
+        daemon_recovery_capabilities: None,
     })
 }
 
@@ -152,6 +159,7 @@ pub(super) fn bounded_remote_homeboy_identity(
     Ok(RemoteHomeboyIdentity {
         version: normalize_homeboy_version_owned(&version),
         build_identity: None,
+        daemon_recovery_capabilities: None,
     })
 }
 
@@ -188,10 +196,29 @@ pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyId
             if dirty { "-dirty" } else { "" }
         ))
     });
+    let daemon_recovery_capabilities = data
+        .get("daemon_recovery_capabilities")
+        .and_then(parse_daemon_recovery_capabilities);
     Some(RemoteHomeboyIdentity {
         version: version.to_string(),
         build_identity,
+        daemon_recovery_capabilities,
     })
+}
+
+/// Tolerantly parse the typed daemon-recovery capability list.
+///
+/// `None` is returned for an absent field, a JSON `null`, a non-array value,
+/// or an array that does not deserialize as [`LabCapabilityVersion`] entries;
+/// the caller then falls back to the help scrape for those recovery contracts
+/// (older binary). Unknown ids and future versions are preserved verbatim:
+/// matching is by id, and a typed list — even an explicitly empty one — is
+/// authoritative whenever it parses.
+fn parse_daemon_recovery_capabilities(value: &Value) -> Option<Vec<LabCapabilityVersion>> {
+    if value.is_null() {
+        return None;
+    }
+    serde_json::from_value(value.clone()).ok()
 }
 
 fn immutable_build_identity(identity: &str) -> bool {
@@ -752,6 +779,10 @@ pub(super) struct RemoteDaemonEnsureRequest<'a> {
     pub(super) replacement_operation_id: Option<&'a str>,
     pub(super) admission_fence: Option<&'a crate::generation_store::AdmissionFence>,
     pub(super) registry_lock_held: bool,
+    /// The typed daemon-recovery capabilities advertised in the remote's
+    /// self-identity report. `None` (older binary) keeps the help scrape
+    /// fallback for `daemon ensure-running --replacement-operation-id`.
+    pub(super) daemon_recovery_capabilities: Option<&'a [LabCapabilityVersion]>,
 }
 
 pub(super) fn ensure_remote_daemon(
@@ -769,6 +800,7 @@ pub(super) fn ensure_remote_daemon(
         replacement_operation_id,
         admission_fence,
         registry_lock_held,
+        daemon_recovery_capabilities,
     } = request;
     let mut status = remote_daemon_status(client, homeboy)?;
     probe_remote_daemon_endpoint(client, &mut status, Some(runner_id));
@@ -816,7 +848,12 @@ pub(super) fn ensure_remote_daemon(
             Ok(daemon)
         }
         RemoteDaemonConnectAction::Start => {
-            negotiate_ensure_running_operation_id(client, homeboy, replacement_operation_id)?;
+            negotiate_ensure_running_operation_id(
+                client,
+                homeboy,
+                replacement_operation_id,
+                daemon_recovery_capabilities,
+            )?;
             journal_ensure_running_replay(
                 runner_id,
                 homeboy,
@@ -829,7 +866,12 @@ pub(super) fn ensure_remote_daemon(
         | RemoteDaemonConnectAction::ReplaceUnhealthyExactOwner => {
             // Prove idempotent replacement support before stopping A. Otherwise
             // a controller response loss could leave no recoverable owner.
-            negotiate_ensure_running_operation_id(client, homeboy, replacement_operation_id)?;
+            negotiate_ensure_running_operation_id(
+                client,
+                homeboy,
+                replacement_operation_id,
+                daemon_recovery_capabilities,
+            )?;
             // Persist B's idempotent receipt key before removing A. A retry then
             // replays this command before inspecting or replacing any lease.
             journal_ensure_running_replay(
@@ -898,17 +940,31 @@ pub(super) fn negotiate_ensure_running_operation_id(
     client: &SshClient,
     homeboy: &str,
     replacement_operation_id: Option<&str>,
+    daemon_recovery_capabilities: Option<&[LabCapabilityVersion]>,
 ) -> std::result::Result<(), String> {
     let Some(_) = replacement_operation_id else {
         return Ok(());
     };
-    let command = format!("{} daemon ensure-running --help", shell::quote_arg(homeboy));
-    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
-    if !output.success {
-        return Err("remote Homeboy must be upgraded: unable to negotiate daemon ensure-running --replacement-operation-id before mutation".to_string());
-    }
-    if !declared_long_options(&output.stdout).contains("--replacement-operation-id") {
-        return Err("remote Homeboy must be upgraded: daemon ensure-running does not support --replacement-operation-id".to_string());
+    // A runner that advertises the typed `--replacement-operation-id`
+    // capability skips the help scrape entirely; an older runner still
+    // negotiates from `daemon ensure-running --help`.
+    let advertised = homeboy_lab_runner_contract::daemon_recovery_capability_negotiated(
+        daemon_recovery_capabilities,
+        homeboy_lab_runner_contract::DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
+        || {
+            let command = format!("{} daemon ensure-running --help", shell::quote_arg(homeboy));
+            let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+            if !output.success {
+                return Err("remote Homeboy must be upgraded: unable to negotiate daemon ensure-running --replacement-operation-id before mutation".to_string());
+            }
+            if !declared_long_options(&output.stdout).contains("--replacement-operation-id") {
+                return Err("remote Homeboy must be upgraded: daemon ensure-running does not support --replacement-operation-id".to_string());
+            }
+            Ok(true)
+        },
+    )?;
+    if !advertised {
+        return Err("remote Homeboy must be upgraded: daemon ensure-running does not advertise the --replacement-operation-id capability".to_string());
     }
     Ok(())
 }

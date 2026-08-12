@@ -1595,15 +1595,23 @@ pub fn serve_public_artifact_base_once(status: u16) -> String {
     serve_public_artifact_base(status, 1)
 }
 
-/// Serve a fixed number of public-artifact probes from one origin.
-pub fn serve_public_artifact_base(status: u16, requests: usize) -> String {
+/// Spin up a bounded localhost HTTP server returning `status` for each probe.
+///
+/// A publication manifest and its materialized children each validate their
+/// public URLs, so tests must declare the number of expected probes rather than
+/// accidentally treating the first response as a shared result.
+pub fn serve_public_artifact_base(status: u16, request_count: usize) -> String {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
+    assert!(
+        request_count > 0,
+        "public artifact server needs a request budget"
+    );
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind public artifact server");
     let addr = listener.local_addr().expect("server address");
     std::thread::spawn(move || {
-        for _ in 0..requests {
+        for _ in 0..request_count {
             let (mut stream, _) = listener.accept().expect("accept public artifact probe");
             let mut buffer = [0; 1024];
             let _ = stream.read(&mut buffer);

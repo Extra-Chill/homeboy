@@ -1879,6 +1879,81 @@ fn discovery_filters_by_cook_identity_and_classifies_only_live_queued_records_as
 }
 
 #[test]
+fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
+    with_isolated_home(|_| {
+        for run_id in ["stale-local", "live-owner", "unverified-runner"] {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        }
+        agent_task_lifecycle::rewrite_record_for_test("stale-local", |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = None;
+        })
+        .expect("age local record");
+        agent_task_lifecycle::mark_running("live-owner").expect("running");
+        agent_task_lifecycle::rewrite_record_for_test("live-owner", |record| {
+            record.metadata["runner_pid"] = serde_json::json!(std::process::id());
+        })
+        .expect("record live owner");
+        agent_task_lifecycle::rewrite_record_for_test("unverified-runner", |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = None;
+            record.metadata["runner_id"] = serde_json::json!("lab");
+            record.metadata["runner_job_id"] = serde_json::json!("old-job");
+        })
+        .expect("record unverified runner");
+
+        let store = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
+        for index in 0..crate::agent_task_lifecycle::HEALTH_SAMPLE_LIMIT * 3 {
+            store
+                .upsert_imported_run(&homeboy_core::observation::RunRecord {
+                    id: format!("malformed-upgrade-{index}"),
+                    kind: "agent-task".to_string(),
+                    component_id: None,
+                    started_at: "2026-01-01T00:00:00Z".to_string(),
+                    finished_at: None,
+                    status: "running".to_string(),
+                    command: None,
+                    cwd: None,
+                    homeboy_version: None,
+                    git_sha: None,
+                    rig_id: None,
+                    metadata_json: serde_json::json!({}),
+                })
+                .expect("insert malformed record");
+        }
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("read");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+
+        assert_eq!(admission.stale, 2);
+        assert_eq!(admission.active, 1);
+        assert_eq!(admission.blockers.len(), 2);
+        assert!(admission
+            .blockers
+            .iter()
+            .any(|blocker| blocker.run_id == "live-owner"));
+        let runner = admission
+            .blockers
+            .iter()
+            .find(|blocker| blocker.run_id == "unverified-runner")
+            .expect("unverified runner blocks");
+        assert_eq!(runner.reason, "runner_job_unverified_after_daemon_restart");
+        assert_eq!(runner.recovery_command, "homeboy runner reconcile lab");
+        assert!(!admission
+            .blockers
+            .iter()
+            .any(|blocker| blocker.run_id == "stale-local"));
+        assert_eq!(admission.record_health["malformed"], 60);
+        assert!(
+            admission.record_health["samples"].as_array().unwrap().len()
+                <= crate::agent_task_lifecycle::HEALTH_SAMPLE_LIMIT
+        );
+    });
+}
+
+#[test]
 fn discovery_rejects_invalid_submitted_after_timestamps() {
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-invalid-timestamp-filter"))

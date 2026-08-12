@@ -731,6 +731,7 @@ dependencies = [
  "homeboy-extension-contract",
  "homeboy-lab-contract",
  "homeboy-lab-runner-contract",
+ "homeboy-upgrade",
  "libc",
  "regex",
  "reqwest",

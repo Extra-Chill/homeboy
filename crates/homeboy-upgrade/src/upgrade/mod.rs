@@ -1,3 +1,4 @@
+mod admission;
 mod constants;
 mod execution;
 mod helpers;
@@ -9,6 +10,11 @@ mod types;
 pub mod update_check;
 mod validation;
 
+pub(crate) use admission::with_controller_upgrade_admission;
+pub use admission::{
+    register_controller_upgrade_admission_provider, ControllerUpgradeAdmission,
+    ControllerUpgradeAdmissionProvider, ControllerUpgradeBlocker,
+};
 pub use execution::parse_build_identity_display;
 pub use helpers::{
     current_build_version, current_version, detect_install_method, fetch_latest_version,

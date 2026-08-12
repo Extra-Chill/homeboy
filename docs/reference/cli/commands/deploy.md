@@ -34,7 +34,7 @@ Deploy components to remote server
 | `--outdated` | flag | Deploy only components whose local version differs from deployed remote |
 | `--behind-upstream` | flag | Deploy only components whose local checkout is behind upstream |
 | `--dry-run` | flag | Preview what would be deployed without executing |
-| `--apply` | flag | Confirm dangerous deploy modes like --head, --ref, or --force |
+| `--confirm-dangerous` | flag | Confirm dangerous deploy modes like --head, --ref, or --force |
 | `--check` | flag | Check component status without building or deploying |
 | `--force` | flag | Deploy even with uncommitted changes |
 | `--projects` | `<PROJECTS>` | Deploy to multiple projects (comma-separated or repeated) |

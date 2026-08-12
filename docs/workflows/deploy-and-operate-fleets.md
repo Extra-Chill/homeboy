@@ -60,8 +60,8 @@ homeboy deploy <project-id> <component-id>
 Dangerous modes require explicit confirmation:
 
 ```bash
-homeboy deploy <project-id> <component-id> --head --apply
-homeboy deploy <project-id> <component-id> --force --apply
+homeboy deploy <project-id> <component-id> --head --confirm-dangerous
+homeboy deploy <project-id> <component-id> --force --confirm-dangerous
 ```
 
 Prefer release tags or accepted stable refs for production. Deploying branch HEADs is an operator decision and should not be the default path.
