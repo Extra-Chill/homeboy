@@ -221,6 +221,26 @@ fn pid_reuse_never_signals_a_temporary_tunnel() {
 }
 
 #[test]
+fn matching_tunnel_identity_signals_only_the_owned_process() {
+    let expected = RunnerTunnelProcessStartIdentity::Linux {
+        starttime_ticks: 123,
+    };
+    let actual = homeboy_core::process::ProcessStartIdentity::Linux {
+        starttime_ticks: 123,
+    };
+    let signaled = std::cell::Cell::new(false);
+
+    terminate_tunnel_with_identity(
+        42,
+        Some(&expected),
+        |_| Ok(Some(actual.clone())),
+        |_| signaled.set(true),
+    );
+
+    assert!(signaled.get(), "the exact owned tunnel is cleaned up");
+}
+
+#[test]
 fn missing_or_uninspectable_tunnel_identity_never_signals() {
     let signaled = std::cell::Cell::new(false);
     terminate_tunnel_with_identity(42, None, |_| Ok(None), |_| signaled.set(true));

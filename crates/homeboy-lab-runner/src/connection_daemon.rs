@@ -10,7 +10,7 @@ use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy_core::engine::shell;
 use homeboy_core::server::Server;
 
-use super::super::session::RunnerStaleRuntimePath;
+use super::super::session::{RunnerStaleRuntimePath, RunnerTunnelProcessStartIdentity};
 use super::{
     failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, reserve_loopback_port,
     terminate_pid, wait_for_tcp, RemoteDaemon,
@@ -43,10 +43,25 @@ pub(super) struct RemoteDaemonConnectRequest<'a> {
     pub(super) session_path: &'a Path,
 }
 
-type RemoteDaemonConnectResult =
-    std::result::Result<(u16, Option<u32>, String, RemoteDaemon), Box<(RunnerConnectReport, i32)>>;
-type TunnelOpenResult =
-    std::result::Result<(u16, Option<u32>, String), Box<(RunnerConnectReport, i32)>>;
+type RemoteDaemonConnectResult = std::result::Result<
+    (
+        u16,
+        Option<u32>,
+        Option<RunnerTunnelProcessStartIdentity>,
+        String,
+        RemoteDaemon,
+    ),
+    Box<(RunnerConnectReport, i32)>,
+>;
+type TunnelOpenResult = std::result::Result<
+    (
+        u16,
+        Option<u32>,
+        Option<RunnerTunnelProcessStartIdentity>,
+        String,
+    ),
+    Box<(RunnerConnectReport, i32)>,
+>;
 
 pub(super) fn connect_remote_daemon(
     request: RemoteDaemonConnectRequest<'_>,
@@ -60,50 +75,60 @@ pub(super) fn connect_remote_daemon(
         runner_id,
         session_path,
     } = request;
-    let failed_after_tunnel = |tunnel_pid: Option<u32>,
-                               message: String,
-                               health_attempts: Vec<String>,
-                               local_url: &str| {
-        if let Some(pid) = tunnel_pid {
-            terminate_pid(pid);
-        }
-        let (mut report, exit_code) = failed_connect(
-            runner_id,
-            session_path.to_path_buf(),
-            RunnerFailureKind::DaemonStartupFailure,
-            message,
-        );
-        report.failure_evidence = Some(RunnerConnectFailureEvidence {
-            recovery_command: format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
-            classification: "daemon_health".to_string(),
-            remote_start_command: Some(format!(
-                "{} daemon ensure-running --addr 127.0.0.1:0",
-                shell::quote_arg(homeboy)
-            )),
-            known_remote_pid: daemon.pid,
-            known_remote_lease_id: daemon.lease_id.clone(),
-            remote_address: Some(daemon.address.clone()),
-            local_address: Some(local_url.to_string()),
-            tunnel_state: Some("established_then_health_failed".to_string()),
-            health_attempt_count: health_attempts.len(),
-            health_attempts,
-        });
-        Box::new((report, exit_code))
-    };
-    let (local_port, tunnel_pid, local_url) =
+    let failed_after_tunnel =
+        |tunnel_pid: Option<u32>,
+         tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
+         message: String,
+         health_attempts: Vec<String>,
+         local_url: &str| {
+            if let Some(pid) = tunnel_pid {
+                super::terminate_tunnel_if_owned_parts(pid, tunnel_process_start_identity.as_ref());
+            }
+            let (mut report, exit_code) = failed_connect(
+                runner_id,
+                session_path.to_path_buf(),
+                RunnerFailureKind::DaemonStartupFailure,
+                message,
+            );
+            report.failure_evidence = Some(RunnerConnectFailureEvidence {
+                recovery_command: format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
+                classification: "daemon_health".to_string(),
+                remote_start_command: Some(format!(
+                    "{} daemon ensure-running --addr 127.0.0.1:0",
+                    shell::quote_arg(homeboy)
+                )),
+                known_remote_pid: daemon.pid,
+                known_remote_lease_id: daemon.lease_id.clone(),
+                remote_address: Some(daemon.address.clone()),
+                local_address: Some(local_url.to_string()),
+                tunnel_state: Some("established_then_health_failed".to_string()),
+                health_attempt_count: health_attempts.len(),
+                health_attempts,
+            });
+            Box::new((report, exit_code))
+        };
+    let (local_port, tunnel_pid, tunnel_process_start_identity, local_url) =
         open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
     match probe_daemon_health_until_ready(&local_url, &daemon) {
         Ok(()) if endpoint_identity_matches(&local_url, expected_version, expected_identity) => {
-            Ok((local_port, tunnel_pid, local_url, daemon))
+            Ok((
+                local_port,
+                tunnel_pid,
+                tunnel_process_start_identity,
+                local_url,
+                daemon,
+            ))
         }
         Ok(()) => Err(failed_after_tunnel(
             tunnel_pid,
+            tunnel_process_start_identity,
             "remote daemon endpoint identity did not match the controller-selected generation; refusing to publish it".to_string(),
             Vec::new(),
             &local_url,
         )),
         Err(DaemonHealthProbeFailure::IdentityMismatch(report)) => Err(failed_after_tunnel(
             tunnel_pid,
+            tunnel_process_start_identity,
             format!(
                 "remote daemon health identity changed or is unavailable (expected lease {:?}, PID {:?}; got lease {:?}, PID {:?}); refusing to write session{}",
                 daemon.lease_id, daemon.pid, report.freshness.lease_id, report.pid,
@@ -113,7 +138,13 @@ pub(super) fn connect_remote_daemon(
             &local_url,
         )),
         Err(DaemonHealthProbeFailure::Unreachable { message, attempts }) => {
-            Err(failed_after_tunnel(tunnel_pid, message, attempts, &local_url))
+            Err(failed_after_tunnel(
+                tunnel_pid,
+                tunnel_process_start_identity,
+                message,
+                attempts,
+                &local_url,
+            ))
         }
     }
 }
@@ -248,9 +279,28 @@ fn open_daemon_tunnel(
         )));
     }
 
-    if !wait_for_tcp(local_port, Duration::from_secs(5)) {
+    // Capture the local process identity before readiness can cause a fast SSH
+    // child to exit and be reaped. Session cleanup relies on this exact identity.
+    let (tunnel_process_start_identity, tunnel_ready) =
+        match capture_identity_before_tunnel_readiness(
+            tunnel.pid,
+            super::capture_tunnel_process_start_identity,
+            || wait_for_tcp(local_port, Duration::from_secs(5)),
+        ) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return Err(Box::new(failed_connect(
+                    runner_id,
+                    session_path.to_path_buf(),
+                    RunnerFailureKind::TunnelFailure,
+                    error.message,
+                )));
+            }
+        };
+
+    if !tunnel_ready {
         if let Some(pid) = tunnel.pid {
-            terminate_pid(pid);
+            super::terminate_tunnel_if_owned_parts(pid, tunnel_process_start_identity.as_ref());
         }
         return Err(Box::new(failed_connect(
             runner_id,
@@ -265,8 +315,22 @@ fn open_daemon_tunnel(
     Ok((
         local_port,
         tunnel.pid,
+        tunnel_process_start_identity,
         format!("http://127.0.0.1:{}", local_port),
     ))
+}
+
+fn capture_identity_before_tunnel_readiness<C, W>(
+    pid: Option<u32>,
+    capture: C,
+    readiness: W,
+) -> homeboy_core::error::Result<(Option<RunnerTunnelProcessStartIdentity>, bool)>
+where
+    C: FnOnce(Option<u32>) -> homeboy_core::error::Result<Option<RunnerTunnelProcessStartIdentity>>,
+    W: FnOnce() -> bool,
+{
+    let identity = capture(pid)?;
+    Ok((identity, readiness()))
 }
 
 pub(crate) fn versions_match(left: &str, right: &str) -> bool {
@@ -651,6 +715,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::process::{Command, Stdio};
 
     fn report(lease_id: &str, pid: u32) -> DaemonHealthReport {
         DaemonHealthReport {
@@ -980,5 +1045,60 @@ mod tests {
             "identity mismatch must not burn the retry budget"
         );
         server.join().expect("server");
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn captures_tunnel_identity_before_readiness_reaps_a_fast_exit() {
+        // The child remains live until readiness releases stdin. This removes
+        // scheduler timing from the race while exercising the real identity API.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("read _; exit 0")
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("start blocked tunnel child");
+        let pid = child.id();
+
+        let result = capture_identity_before_tunnel_readiness(
+            Some(pid),
+            super::super::capture_tunnel_process_start_identity,
+            || {
+                drop(child.stdin.take());
+                assert!(child.wait().expect("reap tunnel child").success());
+                false
+            },
+        )
+        .expect("identity is captured before readiness reaps the child");
+
+        assert!(result.0.is_some());
+        assert!(!result.1);
+        assert_eq!(
+            homeboy_core::process::process_start_identity(pid)
+                .expect("inspect reaped child identity"),
+            None,
+            "the former post-readiness capture would report the child exited"
+        );
+    }
+
+    #[test]
+    fn does_not_probe_readiness_when_tunnel_identity_capture_fails() {
+        let mut readiness_called = false;
+
+        let result = capture_identity_before_tunnel_readiness(
+            Some(42),
+            |_| {
+                Err(homeboy_core::error::Error::internal_unexpected(
+                    "child exited",
+                ))
+            },
+            || {
+                readiness_called = true;
+                true
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!readiness_called);
     }
 }
