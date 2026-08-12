@@ -432,7 +432,6 @@ mod proxy_forward_tests {
             None
         );
     }
-
 }
 
 pub(super) fn spawn_tunnel_process(

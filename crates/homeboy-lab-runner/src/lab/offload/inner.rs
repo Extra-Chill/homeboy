@@ -2986,7 +2986,7 @@ mod tests {
         let details = serde_json::to_string(&error.details).expect("serialize details");
 
         assert!(details.contains("daemon_freshness_unavailable"));
-        assert!(details.contains("runner doctor homeboy-lab --scope lab-offload"));
+        assert!(details.contains("ambiguous daemon candidates"));
     }
 
     #[test]

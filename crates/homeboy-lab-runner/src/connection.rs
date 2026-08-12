@@ -2229,6 +2229,33 @@ where
     })
 }
 
+fn capture_tunnel_process_start_identity(
+    pid: Option<u32>,
+) -> Result<Option<RunnerTunnelProcessStartIdentity>> {
+    let Some(pid) = pid else {
+        return Ok(None);
+    };
+    let identity = homeboy_core::process::process_start_identity(pid)
+        .map_err(|error| {
+            Error::internal_unexpected(format!("capture tunnel process identity: {error}"))
+        })?
+        .ok_or_else(|| {
+            Error::internal_unexpected("new tunnel exited before its process identity was captured")
+        })?;
+    Ok(Some(match identity {
+        homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+            RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+        }
+        homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        } => RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        },
+    }))
+}
+
 pub(crate) fn terminate_tunnel_if_owned(session: &RunnerSession) {
     if let Some(pid) = session.tunnel_pid {
         terminate_tunnel_if_owned_parts(pid, session.tunnel_process_start_identity.as_ref());
