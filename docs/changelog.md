@@ -4,6 +4,53 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.340.0] - 2026-08-12
+
+### Added
+- extract OpenCode runtime progress
+
+### Changed
+- apply workspace rustfmt
+- give the snapshot-notes fixture a repo-local git identity
+- restore rustfmt compliance on main
+- format runtime evidence hydration
+- format cargo target evidence
+- format cook recovery tests
+- make the Test gate declaration real and verify action pins are commits
+- reuse managed Cargo target stores
+- reap cancelled route test processes
+- cover trace observe contract
+- materialize runner cleanup provenance
+- repin Test to homeboy-action v2.11.22
+
+### Fixed
+- reconcile source version drift
+- contain failed SSH forward groups
+- verify effective SSH forward transport
+- own persistent SSH forwards
+- reconcile runner tunnel rebase
+- resolve loopback transport ownership
+- admit loopback direct runners without tunnels
+- coordinate compatible auto-connect handoffs
+- connect runners in process for offload
+- verify tunnel ownership before admission
+- require complete daemon health evidence
+- verify daemon health before admission
+- probe jobs after auto-connect
+- preserve verified auto-connect admission
+- Fix runner tunnel ownership and auto-connect
+- repair completion CI contracts
+- deduplicate finalized executor artifacts
+- separate candidate and PR completion
+- preserve AI disclosure provenance
+- fork after checkpoint mismatch
+- preserve promotion I/O diagnostics
+- admit healthy local auto placement when Lab disconnects
+- persist attempt dispatcher recipes
+- plan absent worktrees in dry runs
+- declare attempt publication capability
+- classify merged CI cancellations as superseded
+
 ## [0.339.0] - 2026-08-12
 
 ### Added
