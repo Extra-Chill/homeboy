@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const runtimeManifest = JSON.parse(
+	readFileSync(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'wp-codebox.json'), 'utf8')
+);
 process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(rootDir, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const {
 	WP_CODEBOX_BACKEND,
@@ -48,6 +51,23 @@ assert.equal(WP_CODEBOX_WORKSPACE_MOUNT_KIND, 'homeboy-runtime-workspace');
 
 const cliDescriptor = wpCodeboxCliDescriptor();
 assert.equal(cliDescriptor.schema, 'wp-codebox/cli-descriptor/v1');
+const recipeRunProvider = runtimeManifest.recipe_run_providers.find(
+	(provider) => provider.id === 'wordpress.wp-codebox.recipe-run'
+);
+assert.deepEqual(recipeRunProvider, {
+	id: 'wordpress.wp-codebox.recipe-run',
+	version: runtimeManifest.version,
+	executable: cliDescriptor.executable,
+	command: [
+		cliDescriptor.executable,
+		cliDescriptor.commands.recipe_run,
+		'--recipe',
+		'{recipe}',
+		'--artifacts',
+		'{artifacts}',
+		'--json',
+	],
+});
 assert.deepEqual(cliDescriptor.commands, {
 	run_agent_task: 'run-agent-task',
 	recipe_run: 'recipe-run',

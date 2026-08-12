@@ -2,8 +2,24 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "wp-codebox",
   "name": "WP Codebox",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "WP Codebox agent runtime for Homeboy agent tasks.",
+  "recipe_run_providers": [
+    {
+      "id": "wordpress.wp-codebox.recipe-run",
+      "version": "1.5.2",
+      "executable": "wp-codebox",
+      "command": [
+        "wp-codebox",
+        "recipe-run",
+        "--recipe",
+        "{recipe}",
+        "--artifacts",
+        "{artifacts}",
+        "--json"
+      ]
+    }
+  ],
   "contract_producers": [
     {
       "id": "wp-codebox.agent-task-result",
