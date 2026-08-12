@@ -280,6 +280,7 @@ mod tests {
             readiness_checks: vec![AgentTaskProviderRunnerReadiness {
                 id: "example-token".to_string(),
                 label: "Example token".to_string(),
+                invocation: None,
                 secret_env: vec!["EXAMPLE_TOKEN".to_string()],
                 env_path: None,
                 executable: None,

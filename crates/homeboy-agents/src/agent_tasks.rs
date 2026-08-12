@@ -398,13 +398,14 @@ pub mod provider {
         AgentTaskProviderCapabilityContract, AgentTaskProviderCatalog,
         AgentTaskProviderDependencyFailurePattern, AgentTaskProviderEnvPathReadiness,
         AgentTaskProviderRoleAliases, AgentTaskProviderRunnerReadiness,
-        AgentTaskProviderRunnerSource, AgentTaskProviderWorkspaceMaterialization,
-        AgentTaskRuntimeApplyBack, AgentTaskRuntimeContract, AgentTaskRuntimeLifecycleStates,
+        AgentTaskProviderRunnerReadinessContract, AgentTaskProviderRunnerSource,
+        AgentTaskProviderWorkspaceMaterialization, AgentTaskRuntimeApplyBack,
+        AgentTaskRuntimeContract, AgentTaskRuntimeLifecycleStates,
         AgentTaskRuntimeMutationArtifact, AgentTaskRuntimeNormalization,
         AgentTaskRuntimeOutputArtifactMapping, ExtensionProviderAgentTaskExecutor,
-        ProviderResolution, ProviderRuntimeReadinessCache, WorkspaceMaterializationSpec,
-        WorkspaceMountSpec, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
-        AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
+        ProviderReadinessInvocationResult, ProviderResolution, ProviderRuntimeReadinessCache,
+        WorkspaceMaterializationSpec, WorkspaceMountSpec, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+        AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA, PROVIDER_READINESS_RESULT_SCHEMA,
     };
     /// Credential readiness: whether a *declared* provider is actually
     /// *dispatchable* here, and the pre-dispatch preflight that enforces it
