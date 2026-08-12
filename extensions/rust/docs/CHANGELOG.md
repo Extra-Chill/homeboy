@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.34.0] - 2026-08-12
+
+### Added
+- run sharded tests from a prebuilt nextest archive
+
 ## [1.33.3] - 2026-08-09
 
 ### Fixed
