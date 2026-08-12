@@ -1387,14 +1387,13 @@ fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRecord) {
         .and_then(Value::as_str)
         .is_some();
     let finalization_requested = recipe.finalization["no_finalize"] != true;
-    if let Some(completion) = agent_task_service::cook_completion(
+    if let Some(completion) = agent_task_service_direct::cook_completion(
         candidate_produced,
         finalization_requested,
         record.metadata.get("cook_finalization"),
         Some(&record.run_id),
     ) {
-        value["cook_completion"] =
-            serde_json::to_value(completion).expect("completion serializes");
+        value["cook_completion"] = serde_json::to_value(completion).expect("completion serializes");
     }
 }
 
