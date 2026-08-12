@@ -3514,6 +3514,7 @@ mod tests {
     fn cargo_gate_rejects_zero_match_and_accepts_one_match_through_supported_declarations() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = env_mutex();
         let temp = tempfile::tempdir().expect("temporary Cargo fixture");
         std::fs::create_dir(temp.path().join("src")).expect("fixture source directory");
         std::fs::write(
