@@ -1290,8 +1290,8 @@ fn normalize_failure_record(line: &str) -> String {
 #[cfg(test)]
 mod baseline_tests {
     use super::{
-        AgentTaskGateEnvironmentPolicy, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
-        AgentTaskGateVisibility, failure_fingerprint, run_gate_command_with_timeout,
+        failure_fingerprint, run_gate_command_with_timeout, AgentTaskGateEnvironmentPolicy,
+        AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
     };
     use std::time::Duration;
 
@@ -3397,15 +3397,13 @@ mod tests {
 
         assert!(cargo_test_result("echo cargo test", 0, summary, "").is_none());
         assert!(cargo_test_result("timeout 30 echo cargo test", 0, summary, "").is_none());
-        assert!(
-            cargo_test_result(
-                "cargo test",
-                0,
-                "test result: ok. 0 passed; 0 failed; arbitrary output",
-                "",
-            )
-            .is_none()
-        );
+        assert!(cargo_test_result(
+            "cargo test",
+            0,
+            "test result: ok. 0 passed; 0 failed; arbitrary output",
+            "",
+        )
+        .is_none());
     }
 
     #[test]
@@ -3927,12 +3925,10 @@ mod tests {
                 skipped,
                 vec![".claude", "docs", "packages", "scripts", "tests"]
             );
-            assert!(
-                evidence
-                    .iter()
-                    .filter(|setup| setup.status == "skipped")
-                    .all(|setup| setup.setup_capability == "dependency.discovery")
-            );
+            assert!(evidence
+                .iter()
+                .filter(|setup| setup.status == "skipped")
+                .all(|setup| setup.setup_capability == "dependency.discovery"));
         });
     }
 
@@ -3955,20 +3951,18 @@ mod tests {
             on_heartbeat: Arc::new(|_| Ok(())),
             is_cancelled: Arc::new(|| false),
         };
-        assert!(
-            run_gate_command_with_supervision(
-                worktree.path(),
-                1,
-                "sleep 30",
-                AgentTaskGateVisibility::Visible,
-                AgentTaskGateRevealPolicy::FullEvidence,
-                None,
-                Some(&supervision),
-                &AgentTaskGateEnvironmentPolicy::default(),
-                &[],
-            )
-            .is_err()
-        );
+        assert!(run_gate_command_with_supervision(
+            worktree.path(),
+            1,
+            "sleep 30",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&supervision),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+        )
+        .is_err());
         let pid = child_pid
             .lock()
             .expect("child pid")
@@ -4010,13 +4004,11 @@ mod tests {
             &[],
         )
         .expect("gate");
-        assert!(
-            tails
-                .lock()
-                .expect("tails")
-                .iter()
-                .any(|tail| tail.contains("stdout") && tail.contains("stderr"))
-        );
+        assert!(tails
+            .lock()
+            .expect("tails")
+            .iter()
+            .any(|tail| tail.contains("stdout") && tail.contains("stderr")));
     }
 
     #[cfg(unix)]
@@ -4055,11 +4047,9 @@ mod tests {
         .expect("private gate");
         let tails = tails.lock().expect("tails");
         assert!(!tails.is_empty());
-        assert!(
-            tails
-                .iter()
-                .all(|tail| tail == "private gate output withheld")
-        );
+        assert!(tails
+            .iter()
+            .all(|tail| tail == "private gate output withheld"));
     }
 
     #[test]
@@ -4435,11 +4425,9 @@ mod tests {
         assert_eq!(result.reveal_policy, HomeboyGateRevealPolicy::SummaryOnly);
         assert_eq!(result.retryable, Some(true));
         assert!(result.summary.contains("detailed evidence is withheld"));
-        assert!(
-            result
-                .agent_feedback
-                .contains("hidden evaluator details are withheld")
-        );
+        assert!(result
+            .agent_feedback
+            .contains("hidden evaluator details are withheld"));
         assert_eq!(result.evidence["exit_code"], 1);
         assert_eq!(result.evidence["withheld"], true);
         assert_eq!(result.evidence.get("stdout"), None);
@@ -4545,27 +4533,21 @@ mod tests {
         .expect("isolated gate report");
 
         assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
-        assert!(
-            report
-                .environment
-                .sanitized
-                .iter()
-                .any(|variable| variable.name == "HOME")
-        );
-        assert!(
-            report
-                .environment
-                .sanitized
-                .iter()
-                .any(|variable| variable.name == "XDG_STATE_HOME")
-        );
-        assert!(
-            report
-                .environment
-                .sanitized
-                .iter()
-                .any(|variable| variable.name == "XDG_RUNTIME_DIR")
-        );
+        assert!(report
+            .environment
+            .sanitized
+            .iter()
+            .any(|variable| variable.name == "HOME"));
+        assert!(report
+            .environment
+            .sanitized
+            .iter()
+            .any(|variable| variable.name == "XDG_STATE_HOME"));
+        assert!(report
+            .environment
+            .sanitized
+            .iter()
+            .any(|variable| variable.name == "XDG_RUNTIME_DIR"));
     }
 
     #[test]
@@ -4629,11 +4611,9 @@ mod tests {
             candidate.environment.extension_inputs[0].id,
             "selected-fixture"
         );
-        assert!(
-            candidate.environment.extension_inputs[0]
-                .identity
-                .starts_with("sha256:")
-        );
+        assert!(candidate.environment.extension_inputs[0]
+            .identity
+            .starts_with("sha256:"));
         assert_eq!(
             candidate.environment.extension_inputs[0]
                 .source_revision
@@ -4643,12 +4623,10 @@ mod tests {
         let copied = worktree
             .path()
             .join("tmp/gate-home/.config/homeboy/extensions/selected-fixture");
-        assert!(
-            !fs::symlink_metadata(&copied)
-                .expect("copied extension metadata")
-                .file_type()
-                .is_symlink()
-        );
+        assert!(!fs::symlink_metadata(&copied)
+            .expect("copied extension metadata")
+            .file_type()
+            .is_symlink());
         assert!(copied.join("gate-owned").exists());
         assert!(!selected.join("gate-owned").exists());
         let gate_home = worktree.path().join("tmp/gate-home");
@@ -4714,12 +4692,10 @@ mod tests {
         let copied = worktree
             .path()
             .join("tmp/gate-home/.config/homeboy/extensions/selected-fixture");
-        assert!(
-            !fs::symlink_metadata(&copied)
-                .expect("copied extension metadata")
-                .file_type()
-                .is_symlink()
-        );
+        assert!(!fs::symlink_metadata(&copied)
+            .expect("copied extension metadata")
+            .file_type()
+            .is_symlink());
         assert!(copied.join("selected-fixture.json").is_file());
     }
 
@@ -5102,14 +5078,12 @@ mod tests {
         .expect("toolchain bin on PATH")
         .join("cargo");
         assert!(cargo_on_path.is_file());
-        assert!(
-            cargo_on_path.starts_with(
-                repeated
-                    .values
-                    .get("RUSTUP_HOME")
-                    .expect("isolated RUSTUP_HOME")
-            )
-        );
+        assert!(cargo_on_path.starts_with(
+            repeated
+                .values
+                .get("RUSTUP_HOME")
+                .expect("isolated RUSTUP_HOME")
+        ));
         assert_eq!(
             repeated.report.rust_cache.expect("hit evidence").state,
             "hit"
@@ -5170,7 +5144,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rust_gate_cache_rejects_symlinked_content_and_bounds_stalled_hydration() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::{symlink, PermissionsExt};
 
         let source = tempfile::tempdir().expect("source");
         let overlay = tempfile::tempdir().expect("overlay");
@@ -5190,14 +5164,12 @@ mod tests {
         }
         let _environment = EnvVarGuard::set(&[("PATH", bin.path())]);
         let started = Instant::now();
-        assert!(
-            hydrate_rust_cache_with_timeout(
-                workspace.path(),
-                cache.path(),
-                Duration::from_millis(50),
-            )
-            .is_err()
-        );
+        assert!(hydrate_rust_cache_with_timeout(
+            workspace.path(),
+            cache.path(),
+            Duration::from_millis(50),
+        )
+        .is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
@@ -5507,12 +5479,10 @@ mod tests {
         assert_eq!(error.details["failure_classification"], "gate_declaration");
         assert_eq!(error.details["package"], "fixture-package");
         assert_eq!(error.details["missing_script"], "typecheck");
-        assert!(
-            error.details["remediation"]
-                .as_str()
-                .expect("remediation")
-                .contains("scripts")
-        );
+        assert!(error.details["remediation"]
+            .as_str()
+            .expect("remediation")
+            .contains("scripts"));
     }
 
     /// A symlinked invocation temp alias must yield sandbox paths that are
@@ -5545,23 +5515,19 @@ mod tests {
 
         // The exported root is reached *through* the alias, but is itself a
         // real directory — the property security-sensitive child tools check.
-        assert!(
-            !fs::symlink_metadata(&expected_root)
-                .expect("gate temp root metadata")
-                .file_type()
-                .is_symlink()
-        );
+        assert!(!fs::symlink_metadata(&expected_root)
+            .expect("gate temp root metadata")
+            .file_type()
+            .is_symlink());
         assert!(expected_root.is_dir());
 
         for variable in &selected.report.sanitized {
             let path = PathBuf::from(&variable.value);
             assert!(path.starts_with(&expected_root));
-            assert!(
-                !fs::symlink_metadata(path)
-                    .expect("isolated path metadata")
-                    .file_type()
-                    .is_symlink()
-            );
+            assert!(!fs::symlink_metadata(path)
+                .expect("isolated path metadata")
+                .file_type()
+                .is_symlink());
         }
     }
 }
