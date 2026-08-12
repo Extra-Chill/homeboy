@@ -8,6 +8,8 @@ use homeboy_core::component::GithubConfig;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::git::release_download::GitHubRepo;
+use serde::Deserialize;
+use std::collections::HashSet;
 
 use super::gh_cli::{
     gh_command, gh_failure_diagnostic, github_release_upload_timeout, run_gh_command, safe_filename,
@@ -73,6 +75,7 @@ pub(crate) fn build_github_release_body(
         return GitHubReleaseBody {
             body: component_scoped_release_notes(
                 component,
+                github,
                 state,
                 changelog_url,
                 tag,
@@ -120,6 +123,7 @@ fn component_release_notes_require_changelog_fallback(component: &Component) -> 
 /// durable history without forge-specific links or author metadata.
 fn component_scoped_release_notes(
     component: &Component,
+    github: &GitHubRepo,
     state: &ReleaseState,
     changelog_url: Option<&str>,
     tag: &str,
@@ -128,63 +132,90 @@ fn component_scoped_release_notes(
     let entries = git::get_component_changes_since_tag(component, previous_tag)
         .ok()
         .map(|commits| {
-            commits
-                .into_iter()
-                .filter(|commit| commit.category.to_changelog_entry_type().is_some())
-                .map(|commit| format!("- {}", format_github_release_entry(component, &commit)))
-                .collect::<Vec<_>>()
+            component_scoped_release_entries(commits, |hash| {
+                associated_merged_pull_requests(github, &component.github, hash)
+            })
         })
         .unwrap_or_default();
 
     let base = if entries.is_empty() {
         fallback_release_notes(state, None, tag)
     } else {
-        format!("## {}\n\n{}", tag, entries.join("\n"))
+        format!("## What's Changed\n\n{}", entries.join("\n"))
     };
     changelog_url
         .map(|url| replace_full_changelog_footer(&base, url))
         .unwrap_or(base)
 }
 
-fn format_github_release_entry(component: &Component, commit: &git::CommitInfo) -> String {
-    let subject = git::strip_conventional_prefix(&commit.subject);
-    let subject = github_reference_links(component, subject);
-    match commit_author(component, &commit.hash) {
-        Some(author) => format!("{} (by {})", subject, author),
-        None => subject,
-    }
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AssociatedPullRequest {
+    pub(crate) title: String,
+    pub(crate) html_url: String,
+    pub(crate) merged_at: Option<String>,
+    pub(crate) user: AssociatedPullRequestAuthor,
 }
 
-fn commit_author(component: &Component, hash: &str) -> Option<String> {
-    let output =
-        git::execute_git_for_release(&component.local_path, &["show", "-s", "--format=%an", hash])
-            .ok()?;
-    if !output.status.success() {
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AssociatedPullRequestAuthor {
+    pub(crate) login: String,
+}
+
+/// Preserve the scoped git collector as the release authority. GitHub metadata
+/// only changes how those selected commits are presented to reviewers.
+pub(crate) fn component_scoped_release_entries(
+    commits: Vec<git::CommitInfo>,
+    mut associated_prs: impl FnMut(&str) -> Option<Vec<AssociatedPullRequest>>,
+) -> Vec<String> {
+    let mut seen_pull_requests = HashSet::new();
+    commits
+        .into_iter()
+        .filter(|commit| commit.category.to_changelog_entry_type().is_some())
+        .map(|commit| {
+            let pull_requests = associated_prs(&commit.hash).unwrap_or_default();
+            let merged = pull_requests
+                .into_iter()
+                .filter(|pull_request| pull_request.merged_at.is_some())
+                .collect::<Vec<_>>();
+            if merged.len() == 1 {
+                let pull_request = &merged[0];
+                if seen_pull_requests.insert(pull_request.html_url.clone()) {
+                    return format!(
+                        "* {} by @{} in {}",
+                        pull_request.title, pull_request.user.login, pull_request.html_url
+                    );
+                }
+                return String::new();
+            }
+            format!("* {}", git::strip_conventional_prefix(&commit.subject))
+        })
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+fn associated_merged_pull_requests(
+    github: &GitHubRepo,
+    config: &GithubConfig,
+    hash: &str,
+) -> Option<Vec<AssociatedPullRequest>> {
+    let endpoint = format!(
+        "repos/{}/{}/commits/{hash}/pulls",
+        github.owner, github.repo
+    );
+    let output = run_gh_command(
+        gh_command(github, config, &["api", &endpoint]),
+        github_release_upload_timeout(),
+    );
+    if output.timed_out || output.exit_code != Some(0) {
+        homeboy_core::log_status!(
+            "release",
+            "GitHub associated-PR metadata unavailable for commit {}: {}",
+            hash,
+            gh_failure_diagnostic("gh api associated pull requests", &endpoint, &output).summary
+        );
         return None;
     }
-    let author = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!author.is_empty()).then_some(author)
-}
-
-fn github_reference_links(component: &Component, subject: &str) -> String {
-    let remote = component.remote_url.clone().or_else(|| {
-        git::release_download::detect_remote_url(std::path::Path::new(&component.local_path))
-    });
-    let Some(remote) = remote else {
-        return subject.to_string();
-    };
-    let Some(repo) = git::release_download::parse_github_url(&remote) else {
-        return subject.to_string();
-    };
-    let reference = regex::Regex::new(r"#(\d+)").expect("valid GitHub reference regex");
-    reference
-        .replace_all(subject, |captures: &regex::Captures<'_>| {
-            format!(
-                "[#{}](https://{}/{}/{}/pull/{})",
-                &captures[1], repo.host, repo.owner, repo.repo, &captures[1]
-            )
-        })
-        .into_owned()
+    serde_json::from_str(&output.stdout).ok()
 }
 
 /// Persist the exact release body to `build/<tag>-release-notes.md` so it is
