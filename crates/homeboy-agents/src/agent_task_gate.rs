@@ -1900,9 +1900,7 @@ impl SelectedGateEnvironment {
             resolution: target.resolution().to_string(),
             owner: target.evidence().owner,
             identity,
-            state: bytes_before.map(|bytes| {
-                if bytes == 0 { "miss" } else { "hit" }.to_string()
-            }),
+            state: bytes_before.map(|bytes| if bytes == 0 { "miss" } else { "hit" }.to_string()),
             bytes_before,
             bytes_after: None,
             elapsed_ms: None,
