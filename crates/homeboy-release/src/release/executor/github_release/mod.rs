@@ -50,9 +50,10 @@ pub(crate) use gh_cli::{
 };
 #[cfg(test)]
 pub(crate) use notes::{
-    build_github_release_body, fallback_release_notes, github_changelog_url,
+    component_scoped_release_entries, fallback_release_notes, github_changelog_url,
     github_generated_notes_start_tag, github_release_notes_start_tag,
-    replace_full_changelog_footer, GitHubReleaseBody,
+    replace_full_changelog_footer, AssociatedPullRequest, AssociatedPullRequestAuthor,
+    GitHubReleaseBody,
 };
 #[cfg(test)]
 pub(crate) use repair::{
