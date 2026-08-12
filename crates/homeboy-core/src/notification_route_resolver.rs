@@ -123,21 +123,32 @@ fn invoke(
     let mut child = command.spawn().map_err(|_| {
         InvokeError::Optional("could not start an installed notification route resolver")
     })?;
-    child
+    if child
         .stdin
         .take()
         .expect("piped stdin")
         .write_all(&request)
-        .map_err(|_| InvokeError::Fatal(resolver_error("could not send the resolver request")))?;
+        .is_err()
+    {
+        terminate(&mut child, None);
+        return Err(InvokeError::Fatal(resolver_error(
+            "could not send the resolver request",
+        )));
+    }
     let stdout = child.stdout.take().expect("piped stdout");
     let reader = thread::spawn(move || read_bounded(stdout));
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(|_| {
-            InvokeError::Fatal(resolver_error(
-                "could not wait for a notification route resolver",
-            ))
-        })? {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(_) => {
+                terminate(&mut child, Some(reader));
+                return Err(InvokeError::Fatal(resolver_error(
+                    "could not wait for a notification route resolver",
+                )));
+            }
+        };
+        if let Some(status) = status {
             // A resolver parent can exit while a descendant retains stdout.
             // Reap its group before joining the reader so that cannot bypass
             // the aggregate deadline by withholding EOF.
@@ -145,9 +156,7 @@ fn invoke(
             break status;
         }
         if started.elapsed() >= timeout {
-            kill_process_group(&mut child);
-            let _ = child.wait();
-            let _ = reader.join();
+            terminate(&mut child, Some(reader));
             return Err(InvokeError::Optional(
                 "notification route resolver discovery timed out",
             ));
@@ -194,6 +203,17 @@ fn invoke(
         _ => Err(InvokeError::Fatal(resolver_error(
             "notification route resolver returned an invalid result shape",
         ))),
+    }
+}
+
+fn terminate(
+    child: &mut std::process::Child,
+    reader: Option<thread::JoinHandle<(Vec<u8>, bool)>>,
+) {
+    kill_process_group(child);
+    let _ = child.wait();
+    if let Some(reader) = reader {
+        let _ = reader.join();
     }
 }
 

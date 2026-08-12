@@ -300,6 +300,8 @@ typed `notification_route_resolver` diagnostic. Timed-out Unix resolvers are
 killed as a process group so descendants cannot retain their pipes. A selected
 route is validated and bound before durable submission, so detached, fanout,
 resume, daemon, and delivery paths reuse their existing route persistence.
+Cook seals to its pinned controller runtime before ambient discovery, so exactly
+that executing runtime resolves and persists the selected route once.
 
 Known sidecar names default to these run-directory paths when `path` is omitted:
 

@@ -622,25 +622,6 @@ impl CliRuntime {
                     );
                     return std::process::ExitCode::from(2);
                 }
-                if notification_route.is_none() {
-                    notification_route =
-                        match crate::core::notification_route_resolver::resolve_installed() {
-                            Ok(route) => route,
-                            Err(err) => {
-                                output_runtime::emit_json_result_for_identity(
-                                    Err(err),
-                                    output_file.as_deref(),
-                                    2,
-                                    &command_identity,
-                                );
-                                return std::process::ExitCode::from(2);
-                            }
-                        };
-                    if let Some(route) = &notification_route {
-                        cli.notification_transport = Some(route.transport.clone());
-                        cli.notification_route = Some(route.route.clone());
-                    }
-                }
             }
         }
 
@@ -655,6 +636,34 @@ impl CliRuntime {
                     &command_identity,
                 );
                 return std::process::ExitCode::from(2);
+            }
+        }
+
+        if matches!(
+            &cli.command,
+            Commands::AgentTask(agent_task)
+                if matches!(
+                    &agent_task.command,
+                    crate::commands::agent_task::AgentTaskCommand::Cook(_)
+                )
+        ) && notification_route.is_none()
+        {
+            notification_route =
+                match crate::core::notification_route_resolver::resolve_installed() {
+                    Ok(route) => route,
+                    Err(err) => {
+                        output_runtime::emit_json_result_for_identity(
+                            Err(err),
+                            output_file.as_deref(),
+                            2,
+                            &command_identity,
+                        );
+                        return std::process::ExitCode::from(2);
+                    }
+                };
+            if let Some(route) = &notification_route {
+                cli.notification_transport = Some(route.transport.clone());
+                cli.notification_route = Some(route.route.clone());
             }
         }
 
@@ -2198,6 +2207,28 @@ mod tests {
         .expect("extension manifest");
     }
 
+    #[cfg(unix)]
+    fn write_notification_resolver(home: &std::path::Path, sentinel: &std::path::Path) {
+        let extension_dir = home.join(".config/homeboy/extensions/resolver-test");
+        std::fs::create_dir_all(&extension_dir).expect("resolver extension dir");
+        std::fs::write(
+            extension_dir.join("resolver-test.json"),
+            serde_json::json!({
+                "name": "Resolver test",
+                "version": "0.0.0",
+                "notification_transports": [{
+                    "id": "test.completed",
+                    "command": ["true"],
+                    "route_resolver": {
+                        "command": ["sh", "-c", format!("touch '{}'", sentinel.display())]
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("resolver extension manifest");
+    }
+
     /// A CLI extension whose `ready_check` leaves a durable trace when it runs.
     ///
     /// "no probe happened" is only provable if the probe would have been
@@ -2308,6 +2339,33 @@ mod tests {
     #[test]
     fn normal_output_file_paths_are_allowed() {
         assert!(output_runtime::validate_output_file_path("./homeboy-output.json").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambient_notification_discovery_is_gated_to_valid_cook_execution() {
+        crate::test_support::with_isolated_home(|home| {
+            let sentinel = home.path().join("resolver-invoked");
+            write_notification_resolver(home.path(), &sentinel);
+
+            let status = CliRuntime::new()
+                .run_from_args(argv(&["homeboy", "status"]));
+            assert_eq!(status, std::process::ExitCode::SUCCESS);
+            assert!(!sentinel.exists(), "non-Cook commands must not invoke resolvers");
+
+            let cook = CliRuntime::new().run_from_args(argv(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--to-worktree",
+                "fixture",
+            ]));
+            assert_eq!(cook, std::process::ExitCode::from(2));
+            assert!(
+                !sentinel.exists(),
+                "Cook validation failures must precede ambient discovery"
+            );
+        });
     }
 
     #[test]
