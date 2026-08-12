@@ -1,0 +1,9 @@
+[alias]
+# Focused deterministic reproduction for #12132's affected route/dispatch family.
+test-route-dispatch = "test -p homeboy-cli commands::infra::route::tests::dispatch -- --test-threads=1"
+
+# Every test binary runs under a small supervisor. It creates a private process
+# group and reaps it when Cargo cancels the runner, so a test cannot leave a
+# daemonized fixture behind after the test binary is interrupted.
+[target.'cfg(unix)']
+runner = "scripts/nextest-hermetic-test-environment.sh"
