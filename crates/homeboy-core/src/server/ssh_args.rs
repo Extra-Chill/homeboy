@@ -1,6 +1,6 @@
 use crate::engine::shell;
 
-use super::{ManagedSshSession, Server, ServerAuthMode, SshClient};
+use super::{ManagedSshSession, Server, SshClient};
 
 #[derive(Clone, Copy)]
 pub enum SshPortFlag {
@@ -49,11 +49,7 @@ pub fn client_option_args(client: &SshClient, options: SshArgOptions<'_>) -> Vec
 }
 
 pub fn server_option_args(server: &Server, options: SshArgOptions<'_>) -> Vec<String> {
-    let auth = server
-        .auth
-        .as_ref()
-        .filter(|auth| auth.mode == ServerAuthMode::KeyPlusPasswordControlmaster)
-        .map(ManagedSshSession::from_auth);
+    let session = server.auth.as_ref().map(ManagedSshSession::from_auth);
     client_connection_args(
         &server.user,
         &server.host,
@@ -62,7 +58,7 @@ pub fn server_option_args(server: &Server, options: SshArgOptions<'_>) -> Vec<St
             .identity_file
             .as_deref()
             .filter(|path| !path.is_empty()),
-        auth.as_ref(),
+        session.as_ref(),
         options,
     )
 }
@@ -79,7 +75,7 @@ fn client_connection_args(
     _host: &str,
     port: u16,
     identity_file: Option<&str>,
-    auth: Option<&ManagedSshSession>,
+    session: Option<&ManagedSshSession>,
     options: SshArgOptions<'_>,
 ) -> Vec<String> {
     let mut args = Vec::new();
@@ -107,18 +103,7 @@ fn client_connection_args(
         push_option(&mut args, "StrictHostKeyChecking=no");
     }
 
-    // Connection multiplexing is enabled only when a managed session exists,
-    // and `SshClient::from_server` populates one only for
-    // `ServerAuthMode::KeyPlusPasswordControlmaster`. So multiplexing is coupled
-    // to a password-recovery auth mode rather than to connection reuse: an
-    // ordinary key-authenticated server gets no `ControlPath` and every command
-    // pays a full connect plus key exchange. That is why 55 concurrent probe
-    // connections reached one Lab runner despite this block existing (#11080).
-    // Probe volume is bounded at the source in
-    // `homeboy_lab_runner::runner_probe_gate`; decoupling multiplexing from the
-    // auth mode is a separate change with its own blast radius (control-socket
-    // lifetime, forwarding, interactive sessions).
-    if let Some(session) = auth {
+    if let Some(session) = session {
         // A managed session is established explicitly by `server connect`. Command
         // clients attach to that socket rather than starting a competing master.
         // `-o ControlPath` is understood by both ssh and scp; scp's `-S` means

@@ -676,6 +676,32 @@ fn managed_session_config_adds_controlmaster_args() {
 }
 
 #[test]
+fn key_authenticated_session_adds_controlmaster_args_without_password_mode() {
+    let server: Server = serde_json::from_str(
+        r#"{
+            "host":"runner.example.test",
+            "user":"runner",
+            "auth":{
+                "mode":"key_controlmaster",
+                "control_path":"/tmp/homeboy-key-%h-%p-%r",
+                "persist":"8h"
+            }
+        }"#,
+    )
+    .expect("key session server");
+
+    let client = SshClient::from_server(&server, "runner").expect("client");
+    let args = client.build_ssh_args(Some("true"), false);
+
+    assert!(args.contains(&"ControlPath=/tmp/homeboy-key-%h-%p-%r".to_string()));
+    assert!(args.contains(&"ControlMaster=no".to_string()));
+    assert_eq!(
+        client.auth.as_ref().map(|session| session.persist.as_str()),
+        Some("8h")
+    );
+}
+
+#[test]
 fn managed_session_connect_builds_master_command() {
     let client = SshClient {
         host: "bastion.example.test".to_string(),
@@ -815,7 +841,7 @@ fn test_from_server() {
     assert_eq!(client.host, "localhost");
     assert_eq!(client.user, "tester");
     assert_eq!(
-        client.auth.as_ref().map(|auth| auth.persist.as_str()),
+        client.auth.as_ref().map(|session| session.persist.as_str()),
         Some("5m")
     );
 }
