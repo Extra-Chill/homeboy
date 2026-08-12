@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.341.2] - 2026-08-12
+
+### Changed
+- serialize Cargo fixture environment
+- retrigger candidate checks
+- format after main merge
+
+### Fixed
+- recognize zombie descendants as exited
+- reject malformed provider declarations without the agent-task layer
+- infer quiet Cargo selection
+- restore fixture Cargo home
+- evidence exact Cargo gate selection
+
 ## [0.341.1] - 2026-08-12
 
 ### Fixed
