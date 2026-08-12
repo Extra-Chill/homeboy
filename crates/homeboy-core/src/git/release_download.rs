@@ -817,25 +817,46 @@ fn is_mutable_dependency_spec(spec: &str) -> bool {
 /// Resolves the repository's remote (preferring `origin`, falling back to a sole
 /// configured remote) and runs `git remote get-url <remote>` in the directory.
 pub fn detect_remote_url(repo_path: &Path) -> Option<String> {
-    let remote = crate::git::resolve_default_remote(repo_path);
-    let output = std::process::Command::new("git")
-        .args(["remote", "get-url", &remote])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
+    detect_remote_url_within(repo_path, crate::git::DEFAULT_GIT_READ_PROBE_TIMEOUT).resolved()
+}
 
-    if output.status.success() {
-        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !url.is_empty() {
-            return Some(url);
-        }
+/// Detect a repository remote within a fixed metadata-read budget.
+///
+/// The typed timeout outcome lets discovery callers degrade without leaving a
+/// Cook admission blocked behind a stale checkout or credential helper.
+pub fn detect_remote_url_within(
+    repo_path: &Path,
+    timeout: std::time::Duration,
+) -> crate::git::BoundedGitRead {
+    let started = std::time::Instant::now();
+    let remotes = match crate::git::output_optional_within(repo_path, &["remote"], timeout) {
+        crate::git::BoundedGitRead::Resolved(remotes) => remotes,
+        outcome => return outcome,
+    };
+    let remotes = remotes
+        .lines()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty())
+        .collect::<Vec<_>>();
+    let remote = if remotes.iter().any(|remote| *remote == "origin") {
+        "origin"
+    } else if let [remote] = remotes.as_slice() {
+        remote
+    } else {
+        "origin"
+    };
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return crate::git::BoundedGitRead::TimedOut;
     }
-    None
+    crate::git::output_optional_within(repo_path, &["remote", "get-url", remote], remaining)
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     // Hashed independently of the shared primitive so this stays a real
     // cross-check on the digest the downloader records.
@@ -844,6 +865,65 @@ mod tests {
     use crate::component::GithubHostConfig;
 
     use super::*;
+
+    #[test]
+    fn remote_detection_enriches_a_live_portable_checkout() {
+        let repo = tempfile::tempdir().expect("repo directory");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/portable.git",
+        ]);
+
+        assert_eq!(
+            detect_remote_url_within(repo.path(), std::time::Duration::from_secs(1)),
+            crate::git::BoundedGitRead::Resolved(
+                "https://github.com/example/portable.git".to_string()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_detection_times_out_with_typed_evidence() {
+        let repo = tempfile::tempdir().expect("repo directory");
+        let bin = tempfile::tempdir().expect("fake git bin");
+        let git = bin.path().join("git");
+        std::fs::write(&git, "#!/bin/sh\nsleep 30\n").expect("write fake git");
+        let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                previous_path.as_deref().unwrap_or_default().to_string_lossy()
+            ),
+        );
+
+        let started = std::time::Instant::now();
+        let result =
+            detect_remote_url_within(repo.path(), std::time::Duration::from_millis(200));
+        match previous_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert_eq!(result, crate::git::BoundedGitRead::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
 
     #[test]
     fn parse_github_url_https() {

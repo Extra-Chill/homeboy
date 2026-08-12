@@ -1094,9 +1094,7 @@ fn bind_cook_repository_identity_from_config(
     let Some(repo) = args.dispatch.repo.as_deref() else {
         return Ok(());
     };
-    let component = homeboy::core::component::registered()?
-        .into_iter()
-        .find(|component| component.id == repo);
+    let component = homeboy::core::component::registered_by_id(repo)?;
     args.repository_identity = Some(
         match component
             .as_ref()

@@ -125,6 +125,73 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let target = tempfile::tempdir().expect("target checkout");
+        register_component(
+            "target",
+            target.path(),
+            "https://github.com/example/target.git",
+        );
+        std::fs::write(target.path().join("homeboy.json"), r#"{"id":"target"}"#)
+            .expect("write portable config");
+        let stale = tempfile::tempdir().expect("stale checkout");
+        std::fs::write(stale.path().join("homeboy.json"), r#"{"id":"stale"}"#)
+            .expect("write portable config");
+        register_component(
+            "stale",
+            stale.path(),
+            "https://github.com/example/stale.git",
+        );
+
+        let bin = tempfile::tempdir().expect("fake git bin");
+        let git = bin.path().join("git");
+        std::fs::write(&git, "#!/bin/sh\nsleep 30\n").expect("write fake git");
+        let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                previous_path.as_deref().unwrap_or_default().to_string_lossy()
+            ),
+        );
+
+        let started = std::time::Instant::now();
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "targeted lookup".to_string(),
+            "--repo".to_string(),
+            "target".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("explicit repo must not inspect unrelated registrations");
+        match previous_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "unrelated portable checkout was probed"
+        );
+        assert_eq!(
+            args.repository_identity.expect("identity")["remote_identity"],
+            "git://github.com/example/target"
+        );
+    });
+}
+
 #[test]
 fn cook_infers_repo_from_an_explicit_git_workspace_and_persists_its_provenance() {
     with_isolated_home(|_| {
