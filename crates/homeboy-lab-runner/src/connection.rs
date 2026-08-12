@@ -2728,6 +2728,17 @@ pub(crate) fn probe_verified_direct_daemon_jobs(
     runner_jobs(runner_id, session)
 }
 
+/// Re-probe the typed health endpoint before a one-operation admission relies
+/// on a connect result that status has not yet projected as live.
+pub(crate) fn probe_verified_direct_daemon_health(
+    local_url: &str,
+) -> std::result::Result<connection_daemon::DaemonHealthReport, String> {
+    connection_daemon::daemon_health_report_with_timeout(
+        local_url,
+        crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
 fn runner_jobs_with_client(
     runner_id: &str,
     session: &RunnerSession,

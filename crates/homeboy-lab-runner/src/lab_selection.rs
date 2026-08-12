@@ -826,6 +826,47 @@ pub(super) fn authoritative_status_for_preflight(
             None,
         ));
     }
+    let local_url = verified_loopback_local_url(session, connect_authority)?;
+    let health =
+        crate::connection::probe_verified_direct_daemon_health(&local_url).map_err(|error| {
+            Error::validation_invalid_argument(
+                "runner",
+                format!("verified runner daemon health probe failed: {error}"),
+                Some(connect_authority.runner_id.clone()),
+                None,
+            )
+        })?;
+    let health_identity_matches = health.build_identity.as_deref().is_none_or(|identity| {
+        [
+            session.homeboy_build_identity.as_deref(),
+            connect_authority.homeboy_build_identity.as_deref(),
+            status
+                .daemon_freshness
+                .as_ref()
+                .and_then(|freshness| freshness.daemon_build_identity.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|expected| expected == identity)
+    });
+    if !health.freshness.fresh
+        || health
+            .pid
+            .is_some_and(|pid| Some(pid) != connect_authority.remote_daemon_pid)
+        || health
+            .freshness
+            .lease_id
+            .as_deref()
+            .is_some_and(|lease_id| Some(lease_id) != session.remote_daemon_lease_id.as_deref())
+        || !health_identity_matches
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "verified runner daemon health did not match the connected session",
+            Some(connect_authority.runner_id.clone()),
+            None,
+        ));
+    }
     let (active_jobs, stale_jobs) = crate::connection::probe_verified_direct_daemon_jobs(
         &connect_authority.runner_id,
         session,
@@ -857,6 +898,48 @@ pub(super) fn authoritative_status_for_preflight(
     status.active_job_source = Some(RunnerActiveJobSource::DirectDaemon);
     status.active_job_error = None;
     Ok(status)
+}
+
+fn verified_loopback_local_url(
+    session: &super::RunnerSession,
+    connect_authority: &RunnerConnectReport,
+) -> Result<String> {
+    let local_url = session.local_url.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "verified runner connect has no local daemon URL",
+            Some(connect_authority.runner_id.clone()),
+            None,
+        )
+    })?;
+    let parsed = reqwest::Url::parse(local_url).map_err(|_| {
+        Error::validation_invalid_argument(
+            "runner",
+            "verified runner connect has an invalid local daemon URL",
+            Some(connect_authority.runner_id.clone()),
+            None,
+        )
+    })?;
+    let host = parsed
+        .host_str()
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok());
+    if parsed.scheme() != "http"
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !host.is_some_and(|host| host.is_loopback())
+        || parsed.port_or_known_default() != session.local_port
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "verified runner connect local daemon URL is not a matching loopback endpoint",
+            Some(connect_authority.runner_id.clone()),
+            None,
+        ));
+    }
+    Ok(local_url.to_string())
 }
 
 pub(super) fn fail_if_no_default_runner_accepts_jobs(command: &LabOffloadCommand) -> Result<()> {

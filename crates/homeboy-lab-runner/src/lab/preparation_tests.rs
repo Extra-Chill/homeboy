@@ -117,15 +117,30 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
     let listener = TcpListener::bind("127.0.0.1:0").expect("daemon listener");
     let address = listener.local_addr().expect("daemon address");
     let daemon = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("typed job request");
-        let mut request = [0; 4096];
-        let length = stream.read(&mut request).expect("read request");
-        assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /jobs HTTP/1.1"));
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"success\":true,\"data\":{\"body\":{\"active_runner_jobs\":[],\"stale_runner_jobs\":[]}}}",
-            )
-            .expect("typed job response");
+        for (path, body) in [
+            (
+                "/health",
+                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759}"#,
+            ),
+            (
+                "/jobs",
+                r#"{"success":true,"data":{"body":{"active_runner_jobs":[],"stale_runner_jobs":[]}}}"#,
+            ),
+        ] {
+            let (mut stream, _) = listener.accept().expect("daemon request");
+            let mut request = [0; 4096];
+            let length = stream.read(&mut request).expect("read request");
+            assert!(String::from_utf8_lossy(&request[..length])
+                .starts_with(&format!("GET {path} HTTP/1.1")));
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
+                    )
+                    .as_bytes(),
+                )
+                .expect("daemon response");
+        }
     });
     let mut stale_projection = connected_reverse_status("lab", None);
     stale_projection.connected = false;
@@ -136,6 +151,7 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
     ));
     let session = stale_projection.session.as_mut().expect("direct session");
     session.tunnel_pid = Some(22420);
+    session.local_port = Some(address.port());
     session.remote_daemon_pid = Some(1467759);
     session.remote_daemon_lease_id = Some("lease-fresh".to_string());
     stale_projection.daemon_freshness = Some(DaemonFreshnessReport {
@@ -189,6 +205,73 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         admitted.session.expect("session").local_url.as_deref(),
         Some(format!("http://{address}").as_str())
     );
+}
+
+#[test]
+fn stale_disconnected_projection_rejects_mismatched_typed_health() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("daemon listener");
+    let address = listener.local_addr().expect("daemon address");
+    let daemon = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("health request");
+        let mut request = [0; 4096];
+        let length = stream.read(&mut request).expect("read request");
+        assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /health HTTP/1.1"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"freshness\":{\"fresh\":true,\"stale_reason_code\":null,\"restartable\":false,\"lease_id\":\"lease-other\",\"pid\":1467759,\"recovery_evidence\":null,\"ownership_evidence\":null,\"adoption_command\":null,\"binary_hash\":null,\"daemon_version\":null,\"daemon_build_identity\":null,\"runtime_paths\":null,\"active_jobs\":0,\"termination_evidence\":null,\"repair_plan\":[]},\"pid\":1467759}")
+            .expect("health response");
+    });
+    let mut status = connected_reverse_status("lab", None);
+    status.connected = false;
+    status.state = super::super::RunnerSessionState::Disconnected;
+    status.session = Some(connected_direct_session(
+        "lab",
+        Some(&format!("http://{address}")),
+    ));
+    let session = status.session.as_mut().expect("session");
+    session.local_port = Some(address.port());
+    session.tunnel_pid = Some(22420);
+    session.remote_daemon_pid = Some(1467759);
+    session.remote_daemon_lease_id = Some("lease-fresh".to_string());
+    status.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        restartable: false,
+        lease_id: Some("lease-fresh".to_string()),
+        pid: Some(1467759),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    let mut connect = connected_direct_connect_report("lab");
+    connect.local_url = Some(format!("http://{address}"));
+    connect.tunnel_pid = Some(22420);
+    connect.remote_daemon_pid = Some(1467759);
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+
+    let error = preflight_lab_runner_availability_from_status(
+        &selection,
+        |_| Ok(status.clone()),
+        Some(1),
+        Some(&connect),
+    )
+    .expect_err("mismatched health is rejected");
+
+    daemon.join().expect("daemon");
+    assert!(error.message.contains("health did not match"));
 }
 
 #[test]

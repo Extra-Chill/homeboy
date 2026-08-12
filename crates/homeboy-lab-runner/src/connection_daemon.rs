@@ -28,9 +28,10 @@ struct DaemonVersionResponse {
 }
 
 #[derive(Debug)]
-struct DaemonHealthReport {
-    freshness: DaemonFreshnessReport,
-    pid: Option<u32>,
+pub(crate) struct DaemonHealthReport {
+    pub(crate) freshness: DaemonFreshnessReport,
+    pub(crate) pid: Option<u32>,
+    pub(crate) build_identity: Option<String>,
 }
 
 pub(super) struct RemoteDaemonConnectRequest<'a> {
@@ -480,7 +481,7 @@ fn daemon_health_report(local_url: &str) -> std::result::Result<DaemonHealthRepo
     daemon_health_report_with_timeout(local_url, Duration::from_secs(2))
 }
 
-fn daemon_health_report_with_timeout(
+pub(crate) fn daemon_health_report_with_timeout(
     local_url: &str,
     timeout: Duration,
 ) -> std::result::Result<DaemonHealthReport, String> {
@@ -494,6 +495,7 @@ fn daemon_health_report_with_timeout(
     Ok(DaemonHealthReport {
         freshness,
         pid: daemon_pid_from_body(&response.body),
+        build_identity: daemon_identity_from_body(&response.body).map(str::to_string),
     })
 }
 
@@ -737,6 +739,7 @@ mod tests {
                 repair_plan: Vec::new(),
             },
             pid: Some(pid),
+            build_identity: None,
         }
     }
 
