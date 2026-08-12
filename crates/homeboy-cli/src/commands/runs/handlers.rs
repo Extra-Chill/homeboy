@@ -683,8 +683,7 @@ fn active_runner_job_run_summary_if_durable(
 
 pub fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_readonly()?;
-    let run = runs_service::require_run(&store, run_id)?;
-    let run = run_detail(&store, run)?;
+    let run = run_detail(&store, run_id)?;
     let actionable = actionable_for_run_detail(&run);
     Ok((
         RunsOutput::Show(RunsShowOutput {
@@ -1504,9 +1503,9 @@ pub(super) fn require_run(
 
 pub(super) fn run_detail(
     store: &ObservationStore,
-    run: RunRecord,
+    run_id: &str,
 ) -> homeboy::core::Result<RunDetail> {
-    let artifacts = runs_service::enrich_artifact_links(store.list_artifacts(&run.id)?);
+    let (run, artifacts) = runs_service::load_run_with_artifacts(store, run_id)?;
     Ok(RunDetail {
         summary: run_summary(run.clone()),
         homeboy_version: run.homeboy_version,

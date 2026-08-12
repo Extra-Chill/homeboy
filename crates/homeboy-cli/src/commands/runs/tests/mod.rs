@@ -815,6 +815,33 @@ fn runs_dossier_aggregates_failure_env_refs_artifacts_and_commands() {
 }
 
 #[test]
+fn runs_dossier_loads_artifacts_for_a_durable_run_label() {
+    with_isolated_home(|_home| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("agent-task")
+                    .metadata(serde_json::json!({"run_id": "dossier-label"}))
+                    .build(),
+            )
+            .expect("run");
+        store
+            .record_url_artifact(&run.id, "report", "https://example.test/report")
+            .expect("artifact");
+        drop(store);
+
+        let (output, _) = runs_dossier("dossier-label").expect("dossier by durable label");
+        let RunsOutput::Dossier(output) = output else {
+            panic!("expected dossier output");
+        };
+
+        assert_eq!(output.run_id, run.id);
+        assert_eq!(output.artifacts.count, 1);
+        assert_eq!(output.artifacts.artifacts[0].kind, "report");
+    });
+}
+
+#[test]
 fn run_show_reads_owned_dead_running_run_without_mutating_it() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();

@@ -245,6 +245,36 @@ fn list_artifacts_for_run_enriches_url_artifact_links() {
 }
 
 #[test]
+fn load_run_with_artifacts_uses_the_resolved_canonical_run_id() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("bench")
+                    .component_id("homeboy")
+                    .metadata(serde_json::json!({"run_id": "durable-label"}))
+                    .build(),
+            )
+            .expect("run");
+        store
+            .record_url_artifact(&run.id, "frontend_url", "https://example.test/")
+            .expect("record URL artifact");
+
+        let (resolved, artifacts) =
+            load_run_with_artifacts(&store, "durable-label").expect("resolved run and artifacts");
+
+        assert_eq!(resolved.id, run.id);
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].run_id, run.id);
+        assert_eq!(
+            artifacts[0].public_url.as_deref(),
+            Some("https://example.test/")
+        );
+    });
+}
+
+#[test]
 fn resolve_artifact_for_run_rejects_unknown_artifact_id() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();

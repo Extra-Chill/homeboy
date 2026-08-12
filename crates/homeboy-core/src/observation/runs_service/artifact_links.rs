@@ -105,9 +105,17 @@ pub fn list_artifacts_for_run(
     store: &ObservationStore,
     run_id: &str,
 ) -> Result<Vec<ArtifactRecord>> {
+    load_run_with_artifacts(store, run_id).map(|(_, artifacts)| artifacts)
+}
+
+/// Resolve a run reference and load its enriched artifacts by canonical ID.
+pub fn load_run_with_artifacts(
+    store: &ObservationStore,
+    run_id: &str,
+) -> Result<(RunRecord, Vec<ArtifactRecord>)> {
     let run = require_run(store, run_id)?;
     let artifacts = store.list_artifacts(&run.id)?;
-    Ok(enrich_artifact_links(artifacts))
+    Ok((run, enrich_artifact_links(artifacts)))
 }
 
 #[cfg(test)]
