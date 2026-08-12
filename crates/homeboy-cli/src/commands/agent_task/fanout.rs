@@ -5222,7 +5222,7 @@ fi
             args.branch_prefix = "dry-run-plan-test".to_string();
             let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
 
-			assert_eq!(exit_code, 0, "{value}");
+            assert_eq!(exit_code, 0, "{value}");
             assert_eq!(value["schema"], "homeboy/agent-task-cook-batch/v1");
             assert_eq!(value["status"], "ready");
             assert_eq!(value["summary"]["issues"], 2);
