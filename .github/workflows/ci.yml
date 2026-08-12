@@ -222,13 +222,16 @@ jobs:
     name: homeboy
     needs: [pr-state, ci-capacity-admission]
     if: ${{ needs.pr-state.outputs.active == 'true' }}
-    # v2.11.21, dereferenced to its commit: `v2.11.21` is an annotated tag, so the
-    # tag ref's own object SHA (a6ff2f5d) is the tag object, which `uses:` cannot
-    # resolve — pin `git rev-parse v2.11.21^{commit}` instead.
-    # Includes the jq-portable exact shard partitioning fix from homeboy-action#372,
-    # and homeboy-action#376, which stops the `Test` reconciliation job from
-    # publishing a cancelled run as a red verdict (#10997).
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@82033fe633d680c696b27421755e56eae8b4af4b
+    # v2.11.22, DEREFERENCED to its commit. These tags are annotated, so the tag
+    # ref's own object SHA is a tag object, which `uses:` cannot resolve — pinning
+    # one fails the whole workflow at startup with zero jobs scheduled (#12153).
+    # Always pin `git rev-parse v<tag>^{commit}`.
+    #
+    # Carries homeboy-action#372 (jq-portable exact shard partitioning),
+    # homeboy-action#376 (a cancelled run no longer publishes a red `Test`
+    # verdict), and homeboy-action#377 (the unreachable sharded baseline phase is
+    # removed, closing a latent no-enforcement green). All refs #10997.
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@5e028c09159f574c8e0d9b6fa229530a13926317
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
