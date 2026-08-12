@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.341.1] - 2026-08-12
+
+### Fixed
+- restore scoped GitHub attribution
+- preserve safe Rust cache symlinks
+- never suggest an unrunnable extension recovery command
+
 ## [0.341.0] - 2026-08-12
 
 ### Changed
