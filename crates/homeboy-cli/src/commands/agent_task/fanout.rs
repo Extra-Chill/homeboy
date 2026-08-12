@@ -1133,7 +1133,9 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
     attempt_dispatcher: &CookAttemptDispatcherFactory,
 ) -> CmdResult<Value> {
     persist_fanout_run_batch_record(&plan)?;
-    persist_batch_cook_recipes(&plan)?;
+    persist_batch_cook_recipes(&plan, |options| {
+        options.attempt_dispatcher = Some(attempt_dispatcher(options));
+    })?;
     let ready_plan = plan.ready_plan()?;
     let cooks = compile_batch_cooks(&ready_plan, |options| {
         options.attempt_dispatcher = Some(attempt_dispatcher(options));
@@ -1174,7 +1176,7 @@ where
     E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
 {
     persist_fanout_run_batch_record(&plan)?;
-    persist_batch_cook_recipes(&plan)?;
+    persist_batch_cook_recipes(&plan, |_| {})?;
     let ready_plan = plan.ready_plan()?;
     let cooks = compile_batch_cooks(&ready_plan, |_| {})?;
     let concurrency = batch_concurrency(&plan, &cooks);
@@ -1268,8 +1270,11 @@ fn notify_batch_wave_complete(
 /// Recipes are the durable restart boundary. Persist blocked dependents before
 /// dispatching any sibling so a later merge can release them through `resume`
 /// without reconstructing mutable operator input or re-planning a branch.
-fn persist_batch_cook_recipes(plan: &BatchCookFanoutPlan) -> Result<()> {
-    for options in compile_batch_cooks(plan, |_| {})? {
+fn persist_batch_cook_recipes(
+    plan: &BatchCookFanoutPlan,
+    configure: impl Fn(&mut AgentTaskCookServiceOptions),
+) -> Result<()> {
+    for options in compile_batch_cooks(plan, configure)? {
         agent_task_service::persist_initial_recipe(&options)?;
     }
     Ok(())
@@ -1507,6 +1512,9 @@ fn cook_batch_inner(
     // remains a pre-execution failure, while child failures retain their durable
     // evidence and produce the same nonzero result at every CLI boundary.
     let exit_code = cook_batch_outer_exit_code(blocked, &run_result);
+    let resume_legal = run_result
+        .as_ref()
+        .is_some_and(|result| batch_resume_is_legal(&result["result"]));
 
     Ok((
         serde_json::json!({
@@ -1536,6 +1544,7 @@ fn cook_batch_inner(
                 &plan.fanout_id,
                 status,
                 run_result.is_some(),
+                resume_legal,
                 &worktrees,
             ),
         }),
@@ -3126,6 +3135,7 @@ fn cook_batch_next_actions(
     fanout_id: &str,
     status: &str,
     executed: bool,
+    resume_legal: bool,
     worktrees: &worktree::WorktreeQueueCreateOutput,
 ) -> Vec<CommandNextAction> {
     let blocked_rows = worktrees
@@ -3182,7 +3192,7 @@ fn cook_batch_next_actions(
         // Resume idempotently harvests children that stopped short of
         // finalization. A batch that already succeeded has nothing to harvest,
         // so offering it there would be noise rather than an action.
-        if status != "succeeded" {
+        if status != "succeeded" && resume_legal {
             actions.push(
                 CommandNextAction::new(
                     "resume children that stopped short of finalization",
@@ -3200,6 +3210,32 @@ fn cook_batch_next_actions(
         CommandNextAction::new("execute this cook-batch", cook_batch_run_command(args))
             .with_kind(CommandNextActionKind::Repair),
     ]
+}
+
+/// A batch resume is legal only when every incomplete child explicitly permits
+/// recovery. The batch aggregate alone cannot establish that: a recipe-only
+/// child can be terminal while having no lifecycle record to resume.
+fn batch_resume_is_legal(result: &Value) -> bool {
+    let Some(cooks) = result.get("cooks").and_then(Value::as_array) else {
+        return false;
+    };
+    let incomplete = cooks
+        .iter()
+        .filter(|cook| {
+            let status = cook
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            !homeboy::core::run_lifecycle_status::RunLifecycleStatus::from(
+                &homeboy::core::cook_status::CookStatus::from_status(status),
+            )
+            .is_success()
+        })
+        .collect::<Vec<_>>();
+    !incomplete.is_empty()
+        && incomplete.iter().all(|cook| {
+            cook.pointer("/result/failure_context/recovery_legal") == Some(&Value::Bool(true))
+        })
 }
 
 fn trim_slashes(value: &str) -> String {
@@ -3363,6 +3399,40 @@ mod tests {
             &args(),
         )
         .expect("test batch plan")
+    }
+
+    #[derive(Debug)]
+    struct LabRecipeDispatcher;
+
+    impl homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher for LabRecipeDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(json!({
+                "kind": "lab",
+                "runner_id": "test-lab",
+                "execution_placement_decision": {},
+                "allow_local_fallback": true,
+                "allow_dirty_lab_workspace": false,
+                "skip_deps_hydration": false,
+                "detach_after_handoff": false,
+                "source_path": null,
+                "job_overrides": {
+                    "env": {},
+                    "secret_env_names": [],
+                    "workspace_root": null,
+                },
+            }))
+        }
+
+        fn dispatch_attempt(
+            &self,
+            _plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+            _run_id: &str,
+            _derived_cook_baseline: Option<
+                &homeboy::agents::agent_task_service::DerivedCookBaselineCapability,
+            >,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -4451,7 +4521,7 @@ fi
             let mut loaded =
                 BatchCookFanoutPlan::from_value(serialized, &args()).expect("load persisted plan");
             loaded.apply_ai_tool_override(Some("OpenAI GPT-5.6 Terra via OpenCode"));
-            persist_batch_cook_recipes(&loaded).expect("persist child recipes");
+            persist_batch_cook_recipes(&loaded, |_| {}).expect("persist child recipes");
             for cook in &loaded.cooks {
                 let invocation = cook.to_cook_invocation(&loaded).expect("cook invocation");
                 assert_eq!(
@@ -4772,6 +4842,72 @@ fi
     }
 
     #[test]
+    fn local_selected_fanout_recipes_remain_local_through_preflight() {
+        with_isolated_home(|_| {
+            let plan = test_batch_plan();
+
+            persist_batch_cook_recipes(&plan, |_| {}).expect("persist local child recipes");
+            preflight_batch_cook_recipes(&plan, None).expect("preflight local recipes");
+
+            for cook in &plan.cooks {
+                let recipe = agent_task_service::load_recipe(&cook.run_id()).expect("local recipe");
+                assert_eq!(
+                    recipe.promotion_transport["attempt_dispatch"]["kind"],
+                    "local"
+                );
+                assert!(
+                    crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
+                        &recipe.promotion_transport["attempt_dispatch"],
+                    )
+                    .expect("reconstruct local dispatcher")
+                    .is_none()
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn lab_or_local_fanout_recipes_preserve_the_dispatcher_used_for_execution() {
+        with_isolated_home(|_| {
+            let plan = test_batch_plan();
+            let dispatcher = |_: &AgentTaskCookServiceOptions| {
+                std::sync::Arc::new(LabRecipeDispatcher)
+                    as std::sync::Arc<
+                        dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher,
+                    >
+            };
+
+            persist_batch_cook_recipes(&plan, |options| {
+                options.attempt_dispatcher = Some(dispatcher(options));
+            })
+            .expect("persist Lab child recipes");
+            preflight_batch_cook_recipes(&plan, Some(&dispatcher))
+                .expect("preflight Lab recipes with their dispatcher");
+            let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile child options");
+
+            for (cook, options) in plan.cooks.iter().zip(&compiled) {
+                let recipe = agent_task_service::load_recipe(&cook.run_id()).expect("Lab recipe");
+                assert_eq!(
+                    recipe.promotion_transport["attempt_dispatch"]["kind"],
+                    "lab"
+                );
+                assert_eq!(
+                    recipe.promotion_transport["attempt_dispatch"]["allow_local_fallback"],
+                    true
+                );
+                assert!(
+                    agent_task_service::reconstruct_options_with_dispatcher(&recipe, None).is_err()
+                );
+                assert!(agent_task_service::reconstruct_options_with_dispatcher(
+                    &recipe,
+                    Some(dispatcher(options)),
+                )
+                .is_ok());
+            }
+        });
+    }
+
+    #[test]
     fn executing_batch_fails_early_for_a_backend_without_a_provider() {
         // #7717: an executing batch whose backend cannot be served by any
         // installed provider must fail early with an actionable configuration
@@ -5062,6 +5198,7 @@ fi
             "issue-wave",
             "blocked",
             false,
+            false,
             &worktrees,
         );
 
@@ -5103,6 +5240,7 @@ fi
             "issue-wave",
             "planned",
             false,
+            false,
             &worktrees,
         );
         assert_every_action_is_executable(&planned);
@@ -5119,6 +5257,7 @@ fi
             &cook_batch_args(),
             "issue-wave",
             "partial_failure",
+            true,
             true,
             &worktrees,
         );
@@ -5152,6 +5291,7 @@ fi
             "issue-wave",
             "succeeded",
             true,
+            false,
             &worktrees,
         );
 
@@ -5159,6 +5299,34 @@ fi
         assert!(!action_commands(&actions)
             .iter()
             .any(|command| command.contains("fanout resume")));
+    }
+
+    #[test]
+    fn batch_recovery_projection_requires_legal_recovery_for_every_incomplete_child() {
+        let mut result = json!({
+            "cooks": [
+                {
+                    "status": "review_ready",
+                    "result": {}
+                },
+                {
+                    "status": "failed",
+                    "result": {
+                        "failure_context": {
+                            "recovery_legal": true,
+                            "recovery_reason": "durable recipe and lifecycle record permit recovery"
+                        }
+                    }
+                }
+            ]
+        });
+        assert!(batch_resume_is_legal(&result));
+
+        result["cooks"][1]["result"]["failure_context"]["recovery_legal"] = json!(false);
+        assert!(!batch_resume_is_legal(&result));
+
+        result["cooks"][1]["result"]["failure_context"]["recovery_legal"] = json!(true);
+        assert!(batch_resume_is_legal(&result));
     }
 
     #[test]
