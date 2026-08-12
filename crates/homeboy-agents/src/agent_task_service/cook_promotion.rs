@@ -1332,6 +1332,14 @@ pub(crate) fn cook_finalization_options(
         })?;
     let mut review_dossier = cook_review_dossier(options, promotion, successful_run_id)?;
     review_dossier.overrides = overrides;
+    // A non-empty option is an explicit operator disclosure. Otherwise retain
+    // the validated review form's process statement as durable PR provenance.
+    let ai_used_for = if options.ai_used_for.trim().is_empty() {
+        review_dossier.ai_assistance.used_for.clone()
+    } else {
+        options.ai_used_for.clone()
+    };
+    review_dossier.ai_assistance.used_for = ai_used_for.clone();
     let targeted_checks_run = review_dossier
         .how_to_test
         .iter()
@@ -1387,7 +1395,7 @@ pub(crate) fn cook_finalization_options(
                 .ok()
                 .map(|record| record.lifecycle),
         },
-        ai_used_for: options.ai_used_for.clone(),
+        ai_used_for,
         review_dossier,
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: false,
@@ -2377,15 +2385,22 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
             )
         })?;
     let model = outcome.selected_model();
-    if let (Some(planned_model), Some(model)) = (task.executor.model(), model) {
-        if planned_model != model {
-            return Err(Error::validation_invalid_argument(
-                "provider_model",
-                "Cook lineage plan model conflicts with the concrete executed model",
-                Some(run_id.to_string()),
-                None,
-            ));
-        }
+    let requested_model = outcome.metadata["model_identity"]["requested"].as_str();
+    let resolved_model = outcome.metadata["model_identity"]["resolved"].as_str();
+    let provider_reported_model = outcome.metadata["model_identity"]["provider_reported"]
+        .as_str();
+    if model.is_none()
+        && provider_reported_model.is_none()
+        && requested_model.zip(resolved_model).is_some_and(|(requested, resolved)| {
+            requested != resolved
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            "provider_model",
+            "Cook lineage has unresolved requested and resolved model disagreement without a provider-reported executed model",
+            Some(run_id.to_string()),
+            None,
+        ));
     }
     if task.executor.backend.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -2913,6 +2928,7 @@ fn cook_failure_context(
             < recipe.retry_budget["max_attempts"]
                 .as_u64()
                 .unwrap_or_default(),
+        exact_checkpoint_candidate_mismatch(&diagnostic),
         record.as_ref().and_then(lab_handoff_runtime_recovery),
     );
     let promotion_provenance = promotion.cloned();
@@ -2957,6 +2973,7 @@ fn cook_recovery_actions(
     recovery_legal: bool,
     blocking_claim: bool,
     provider_retry_available: bool,
+    exact_checkpoint_candidate_mismatch: bool,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
 ) -> CookRecoveryActions {
     if !recovery_legal {
@@ -2993,7 +3010,15 @@ fn cook_recovery_actions(
             command: format!("homeboy agent-task reconcile {run_id} --dry-run"),
         });
     }
-    if continuation_eligible {
+    if exact_checkpoint_candidate_mismatch {
+        // The checkpoint authenticates one exact destination candidate. A
+        // replacement run preserves that immutable evidence without claiming it
+        // can safely continue against a diverged worktree.
+        actions.push(super::AgentTaskCookRecoveryAction {
+            action: "fork_replacement".to_string(),
+            command: format!("homeboy agent-task retry {run_id} --run"),
+        });
+    } else if continuation_eligible {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "resume".to_string(),
             command: format!("homeboy agent-task cook-continue {run_id}"),
@@ -3018,6 +3043,14 @@ fn cook_recovery_actions(
     }
 }
 
+fn exact_checkpoint_candidate_mismatch(diagnostic: &Option<Value>) -> bool {
+    diagnostic
+        .as_ref()
+        .and_then(|diagnostic| diagnostic.pointer("/details/recovery/action"))
+        .and_then(Value::as_str)
+        == Some("fork_replacement")
+}
+
 #[cfg(test)]
 mod recovery_action_tests {
     use super::*;
@@ -3025,32 +3058,41 @@ mod recovery_action_tests {
     #[test]
     fn recovery_actions_follow_the_cook_state_matrix() {
         let cases = [
-            ("gate_failed", true, vec!["status", "diagnose", "resume"]),
+            (
+                "gate_failed",
+                true,
+                false,
+                vec!["status", "diagnose", "resume"],
+            ),
             (
                 "execution_budget_exhausted",
+                false,
                 false,
                 vec!["status", "diagnose"],
             ),
             (
                 "verification_pending",
                 false,
+                false,
                 vec!["status", "diagnose", "resume"],
             ),
             (
                 "finalization_failed",
                 false,
+                false,
                 vec!["status", "diagnose", "resume"],
             ),
-            ("completed", false, vec!["status", "diagnose"]),
+            ("completed", false, false, vec!["status", "diagnose"]),
         ];
 
-        for (status, retry_available, expected) in cases {
+        for (status, retry_available, exact_checkpoint_candidate_mismatch, expected) in cases {
             let recovery = cook_recovery_actions(
                 status,
                 "cook-state-matrix-attempt-1",
                 true,
                 false,
                 retry_available,
+                exact_checkpoint_candidate_mismatch,
                 None,
             );
             let actions = recovery
@@ -3088,6 +3130,61 @@ mod recovery_action_tests {
                 )
             }));
         }
+    }
+
+    #[test]
+    fn exact_checkpoint_mismatch_offers_a_replacement_not_an_illegal_resume() {
+        let recovery = cook_recovery_actions(
+            "verification_pending",
+            "checkpoint-mismatch-attempt-1",
+            true,
+            false,
+            false,
+            true,
+            None,
+        );
+
+        let actions = |actions: &[super::super::AgentTaskCookRecoveryAction]| {
+            actions
+                .iter()
+                .map(|action| (action.action.clone(), action.command.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            actions(&recovery.legal_actions),
+            vec![
+                (
+                    "status".to_string(),
+                    "homeboy agent-task status checkpoint-mismatch-attempt-1 --full".to_string()
+                ),
+                (
+                    "diagnose".to_string(),
+                    "homeboy agent-task diagnose checkpoint-mismatch-attempt-1".to_string()
+                ),
+                (
+                    "fork_replacement".to_string(),
+                    "homeboy agent-task retry checkpoint-mismatch-attempt-1 --run".to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            actions(&recovery.next_actions),
+            actions(&recovery.legal_actions)
+        );
+    }
+
+    #[test]
+    fn exact_checkpoint_mismatch_matches_only_the_typed_recovery_action() {
+        assert!(exact_checkpoint_candidate_mismatch(&Some(
+            serde_json::json!({
+                "details": { "recovery": { "action": "fork_replacement" } },
+            })
+        )));
+        assert!(!exact_checkpoint_candidate_mismatch(&Some(
+            serde_json::json!({
+                "details": { "recovery": { "action": "resume" } },
+            })
+        )));
     }
 }
 

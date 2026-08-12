@@ -11,6 +11,30 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 #[test]
+fn provider_reported_model_is_retained_separately_from_requested_and_resolved_models() {
+    let mut request = request("task-1");
+    request.executor.model = Some("openai/gpt-5.6-terra".to_string());
+    request.metadata = json!({
+        "model_selection": { "requested": "openai/gpt-5.6-sol" }
+    });
+    let mut outcome = outcome("task-1".to_string(), AgentTaskOutcomeStatus::Succeeded);
+    outcome.metadata = json!({ "model": "openai/gpt-5.6-terra" });
+
+    crate::agent_task_scheduler::engine::persist_resolved_provider_model(&mut outcome, &request);
+
+    assert_eq!(outcome.selected_model(), Some("openai/gpt-5.6-terra"));
+    assert_eq!(
+        outcome.metadata["model_identity"],
+        json!({
+            "requested": "openai/gpt-5.6-sol",
+            "resolved": "openai/gpt-5.6-terra",
+            "provider_reported": "openai/gpt-5.6-terra",
+            "actual": "openai/gpt-5.6-terra",
+        })
+    );
+}
+
+#[test]
 fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {
     let scheduler = AgentTaskScheduler::new(NestedFailedStatusExecutor);
 

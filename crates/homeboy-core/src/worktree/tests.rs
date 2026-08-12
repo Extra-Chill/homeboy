@@ -1529,27 +1529,60 @@ fn queue_options() -> WorktreeQueueCreateOptions {
 
 #[test]
 fn queue_create_dry_run_returns_queued_rows_with_exact_homeboy_commands() {
-    let output = queue_create(queue_options()).unwrap();
+    use crate::test_support::with_isolated_home;
 
-    assert_eq!(output.schema, "homeboy/worktree-queue-create/v1");
-    assert_eq!(output.rows.len(), 2);
-    assert_eq!(output.rows[0].status, WorktreeQueueCreateStatus::Queued);
-    assert_eq!(output.rows[0].handle, "homeboy@cook-one");
-    assert_eq!(
-        output.rows[0].command,
-        vec![
-            "homeboy",
-            "worktree",
-            "create",
-            "homeboy",
-            "--branch",
-            "cook/one",
-            "--from",
-            "origin/main",
-            "--task-url",
-            "https://github.com/Extra-Chill/homeboy/issues/5786",
-        ]
-    );
+    with_isolated_home(|home| {
+        let parent = home.path().join("Developer");
+        let source = parent.join("queue-fixture");
+        fs::create_dir_all(&source).unwrap();
+        run_git(&source, &["init", "-q"]);
+        run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+        run_git(&source, &["config", "user.name", "Homeboy Test"]);
+        fs::write(source.join("homeboy.json"), r#"{"id":"queue-fixture"}"#).unwrap();
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "initial"]);
+        write_component_registration(home.path(), "queue-fixture", &source);
+
+        let mut options = queue_options();
+        options.repo = "queue-fixture".to_string();
+        options.from = "HEAD".to_string();
+        let output = queue_create(options).unwrap();
+
+        assert_eq!(output.schema, "homeboy/worktree-queue-create/v1");
+        assert_eq!(output.rows.len(), 2);
+        assert_eq!(
+            output.rows[0].status,
+            WorktreeQueueCreateStatus::WouldCreate
+        );
+        assert_eq!(output.rows[0].handle, "queue-fixture@cook-one");
+        assert_eq!(
+            output.rows[0].path.as_deref(),
+            Some(
+                parent
+                    .canonicalize()
+                    .unwrap()
+                    .join("queue-fixture@cook-one")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            output.rows[0].command,
+            vec![
+                "homeboy",
+                "worktree",
+                "create",
+                "queue-fixture",
+                "--branch",
+                "cook/one",
+                "--from",
+                "HEAD",
+                "--task-url",
+                "https://github.com/Extra-Chill/homeboy/issues/5786",
+            ]
+        );
+        assert!(!parent.join("queue-fixture@cook-one").exists());
+    });
 }
 
 #[test]

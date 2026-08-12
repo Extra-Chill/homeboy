@@ -2,6 +2,40 @@ use super::common::request;
 use super::*;
 
 #[test]
+fn controller_owned_publication_is_reported_as_not_attempted() {
+    let (mut request, _) = request("controller-publication", "node provider.js".to_string());
+    request.controller_owns_publication();
+    let executor_request = AgentTaskExecutorRequest {
+        request,
+        artifacts_path: tempfile::tempdir().expect("artifacts").keep(),
+        artifacts_path_provenance: AgentTaskArtifactsPathProvenance {
+            owner: "homeboy".to_string(),
+            locality: "runner".to_string(),
+            plan_id: "plan".to_string(),
+            run_id: Some("run".to_string()),
+            task_id: "controller-publication".to_string(),
+            attempt: 1,
+        },
+        resolved_runtime_tools: Vec::new(),
+        artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&tempfile::tempdir().expect("identity artifacts").keep()).expect("artifact identity"),
+    };
+    let mut outcome = AgentTaskOutcome {
+        task_id: "controller-publication".to_string(),
+        status: AgentTaskOutcomeStatus::Succeeded,
+        ..Default::default()
+    };
+
+    super::command_runner::describe_controller_owned_publication(&executor_request, &mut outcome);
+
+    assert_eq!(
+        outcome.metadata["publication"],
+        json!({ "owner": "controller", "status": "not_attempted" })
+    );
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert!(outcome.failure_classification.is_none());
+}
+
+#[test]
 fn provider_runner_secret_env_contracts_are_applied_to_selected_plan_tasks() {
     let (mut request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
     request_a.executor.backend = "provider-a".to_string();

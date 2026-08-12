@@ -115,6 +115,10 @@ impl ManagedCargoTarget {
             owner: self.owner.clone(),
         }
     }
+
+    pub fn size_bytes(&self) -> Result<u64> {
+        path_size(&self.target_dir)
+    }
 }
 
 impl SharedCargoTargetLease {

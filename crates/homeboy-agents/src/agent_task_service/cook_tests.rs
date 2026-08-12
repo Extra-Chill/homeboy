@@ -2515,6 +2515,23 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     );
     assert!(request.instructions.contains("reviewer-facing PR dossier"));
     assert!(request.instructions.contains("A successful response"));
+    assert_eq!(
+        request.metadata["publication"],
+        serde_json::json!({
+            "capability": "unavailable",
+            "owner": "controller",
+            "status": "not_attempted"
+        })
+    );
+    assert!(request
+        .instructions
+        .contains("non-publishable attempt workspace"));
+    assert!(request
+        .instructions
+        .contains("do not push, create a pull request"));
+    assert!(request
+        .instructions
+        .contains("controller-owned publication"));
 
     project_initial_finalizing_review_form_contract(&mut options);
     assert_eq!(
@@ -9581,6 +9598,43 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
 }
 
 #[test]
+fn cook_finalization_adopts_validated_review_form_used_for_when_option_is_empty() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-empty-used-for-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(
+            "cook-empty-used-for",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.initial_run_id = run_id.to_string();
+        options.ai_used_for.clear();
+        let plan = options.initial_plan.clone();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::record_cook_attempt(&options.cook_id, 1, run_id).unwrap();
+        seed_review_form_aggregate(run_id, &plan);
+        let promotion = promotion_with_existing_path(run_id, target.path());
+
+        let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("finalization options");
+        assert_eq!(finalization.ai_used_for, test_review_form().used_for);
+        assert_eq!(
+            finalization.review_dossier.ai_assistance.used_for,
+            test_review_form().used_for
+        );
+
+        options.ai_used_for = "Operator-authored disclosure.".to_string();
+        let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("finalization options with override");
+        assert_eq!(finalization.ai_used_for, "Operator-authored disclosure.");
+        assert_eq!(
+            finalization.review_dossier.ai_assistance.used_for,
+            "Operator-authored disclosure."
+        );
+    });
+}
+
+#[test]
 fn manual_finalization_identity_resolves_cook_and_failed_attempt_or_reserves_fresh_id() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-11334";
@@ -11305,6 +11359,69 @@ fn recovery_context_uses_current_gate_and_finalization_evidence_not_an_older_can
         assert!(finalization_context.legal_actions.iter().all(|action| {
             action.command.contains(&current_run_id) && !action.command.contains(older_run_id)
         }));
+    });
+}
+
+#[test]
+fn exact_checkpoint_destination_mismatch_projects_a_fork_replacement_response() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-checkpoint-destination-mismatch";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .expect("persist lifecycle record");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, &options.initial_run_id)
+            .expect("index Cook attempt");
+        let operation_key = format!("promote:{}", options.initial_run_id);
+        agent_task_lifecycle::claim_cook_operation(
+            &options.initial_run_id,
+            &operation_key,
+            std::time::Duration::from_secs(60),
+        )
+        .expect("claim promotion");
+        agent_task_lifecycle::fail_cook_operation(
+            &options.initial_run_id,
+            &operation_key,
+            serde_json::json!({
+                "code": "ValidationInvalidArgument",
+                "details": {
+                    "field": "promotion",
+                    "recovery": { "action": "fork_replacement" },
+                },
+                "deepest_cause": {
+                    "code": "validation.invalid_argument",
+                    "field": "promotion",
+                    "message": "promotion resume target differs from the exact checkpointed applied candidate",
+                },
+            }),
+        )
+        .expect("persist exact checkpoint rejection");
+
+        let context = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "durable_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some(&options.initial_run_id),
+        })
+        .value
+        .failure_context
+        .expect("durable failure context");
+
+        assert_eq!(context.phase, "promotion");
+        assert!(context.legal_actions.iter().any(|action| {
+            action.action == "fork_replacement"
+                && action.command
+                    == format!("homeboy agent-task retry {} --run", options.initial_run_id)
+        }));
+        assert!(context
+            .legal_actions
+            .iter()
+            .chain(&context.next_actions)
+            .all(|action| action.action != "resume" && !action.command.contains("cook-continue")));
     });
 }
 

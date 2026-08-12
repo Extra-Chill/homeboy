@@ -697,6 +697,13 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     assert!(mismatch
         .message
         .contains("differs from the exact checkpointed"));
+    assert_eq!(
+        mismatch
+            .details
+            .pointer("/recovery/action")
+            .and_then(Value::as_str),
+        Some("fork_replacement")
+    );
 
     std::fs::write(worktree_path.join("extra.rs"), "extra\n").expect("add extra candidate file");
     let extra = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
@@ -704,6 +711,13 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     assert!(extra
         .message
         .contains("differs from the exact checkpointed"));
+    assert_eq!(
+        extra
+            .details
+            .pointer("/recovery/action")
+            .and_then(Value::as_str),
+        Some("fork_replacement")
+    );
 }
 
 #[test]
