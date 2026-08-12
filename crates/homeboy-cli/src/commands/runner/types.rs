@@ -29,6 +29,10 @@ pub struct RunnerExtra {
     pub managed_followups: Vec<LabFollowup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<RunnerConnectionOutput>,
+    /// Postcondition of a mutating generation reconciliation. This is distinct
+    /// from the command envelope: only `converged` restores runner admission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<RunnerReconciliationOutcome>,
     /// The compact authoritative "ready now / safe to rotate" answer. Leads the
     /// status output; the full generation inventory below is detail behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +73,7 @@ impl Default for RunnerExtra {
             selected_lab_runner: None,
             managed_followups: Vec::new(),
             connection: None,
+            reconciliation: None,
             admission_summary: None,
             inspection: None,
             sessions: Vec::new(),
@@ -82,6 +87,18 @@ impl Default for RunnerExtra {
             probe_degradations: Vec::new(),
         }
     }
+}
+
+/// Bounded postcondition for `runner reconcile`.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RunnerReconciliationOutcome {
+    /// `converged`, `partial_progress`, or `blocked`.
+    pub status: &'static str,
+    pub retired_generation_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_blocker: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
 }
 
 /// The bounded inspection state for a registry-wide status response.

@@ -17,9 +17,9 @@ use super::super::jobs::format_job_event;
 use super::super::status::{
     declared_executable_requirement_diagnostics, declared_run_followups,
     declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
-    lab_runner_homeboy_output, operator_summary, runner_artifact_feature_diagnostics,
-    runner_followups, runner_followups_with_admission, runner_status_operator_commands,
-    selected_admission_summary,
+    lab_runner_homeboy_output, operator_summary, reconciliation_outcome,
+    runner_artifact_feature_diagnostics, runner_followups, runner_followups_with_admission,
+    runner_status_operator_commands, selected_admission_summary,
 };
 use super::super::types::RunnerConnectionOutput;
 use crate::cli_surface::Cli;
@@ -48,6 +48,82 @@ fn runner_session_fixture() -> RunnerSession {
         last_seen_at: None,
         leaseless_recovery_evidence: None,
     }
+}
+
+fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
+    homeboy::runner::runners::RunnerAdmissionSummary {
+        runner_id: "homeboy-lab".to_string(),
+        connected: true,
+        daemon_fresh: true,
+        accepting_jobs: false,
+        active_job_count: 0,
+        live_daemon_job_count: 0,
+        retained_durable_job_count: 0,
+        unresolved_retained_projection_count: 0,
+        admission_blocking_job_ids: Vec::new(),
+        unresolved_job_owners: Vec::new(),
+        unresolved_generation_ids: Vec::new(),
+        stale_job_count: 0,
+        daemon_build_identity: None,
+        blocking_generation: None,
+        draining_generation_count: 0,
+        safe_to_rotate: false,
+        next_action: None,
+    }
+}
+
+#[test]
+fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownership() {
+    let mut admission = admission_fixture();
+    admission.daemon_fresh = false;
+    admission.blocking_generation = Some("lease-retained".to_string());
+    admission.admission_blocking_job_ids = vec!["job-retained".to_string()];
+    admission.next_action =
+        Some("homeboy runner refresh-homeboy homeboy-lab --reconnect".to_string());
+
+    let outcome = reconciliation_outcome("homeboy-lab", 3, 2, &admission);
+
+    assert_eq!(outcome.status, "partial_progress");
+    assert_eq!(outcome.retired_generation_count, 1);
+    assert_eq!(outcome.remaining_blocker, Some("daemon_version_skew"));
+    assert_eq!(
+        outcome.next_action.as_deref(),
+        Some("homeboy runner refresh-homeboy homeboy-lab --reconnect")
+    );
+}
+
+#[test]
+fn reconcile_reports_unchanged_blocked_state_without_self_recommendation() {
+    let mut admission = admission_fixture();
+    admission.unresolved_retained_projection_count = 1;
+    admission.next_action = Some("homeboy runner reconcile homeboy-lab".to_string());
+
+    let outcome = reconciliation_outcome("homeboy-lab", 2, 2, &admission);
+
+    assert_eq!(outcome.status, "blocked");
+    assert_eq!(outcome.retired_generation_count, 0);
+    assert_eq!(
+        outcome.remaining_blocker,
+        Some("unresolved_generation_projection")
+    );
+    assert_eq!(
+        outcome.next_action.as_deref(),
+        Some("homeboy runner status homeboy-lab --full")
+    );
+}
+
+#[test]
+fn reconcile_reports_ready_admission_as_converged() {
+    let mut admission = admission_fixture();
+    admission.accepting_jobs = true;
+    admission.safe_to_rotate = true;
+
+    let outcome = reconciliation_outcome("homeboy-lab", 1, 1, &admission);
+
+    assert_eq!(outcome.status, "converged");
+    assert_eq!(outcome.retired_generation_count, 0);
+    assert_eq!(outcome.remaining_blocker, None);
+    assert_eq!(outcome.next_action, None);
 }
 
 #[test]
