@@ -225,6 +225,11 @@ printf 'PASS: missing, mismatched, failed, and timed-out shards fail closed\n'
 
 grep -F 'needs: [reconcile, reconcile-test-shards, plan]' "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy does not wait for the sharded Test verdict and pinned plan\n'; exit 1; }
 grep -F "inputs.test-shards == '1' || needs.reconcile-test-shards.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy can bypass a failed sharded Test verdict\n'; exit 1; }
+# A FAILED upstream phase must still reach a verdict; a CANCELLED run must not.
+# Under always() the reconciliation job ran after cancellation, took the
+# inventory-failure branch, and failed on an artifact the cancelled plan job had
+# never uploaded — publishing a cancellation as a red Test check (homeboy#10997).
+grep -F '!cancelled() && needs.plan.outputs.test-shards-enabled' "${WORKFLOW}" >/dev/null || { printf 'FAIL: sharded Test reconciliation publishes a verdict for a cancelled run\n'; exit 1; }
 if [ "$(grep -c 'uses: taiki-e/install-action@nextest' "${WORKFLOW}")" -ne 4 ]; then
   printf 'FAIL: Rust candidate and baseline plan/replay jobs do not all install cargo-nextest\n'; exit 1
 fi
