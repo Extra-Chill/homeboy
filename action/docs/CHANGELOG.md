@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.23] - 2026-08-12
+
+### Changed
+- build sharded Rust tests once into a nextest archive
+
 ## [2.11.22] - 2026-08-12
 
 ### Changed
