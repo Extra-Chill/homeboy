@@ -1691,8 +1691,7 @@ fn upgrade_admission_keeps_an_unindexed_handoff_child_independent_with_executabl
         }));
         assert!(admission.blockers.iter().any(|blocker| {
             blocker.run_id == attempt_id
-                && blocker.recovery_command
-                    == format!("homeboy agent-task reconcile {attempt_id} --apply")
+                && blocker.recovery_command == format!("homeboy agent-task cancel {attempt_id}")
         }));
         assert!(agent_task_lifecycle::reconcile_record_health(true).is_ok());
     });
