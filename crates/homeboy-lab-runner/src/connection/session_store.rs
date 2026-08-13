@@ -1,8 +1,10 @@
 use super::*;
 use crate::session::RunnerConnectFailureEvidence;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use homeboy_core::error::{ActionSafety, ExecutableAction};
+use serde::Serialize;
 pub(super) fn session_is_live(session: &RunnerSession) -> bool {
     session_is_live_with_timeout(session, Duration::from_secs(2))
 }
@@ -307,6 +309,11 @@ pub(super) fn read_session_for_status_until(
 }
 
 fn record_partial_peer_projection(runner_id: &str, reason_code: &'static str, detail: String) {
+    // This scan declined to select a peer, so status must not recommend another
+    // status projection or a reconnect that could replace a live daemon. Peer
+    // maintenance pages every persisted record and removes only proven-dead
+    // snapshots, allowing a stale inventory to converge safely.
+    let follow_up_action = peer_session_maintenance_action(runner_id, None, false);
     crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
         probe: "runner_peer_session".to_string(),
         runner_id: Some(runner_id.to_string()),
@@ -314,9 +321,10 @@ fn record_partial_peer_projection(runner_id: &str, reason_code: &'static str, de
         timeout_seconds: 0,
         elapsed_ms: 0,
         deadline_ms: 0,
-        follow_up: crate::readonly_probe::runner_status_follow_up(Some(runner_id)),
+        follow_up: follow_up_action.render_command(),
+        follow_up_action: Some(follow_up_action),
         detail: format!(
-            "{detail}; status is partial. Run `homeboy runner connect {runner_id}` to re-establish and validate the authoritative session."
+            "{detail}; status is partial. Inspect bounded runner evidence before changing any session state."
         ),
     });
 }
@@ -333,6 +341,269 @@ enum StatusPeerSession {
 /// shared state and never an admission scan.
 const STATUS_PEER_SESSION_LIMIT: usize = 8;
 const STATUS_PEER_SESSION_TIMEOUT: Duration = Duration::from_secs(1);
+const PEER_SESSION_MAINTENANCE_LIMIT: usize = 100;
+
+/// One bounded page of persisted peer-session maintenance.
+///
+/// A session is removed only after a liveness probe proves its local tunnel is
+/// dead and its durable snapshot still exactly matches the inspected record.
+/// Live records, including peers with conflicting daemon identities, remain in
+/// place for their controllers to manage.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PeerSessionMaintenanceReport {
+    pub runner_id: String,
+    pub applied: bool,
+    pub inspected: usize,
+    pub removed: usize,
+    pub removable: usize,
+    pub retained_live: usize,
+    pub retained_unproven: usize,
+    pub retained_malformed: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<ExecutableAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_action: Option<ExecutableAction>,
+}
+
+pub fn peer_session_maintenance(
+    runner_id: &str,
+    cursor: Option<&str>,
+    apply: bool,
+) -> Result<PeerSessionMaintenanceReport> {
+    let directory = paths::runner_sessions_dir()?.join(runner_id);
+    let deadline = Instant::now() + crate::readonly_probe::readonly_probe_timeout();
+    peer_session_maintenance_in_with(&directory, runner_id, cursor, apply, |session| {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() && session_is_live_with_timeout(session, remaining) {
+            PeerSessionLiveness::Live
+        } else if session_is_proven_dead(session) {
+            PeerSessionLiveness::ProvenDead
+        } else {
+            PeerSessionLiveness::Unknown
+        }
+    })
+}
+
+fn peer_session_maintenance_in(
+    directory: &Path,
+    runner_id: &str,
+    cursor: Option<&str>,
+    apply: bool,
+    is_live: impl Fn(&RunnerSession) -> bool,
+) -> Result<PeerSessionMaintenanceReport> {
+    peer_session_maintenance_in_with(directory, runner_id, cursor, apply, |session| {
+        if is_live(session) {
+            PeerSessionLiveness::Live
+        } else {
+            PeerSessionLiveness::ProvenDead
+        }
+    })
+}
+
+enum PeerSessionLiveness {
+    Live,
+    ProvenDead,
+    Unknown,
+}
+
+fn peer_session_maintenance_in_with(
+    directory: &Path,
+    runner_id: &str,
+    cursor: Option<&str>,
+    apply: bool,
+    observe: impl Fn(&RunnerSession) -> PeerSessionLiveness,
+) -> Result<PeerSessionMaintenanceReport> {
+    let cursor = cursor.map(validate_peer_session_cursor).transpose()?;
+    let mut paths = peer_session_paths(&directory)?;
+    let current_session = paths::runner_controller_session_file(runner_id, &controller_id())?;
+    paths.retain(|path| path != &current_session);
+    paths.retain(|path| {
+        cursor.as_ref().is_none_or(|cursor| {
+            path.file_name().and_then(|name| name.to_str()) > Some(cursor.as_str())
+        })
+    });
+    let has_next_page = paths.len() > PEER_SESSION_MAINTENANCE_LIMIT;
+    paths.truncate(PEER_SESSION_MAINTENANCE_LIMIT);
+
+    let mut removed = 0;
+    let mut removable = 0;
+    let mut retained_live = 0;
+    let mut retained_unproven = 0;
+    let mut retained_malformed = 0;
+    let mut diagnostics = Vec::new();
+    for path in &paths {
+        let session = match read_session_at(path) {
+            Ok(Some(session)) => session,
+            Ok(None) => continue,
+            Err(error) => {
+                retained_malformed += 1;
+                diagnostics.push(format!(
+                    "retained unreadable peer session `{}`: {}",
+                    path.display(),
+                    error.message
+                ));
+                continue;
+            }
+        };
+        match observe(&session) {
+            PeerSessionLiveness::Live => retained_live += 1,
+            PeerSessionLiveness::Unknown => retained_unproven += 1,
+            PeerSessionLiveness::ProvenDead => {
+                removable += 1;
+                if apply && remove_session_at_if_matches(path, &session)? {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    let next_cursor = has_next_page.then(|| {
+        paths
+            .last()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .expect("controller session path has a UTF-8 file name")
+            .to_string()
+    });
+    let next_action = next_cursor
+        .as_deref()
+        .map(|cursor| peer_session_maintenance_action(runner_id, Some(cursor), apply));
+    let apply_action = (!apply && removable > 0)
+        .then(|| peer_session_maintenance_action(runner_id, cursor.as_deref(), true));
+    Ok(PeerSessionMaintenanceReport {
+        runner_id: runner_id.to_string(),
+        applied: apply,
+        inspected: paths.len(),
+        removed,
+        removable,
+        retained_live,
+        retained_unproven,
+        retained_malformed,
+        diagnostics,
+        next_cursor,
+        next_action,
+        apply_action,
+    })
+}
+
+fn session_is_proven_dead(session: &RunnerSession) -> bool {
+    session.mode == RunnerTunnelMode::DirectSsh
+        && session.tunnel_pid.is_some_and(|pid| {
+            let expected_identity =
+                session
+                    .tunnel_process_start_identity
+                    .as_ref()
+                    .map(|identity| match identity {
+                        RunnerTunnelProcessStartIdentity::Linux { starttime_ticks } => {
+                            homeboy_core::process::ProcessStartIdentity::Linux {
+                                starttime_ticks: *starttime_ticks,
+                            }
+                        }
+                        RunnerTunnelProcessStartIdentity::Macos {
+                            start_seconds,
+                            start_microseconds,
+                        } => homeboy_core::process::ProcessStartIdentity::Macos {
+                            start_seconds: *start_seconds,
+                            start_microseconds: *start_microseconds,
+                        },
+                    });
+            matches!(
+                homeboy_core::process::process_identity_state_with_start_identity(
+                    pid,
+                    None,
+                    expected_identity.as_ref(),
+                ),
+                homeboy_core::process::ProcessIdentityState::Dead
+            )
+        })
+}
+
+fn peer_session_maintenance_action(
+    runner_id: &str,
+    cursor: Option<&str>,
+    apply: bool,
+) -> ExecutableAction {
+    let mut args = vec![
+        "runner".to_string(),
+        "peer-sessions".to_string(),
+        runner_id.to_string(),
+    ];
+    if apply {
+        args.push("--apply".to_string());
+    }
+    if let Some(cursor) = cursor {
+        args.push("--cursor".to_string());
+        args.push(cursor.to_string());
+    }
+    ExecutableAction::new(
+        if apply {
+            "runner.peer_sessions.cleanup"
+        } else {
+            "runner.peer_sessions.preview"
+        },
+        if apply {
+            format!("remove proven-dead peer sessions for runner {runner_id}")
+        } else {
+            format!("inspect peer sessions for runner {runner_id}")
+        },
+        "homeboy",
+        args,
+        if apply {
+            ActionSafety::Mutating
+        } else {
+            ActionSafety::ReadOnly
+        },
+    )
+}
+
+fn validate_peer_session_cursor(cursor: &str) -> Result<String> {
+    let cursor = cursor.trim();
+    if cursor.is_empty()
+        || std::path::Path::new(cursor)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(cursor)
+        || !cursor.ends_with(".json")
+    {
+        return Err(Error::validation_invalid_argument(
+            "cursor",
+            "must be a peer-session cursor returned by a prior command",
+            None,
+            None,
+        ));
+    }
+    Ok(cursor.to_string())
+}
+
+fn peer_session_paths(directory: &Path) -> Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("read runner controller sessions".to_string()),
+            ))
+        }
+    };
+    let mut paths = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read runner controller session".to_string()),
+            )
+        })?
+        .into_iter()
+        .filter(|path| is_controller_session_file(path))
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
 
 fn status_peer_session_in(directory: &Path, controller_id: &str) -> Result<StatusPeerSession> {
     status_peer_session_in_until(
@@ -1454,7 +1725,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_peer_session_recovery_guidance_reconnects_instead_of_reconciling() {
+    fn partial_peer_session_recovery_emits_a_typed_preview_action() {
         let _ = crate::readonly_probe::take_degradations();
         let root = TempDir::new().expect("session directory");
         for index in 0..9 {
@@ -1474,10 +1745,204 @@ mod tests {
             .into_iter()
             .find(|degradation| degradation.runner_id.as_deref() == Some("runner-a"))
             .expect("partial peer guidance");
-        assert!(guidance.detail.contains("homeboy runner connect runner-a"));
-        assert!(!guidance
-            .detail
-            .contains("homeboy runner reconcile runner-a"));
+        assert_eq!(guidance.follow_up, "homeboy runner peer-sessions runner-a");
+        let action = guidance.follow_up_action.expect("typed preview action");
+        assert_eq!(action.id, "runner.peer_sessions.preview");
+        assert_eq!(action.args, ["runner", "peer-sessions", "runner-a"]);
+        assert_eq!(action.safety, homeboy_core::error::ActionSafety::ReadOnly);
+        assert!(!guidance.detail.contains("runner connect runner-a"));
+        assert!(!guidance.detail.contains("runner reconcile runner-a"));
+    }
+
+    #[test]
+    fn peer_session_cleanup_converges_an_over_limit_stale_inventory() {
+        let root = TempDir::new().expect("session directory");
+        for index in 0..9 {
+            let peer = session(&format!("peer-{index}"), "lease-stale");
+            write_session_at(&root.path().join(format!("peer-{index}.json")), &peer)
+                .expect("write stale peer");
+        }
+
+        assert!(matches!(
+            status_peer_session_in_with(&root.path().to_path_buf(), "current", |_| true)
+                .expect("bounded status"),
+            StatusPeerSession::Truncated
+        ));
+        let cleanup = peer_session_maintenance_in(root.path(), "lab", None, true, |_| false)
+            .expect("clean stale peers");
+        assert_eq!(cleanup.inspected, 9);
+        assert_eq!(cleanup.removed, 9);
+        assert_eq!(cleanup.removable, 9);
+        assert_eq!(cleanup.retained_live, 0);
+        assert_eq!(cleanup.next_action, None);
+        assert!(matches!(
+            status_peer_session_in_with(&root.path().to_path_buf(), "current", |_| true)
+                .expect("converged status"),
+            StatusPeerSession::None
+        ));
+    }
+
+    #[test]
+    fn peer_session_cleanup_preserves_live_ambiguous_peers() {
+        let root = TempDir::new().expect("session directory");
+        let first = session("peer-a", "lease-a");
+        let second = session("peer-b", "lease-b");
+        write_session_at(&root.path().join("peer-a.json"), &first).expect("write first peer");
+        write_session_at(&root.path().join("peer-b.json"), &second).expect("write second peer");
+
+        let cleanup = peer_session_maintenance_in(root.path(), "lab", None, true, |_| true)
+            .expect("inspect live peers");
+        assert_eq!(cleanup.removed, 0);
+        assert_eq!(cleanup.retained_live, 2);
+        assert_eq!(
+            read_session_at(&root.path().join("peer-a.json")).expect("read first"),
+            Some(first)
+        );
+        assert_eq!(
+            read_session_at(&root.path().join("peer-b.json")).expect("read second"),
+            Some(second)
+        );
+        assert!(matches!(
+            status_peer_session_in_with(&root.path().to_path_buf(), "current", |_| true)
+                .expect("ambiguous status"),
+            StatusPeerSession::Ambiguous
+        ));
+    }
+
+    #[test]
+    fn peer_session_cleanup_pages_with_a_typed_apply_action() {
+        let root = TempDir::new().expect("session directory");
+        for index in 0..=PEER_SESSION_MAINTENANCE_LIMIT {
+            let peer = session(&format!("peer-{index:03}"), "lease-stale");
+            write_session_at(&root.path().join(format!("peer-{index:03}.json")), &peer)
+                .expect("write stale peer");
+        }
+
+        let first = peer_session_maintenance_in(root.path(), "lab", None, true, |_| false)
+            .expect("first cleanup page");
+        assert_eq!(first.inspected, PEER_SESSION_MAINTENANCE_LIMIT);
+        assert_eq!(first.removed, PEER_SESSION_MAINTENANCE_LIMIT);
+        assert_eq!(first.next_cursor.as_deref(), Some("peer-099.json"));
+        let next = first.next_action.expect("next page action");
+        assert_eq!(next.id, "runner.peer_sessions.cleanup");
+        assert_eq!(
+            next.args,
+            [
+                "runner",
+                "peer-sessions",
+                "lab",
+                "--apply",
+                "--cursor",
+                "peer-099.json"
+            ]
+        );
+
+        let second = peer_session_maintenance_in(
+            root.path(),
+            "lab",
+            first.next_cursor.as_deref(),
+            true,
+            |_| false,
+        )
+        .expect("second cleanup page");
+        assert_eq!(second.inspected, 1);
+        assert_eq!(second.removed, 1);
+        assert_eq!(second.next_action, None);
+    }
+
+    #[test]
+    fn peer_session_preview_pages_with_a_typed_read_only_action() {
+        let root = TempDir::new().expect("session directory");
+        for index in 0..=PEER_SESSION_MAINTENANCE_LIMIT {
+            let peer = session(&format!("peer-{index:03}"), "lease-stale");
+            write_session_at(&root.path().join(format!("peer-{index:03}.json")), &peer)
+                .expect("write stale peer");
+        }
+
+        let preview = peer_session_maintenance_in(root.path(), "lab", None, false, |_| false)
+            .expect("preview first page");
+        assert_eq!(preview.removed, 0);
+        let next = preview.next_action.expect("next preview action");
+        assert_eq!(next.id, "runner.peer_sessions.preview");
+        assert_eq!(
+            next.args,
+            [
+                "runner",
+                "peer-sessions",
+                "lab",
+                "--cursor",
+                "peer-099.json"
+            ]
+        );
+        assert_eq!(next.safety, homeboy_core::error::ActionSafety::ReadOnly);
+    }
+
+    #[test]
+    fn peer_session_cleanup_retains_a_snapshot_changed_after_observation() {
+        let root = TempDir::new().expect("session directory");
+        let path = root.path().join("peer-race.json");
+        let recorded = session("peer-race", "lease-recorded");
+        let replacement = session("peer-race", "lease-reconnected");
+        write_session_at(&path, &recorded).expect("write recorded peer");
+
+        let report = peer_session_maintenance_in_with(root.path(), "lab", None, true, |_| {
+            write_session_at(&path, &replacement).expect("replace peer during observation");
+            PeerSessionLiveness::ProvenDead
+        })
+        .expect("clean peer");
+        assert_eq!(report.removable, 1);
+        assert_eq!(report.removed, 0);
+        assert_eq!(
+            read_session_at(&path).expect("read replacement"),
+            Some(replacement)
+        );
+    }
+
+    #[test]
+    fn peer_session_preview_does_not_mutate_and_emits_apply_only_for_proven_dead_records() {
+        let root = TempDir::new().expect("session directory");
+        let peer = session("peer-stale", "lease-stale");
+        let path = root.path().join("peer-stale.json");
+        write_session_at(&path, &peer).expect("write stale peer");
+
+        let preview = peer_session_maintenance_in(root.path(), "lab", None, false, |_| false)
+            .expect("preview stale peer");
+        assert_eq!(preview.removable, 1);
+        assert_eq!(preview.removed, 0);
+        assert_eq!(
+            read_session_at(&path).expect("read previewed peer"),
+            Some(peer)
+        );
+        let apply = preview.apply_action.expect("typed apply action");
+        assert_eq!(apply.id, "runner.peer_sessions.cleanup");
+        assert_eq!(apply.args, ["runner", "peer-sessions", "lab", "--apply"]);
+        assert_eq!(apply.safety, homeboy_core::error::ActionSafety::Mutating);
+    }
+
+    #[test]
+    fn peer_session_cleanup_retains_a_reused_pid_with_mismatched_start_identity() {
+        let mut peer = session("peer-reused-pid", "lease-live");
+        peer.tunnel_pid = Some(std::process::id());
+        peer.tunnel_process_start_identity = Some(RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds: 0,
+            start_microseconds: 0,
+        });
+
+        assert!(!session_is_proven_dead(&peer));
+    }
+
+    #[test]
+    fn peer_session_cleanup_retains_and_reports_malformed_snapshots() {
+        let root = TempDir::new().expect("session directory");
+        std::fs::write(root.path().join("peer-malformed.json"), b"not json")
+            .expect("write malformed peer");
+
+        let report = peer_session_maintenance_in(root.path(), "lab", None, true, |_| false)
+            .expect("inspect malformed peer");
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.retained_malformed, 1);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(root.path().join("peer-malformed.json").exists());
     }
 
     #[test]

@@ -34,6 +34,7 @@ Manage local and SSH execution runners
 | `homeboy runner preflight` | Evaluate workload placement without creating a run, rig lease, runner job, or connection |
 | `homeboy runner connect` | Connect to a runner by starting a loopback-only remote daemon and SSH tunnel |
 | `homeboy runner status` | Show persisted runner tunnel status |
+| `homeboy runner peer-sessions` | Inspect and safely remove persisted peer sessions whose local tunnels are proven dead |
 | `homeboy runner reconcile` | Reconcile persisted direct-runner generation state and retire verified drained daemons |
 | `homeboy runner disconnect` | Close a runner tunnel and remove its persisted session state |
 | `homeboy runner refresh-homeboy` | Build or select the Homeboy binary used for runner/Lab jobs |
@@ -269,6 +270,23 @@ Show persisted runner tunnel status
 | --- | --- | --- |
 | `--generations` | flag | Include the full historical draining-generation inventory. By default status leads with the compact authoritative admission summary and omits the expanded per-generation ledger, which can run to thousands of lines on a long-lived runner |
 | `--full` | flag | Return complete status, runtime diagnostics, followups, and generation detail |
+
+## `homeboy runner peer-sessions`
+
+```sh
+homeboy runner peer-sessions [OPTIONS] <ID>
+```
+
+Inspect and safely remove persisted peer sessions whose local tunnels are proven dead
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<ID>` | yes | Runner ID |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--cursor` | `<CURSOR>` | Continue after this cursor returned by a prior peer-session command |
+| `--apply` | flag | Remove only peer-session snapshots proven dead during this inspection |
 
 ## `homeboy runner reconcile`
 

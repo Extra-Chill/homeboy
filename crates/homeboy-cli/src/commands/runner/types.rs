@@ -5,9 +5,9 @@ use homeboy::core::api_jobs::{Job, JobEvent, JobStatus};
 use homeboy::core::EntityCrudOutput;
 use homeboy::runner::readonly_probe::ReadOnlyProbeDegradation;
 use homeboy::runner::runners::{
-    ReverseRunnerWorkerOutput, Runner, RunnerAdmissionSummary, RunnerAvailability,
-    RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerExecOutput,
-    RunnerStatusReport,
+    PeerSessionMaintenanceReport, ReverseRunnerWorkerOutput, Runner, RunnerAdmissionSummary,
+    RunnerAvailability, RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDisconnectReport,
+    RunnerExecOutput, RunnerStatusReport,
 };
 
 use std::collections::BTreeMap;
@@ -63,6 +63,8 @@ pub struct RunnerExtra {
     /// that the Lab is wedged rather than idle.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub probe_degradations: Vec<ReadOnlyProbeDegradation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_session_maintenance: Option<PeerSessionMaintenanceReport>,
 }
 
 impl Default for RunnerExtra {
@@ -85,6 +87,7 @@ impl Default for RunnerExtra {
             operator_summaries: Vec::new(),
             truncation: None,
             probe_degradations: Vec::new(),
+            peer_session_maintenance: None,
         }
     }
 }

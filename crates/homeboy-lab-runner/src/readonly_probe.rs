@@ -17,6 +17,7 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
+use homeboy_core::error::ExecutableAction;
 use serde::Serialize;
 
 /// Default wall-clock bound for a single read-only remote probe.
@@ -71,6 +72,11 @@ pub struct ReadOnlyProbeDegradation {
     /// The narrowest command that can provide more detail after this partial
     /// observation.
     pub follow_up: String,
+    /// The argv-backed follow-up when this degradation has a safe, executable
+    /// recovery path. `follow_up` remains the presentation form for existing
+    /// consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_up_action: Option<ExecutableAction>,
     /// Operator-facing explanation of what is missing from the result.
     pub detail: String,
 }
@@ -155,6 +161,7 @@ pub fn record_probe_outcome(
         elapsed_ms,
         deadline_ms,
         follow_up: runner_status_follow_up(runner_id),
+        follow_up_action: None,
         detail,
     });
     true
