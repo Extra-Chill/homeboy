@@ -34,7 +34,10 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
             validate_provider_immediate_failure_patterns(provider).map_err(|message| {
                 Error::validation_invalid_argument(
                     "immediate_failure_patterns",
-                    format!("provider '{}' has invalid immediate failure configuration: {message}", provider.id),
+                    format!(
+                        "provider '{}' has invalid immediate failure configuration: {message}",
+                        provider.id
+                    ),
                     Some(provider.backend.clone()),
                     None,
                 )
@@ -44,7 +47,10 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
         validate_provider_immediate_failure_patterns(provider).map_err(|message| {
             Error::validation_invalid_argument(
                 "immediate_failure_patterns",
-                format!("provider '{}' has invalid immediate failure configuration: {message}", provider.id),
+                format!(
+                    "provider '{}' has invalid immediate failure configuration: {message}",
+                    provider.id
+                ),
                 Some(provider.backend.clone()),
                 None,
             )

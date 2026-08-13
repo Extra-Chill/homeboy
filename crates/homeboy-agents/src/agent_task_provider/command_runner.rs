@@ -72,7 +72,8 @@ pub(super) fn run_materialized_provider_command(
 
         if let Some(failure) = immediate_provider_failure(provider, &outcome, started.elapsed()) {
             if prior_immediate_failure.as_deref() == Some(failure.signature.as_str()) {
-                if outcome.failure_classification != Some(AgentTaskFailureClassification::Transient) {
+                if outcome.failure_classification != Some(AgentTaskFailureClassification::Transient)
+                {
                     outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
                 }
                 outcome.diagnostics.push(AgentTaskDiagnostic {
@@ -125,59 +126,71 @@ pub(super) fn run_materialized_provider_command(
     }
 }
 
-struct ImmediateProviderFailure {
+pub(super) struct ImmediateProviderFailure {
     pattern_id: String,
     signature: String,
-    error_refs: Vec<String>,
-    log_lookup: String,
+    pub(super) error_refs: Vec<String>,
+    pub(super) log_lookup: String,
     fallback_action: String,
 }
 
-fn immediate_provider_failure(
+pub(super) fn immediate_provider_failure(
     provider: &AgentTaskExecutorProvider,
     outcome: &AgentTaskOutcome,
     elapsed: Duration,
 ) -> Option<ImmediateProviderFailure> {
     if elapsed >= IMMEDIATE_FAILURE_WINDOW
-        || !matches!(outcome.status, AgentTaskOutcomeStatus::ProviderError | AgentTaskOutcomeStatus::Failed)
+        || !matches!(
+            outcome.status,
+            AgentTaskOutcomeStatus::ProviderError | AgentTaskOutcomeStatus::Failed
+        )
         || !matches!(
             outcome.failure_classification,
-            None
-                | Some(AgentTaskFailureClassification::Provider)
+            None | Some(AgentTaskFailureClassification::Provider)
                 | Some(AgentTaskFailureClassification::Transient)
         )
     {
         return None;
     }
     let text = provider_failure_text(outcome);
-    provider.immediate_failure_patterns.iter().find_map(|pattern| {
-        if !pattern.retryable || pattern.error_contains_any.is_empty() {
-            return None;
-        }
-        let matches = pattern.error_contains_any.iter().any(|needle| {
-            !needle.is_empty() && text.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
-        });
-        matches.then(|| {
-            let error_refs = pattern
-                .error_ref_pattern
-                .as_deref()
-                .and_then(|expression| regex::Regex::new(expression).ok())
-                .map(|expression| {
-                    expression
-                        .find_iter(&text)
-                        .take(IMMEDIATE_FAILURE_ERROR_REF_LIMIT)
-                        .map(|matched| matched.as_str().to_string())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let normalized = pattern
-                .error_ref_pattern
-                .as_deref()
-                .and_then(|expression| regex::Regex::new(expression).ok())
-                .map(|expression| expression.replace_all(&text, "[provider-error-ref]").into_owned())
-                .unwrap_or_else(|| text.clone());
-            let normalized = bounded_text(&normalized, IMMEDIATE_FAILURE_SIGNATURE_TEXT_LIMIT);
-            ImmediateProviderFailure {
+    provider
+        .immediate_failure_patterns
+        .iter()
+        .find_map(|pattern| {
+            if !pattern.retryable || pattern.error_contains_any.is_empty() {
+                return None;
+            }
+            let matches = pattern.error_contains_any.iter().any(|needle| {
+                !needle.is_empty()
+                    && text
+                        .to_ascii_lowercase()
+                        .contains(&needle.to_ascii_lowercase())
+            });
+            matches.then(|| {
+                let error_refs = pattern
+                    .error_ref_pattern
+                    .as_deref()
+                    .and_then(|expression| regex::Regex::new(expression).ok())
+                    .map(|expression| {
+                        expression
+                            .find_iter(&text)
+                            .take(IMMEDIATE_FAILURE_ERROR_REF_LIMIT)
+                            .map(|matched| matched.as_str().to_string())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let normalized = pattern
+                    .error_ref_pattern
+                    .as_deref()
+                    .and_then(|expression| regex::Regex::new(expression).ok())
+                    .map(|expression| {
+                        expression
+                            .replace_all(&text, "[provider-error-ref]")
+                            .into_owned()
+                    })
+                    .unwrap_or_else(|| text.clone());
+                let normalized = bounded_text(&normalized, IMMEDIATE_FAILURE_SIGNATURE_TEXT_LIMIT);
+                ImmediateProviderFailure {
                 pattern_id: pattern.id.clone(),
                 signature: format!(
                     "{}:{}:{}",
@@ -194,8 +207,8 @@ fn immediate_provider_failure(
                         .to_string()
                 }),
             }
+            })
         })
-    })
 }
 
 /// Validate adapter-owned failure signatures before they can affect dispatch.
@@ -205,8 +218,16 @@ pub fn validate_provider_immediate_failure_patterns(
     provider: &AgentTaskExecutorProvider,
 ) -> std::result::Result<(), String> {
     for pattern in &provider.immediate_failure_patterns {
-        if pattern.id.trim().is_empty() || pattern.error_contains_any.iter().all(|value| value.trim().is_empty()) {
-            return Err("immediate failure patterns need an id and at least one non-empty error substring".to_string());
+        if pattern.id.trim().is_empty()
+            || pattern
+                .error_contains_any
+                .iter()
+                .all(|value| value.trim().is_empty())
+        {
+            return Err(
+                "immediate failure patterns need an id and at least one non-empty error substring"
+                    .to_string(),
+            );
         }
         if let Some(expression) = &pattern.error_ref_pattern {
             if expression.len() > 512 {
@@ -216,7 +237,10 @@ pub fn validate_provider_immediate_failure_patterns(
                 ));
             }
             let expression = regex::Regex::new(expression).map_err(|error| {
-                format!("immediate failure pattern '{}' has invalid error_ref_pattern: {error}", pattern.id)
+                format!(
+                    "immediate failure pattern '{}' has invalid error_ref_pattern: {error}",
+                    pattern.id
+                )
             })?;
             if expression.is_match("") {
                 return Err(format!(
