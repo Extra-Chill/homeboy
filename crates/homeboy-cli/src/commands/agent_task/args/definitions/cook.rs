@@ -20,6 +20,14 @@ use homeboy::agents::agent_tasks::gate::{
 use super::super::super::super::agent_task_dispatch::DispatchArgs;
 use super::super::super::review;
 
+/// A bounded, controller-projected input available to the provider as read-only
+/// workspace evidence.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderEvidenceInput {
+    pub id: String,
+    pub source: String,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct VerifyGateArgs {
     /// Deterministic verification command that must pass before the cook
@@ -115,6 +123,10 @@ pub struct VerifyGateArgs {
     /// `COMMAND --version` in the final isolated gate environment. Repeatable.
     #[arg(long = "gate-toolchain", value_name = "COMMAND")]
     pub gate_toolchains: Vec<String>,
+    /// Exact toolchain probe contract as JSON. Use when a probe needs arguments
+    /// other than the `--version` default retained by `--gate-toolchain`.
+    #[arg(long = "gate-toolchain-spec", value_name = "JSON", value_parser = parse_gate_toolchain_requirement)]
+    pub gate_toolchain_specs: Vec<AgentTaskGateToolchainRequirement>,
     /// Caller-declared package resource readiness as a JSON object. The object
     /// defines its environment mapping, required paths or digests, and opaque
     /// remediation metadata. Repeat for multiple resources.
@@ -378,6 +390,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                     command,
                     probe_arguments: vec!["--version".to_string()],
                 })
+                .chain(args.gate_toolchain_specs)
                 .collect(),
             gate_package_artifacts: args.gate_package_artifacts,
             gate_diagnostic_sidecars: Vec::new(),
@@ -391,6 +404,13 @@ fn parse_gate_package_artifact(
 ) -> Result<AgentTaskGatePackageArtifactRequirement, String> {
     serde_json::from_str(value)
         .map_err(|error| format!("invalid gate package artifact declaration: {error}"))
+}
+
+fn parse_gate_toolchain_requirement(
+    value: &str,
+) -> Result<AgentTaskGateToolchainRequirement, String> {
+    serde_json::from_str(value)
+        .map_err(|error| format!("invalid gate toolchain requirement: {error}"))
 }
 
 fn parse_gate_extension_input(value: &str) -> Result<AgentTaskGateExtensionInput, String> {
@@ -621,6 +641,34 @@ mod tests {
             AgentTaskGateRevealPolicy::FullEvidence,
         )
         .expect_err("replacement must fail closed");
+    }
+
+    #[test]
+    fn gate_toolchain_spec_preserves_non_default_probe_arguments() {
+        let options: VerifyGateOptions = TestCli::try_parse_from([
+            "homeboy",
+            "--gate-toolchain",
+            "legacy-tool",
+            "--gate-toolchain-spec",
+            r#"{"command":"custom-tool","probe_arguments":["probe","--json"]}"#,
+        ])
+        .expect("parse legacy and structured toolchain declarations")
+        .gates
+        .into();
+
+        assert_eq!(
+            options.gate_toolchains,
+            vec![
+                AgentTaskGateToolchainRequirement {
+                    command: "legacy-tool".to_string(),
+                    probe_arguments: vec!["--version".to_string()],
+                },
+                AgentTaskGateToolchainRequirement {
+                    command: "custom-tool".to_string(),
+                    probe_arguments: vec!["probe".to_string(), "--json".to_string()],
+                },
+            ]
+        );
     }
 
     #[derive(Parser)]
@@ -866,6 +914,10 @@ pub struct AgentTaskCookArgs {
     /// --prompt, it supplies the one provider task.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
+    /// Read-only external file projected into `.homeboy/evidence/<id>/` in the
+    /// Cook workspace. Repeat for each source the provider may read.
+    #[arg(long = "provider-evidence", value_name = "JSON", value_parser = parse_provider_evidence_input)]
+    pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
     /// Workspace handle the cook edits, verifies, and finalizes into. The handle
     /// is `<repo>@<branch-slug>`, where the slug replaces every character of
     /// --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle
@@ -969,6 +1021,13 @@ pub struct AgentTaskCookArgs {
     /// not caller input: Cook persists it with the compiled plan.
     #[arg(skip)]
     pub repository_identity: Option<serde_json::Value>,
+}
+
+pub(crate) fn parse_provider_evidence_input(
+    value: &str,
+) -> Result<AgentTaskProviderEvidenceInput, String> {
+    serde_json::from_str(value)
+        .map_err(|error| format!("invalid provider evidence declaration: {error}"))
 }
 
 #[derive(Args, Clone, Debug)]

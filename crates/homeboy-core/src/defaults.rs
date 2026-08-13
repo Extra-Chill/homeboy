@@ -157,6 +157,11 @@ pub struct ResidentServiceConfig {
     /// Use this for non-systemd supervisors or custom restart logic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_command: Option<String>,
+
+    /// Extensions whose changed source revision requires this service to reload.
+    /// An empty list means the service is controller-binary-resident only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_ids: Vec<String>,
 }
 
 impl Default for HomeboyConfig {
