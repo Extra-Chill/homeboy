@@ -138,9 +138,31 @@ assert.equal(provider.capabilities.includes('browser_runtime'), false);
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'opencode.json'), 'utf8'));
 assert.equal(manifest.id, 'opencode');
 assert.equal(manifest.name, 'OpenCode');
+assert.deepEqual(manifest.requires, { homeboy: '>=0.345.0' });
+assert.deepEqual(manifest.compatibility, {
+	immediate_failure_patterns: {
+		owner: 'Extra-Chill/homeboy#12293',
+		requirement: 'Homeboy core support for agent-task executor immediate_failure_patterns.',
+	},
+});
 assert.equal(manifest.agent_task_executors.length, 1);
 assert.equal(manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
 assert.equal(Object.hasOwn(manifest.agent_task_executors[0].provider_defaults.codex, 'model'), false);
+const [unexpectedServerError] = manifest.agent_task_executors[0].immediate_failure_patterns;
+assert.deepEqual(unexpectedServerError, {
+	id: 'unexpected_server_error',
+	error_contains_any: ['Unexpected server error. Check server logs for details.'],
+	retryable: true,
+	error_ref_pattern: 'err_[A-Fa-f0-9]{1,64}\\b',
+	log_lookup: 'opencode debug paths; tail -n 200 "$HOME/.local/share/opencode/log/opencode.log"',
+	fallback_action: 'OpenCode has no error-reference lookup command. Inspect the runtime log manually for <provider-error-ref>, then select another configured provider while the service is investigated.',
+});
+const errorRefPattern = new RegExp(unexpectedServerError.error_ref_pattern, 'g');
+assert.deepEqual(
+	'Unexpected server error. Check server logs for details. err_3a6d31e2 err_FACE'.match(errorRefPattern),
+	['err_3a6d31e2', 'err_FACE']
+);
+assert.equal('Unexpected server error. Check server logs for details. err_not-hex'.match(errorRefPattern), null);
 const packageJson = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'package.json'), 'utf8'));
 assert.equal(packageJson.name, 'homeboy-agent-runtime-opencode');
 assert.equal(packageJson.homeboy.agent_runtime_manifest, 'opencode.json');

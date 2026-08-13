@@ -9,8 +9,17 @@ function runtimeManifest() {
 		schema: 'homeboy/agent-runtime-manifest/v1',
 		id: 'opencode',
 		name: 'OpenCode',
-		version: '1.2.4',
+		version: '1.3.0',
 		description: 'OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.',
+		requires: {
+			homeboy: '>=0.345.0',
+		},
+		compatibility: {
+			immediate_failure_patterns: {
+				owner: 'Extra-Chill/homeboy#12293',
+				requirement: 'Homeboy core support for agent-task executor immediate_failure_patterns.',
+			},
+		},
 		contract_producers: [
 			{
 				id: 'opencode.agent-task-result',
