@@ -194,10 +194,13 @@ fn controller_dispatch_runtime_component_contracts_reach_spawned_agent_task_requ
 #[test]
 fn controller_run_from_spec_materializes_runs_bounded_actions_and_returns_status() {
     with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("clean dispatch workspace");
+        init_runtime_component_checkout(workspace.path());
         let (value, exit_code) = controller_run_from_spec_with_test_executor(
             AgentTaskControllerRunFromSpecArgs {
                 spec: serde_json::to_string(&json!({
                     "loop_id": "run-from-spec-loop",
+                    "metadata": { "dispatch_defaults": { "cwd": workspace.path() } },
                     "workflows": [
                         { "workflow_id": "brief", "prompt": "Draft the brief." },
                         { "workflow_id": "review", "prompt": "Review the brief." }
@@ -261,11 +264,14 @@ fn controller_run_from_spec_materializes_runs_bounded_actions_and_returns_status
 #[test]
 fn controller_run_from_spec_persists_dispatch_defaults_for_generated_actions() {
     with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("clean dispatch workspace");
+        init_runtime_component_checkout(workspace.path());
         let observed_request = Arc::new(Mutex::new(None));
         let (value, exit_code) = controller_run_from_spec_with_test_executor(
             AgentTaskControllerRunFromSpecArgs {
                 spec: serde_json::to_string(&json!({
                     "loop_id": "run-from-spec-dispatch-defaults-loop",
+                    "metadata": { "dispatch_defaults": { "cwd": workspace.path() } },
                     "workflows": [{ "workflow_id": "cook", "prompt": "Cook." }]
                 }))
                 .expect("spec json"),
@@ -320,11 +326,14 @@ fn controller_run_from_spec_preserves_runtime_execution_and_components() {
         let component = tempfile::tempdir().expect("agents-api checkout");
         init_runtime_component_checkout(component.path());
         let component_path = component.path().display().to_string();
+        let workspace = tempfile::tempdir().expect("clean dispatch workspace");
+        init_runtime_component_checkout(workspace.path());
         let observed_request = Arc::new(Mutex::new(None));
         let (value, exit_code) = controller_run_from_spec_with_test_executor(
             AgentTaskControllerRunFromSpecArgs {
                 spec: serde_json::to_string(&json!({
                     "loop_id": "run-from-spec-runtime-execution-loop",
+                    "metadata": { "dispatch_defaults": { "cwd": workspace.path() } },
                     "workflows": [{
                         "workflow_id": "store-idea",
                         "prompt": "Generate a concept packet.",
@@ -639,15 +648,27 @@ fn controller_from_spec_resume_guards_stale_state_with_valid_reconcile_hint() {
 #[test]
 fn controller_run_from_spec_reconcile_stale_recovers_without_manual_cleanup() {
     with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("clean dispatch workspace");
+        init_runtime_component_checkout(workspace.path());
+        let proof_args = |prompt, reconcile_stale| {
+            let mut args =
+                run_from_spec_proof_args("run-from-spec-reconcile", prompt, reconcile_stale);
+            let mut spec: Value = serde_json::from_str(&args.spec).expect("spec json");
+            spec["metadata"] = json!({
+                "dispatch_defaults": { "cwd": workspace.path() }
+            });
+            args.spec = serde_json::to_string(&spec).expect("updated spec json");
+            args
+        };
         controller_run_from_spec_with_test_executor(
-            run_from_spec_proof_args("run-from-spec-reconcile", "Draft the brief.", false),
+            proof_args("Draft the brief.", false),
             ArtifactCapturingExecutor::default(),
         )
         .expect("base proof run");
 
         // The one-flag safe mode resets run-scoped state automatically.
         let (value, exit_code) = controller_run_from_spec_with_test_executor(
-            run_from_spec_proof_args("run-from-spec-reconcile", "Rewrite the brief.", true),
+            proof_args("Rewrite the brief.", true),
             ArtifactCapturingExecutor::default(),
         )
         .expect("reconcile-stale recovers the proof run");
@@ -670,19 +691,21 @@ fn controller_run_from_spec_reconcile_stale_recovers_without_manual_cleanup() {
 #[test]
 fn controller_from_spec_resume_reconcile_stale_recovers_without_manual_cleanup() {
     with_temp_home(|| {
-        controller_from_spec(from_spec_resume_args(
-            "from-spec-reconcile",
-            "Draft the brief.",
-            false,
-        ))
-        .expect("base from-spec resume");
+        let workspace = tempfile::tempdir().expect("clean dispatch workspace");
+        init_runtime_component_checkout(workspace.path());
+        let args = |prompt, reconcile_stale| {
+            let mut args = from_spec_resume_args("from-spec-reconcile", prompt, reconcile_stale);
+            let mut spec: Value = serde_json::from_str(&args.spec).expect("spec json");
+            spec["metadata"] = json!({
+                "dispatch_defaults": { "cwd": workspace.path() }
+            });
+            args.spec = serde_json::to_string(&spec).expect("updated spec json");
+            args
+        };
+        controller_from_spec(args("Draft the brief.", false)).expect("base from-spec resume");
 
-        let (value, exit_code) = controller_from_spec(from_spec_resume_args(
-            "from-spec-reconcile",
-            "Rewrite the brief.",
-            true,
-        ))
-        .expect("from-spec --reconcile-stale recovers");
+        let (value, exit_code) = controller_from_spec(args("Rewrite the brief.", true))
+            .expect("from-spec --reconcile-stale recovers");
 
         assert_eq!(exit_code, 0, "{value:#}");
         assert_eq!(value["from_spec"]["loop_id"], "from-spec-reconcile");
@@ -702,17 +725,26 @@ fn controller_from_spec_resume_reconcile_stale_recovers_without_manual_cleanup()
 #[test]
 fn controller_run_from_spec_fork_isolates_repeated_replays_from_stale_child_runs() {
     with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("clean dispatch workspace");
+        init_runtime_component_checkout(workspace.path());
+        let args = |prompt| {
+            let mut args = run_from_spec_proof_args("run-from-spec-fork-isolation", prompt, false);
+            let mut spec: Value = serde_json::from_str(&args.spec).expect("spec json");
+            spec["metadata"] = json!({
+                "dispatch_defaults": { "cwd": workspace.path() }
+            });
+            args.spec = serde_json::to_string(&spec).expect("updated spec json");
+            args
+        };
         controller_run_from_spec_with_test_executor(
-            run_from_spec_proof_args("run-from-spec-fork-isolation", "Draft the brief.", false),
+            args("Draft the brief."),
             ArtifactCapturingExecutor::default(),
         )
         .expect("base proof run");
 
-        let mut first_fork_args =
-            run_from_spec_proof_args("run-from-spec-fork-isolation", "Rewrite the brief.", false);
+        let mut first_fork_args = args("Rewrite the brief.");
         first_fork_args.fork = true;
-        let mut second_fork_args =
-            run_from_spec_proof_args("run-from-spec-fork-isolation", "Rewrite the brief.", false);
+        let mut second_fork_args = args("Rewrite the brief.");
         second_fork_args.fork = true;
 
         let (first, first_exit_code) = controller_run_from_spec_with_test_executor(

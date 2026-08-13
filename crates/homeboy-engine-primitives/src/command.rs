@@ -22,6 +22,9 @@ const PROCESS_TREE_KILL_GRACE: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const PROCESS_TREE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+#[cfg(target_os = "linux")]
+static CHILD_SUBREAPER_ENABLED: std::sync::OnceLock<io::Result<()>> = std::sync::OnceLock::new();
+
 pub type StdoutLineObserver = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
 /// Whether this build can isolate a spawned command into a terminable process
@@ -665,6 +668,7 @@ pub fn wait_with_bounded_output_supervised_with_progress(
 /// tree with the same semantics instead of reimplementing them.
 #[cfg(unix)]
 pub fn terminate_remaining_process_group(root_pid: u32) -> io::Result<()> {
+    enable_child_subreaper()?;
     if !process_group_has_live_member(root_pid) {
         return Ok(());
     }
@@ -788,6 +792,9 @@ fn capture_tail_with_live_snapshot(
 }
 
 pub fn isolate_process_tree(command: &mut Command) {
+    // Enable adoption before spawn: descendants that outlive their direct
+    // parent are then reparented here and can be reaped during cleanup.
+    let _ = enable_child_subreaper();
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -1173,6 +1180,7 @@ mod supervisor_zombie_guard_tests {
 pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStatus> {
     #[cfg(unix)]
     {
+        enable_child_subreaper()?;
         let root_pid = child.id();
         // Shells can put background jobs in a distinct process group. Snapshot
         // descendants before terminating the root so those jobs cannot retain
@@ -1207,6 +1215,27 @@ pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStat
         }
         child.wait()
     }
+}
+
+/// Adopt orphaned descendants while their isolated process group is being
+/// terminated, so they can be reaped instead of remaining zombies under PID 1.
+#[cfg(target_os = "linux")]
+fn enable_child_subreaper() -> io::Result<()> {
+    CHILD_SUBREAPER_ENABLED
+        .get_or_init(|| {
+            if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        })
+        .as_ref()
+        .map_err(|error| io::Error::new(error.kind(), error.to_string()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn enable_child_subreaper() -> io::Result<()> {
+    Ok(())
 }
 
 #[derive(Debug)]

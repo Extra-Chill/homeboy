@@ -350,6 +350,11 @@ pub fn init_from_spec_for_resume_with_resolution(
             // proof-run alias surfaced under its own evidence keyword (#6221).
             reset_controller_state(&record.loop_id)?;
             let mut report = init_from_spec(request)?;
+            // Lifecycle children outlive their controller records, so a rebuilt
+            // controller needs a new dispatch identity only for this replay.
+            report.controller.metadata["controller_replay_nonce"] =
+                serde_json::json!(Uuid::new_v4().simple().to_string());
+            controller::write_controller(&report.controller)?;
             report.resume_state = Some(ControllerResumeStateReport {
                 action: "replacing",
                 resolution: resolution.keyword(),

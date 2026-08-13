@@ -1448,7 +1448,12 @@ pub(crate) fn validate_cook_request_with_provenance(
             "verify",
             "agent-task cook requires at least one deterministic --verify or --private-verify gate before it can commit, push, and open a PR",
             None,
-            Some(vec!["Provide a deterministic verification gate, e.g. --verify \"cargo test\".".to_string()]),
+            Some(vec![
+                "Provide a deterministic verification gate, e.g. --verify \"cargo test\"."
+                    .to_string(),
+                "Use --no-finalize for a read-only Cook that will not commit, push, or open a PR."
+                    .to_string(),
+            ]),
         ));
     }
     if args.dispatch.core.queue_only {

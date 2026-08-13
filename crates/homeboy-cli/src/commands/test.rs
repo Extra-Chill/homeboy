@@ -1137,6 +1137,11 @@ mod tests {
         prior: Option<String>,
     }
 
+    struct EnvVarGuard {
+        name: &'static str,
+        prior: Option<String>,
+    }
+
     impl XdgGuard {
         fn unset() -> Self {
             let prior = std::env::var("XDG_DATA_HOME").ok();
@@ -1156,6 +1161,23 @@ mod tests {
             match &self.prior {
                 Some(value) => std::env::set_var("XDG_DATA_HOME", value),
                 None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &std::path::Path) -> Self {
+            let prior = std::env::var(name).ok();
+            std::env::set_var(name, value);
+            Self { name, prior }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
             }
         }
     }
@@ -1986,6 +2008,8 @@ mod tests {
             let bad_data_home = home.path().join("not-a-dir");
             fs::write(&bad_data_home, "file blocks observation dir").expect("write marker");
             let _xdg = XdgGuard::set(&bad_data_home);
+            let _data_dir =
+                EnvVarGuard::set(homeboy::core::paths::HOMEBOY_DATA_DIR_ENV, &bad_data_home);
 
             let observation =
                 start_test_observation("homeboy", home.path(), &sample_args(), "test", None);

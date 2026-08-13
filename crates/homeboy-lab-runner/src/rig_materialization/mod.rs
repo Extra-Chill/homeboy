@@ -59,7 +59,7 @@ fn materialize_lab_stack_from_repository(
     let q = homeboy_core::engine::shell::quote_arg;
     let verify = |reference: &homeboy_rig::LabStackRef| {
         format!(
-            "git -C {destination} fetch --no-tags origin {reference}; actual=$(git -C {destination} rev-parse FETCH_HEAD^{{commit}}); test \"$actual\" = {sha}",
+            "git -C {destination} fetch --no-tags origin {reference}:refs/homeboy/lab-stack; actual=$(git -C {destination} rev-parse refs/homeboy/lab-stack^{{commit}}); test \"$actual\" = {sha}",
             destination = q(destination),
             reference = q(&reference.reference),
             sha = q(&reference.sha),

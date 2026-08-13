@@ -1018,10 +1018,11 @@ mod tests {
             let err = resolve_with_component(&options, Some(component))
                 .expect_err("unknown override should fail");
 
-            assert_eq!(err.code, ErrorCode::ExtensionNotFound);
+            assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+            assert!(err.message.contains("does not declare lint support"));
             assert!(err.hints.iter().any(|hint| {
-                hint.message.contains("--extension wordpress")
-                    && hint.message.contains("omit --extension")
+                hint.message
+                    .contains("Upgrade or refresh the runner extension")
             }));
         });
     }

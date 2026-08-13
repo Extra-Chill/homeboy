@@ -543,7 +543,10 @@ mod tests {
     use super::*;
     use homeboy::core::api_jobs::{JobClaimMetadata, JobEventKind};
     use homeboy::runner::runners::{RunnerGenerationJobOwners, RunnerJob, RunnerLifecycleOwner};
-    use homeboy::runner::runners::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
+    use homeboy::runner::{
+        runners::{RunnerSession, RunnerSessionRole, RunnerTunnelMode},
+        RunnerTunnelProcessStartIdentity,
+    };
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::process::Command;
@@ -855,7 +858,22 @@ mod tests {
             .args(["-c", "sleep 60"])
             .spawn()
             .expect("recovery tunnel process");
-        let authoritative = session(authoritative_url, Some(tunnel.id()));
+        let mut authoritative = session(authoritative_url, Some(tunnel.id()));
+        authoritative.tunnel_process_start_identity =
+            homeboy_core::process::process_start_identity(tunnel.id())
+                .expect("inspect recovery tunnel")
+                .map(|identity| match identity {
+                    homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                        RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+                    }
+                    homeboy_core::process::ProcessStartIdentity::Macos {
+                        start_seconds,
+                        start_microseconds,
+                    } => RunnerTunnelProcessStartIdentity::Macos {
+                        start_seconds,
+                        start_microseconds,
+                    },
+                });
         let mut cursor = 0;
         let mut rendered = Vec::new();
 

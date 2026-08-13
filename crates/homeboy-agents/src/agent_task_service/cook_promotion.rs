@@ -2924,6 +2924,7 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
                 .unwrap_or_default()
         });
     let latest_run_id = invocation_latest_run_id
+        .filter(|run_id| !run_id.trim().is_empty())
         .map(str::to_string)
         .or_else(|| {
             agent_task_lifecycle::cook_index(&cook_id)

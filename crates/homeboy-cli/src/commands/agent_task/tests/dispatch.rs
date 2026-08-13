@@ -173,6 +173,8 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
             "targeted lookup".to_string(),
             "--repo".to_string(),
             "target".to_string(),
+            "--to-worktree".to_string(),
+            target.path().display().to_string(),
             "--no-finalize".to_string(),
         ]))
         .expect("explicit repo must not inspect unrelated registrations");

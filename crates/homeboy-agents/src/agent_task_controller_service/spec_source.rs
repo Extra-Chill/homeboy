@@ -21,7 +21,6 @@ use crate::agent_task_loop_definition::{
     materialize_repo_loop_spec, AgentTaskLoopSpecMaterializationRequest,
 };
 use homeboy_core::config;
-use homeboy_core::proof::validate_proof_value;
 use homeboy_core::{Error, Result};
 
 use super::AgentTaskRepoLoopSpec;
@@ -134,13 +133,22 @@ fn load_generated_materialize_spec(
         run_inputs: &Value::Null,
         policy_results: &[],
     })?;
-    let validation_result =
-        validate_proof_value(serde_json::to_value(materialized).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("controller.materialize.generator.serialize".to_string()),
-            )
-        })?);
+    let validation_diagnostics =
+        super::loop_spec_validation_provider::validate_materialized_loop_spec(
+            &serde_json::to_value(materialized).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("controller.materialize.generator.serialize".to_string()),
+                )
+            })?["spec"],
+        );
+    let validation_result = serde_json::json!({
+        "valid": validation_diagnostics.is_empty(),
+        "diagnostics": validation_diagnostics.into_iter().map(|diagnostic| serde_json::json!({
+            "code": diagnostic.code,
+            "message": diagnostic.message,
+        })).collect::<Vec<_>>(),
+    });
     let spec_hash = content_hash::sha256_hex(generated_raw.as_bytes());
 
     Ok(MaterializeSpecSource {

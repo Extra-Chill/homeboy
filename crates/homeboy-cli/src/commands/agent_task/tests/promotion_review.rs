@@ -524,6 +524,53 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
             .status()
             .expect("create target worktree");
         assert!(status.success());
+        let provider = root.path().join("worktree-provider.sh");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"{}\",\"path\":\"{}\",\"branch\":\"fixture-wrong-schema\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                target.display(),
+                target.display(),
+            ),
+        )
+        .expect("write worktree provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("worktree provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions)
+            .expect("make worktree provider executable");
+        let mut config = homeboy::core::defaults::load_config();
+        // This fixture exercises the provider response boundary, not host
+        // capacity admission. Keep that independent inside its isolated home.
+        config.retention.reconstructable_artifact_reserve_bytes = 0;
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save worktree provider config");
         let (value, exit_code) = run_cook_with_executor(
             AgentTaskCookArgs {
                 provider_evidence_inputs: Vec::new(),
@@ -632,7 +679,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
             Some(1),
             "{value:#}"
         );
-        assert_eq!(value["status"], "policy_failure");
+        assert_eq!(value["status"], "durable_failure", "{value:#}");
         assert_eq!(value["attempts"][0]["run_id"], value["latest_run_id"]);
         assert!(!value["stop_reason"]
             .as_str()

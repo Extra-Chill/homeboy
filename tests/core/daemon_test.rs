@@ -950,12 +950,12 @@ fn controller_terminal_persistence_retries_the_result_without_reexecuting_after_
     );
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     for _ in 0..100 {
-        if controller_job_runtime_count() == 0 {
+        if controller_job_runtime_count(&store) == 0 {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(controller_job_runtime_count(), 0);
+    assert_eq!(controller_job_runtime_count(&store), 0);
 
     let restarted = JobStore::open_without_reconciliation(&path).expect("reopen durable store");
     recover_controller_jobs(&restarted);
@@ -1258,10 +1258,10 @@ fn controller_job_retry_after_compaction_returns_tombstoned_terminal_projection(
     assert!(store
         .get(uuid::Uuid::parse_str(&first_id).expect("valid ID"))
         .is_err());
-    wait_for("controller_job_runtime_count() == 0", || {
-        controller_job_runtime_count() == 0
+    wait_for("controller_job_runtime_count(&store) == 0", || {
+        controller_job_runtime_count(&store) == 0
     });
-    assert_eq!(controller_job_runtime_count(), 0);
+    assert_eq!(controller_job_runtime_count(&store), 0);
     let executions_before_retry = executions.load(Ordering::SeqCst);
     let retry = route_with_body("POST", "/controller/jobs", Some(request), &store);
     assert_eq!(retry.status_code, 200);
@@ -2124,7 +2124,7 @@ fn daemon_operation_lock_recovers_after_owner_exits_without_drop() {
         .with_file_name("operation-lock-holder.release");
     let mut child = Command::new(std::env::current_exe().expect("current test executable"))
         .arg("--exact")
-        .arg("core::daemon::daemon_test::daemon_operation_lock_recovers_after_owner_exits_without_drop")
+        .arg("daemon::daemon_test::daemon_operation_lock_recovers_after_owner_exits_without_drop")
         .arg("--nocapture")
         .env(HOLDER_ENV, "1")
         .spawn()
@@ -2163,8 +2163,8 @@ fn stop_refuses_stale_lease_that_points_at_reused_pid() {
     assert_eq!(result.pid, Some(std::process::id()));
     assert!(pid_is_running(std::process::id()));
     assert!(
-        status.state.is_some(),
-        "stale lease should remain for operator inspection"
+        status.state.is_none(),
+        "an idle, unowned stale lease is retired without signaling its reused PID"
     );
 }
 
