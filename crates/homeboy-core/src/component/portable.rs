@@ -283,8 +283,21 @@ pub fn try_discover_from_portable(dir: &Path) -> Result<Option<Component>> {
 
         // Auto-detect remote_url from git if not already set
         if !obj.contains_key("remote_url") {
-            if let Some(url) = crate::git::release_download::detect_remote_url(dir) {
-                obj.insert("remote_url".to_string(), Value::String(url));
+            match crate::git::release_download::detect_remote_url_within(
+                dir,
+                crate::git::DEFAULT_GIT_READ_PROBE_TIMEOUT,
+            ) {
+                crate::git::BoundedGitRead::Resolved(url) => {
+                    obj.insert("remote_url".to_string(), Value::String(url));
+                }
+                crate::git::BoundedGitRead::TimedOut => {
+                    crate::log_status!(
+                        "warning",
+                        "repository-identity metadata enrichment timed out for {}",
+                        dir.display()
+                    );
+                }
+                crate::git::BoundedGitRead::Unresolved => {}
             }
         }
     }

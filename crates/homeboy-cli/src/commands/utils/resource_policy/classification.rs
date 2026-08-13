@@ -79,7 +79,7 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::CookContinue(_)
         | agent_task::AgentTaskCommand::RunPlan(_)
         | agent_task::AgentTaskCommand::Run(_)
-        | agent_task::AgentTaskCommand::RunNext
+        | agent_task::AgentTaskCommand::RunNext(_)
         | agent_task::AgentTaskCommand::ReplayProviderBoundary(_)
         | agent_task::AgentTaskCommand::Resume(_)
         | agent_task::AgentTaskCommand::Promote(_)

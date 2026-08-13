@@ -221,6 +221,7 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
             "schema": "homeboy/agent-task-fanout-status/v2",
             "batch": report,
             "portfolio": portfolio,
+            "commands": batch_commands(&args.batch_id),
         }),
         exit_code,
     ))
@@ -4253,7 +4254,7 @@ fn batch_commands(batch_id: &str) -> Value {
     serde_json::json!({
         "status": format!("homeboy agent-task fanout status {batch_id}"),
         "artifacts": format!("homeboy agent-task fanout artifacts {batch_id}"),
-        "run_next": "homeboy agent-task run-next"
+        "run_next": format!("homeboy agent-task run-next --fanout {batch_id}")
     })
 }
 

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::component::Component;
+use crate::project::{Project, ProjectComponentAttachment};
 use std::fs;
 use std::process::Command;
 use std::sync::MutexGuard;
@@ -259,6 +260,231 @@ fn portable_config_fields_override_standalone_registration() {
         .extensions
         .as_ref()
         .is_some_and(|extensions| extensions.contains_key("standalone-extension")));
+}
+
+#[test]
+fn targeted_standalone_lookup_preserves_portable_overrides() {
+    let dir = temp_home_dir();
+    let config_components = dir
+        .path()
+        .join(".config")
+        .join("homeboy")
+        .join("components");
+    fs::create_dir_all(&config_components).unwrap();
+    let repo_dir = dir.path().join("repo-owned-plugin");
+    fs::create_dir_all(&repo_dir).unwrap();
+    fs::write(
+        repo_dir.join("homeboy.json"),
+        serde_json::json!({
+            "id": "repo-owned-plugin",
+            "remote_path": "portable/remote-path",
+            "build_artifact": "portable.zip"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        config_components.join("repo-owned-plugin.json"),
+        serde_json::json!({
+            "local_path": repo_dir,
+            "remote_path": "standalone/remote-path",
+            "build_artifact": "standalone.zip"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let _home = with_home_override(dir.path());
+
+    let component = registered_by_id("repo-owned-plugin")
+        .unwrap()
+        .expect("targeted component");
+
+    assert_eq!(component.remote_path, "portable/remote-path");
+    assert_eq!(component.build_artifact.as_deref(), Some("portable.zip"));
+}
+
+#[test]
+fn targeted_lookup_preserves_project_attachment_precedence() {
+    let dir = temp_home_dir();
+    let project_repo = dir.path().join("project-repo");
+    let standalone_repo = dir.path().join("standalone-repo");
+    fs::create_dir_all(&project_repo).unwrap();
+    fs::create_dir_all(&standalone_repo).unwrap();
+    fs::write(
+        project_repo.join("homeboy.json"),
+        serde_json::json!({
+            "id": "fixture",
+            "remote_url": "https://github.com/example/project.git"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let _home = with_home_override(dir.path());
+    let components = crate::paths::components().unwrap();
+    fs::create_dir_all(&components).unwrap();
+    fs::write(
+        components.join("fixture.json"),
+        serde_json::json!({
+            "local_path": standalone_repo,
+            "remote_url": "https://github.com/example/standalone.git"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    crate::project::save(&Project {
+        id: "site".to_string(),
+        components: vec![ProjectComponentAttachment {
+            id: "fixture".to_string(),
+            local_path: project_repo.to_string_lossy().to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+
+    let component = registered_by_id("fixture")
+        .unwrap()
+        .expect("targeted component");
+
+    assert_eq!(component.local_path, project_repo.to_string_lossy());
+    assert_eq!(
+        component.remote_url.as_deref(),
+        Some("https://github.com/example/project.git")
+    );
+}
+
+#[test]
+fn targeted_lookup_skips_stale_registration_and_finds_matching_sibling() {
+    let dir = temp_home_dir();
+    let workspace = dir.path().join("workspace");
+    let stale_path = workspace.join("old-plugin");
+    let replacement = workspace.join("replacement");
+    fs::create_dir_all(&replacement).unwrap();
+    fs::write(
+        replacement.join("homeboy.json"),
+        serde_json::json!({ "id": "old-plugin" }).to_string(),
+    )
+    .unwrap();
+    let _home = with_home_override(dir.path());
+    let components = crate::paths::components().unwrap();
+    fs::create_dir_all(&components).unwrap();
+    fs::write(
+        components.join("old-plugin.json"),
+        serde_json::json!({ "local_path": stale_path }).to_string(),
+    )
+    .unwrap();
+
+    let component = registered_by_id("old-plugin")
+        .unwrap()
+        .expect("sibling portable replacement");
+
+    assert_eq!(component.local_path, replacement.to_string_lossy());
+}
+
+#[test]
+fn targeted_lookup_ignores_stale_registration_without_a_matching_sibling() {
+    let dir = temp_home_dir();
+    let workspace = dir.path().join("workspace");
+    let stale_path = workspace.join("old-plugin");
+    let renamed = workspace.join("new-plugin");
+    fs::create_dir_all(&renamed).unwrap();
+    fs::write(
+        renamed.join("homeboy.json"),
+        serde_json::json!({ "id": "new-plugin" }).to_string(),
+    )
+    .unwrap();
+    let _home = with_home_override(dir.path());
+    let components = crate::paths::components().unwrap();
+    fs::create_dir_all(&components).unwrap();
+    fs::write(
+        components.join("old-plugin.json"),
+        serde_json::json!({ "local_path": stale_path }).to_string(),
+    )
+    .unwrap();
+
+    assert!(registered_by_id("old-plugin").unwrap().is_none());
+}
+
+#[test]
+fn targeted_lookup_skips_invalid_project_attachment_for_later_attachment() {
+    let dir = temp_home_dir();
+    let valid_repo = dir.path().join("valid-repo");
+    fs::create_dir_all(&valid_repo).unwrap();
+    fs::write(
+        valid_repo.join("homeboy.json"),
+        serde_json::json!({ "id": "fixture" }).to_string(),
+    )
+    .unwrap();
+    let _home = with_home_override(dir.path());
+    crate::project::save(&Project {
+        id: "invalid".to_string(),
+        components: vec![ProjectComponentAttachment {
+            id: "fixture".to_string(),
+            local_path: dir.path().join("missing").to_string_lossy().to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    crate::project::save(&Project {
+        id: "valid".to_string(),
+        components: vec![ProjectComponentAttachment {
+            id: "fixture".to_string(),
+            local_path: valid_repo.to_string_lossy().to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+
+    let component = registered_by_id("fixture")
+        .unwrap()
+        .expect("later project attachment");
+    assert_eq!(component.local_path, valid_repo.to_string_lossy());
+}
+
+#[test]
+fn targeted_lookup_skips_project_attachment_with_a_mismatched_portable_id() {
+    let dir = temp_home_dir();
+    let mismatched_repo = dir.path().join("mismatched-repo");
+    let valid_repo = dir.path().join("valid-repo");
+    fs::create_dir_all(&mismatched_repo).unwrap();
+    fs::create_dir_all(&valid_repo).unwrap();
+    for (repo, id) in [(&mismatched_repo, "other"), (&valid_repo, "fixture")] {
+        fs::write(
+            repo.join("homeboy.json"),
+            serde_json::json!({ "id": id }).to_string(),
+        )
+        .unwrap();
+    }
+    let _home = with_home_override(dir.path());
+    for (project_id, local_path) in [("mismatched", &mismatched_repo), ("valid", &valid_repo)] {
+        crate::project::save(&Project {
+            id: project_id.to_string(),
+            components: vec![ProjectComponentAttachment {
+                id: "fixture".to_string(),
+                local_path: local_path.to_string_lossy().to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    let component = registered_by_id("fixture")
+        .unwrap()
+        .expect("later matching attachment");
+    assert_eq!(component.local_path, valid_repo.to_string_lossy());
+}
+
+#[test]
+fn targeted_lookup_rejects_traversal_component_id() {
+    let dir = temp_home_dir();
+    let _home = with_home_override(dir.path());
+
+    let error = registered_by_id("../outside").expect_err("traversal must be rejected");
+
+    assert_eq!(error.details["field"], "component_id");
 }
 
 #[test]

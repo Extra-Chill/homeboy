@@ -28,7 +28,7 @@ Run generic agent task plans
 | `homeboy agent-task loop` | Operate durable defined multi-agent loops: define, inspect, resume, and stop |
 | `homeboy agent-task run-plan` | Run an `AgentTaskPlan` through extension-declared executor providers |
 | `homeboy agent-task run` | Execute a previously submitted durable run |
-| `homeboy agent-task run-next` | Claim and execute the oldest queued durable run |
+| `homeboy agent-task run-next` | Claim and execute the oldest queued durable run, optionally within one fanout |
 | `homeboy agent-task submit` | Persist an agent-task plan and return a durable run id without executing it |
 | `homeboy agent-task status` | Read durable run status |
 | `homeboy agent-task watch` | Poll a run until it reaches a terminal state |
@@ -146,6 +146,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
 | `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
 | `--gate-toolchain` | `<COMMAND>` | Required executable to initialize before provider execution. Its probe is `COMMAND --version` in the final isolated gate environment. Repeatable |
+| `--gate-toolchain-spec` | `<JSON>` | Exact toolchain probe contract as JSON. Use when a probe needs arguments other than the `--version` default retained by `--gate-toolchain` |
 | `--gate-package-artifact` | `<JSON>` | Caller-declared package resource readiness as a JSON object. The object defines its environment mapping, required paths or digests, and opaque remediation metadata. Repeat for multiple resources |
 | `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
 | `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
@@ -184,6 +185,7 @@ Continue a detached Cook from its durable Cook ID or provider attempt ID. The pe
 | --- | --- | --- |
 | `--preflight` | flag | Validate continuation admission without dispatching a provider or mutating lifecycle state |
 | `--rearm` | flag | Explicitly rearm one failed terminal continuation before consuming it |
+| `--artifact-id` | `<ID>` | Select the patch artifact to promote when the durable attempt produced more than one patch candidate. This resumes controller-side promotion without dispatching another provider execution |
 | `--full` | flag | Include the complete Cook report rather than the compact lifecycle view |
 
 ## `homeboy agent-task loop`
@@ -305,10 +307,14 @@ Execute a previously submitted durable run
 ## `homeboy agent-task run-next`
 
 ```sh
-homeboy agent-task run-next
+homeboy agent-task run-next [OPTIONS]
 ```
 
-Claim and execute the oldest queued durable run
+Claim and execute the oldest queued durable run, optionally within one fanout
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--fanout` | `<ID>` | Claim only queued child runs belonging to this durable fanout |
 
 ## `homeboy agent-task submit`
 
@@ -764,6 +770,7 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
 | `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
 | `--gate-toolchain` | `<COMMAND>` | Required executable to initialize before provider execution. Its probe is `COMMAND --version` in the final isolated gate environment. Repeatable |
+| `--gate-toolchain-spec` | `<JSON>` | Exact toolchain probe contract as JSON. Use when a probe needs arguments other than the `--version` default retained by `--gate-toolchain` |
 | `--gate-package-artifact` | `<JSON>` | Caller-declared package resource readiness as a JSON object. The object defines its environment mapping, required paths or digests, and opaque remediation metadata. Repeat for multiple resources |
 | `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
 | `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
@@ -942,6 +949,7 @@ Promote a completed generic patch artifact into a managed worktree
 | `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
 | `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
 | `--gate-toolchain` | `<COMMAND>` | Required executable to initialize before provider execution. Its probe is `COMMAND --version` in the final isolated gate environment. Repeatable |
+| `--gate-toolchain-spec` | `<JSON>` | Exact toolchain probe contract as JSON. Use when a probe needs arguments other than the `--version` default retained by `--gate-toolchain` |
 | `--gate-package-artifact` | `<JSON>` | Caller-declared package resource readiness as a JSON object. The object defines its environment mapping, required paths or digests, and opaque remediation metadata. Repeat for multiple resources |
 | `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
 | `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
@@ -1063,6 +1071,7 @@ Record an independent, durable acceptance verdict for a candidate
 | `--verdict` | `<VERDICT>` | _no help text_ Values: `accepted`, `rejected`. |
 | `--token` | `<TOKEN>` | Opaque credential consumed by the configured acceptance verifier |
 | `--evidence-ref` | `<EVIDENCE_REFS>` | _no help text_ |
+| `--feedback` | `<TEXT>` | Bounded reviewer remediation feedback retained with a rejected Cook candidate for its one authorized repair attempt |
 
 ## `homeboy agent-task gate-feedback`
 

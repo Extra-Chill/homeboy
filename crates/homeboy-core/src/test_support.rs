@@ -1592,6 +1592,35 @@ pub fn env_lock() -> MutexGuard<'static, ()> {
     home_lock().lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Restores one process-global environment value when dropped.
+///
+/// Callers must hold [`env_lock`] while this guard is live. [`HomeGuard`]
+/// already holds that lock, so it composes with [`with_isolated_home`].
+pub struct EnvVarGuard {
+    name: String,
+    prior: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    pub fn set(name: &str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prior = std::env::var_os(name);
+        unsafe { std::env::set_var(name, value) };
+        Self {
+            name: name.to_string(),
+            prior,
+        }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.prior {
+            Some(value) => unsafe { std::env::set_var(&self.name, value) },
+            None => unsafe { std::env::remove_var(&self.name) },
+        }
+    }
+}
+
 fn home_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -2269,6 +2298,29 @@ mod tests {
         assert_eq!(
             command_env(&command, TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV),
             Some(Some("1".into()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermetic_runner_clean_exits_do_not_pay_descendant_cleanup_grace_period() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let runner = workspace.join("scripts/nextest-hermetic-test-environment.sh");
+        let started = Instant::now();
+        for _ in 0..4 {
+            let status = Command::new("sh")
+                .arg(&runner)
+                .arg("true")
+                .status()
+                .expect("run hermetic test runner");
+            assert!(status.success());
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "clean test processes must not each pay the one-second descendant cleanup grace period"
         );
     }
 

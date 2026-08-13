@@ -84,6 +84,35 @@ pub fn registered() -> Result<Vec<Component>> {
     Ok(components)
 }
 
+/// Resolve one persisted component without reconstructing the full inventory.
+///
+/// Cook admission uses this for an explicit repository identity so stale,
+/// unrelated registrations cannot trigger portable Git enrichment.
+pub fn registered_by_id(id: &str) -> Result<Option<Component>> {
+    crate::engine::identifier::validate_component_id(id)?;
+    let projects = project::list().unwrap_or_default();
+    let standalone_snapshot = project::StandaloneComponentConfigSnapshot::load();
+    for project in &projects {
+        if project
+            .components
+            .iter()
+            .any(|attachment| attachment.id == id)
+        {
+            if let Ok(component) = project::resolve_project_component_with_standalone_snapshot(
+                project,
+                id,
+                Some(&standalone_snapshot),
+            ) {
+                if component.id == id {
+                    return Ok(Some(component));
+                }
+            }
+        }
+    }
+
+    load_standalone_component(id)
+}
+
 /// Load standalone component registrations from `~/.config/homeboy/components/`.
 ///
 /// Each `<id>.json` file in the components directory is a registered component
@@ -138,7 +167,6 @@ pub(super) fn load_standalone_components() -> Result<Vec<Component>> {
             Some(p) if !p.is_empty() => p.to_string(),
             _ => continue,
         };
-
         let local_dir = Path::new(&local_path);
 
         // If the local_path directory has a homeboy.json, prefer portable discovery
@@ -177,6 +205,69 @@ pub(super) fn load_standalone_components() -> Result<Vec<Component>> {
     }
 
     Ok(components)
+}
+
+fn load_standalone_component(id: &str) -> Result<Option<Component>> {
+    let path = crate::paths::components()?.join(format!("{id}.json"));
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Ok(None);
+    };
+    Ok(component_from_standalone_registration(id, json))
+}
+
+fn component_from_standalone_config(id: &str, mut json: serde_json::Value) -> Option<Component> {
+    let local_path = json.get("local_path")?.as_str()?.trim();
+    if local_path.is_empty() {
+        return None;
+    }
+    json.as_object_mut()?
+        .insert("id".to_string(), serde_json::Value::String(id.to_string()));
+    serde_json::from_value(json).ok()
+}
+
+fn component_from_standalone_registration(id: &str, json: serde_json::Value) -> Option<Component> {
+    let local_path = json.get("local_path")?.as_str()?.trim();
+    if local_path.is_empty() {
+        return None;
+    }
+    let local_dir = Path::new(local_path);
+
+    // Repo-owned fields take precedence when the targeted registration is live.
+    if local_dir.exists() {
+        if let Some(discovered) = discover_from_portable(local_dir) {
+            let portable = read_portable_config(local_dir)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| serde_json::json!({}));
+            return Some(overlay_standalone_registration(
+                id, discovered, portable, json,
+            ));
+        }
+    } else if let Some(parent) = local_dir.parent() {
+        return find_sibling_portable_component(parent, id);
+    }
+
+    component_from_standalone_config(id, json)
+}
+
+fn find_sibling_portable_component(parent: &Path, id: &str) -> Option<Component> {
+    let entries = std::fs::read_dir(parent).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(component) = discover_from_portable(&path) else {
+            continue;
+        };
+        if component.id == id {
+            return Some(component);
+        }
+    }
+    None
 }
 
 fn overlay_standalone_registration(

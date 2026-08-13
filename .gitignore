@@ -26,6 +26,7 @@ dist-manifest.json
 /homeboy-test-shard.json
 /homeboy-test-shard-plan.json
 /homeboy-test-shard-inventory.json
+/homeboy-test-archive/
 /differential-phase/
 
 # Keep Cargo.lock for reproducible builds
