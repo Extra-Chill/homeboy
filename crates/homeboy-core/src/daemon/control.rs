@@ -34,9 +34,9 @@ use super::{
 const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
 
 /// Enumerate foreground daemon processes without inferring ownership from a
-/// command substring. A candidate is an owner only when its explicit HOME
-/// environment resolves to this durable store and its executable is the active
-/// binary; absent evidence remains ambiguous.
+/// command substring. A candidate is an owner only when its explicit state
+/// store resolves to this durable store and its executable is the active binary;
+/// absent evidence remains ambiguous.
 pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonProcessCandidate>> {
     // macOS cannot expose another process's environment through `ps`, so a live
     // operator daemon has no durable-store evidence there. Test harnesses opt
@@ -69,9 +69,14 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
         .lines()
         .filter_map(|line| parse_daemon_process_candidate(line, jobs_path, current_exe.as_deref()))
         .map(|mut candidate| {
-            if let Some(store) = process_durable_store_path(candidate.pid) {
-                candidate.durable_store_path = Some(store.display().to_string());
-                candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
+            if matches!(
+                command_state_dir(&candidate.cmdline),
+                CommandStateDir::Absent
+            ) {
+                if let Some(store) = process_durable_store_path(candidate.pid) {
+                    candidate.durable_store_path = Some(store.display().to_string());
+                    candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
+                }
             }
             if test_namespace && candidate.durable_store_path.as_deref() != jobs_path.to_str() {
                 candidate.ownership = DaemonProcessOwnership::Unrelated;
@@ -277,17 +282,28 @@ fn parse_daemon_process_candidate(
         .collect::<Vec<_>>()
         .windows(2)
         .find_map(|pair| (pair[0] == "--addr").then(|| pair[1].to_string()));
-    let state_dir = cmdline
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix(crate::paths::DAEMON_STATE_DIR_ENV))
-        .and_then(|value| value.strip_prefix('='))
-        .filter(|value| !value.trim().is_empty());
-    let home = cmdline
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("HOME="));
-    let durable_store_path = state_dir
-        .map(|state_dir| Path::new(state_dir).join("jobs.json"))
-        .or_else(|| home.map(|home| Path::new(home).join(".config/homeboy/daemon/jobs.json")));
+    let durable_store_path = match command_state_dir(&cmdline) {
+        CommandStateDir::Proven(state_dir) => Some(durable_store_path(Path::new(state_dir))),
+        // `ps` command text cannot preserve an argv boundary inside a quoted or
+        // whitespace-bearing path. Do not substitute a lower-priority store.
+        CommandStateDir::Ambiguous => None,
+        CommandStateDir::Absent => match command_environment_value(
+            &cmdline,
+            &executable,
+            crate::paths::DAEMON_STATE_DIR_ENV,
+        ) {
+            CommandTextValue::Proven(state_dir) => Some(durable_store_path(Path::new(state_dir))),
+            CommandTextValue::Ambiguous => None,
+            CommandTextValue::Absent => {
+                match command_environment_value(&cmdline, &executable, "HOME") {
+                    CommandTextValue::Proven(home) => Some(durable_store_path(
+                        &Path::new(home).join(".config/homeboy/daemon"),
+                    )),
+                    CommandTextValue::Absent | CommandTextValue::Ambiguous => None,
+                }
+            }
+        },
+    };
     let executable_matches = current_exe.is_some_and(|current| {
         Path::new(&executable).canonicalize().ok().as_deref() == Some(current)
     });
@@ -316,12 +332,96 @@ fn command_has_daemon_serve(cmdline: &str) -> bool {
         .any(|arguments| arguments == ["daemon", "serve"])
 }
 
+enum CommandStateDir<'a> {
+    Absent,
+    Proven(&'a str),
+    Ambiguous,
+}
+
+enum CommandTextValue<'a> {
+    Absent,
+    Proven(&'a str),
+    Ambiguous,
+}
+
+fn command_state_dir(cmdline: &str) -> CommandStateDir<'_> {
+    let arguments = cmdline.split_whitespace().collect::<Vec<_>>();
+    let Some((index, argument)) = arguments
+        .iter()
+        .enumerate()
+        .find(|(_, argument)| **argument == "--state-dir" || argument.starts_with("--state-dir="))
+    else {
+        return CommandStateDir::Absent;
+    };
+
+    let value = if *argument == "--state-dir" {
+        arguments.get(index + 1).copied()
+    } else {
+        argument.strip_prefix("--state-dir=")
+    };
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return CommandStateDir::Ambiguous;
+    };
+
+    // `ps` renders argv as whitespace-delimited text. A state-dir is exact only
+    // at the end of that rendering and without shell quoting or escaping.
+    if index + if *argument == "--state-dir" { 2 } else { 1 } != arguments.len()
+        || value.contains(['\'', '"', '\\'])
+    {
+        CommandStateDir::Ambiguous
+    } else {
+        CommandStateDir::Proven(value)
+    }
+}
+
+fn command_environment_value<'a>(
+    cmdline: &'a str,
+    executable: &str,
+    key: &str,
+) -> CommandTextValue<'a> {
+    let arguments = cmdline.split_whitespace().collect::<Vec<_>>();
+    let Some((index, value)) = arguments.iter().enumerate().find_map(|(index, argument)| {
+        argument
+            .strip_prefix(key)
+            .and_then(|value| value.strip_prefix('='))
+            .map(|value| (index, value))
+    }) else {
+        return CommandTextValue::Absent;
+    };
+    if value.trim().is_empty() || value.contains(['\'', '"', '\\']) {
+        return CommandTextValue::Ambiguous;
+    }
+
+    // `ps` renders the environment and argv as whitespace-delimited text. The
+    // assignment is trustworthy only when its following command boundary is
+    // proven by the executable field; otherwise it may be a path fragment.
+    match arguments[index + 1..]
+        .iter()
+        .find(|argument| !argument.contains('='))
+    {
+        Some(command) if *command == executable => CommandTextValue::Proven(value),
+        Some(_) | None => CommandTextValue::Ambiguous,
+    }
+}
+
+fn durable_store_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("jobs.json")
+}
+
+fn normalize_durable_store_path(store: &Path) -> PathBuf {
+    let parent = store.parent().expect("jobs file has a parent");
+    parent
+        .canonicalize()
+        .map(|parent| parent.join("jobs.json"))
+        .unwrap_or_else(|_| store.to_path_buf())
+}
+
 fn classify_candidate_store(
     candidate: &DaemonProcessCandidate,
     jobs_path: &Path,
     store: &Path,
 ) -> DaemonProcessOwnership {
-    if store != jobs_path {
+    if normalize_durable_store_path(store) != normalize_durable_store_path(jobs_path) {
         DaemonProcessOwnership::Unrelated
     } else if candidate.build_identity.is_some() {
         DaemonProcessOwnership::Owning
@@ -344,11 +444,11 @@ fn process_durable_store_path(pid: u32) -> Option<PathBuf> {
     };
     assignment(crate::paths::DAEMON_STATE_DIR_ENV)
         .filter(|value| !value.is_empty())
-        .map(|value| Path::new(value).join("jobs.json"))
+        .map(|value| durable_store_path(Path::new(value)))
         .or_else(|| {
             assignment("HOME")
                 .filter(|value| !value.is_empty())
-                .map(|value| Path::new(value).join(".config/homeboy/daemon/jobs.json"))
+                .map(|value| durable_store_path(&Path::new(value).join(".config/homeboy/daemon")))
         })
 }
 

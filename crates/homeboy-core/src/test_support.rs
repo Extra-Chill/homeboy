@@ -110,6 +110,13 @@ impl HermeticTestContext {
         self.root().join("artifacts")
     }
 
+    /// Explicit roots for in-process services that support dependency
+    /// injection. Unlike `HomeGuard`, constructing these does not mutate the
+    /// parent process or serialize peer tests.
+    pub fn path_roots(&self) -> crate::paths::PathRoots {
+        crate::paths::PathRoots::new(self.config_dir(), self.data_dir(), self.artifact_dir())
+    }
+
     pub fn runtime_dir(&self) -> &Path {
         self.runtime.path()
     }

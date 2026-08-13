@@ -20,6 +20,153 @@ use homeboy_core::{paths, Error, Result};
 pub const COOK_RECIPE_SCHEMA: &str = "homeboy/agent-task-cook-recipe/v1";
 const CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation/v1";
 
+/// Durable Cook storage bound to explicit filesystem roots.
+#[derive(Clone, Debug)]
+pub struct CookRecipeStore {
+    data_root: PathBuf,
+}
+
+impl CookRecipeStore {
+    pub fn new(roots: paths::PathRoots) -> Self {
+        Self::from_data_root(roots.data().to_path_buf())
+    }
+
+    pub fn from_environment() -> Result<Self> {
+        Ok(Self::new(paths::PathRoots::from_environment()?))
+    }
+
+    /// Bind Cook's data-only storage without requiring unrelated config or
+    /// artifact roots. Legacy Cook entry points use this to preserve their
+    /// historical `HOMEBOY_DATA_DIR`-only contract.
+    pub fn from_data_root(data: PathBuf) -> Self {
+        Self { data_root: data }
+    }
+
+    pub fn from_current_data_root() -> Result<Self> {
+        Ok(Self::from_data_root(paths::homeboy_data()?))
+    }
+
+    fn recipe_root(&self) -> PathBuf {
+        self.data_root.join("agent-task-cooks")
+    }
+
+    fn recipe_path(&self, cook_id: &str) -> PathBuf {
+        self.recipe_root()
+            .join(paths::sanitize_path_segment(cook_id))
+            .join("recipe.json")
+    }
+
+    fn supersession_path(&self, cook_id: &str) -> PathBuf {
+        self.recipe_path(cook_id)
+            .with_file_name("supersession.json")
+    }
+
+    fn queue_root(&self) -> PathBuf {
+        self.data_root.join("agent-task-cook-continuations")
+    }
+
+    pub fn persist_recipe(&self, recipe: &AgentTaskCookRecipe) -> Result<()> {
+        validate_recipe(recipe)?;
+        let path = self.recipe_path(&recipe.cook_id);
+        fs::create_dir_all(path.parent().expect("recipe path has parent")).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        homeboy_core::engine::local_files::write_json_file_owner_only(&path, recipe)
+    }
+
+    pub fn load_recipe(&self, cook_id: &str) -> Result<AgentTaskCookRecipe> {
+        load_recipe_at(self.recipe_path(cook_id), cook_id)
+    }
+
+    pub fn recipe_exists(&self, cook_id: &str) -> bool {
+        self.recipe_path(cook_id).exists()
+    }
+
+    pub fn load_recipe_for_attempt(&self, run_id: &str) -> Result<Option<AgentTaskCookRecipe>> {
+        load_recipe_for_attempt_from(&self.recipe_root(), run_id)
+    }
+
+    pub fn persist_initial_recipe(
+        &self,
+        options: &AgentTaskCookServiceOptions,
+    ) -> Result<AgentTaskCookRecipe> {
+        persist_initial_recipe_in_store(self, options)
+    }
+
+    pub fn validate_initial_recipe_compatibility(
+        &self,
+        options: &AgentTaskCookServiceOptions,
+    ) -> Result<()> {
+        validate_initial_recipe_compatibility_in_store(self, options)
+    }
+
+    pub fn record_recipe_attempt(
+        &self,
+        cook_id: &str,
+        attempt: u32,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+    ) -> Result<AgentTaskCookRecipe> {
+        record_recipe_attempt_in_store(self, cook_id, attempt, run_id, plan)
+    }
+
+    pub fn record_recipe_attempt_replacement(
+        &self,
+        cook_id: &str,
+        replaced_run_id: &str,
+        replacement_run_id: &str,
+    ) -> Result<AgentTaskCookRecipe> {
+        record_recipe_attempt_replacement_in_store(
+            self,
+            cook_id,
+            replaced_run_id,
+            replacement_run_id,
+        )
+    }
+
+    pub fn enqueue_continuation(
+        &self,
+        continuation: &AgentTaskCookContinuation,
+        rearm_failed: bool,
+    ) -> Result<bool> {
+        DurableCookContinuationQueue { store: self }.enqueue(continuation, rearm_failed)
+    }
+
+    pub fn claim_continuation_with_budget(&self, budget: usize) -> Result<CookContinuationClaim> {
+        claim_continuation_from(&self.queue_root(), budget)
+    }
+
+    pub fn claim_continuation_for(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+    ) -> Result<Option<ClaimedCookContinuation>> {
+        claim_continuation_for_from(&self.queue_root(), cook_id, run_id)
+    }
+
+    pub fn consume_claimed_with_dispatcher(
+        &self,
+        claim: ClaimedCookContinuation,
+        dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+        execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
+    ) -> Result<i32> {
+        let queue_root = self.queue_root();
+        if !paths::local_path_is_contained(&queue_root, &claim.path) {
+            return Err(Error::validation_invalid_argument(
+                "cook_continuation.store",
+                "claimed Cook continuation belongs to a different durable store",
+                Some(claim.path.display().to_string()),
+                None,
+            ));
+        }
+        consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute, false)
+    }
+}
+
+fn default_store() -> Result<CookRecipeStore> {
+    CookRecipeStore::from_current_data_root()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentTaskCookRecipe {
@@ -126,14 +273,21 @@ pub trait AgentTaskCookContinuationScheduler {
 pub fn persist_initial_recipe(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<AgentTaskCookRecipe> {
-    recover_pending_supersession(&options.cook_id)?;
+    default_store()?.persist_initial_recipe(options)
+}
+
+fn persist_initial_recipe_in_store(
+    store: &CookRecipeStore,
+    options: &AgentTaskCookServiceOptions,
+) -> Result<AgentTaskCookRecipe> {
+    recover_pending_supersession(store, &options.cook_id)?;
     let mut recipe = initial_recipe(options)?;
     validate_recipe(&recipe)?;
-    if let Some(existing) = compatible_existing_recipe(&recipe)? {
+    if let Some(existing) = compatible_existing_recipe(store, &recipe)? {
         return Ok(existing);
     }
-    if recipe_exists(&recipe.cook_id)? {
-        let existing = load_recipe(&recipe.cook_id)?;
+    if store.recipe_exists(&recipe.cook_id) {
+        let existing = store.load_recipe(&recipe.cook_id)?;
         let mismatches = recipe_mismatch_fields(&existing, &recipe);
         ensure_correction_is_safe(&existing, &recipe, &mismatches)?;
         let requested_attempt = recipe.attempts.pop().expect("validated recipe has attempt");
@@ -169,11 +323,11 @@ pub fn persist_initial_recipe(
                 .map(|field| (*field).to_string())
                 .collect(),
         };
-        write_supersession(&supersession)?;
-        complete_supersession(&supersession)?;
+        write_supersession(store, &supersession)?;
+        complete_supersession(store, &supersession)?;
         return Ok(recipe);
     }
-    write_recipe(&recipe)?;
+    store.persist_recipe(&recipe)?;
     Ok(recipe)
 }
 
@@ -181,10 +335,17 @@ pub fn persist_initial_recipe(
 /// uses this before creating worktrees so incompatible replays fail before any
 /// lifecycle resources are mutated.
 pub fn validate_initial_recipe_compatibility(options: &AgentTaskCookServiceOptions) -> Result<()> {
-    if !recipe_exists(&options.cook_id)? {
+    default_store()?.validate_initial_recipe_compatibility(options)
+}
+
+fn validate_initial_recipe_compatibility_in_store(
+    store: &CookRecipeStore,
+    options: &AgentTaskCookServiceOptions,
+) -> Result<()> {
+    if !store.recipe_exists(&options.cook_id) {
         return Ok(());
     }
-    let existing = load_recipe(&options.cook_id)?;
+    let existing = store.load_recipe(&options.cook_id)?;
     let mut recipe = initial_recipe(options)?;
     // The attempt plan is compiled only after the target worktree exists. Use
     // the durable plan here so preflight compares every input already known
@@ -261,9 +422,12 @@ fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCook
     Ok(recipe)
 }
 
-fn compatible_existing_recipe(recipe: &AgentTaskCookRecipe) -> Result<Option<AgentTaskCookRecipe>> {
-    if recipe_exists(&recipe.cook_id)? {
-        let existing = load_recipe(&recipe.cook_id)?;
+fn compatible_existing_recipe(
+    store: &CookRecipeStore,
+    recipe: &AgentTaskCookRecipe,
+) -> Result<Option<AgentTaskCookRecipe>> {
+    if store.recipe_exists(&recipe.cook_id) {
+        let existing = store.load_recipe(&recipe.cook_id)?;
         let mut expected = recipe.clone();
         expected.attempts = existing.attempts.clone();
         expected.sensitive_mappings = existing.sensitive_mappings.clone();
@@ -410,8 +574,8 @@ fn ensure_correction_is_safe(
     ))
 }
 
-fn recover_pending_supersession(cook_id: &str) -> Result<()> {
-    let path = supersession_path(cook_id)?;
+fn recover_pending_supersession(store: &CookRecipeStore, cook_id: &str) -> Result<()> {
+    let path = store.supersession_path(cook_id);
     if !path.exists() {
         return Ok(());
     }
@@ -435,27 +599,37 @@ fn recover_pending_supersession(cook_id: &str) -> Result<()> {
             None,
         ));
     }
-    complete_supersession(&supersession)
+    complete_supersession(store, &supersession)
 }
 
-fn write_supersession(supersession: &AgentTaskCookRecipeSupersession) -> Result<()> {
-    let path = supersession_path(&supersession.previous.cook_id)?;
+fn write_supersession(
+    store: &CookRecipeStore,
+    supersession: &AgentTaskCookRecipeSupersession,
+) -> Result<()> {
+    let path = store.supersession_path(&supersession.previous.cook_id);
     homeboy_core::engine::local_files::write_json_file_owner_only(&path, supersession)
 }
 
-fn complete_supersession(supersession: &AgentTaskCookRecipeSupersession) -> Result<()> {
+fn complete_supersession(
+    store: &CookRecipeStore,
+    supersession: &AgentTaskCookRecipeSupersession,
+) -> Result<()> {
     // The intent is durable before either result. Replaying always replaces the
     // active recipe first, then records immutable history, so either crash point
     // converges on the same state without blocking the corrected retry.
-    write_recipe(&supersession.replacement)?;
-    archive_recipe_revision(supersession)?;
-    let path = supersession_path(&supersession.previous.cook_id)?;
+    store.persist_recipe(&supersession.replacement)?;
+    archive_recipe_revision(store, supersession)?;
+    let path = store.supersession_path(&supersession.previous.cook_id);
     fs::remove_file(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
 }
 
-fn archive_recipe_revision(supersession: &AgentTaskCookRecipeSupersession) -> Result<()> {
-    let root = recipe_path(&supersession.previous.cook_id)?
+fn archive_recipe_revision(
+    store: &CookRecipeStore,
+    supersession: &AgentTaskCookRecipeSupersession,
+) -> Result<()> {
+    let root = store
+        .recipe_path(&supersession.previous.cook_id)
         .parent()
         .expect("recipe path has parent")
         .join("recipe-history");
@@ -629,7 +803,17 @@ pub fn record_recipe_attempt(
     run_id: &str,
     plan: &AgentTaskPlan,
 ) -> Result<AgentTaskCookRecipe> {
-    let mut recipe = load_recipe(cook_id)?;
+    default_store()?.record_recipe_attempt(cook_id, attempt, run_id, plan)
+}
+
+fn record_recipe_attempt_in_store(
+    store: &CookRecipeStore,
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+) -> Result<AgentTaskCookRecipe> {
+    let mut recipe = store.load_recipe(cook_id)?;
     let candidate = AgentTaskCookRecipeAttempt {
         attempt,
         run_id: run_id.to_string(),
@@ -681,7 +865,7 @@ pub fn record_recipe_attempt(
     recipe.sensitive_mappings.sort();
     recipe.sensitive_mappings.dedup();
     validate_recipe(&recipe)?;
-    write_recipe(&recipe)?;
+    store.persist_recipe(&recipe)?;
     Ok(recipe)
 }
 
@@ -690,7 +874,16 @@ pub fn record_recipe_attempt_replacement(
     replaced_run_id: &str,
     replacement_run_id: &str,
 ) -> Result<AgentTaskCookRecipe> {
-    let mut recipe = load_recipe(cook_id)?;
+    default_store()?.record_recipe_attempt_replacement(cook_id, replaced_run_id, replacement_run_id)
+}
+
+fn record_recipe_attempt_replacement_in_store(
+    store: &CookRecipeStore,
+    cook_id: &str,
+    replaced_run_id: &str,
+    replacement_run_id: &str,
+) -> Result<AgentTaskCookRecipe> {
+    let mut recipe = store.load_recipe(cook_id)?;
     if let Some(existing) = recipe
         .attempts
         .iter()
@@ -732,12 +925,15 @@ pub fn record_recipe_attempt_replacement(
         plan: replaced.plan,
     });
     validate_recipe(&recipe)?;
-    write_recipe(&recipe)?;
+    store.persist_recipe(&recipe)?;
     Ok(recipe)
 }
 
 pub fn load_recipe(cook_id: &str) -> Result<AgentTaskCookRecipe> {
-    let path = recipe_path(cook_id)?;
+    default_store()?.load_recipe(cook_id)
+}
+
+fn load_recipe_at(path: PathBuf, cook_id: &str) -> Result<AgentTaskCookRecipe> {
     let raw = fs::read_to_string(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     let recipe = serde_json::from_str(&raw).map_err(|error| {
@@ -763,19 +959,25 @@ pub fn load_recipe(cook_id: &str) -> Result<AgentTaskCookRecipe> {
 /// Legacy cook indexes predate this durable scheduler contract. Their status
 /// projection remains read-only and preserves the previous orphan behavior.
 pub fn recipe_exists(cook_id: &str) -> Result<bool> {
-    Ok(recipe_path(cook_id)?.exists())
+    Ok(default_store()?.recipe_exists(cook_id))
 }
 
 /// Locate an orphaned attempt by its exact durable run ID. This permits an
 /// operator to disambiguate a cook whose retry attempts have different plans.
 pub fn load_recipe_for_attempt(run_id: &str) -> Result<Option<AgentTaskCookRecipe>> {
-    let root = paths::homeboy_data()?.join("agent-task-cooks");
+    default_store()?.load_recipe_for_attempt(run_id)
+}
+
+fn load_recipe_for_attempt_from(
+    root: &std::path::Path,
+    run_id: &str,
+) -> Result<Option<AgentTaskCookRecipe>> {
     if !root.exists() {
         return Ok(None);
     }
 
     let mut matches = Vec::new();
-    for entry in fs::read_dir(&root)
+    for entry in fs::read_dir(root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
     {
         let path = entry
@@ -978,7 +1180,7 @@ fn enqueue_terminal_continuation_with_recovery(
         run_id: run_id.to_string(),
         retries: 0,
     };
-    DurableCookContinuationQueue.enqueue(&continuation, rearm_failed)
+    default_store()?.enqueue_continuation(&continuation, rearm_failed)
 }
 
 pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
@@ -994,11 +1196,14 @@ pub struct CookContinuationClaim {
 /// Claim one valid continuation after terminalizing malformed entries within a
 /// caller-owned admission budget.
 pub fn claim_continuation_with_budget(budget: usize) -> Result<CookContinuationClaim> {
-    let root = queue_root()?;
-    fs::create_dir_all(&root)
+    default_store()?.claim_continuation_with_budget(budget)
+}
+
+fn claim_continuation_from(root: &std::path::Path, budget: usize) -> Result<CookContinuationClaim> {
+    fs::create_dir_all(root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
-    reclaim_dead_claims(&root)?;
-    let mut pending: Vec<_> = fs::read_dir(&root)
+    reclaim_dead_claims(root)?;
+    let mut pending: Vec<_> = fs::read_dir(root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
@@ -1064,12 +1269,19 @@ pub fn claim_continuation_for(
     cook_id: &str,
     run_id: &str,
 ) -> Result<Option<ClaimedCookContinuation>> {
+    default_store()?.claim_continuation_for(cook_id, run_id)
+}
+
+fn claim_continuation_for_from(
+    root: &std::path::Path,
+    cook_id: &str,
+    run_id: &str,
+) -> Result<Option<ClaimedCookContinuation>> {
     let key = format!("{cook_id}:{run_id}");
     let hash = content_hash::sha256_hex(key.as_bytes());
-    let root = queue_root()?;
-    fs::create_dir_all(&root)
+    fs::create_dir_all(root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
-    reclaim_dead_claims(&root)?;
+    reclaim_dead_claims(root)?;
     let path = root.join(format!("{hash}.pending"));
     let claimed = path.with_extension(format!("claimed.{}", std::process::id()));
     match fs::rename(&path, &claimed) {
@@ -1514,7 +1726,7 @@ pub fn consume_claimed_with_dispatcher(
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
 ) -> Result<i32> {
-    consume_claimed_with_dispatcher_policy(claim, dispatcher, execute, false)
+    default_store()?.consume_claimed_with_dispatcher(claim, dispatcher, execute)
 }
 
 pub fn consume_claimed_terminal_with_dispatcher(
@@ -1522,16 +1734,17 @@ pub fn consume_claimed_terminal_with_dispatcher(
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
 ) -> Result<i32> {
-    consume_claimed_with_dispatcher_policy(claim, dispatcher, execute, true)
+    consume_claimed_with_dispatcher_policy(&default_store()?, claim, dispatcher, execute, true)
 }
 
 fn consume_claimed_with_dispatcher_policy(
+    store: &CookRecipeStore,
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
     allow_historical_terminal: bool,
 ) -> Result<i32> {
-    let recipe = match load_recipe(&claim.continuation().cook_id) {
+    let recipe = match store.load_recipe(&claim.continuation().cook_id) {
         Ok(recipe) => recipe,
         Err(error) => {
             claim.fail(&error.message)?;
@@ -1632,15 +1845,17 @@ fn recipe_value_error(field: &'static str) -> impl FnOnce(serde_json::Error) -> 
     }
 }
 
-struct DurableCookContinuationQueue;
-impl DurableCookContinuationQueue {
+struct DurableCookContinuationQueue<'a> {
+    store: &'a CookRecipeStore,
+}
+impl DurableCookContinuationQueue<'_> {
     fn enqueue(
         &self,
         continuation: &AgentTaskCookContinuation,
         rearm_failed: bool,
     ) -> Result<bool> {
         validate_continuation(continuation)?;
-        let root = queue_root()?;
+        let root = self.store.queue_root();
         fs::create_dir_all(&root).map_err(|error| {
             Error::internal_io(error.to_string(), Some(root.display().to_string()))
         })?;
@@ -1722,7 +1937,7 @@ impl DurableCookContinuationQueue {
     }
 }
 
-impl AgentTaskCookContinuationScheduler for DurableCookContinuationQueue {
+impl AgentTaskCookContinuationScheduler for DurableCookContinuationQueue<'_> {
     fn enqueue(&self, continuation: &AgentTaskCookContinuation) -> Result<bool> {
         self.enqueue(continuation, false)
     }
@@ -1832,23 +2047,17 @@ fn sensitive_mappings(plan: &AgentTaskPlan) -> Result<Vec<String>> {
 }
 
 fn write_recipe(recipe: &AgentTaskCookRecipe) -> Result<()> {
-    let path = recipe_path(&recipe.cook_id)?;
-    fs::create_dir_all(path.parent().expect("recipe path has parent"))
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    homeboy_core::engine::local_files::write_json_file_owner_only(&path, recipe)
+    default_store()?.persist_recipe(recipe)
 }
 
 fn recipe_path(cook_id: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
-        .join("agent-task-cooks")
-        .join(paths::sanitize_path_segment(cook_id))
-        .join("recipe.json"))
+    Ok(default_store()?.recipe_path(cook_id))
 }
 fn supersession_path(cook_id: &str) -> Result<PathBuf> {
-    Ok(recipe_path(cook_id)?.with_file_name("supersession.json"))
+    Ok(default_store()?.supersession_path(cook_id))
 }
 fn queue_root() -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?.join("agent-task-cook-continuations"))
+    Ok(default_store()?.queue_root())
 }
 
 fn continuation_base_path(path: &std::path::Path) -> PathBuf {
@@ -2014,6 +2223,151 @@ mod tests {
             "gate_results": gate_results,
             "operator_notification": { "status": "completed", "message": "fixture" }
         })
+    }
+
+    #[test]
+    fn injected_cook_stores_isolate_identical_ids_in_parallel() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_store = CookRecipeStore::new(left_context.path_roots());
+        let right_store = CookRecipeStore::new(right_context.path_roots());
+        let left_recipe = recipe();
+        let mut right_recipe = recipe();
+        right_recipe.source_refs = vec!["other-issue".to_string()];
+        let continuation = AgentTaskCookContinuation {
+            schema: CONTINUATION_SCHEMA.to_string(),
+            key: "cook:run".to_string(),
+            cook_id: "cook".to_string(),
+            run_id: "run".to_string(),
+            retries: 0,
+        };
+
+        let left_continuation = continuation.clone();
+        let left = std::thread::spawn(move || {
+            left_store.persist_recipe(&left_recipe)?;
+            left_store.enqueue_continuation(&left_continuation, false)?;
+            let claim = left_store.claim_continuation_with_budget(1)?;
+            let exit_code = left_store.consume_claimed_with_dispatcher(
+                claim.claim.expect("left claim"),
+                |_| Ok(None),
+                |options| {
+                    assert_eq!(options.source_refs, ["issue"]);
+                    Ok(0)
+                },
+            )?;
+            Ok::<_, Error>((left_store, exit_code))
+        });
+        let right = std::thread::spawn(move || {
+            right_store.persist_recipe(&right_recipe)?;
+            right_store.enqueue_continuation(&continuation, false)?;
+            let claim = right_store
+                .claim_continuation_for("cook", "run")?
+                .expect("right exact claim");
+            let exit_code = right_store.consume_claimed_with_dispatcher(
+                claim,
+                |_| Ok(None),
+                |options| {
+                    assert_eq!(options.source_refs, ["other-issue"]);
+                    Ok(0)
+                },
+            )?;
+            Ok::<_, Error>((right_store, exit_code))
+        });
+
+        let (left_store, left_exit_code) = left.join().expect("left thread").expect("left store");
+        let (right_store, right_exit_code) =
+            right.join().expect("right thread").expect("right store");
+
+        assert_eq!(
+            left_store.load_recipe("cook").unwrap().source_refs,
+            ["issue"]
+        );
+        assert_eq!(
+            right_store.load_recipe("cook").unwrap().source_refs,
+            ["other-issue"]
+        );
+        assert_eq!(left_exit_code, 0);
+        assert_eq!(right_exit_code, 0);
+        assert!(left_store
+            .recipe_path("cook")
+            .starts_with(left_context.data_dir()));
+        assert!(right_store
+            .recipe_path("cook")
+            .starts_with(right_context.data_dir()));
+        assert_ne!(left_store.recipe_root(), right_store.recipe_root());
+    }
+
+    #[test]
+    fn injected_cook_stores_isolate_recipe_mutations_in_parallel() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_store = CookRecipeStore::new(left_context.path_roots());
+        let right_store = CookRecipeStore::new(right_context.path_roots());
+
+        let mutate = |store: CookRecipeStore, source_ref: &str, plan_id: &str| {
+            let mut options = reconstruct_options(&recipe()).expect("recipe options");
+            options.source_refs = vec![source_ref.to_string()];
+            store.persist_initial_recipe(&options)?;
+            store.validate_initial_recipe_compatibility(&options)?;
+
+            let mut retry_plan = options.initial_plan;
+            retry_plan.plan_id = plan_id.to_string();
+            store.record_recipe_attempt("cook", 2, "run-2", &retry_plan)?;
+            store.record_recipe_attempt_replacement("cook", "run-2", "run-2-replacement")?;
+            Ok::<_, Error>(store)
+        };
+
+        let left = std::thread::spawn(move || mutate(left_store, "left-issue", "left-plan"));
+        let right = std::thread::spawn(move || mutate(right_store, "right-issue", "right-plan"));
+        let left_store = left.join().expect("left thread").expect("left mutations");
+        let right_store = right
+            .join()
+            .expect("right thread")
+            .expect("right mutations");
+
+        let left_recipe = left_store.load_recipe("cook").expect("left recipe");
+        let right_recipe = right_store.load_recipe("cook").expect("right recipe");
+        assert_eq!(left_recipe.source_refs, ["left-issue"]);
+        assert_eq!(right_recipe.source_refs, ["right-issue"]);
+        assert_eq!(left_recipe.attempts[1].run_id, "run-2");
+        assert_eq!(right_recipe.attempts[1].run_id, "run-2");
+        assert_eq!(left_recipe.attempts[2].run_id, "run-2-replacement");
+        assert_eq!(right_recipe.attempts[2].run_id, "run-2-replacement");
+        assert_eq!(left_recipe.attempts[2].plan.plan_id, "left-plan");
+        assert_eq!(right_recipe.attempts[2].plan.plan_id, "right-plan");
+        assert_ne!(left_store.recipe_root(), right_store.recipe_root());
+    }
+
+    #[test]
+    fn store_rejects_a_claim_from_another_root() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_store = CookRecipeStore::new(left_context.path_roots());
+        let right_store = CookRecipeStore::new(right_context.path_roots());
+        let recipe = recipe();
+        let continuation = AgentTaskCookContinuation {
+            schema: CONTINUATION_SCHEMA.to_string(),
+            key: "cook:run".to_string(),
+            cook_id: "cook".to_string(),
+            run_id: "run".to_string(),
+            retries: 0,
+        };
+        left_store.persist_recipe(&recipe).unwrap();
+        right_store.persist_recipe(&recipe).unwrap();
+        left_store
+            .enqueue_continuation(&continuation, false)
+            .unwrap();
+        let claim = left_store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .expect("left claim");
+
+        let error = right_store
+            .consume_claimed_with_dispatcher(claim, |_| Ok(None), |_| Ok(0))
+            .expect_err("foreign claim must be rejected");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("different durable store"));
     }
 
     fn persist_recipe_run() -> (AgentTaskCookRecipe, AgentTaskPlan) {
@@ -3045,6 +3399,7 @@ mod tests {
     #[test]
     fn supersession_intent_recovers_before_and_after_active_recipe_replacement() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            let store = default_store().expect("Cook store");
             let previous = recipe();
             let mut replacement = previous.clone();
             replacement.finalization["title"] = serde_json::json!("corrected");
@@ -3061,15 +3416,17 @@ mod tests {
             };
 
             write_recipe(&previous).expect("persist previous recipe");
-            write_supersession(&supersession).expect("persist intent before active replacement");
-            recover_pending_supersession("cook").expect("recover interrupted replacement");
+            write_supersession(&store, &supersession)
+                .expect("persist intent before active replacement");
+            recover_pending_supersession(&store, "cook").expect("recover interrupted replacement");
             assert_eq!(load_recipe("cook").unwrap(), replacement);
             assert!(!supersession_path("cook").unwrap().exists());
 
             write_recipe(&previous).expect("reset active recipe");
-            write_supersession(&supersession).expect("persist retry intent");
+            write_supersession(&store, &supersession).expect("persist retry intent");
             write_recipe(&replacement).expect("simulate interruption after active replacement");
-            recover_pending_supersession("cook").expect("idempotently finish archived history");
+            recover_pending_supersession(&store, "cook")
+                .expect("idempotently finish archived history");
             assert_eq!(load_recipe("cook").unwrap(), replacement);
             assert!(!supersession_path("cook").unwrap().exists());
             assert_eq!(

@@ -42,6 +42,9 @@ pub(crate) enum FileCommand {
         project_id: String,
         /// Remote file path
         path: String,
+        /// Permit an empty write, truncating the destination to zero bytes
+        #[arg(long)]
+        allow_empty: bool,
         // Apply the destructive write. Without this flag, prints a plan only.
         // Shared plan-default mutation group (#11139).
         #[command(flatten)]

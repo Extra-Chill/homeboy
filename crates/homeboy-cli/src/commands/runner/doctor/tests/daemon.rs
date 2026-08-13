@@ -211,6 +211,61 @@ fn remote_default_artifact_root_rejects_empty_home() {
 }
 
 #[test]
+fn unreachable_transport_report_is_terminal_and_has_no_daemon_evidence() {
+    let runner = Runner {
+        id: "lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: Some("lab".to_string()),
+        workspace_root: None,
+        settings: server::RunnerSettings::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: server::RunnerPolicy::default(),
+    };
+    let server = server::Server {
+        id: "lab".to_string(),
+        aliases: Vec::new(),
+        host: "example.test".to_string(),
+        user: "runner".to_string(),
+        port: 22,
+        identity_file: None,
+        kind: None,
+        auth: None,
+        env: Default::default(),
+        runner: None,
+    };
+    let output = homeboy::core::server::CommandOutput {
+        stdout: String::new(),
+        stderr: "mm_send_fd: sendmsg(0): Message too long".to_string(),
+        success: false,
+        exit_code: 255,
+        timed_out: false,
+        child_resource: None,
+    };
+
+    let report = remote::unreachable_report("lab", &runner, &server, output);
+
+    assert_eq!(report.status, RunnerDoctorStatus::Error);
+    assert_eq!(report.checks.len(), 1);
+    assert_eq!(report.checks[0].id, "ssh.execution");
+    assert!(report.daemon_recovery.is_none());
+    assert!(report.admission_summary.is_none());
+    assert_eq!(report.diagnostics.expect("diagnostics").completed_checks, 1);
+}
+
+#[test]
+fn lab_offload_uses_a_bounded_probe_envelope() {
+    assert_eq!(
+        remote::probe_limits(RunnerDoctorScope::LabOffload),
+        (
+            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(20),
+        )
+    );
+}
+
+#[test]
 fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
     let recovery = homeboy::core::daemon::DaemonFreshnessReport {
         fresh: false,

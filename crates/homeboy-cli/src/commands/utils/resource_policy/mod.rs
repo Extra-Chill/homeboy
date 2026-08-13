@@ -434,8 +434,10 @@ pub fn non_interactive_preflight_error(
         None,
     );
     if let Some(command) = local_hot_rerun_command {
+        error.details["resume_command"] = serde_json::Value::String(command.clone());
         error.details["rerun_command"] = serde_json::Value::String(command);
     }
+    error.details["run_created"] = serde_json::Value::Bool(false);
     Some(error)
 }
 
@@ -1272,6 +1274,7 @@ mod tests {
             .message
             .contains("No Homeboy Lab runner is configured on this host"));
         assert!(error.details.get("rerun_command").is_none());
+        assert_eq!(error.details["run_created"], false);
     }
 
     #[test]
@@ -1405,6 +1408,11 @@ mod tests {
             error.details["rerun_command"].as_str(),
             Some("homeboy --placement local review lint --changed-since origin/main")
         );
+        assert_eq!(
+            error.details["resume_command"].as_str(),
+            Some("homeboy --placement local review lint --changed-since origin/main")
+        );
+        assert_eq!(error.details["run_created"], false);
         assert!(error.message.contains("Lab routing is not offered"));
     }
 

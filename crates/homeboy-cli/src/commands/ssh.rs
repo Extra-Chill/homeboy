@@ -128,17 +128,11 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
                 Some(shell::quote_args(&args.command))
             };
 
-            // When project is resolved with base_path, auto-cd to project root
-            let effective_command = match (&result.project_id, &result.base_path, &command_string) {
-                // Project with base_path and command: cd to base_path then run command
-                (Some(_), Some(bp), Some(cmd)) => {
-                    Some(format!("cd {} && {}", shell::quote_path(bp), cmd))
-                }
-                // Project with base_path, no command: interactive shell starts in base_path
-                (Some(_), Some(bp), None) => Some(format!("cd {}", shell::quote_path(bp))),
-                // No project context or no base_path: use command as-is
-                _ => command_string.clone(),
-            };
+            let effective_command = effective_remote_command(
+                result.project_id.as_deref(),
+                result.base_path.as_deref(),
+                command_string.as_deref(),
+            );
 
             let mut client = SshClient::from_server(&result.server, &result.server_id)?;
             if let Some(ref user_override) = args.user {
@@ -341,9 +335,89 @@ fn ssh_failure_reason(success: bool, exit_code: i32) -> Option<String> {
     ))
 }
 
+/// Compose the remote command, rooting it at the project base path.
+///
+/// Extracted from `run` so the generated command is directly assertable
+/// (#10839). The interactive shape in particular could not be observed from a
+/// test while it was an inline `match` arm, which is how `cd <base_path>` --
+/// a command that exits immediately -- shipped as the "open a shell" case.
+fn effective_remote_command(
+    project_id: Option<&str>,
+    base_path: Option<&str>,
+    command: Option<&str>,
+) -> Option<String> {
+    match (project_id, base_path, command) {
+        // Project with base_path and command: cd to base_path then run command.
+        (Some(_), Some(bp), Some(cmd)) => Some(format!("cd {} && {}", shell::quote_path(bp), cmd)),
+        // Project with base_path, no command: interactive shell rooted at
+        // base_path.
+        //
+        // `cd <bp>` alone is a complete remote command, so ssh ran it, it
+        // succeeded, and the session ended -- reporting
+        // `remote_command_success` with no shell ever presented. Replace the
+        // process with the operator's shell so the session persists until they
+        // exit it.
+        //
+        // `exec` rather than a plain invocation so the shell's exit status is
+        // the session's. Not `-l`: a login shell re-runs the profile scripts,
+        // and one that cd's to $HOME would silently undo the base_path this
+        // command exists to apply. The pty requested for the interactive path
+        // is what makes the exec'd shell interactive.
+        (Some(_), Some(bp), None) => Some(format!(
+            "cd {} && exec \"${{SHELL:-/bin/sh}}\"",
+            shell::quote_path(bp)
+        )),
+        // No project context or no base_path: use the command as-is. A
+        // server-only session with no command stays None, so ssh opens its own
+        // login shell exactly as before.
+        _ => command.map(str::to_string),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `homeboy ssh <project>` must hand back a shell, not run `cd` and quit.
+    #[test]
+    fn interactive_project_ssh_execs_a_shell_after_changing_directory() {
+        let command = effective_remote_command(Some("wpcom-sandbox"), Some("/srv/app"), None)
+            .expect("a project with a base path must produce a remote command");
+
+        assert_eq!(command, "cd '/srv/app' && exec \"${SHELL:-/bin/sh}\"");
+        assert!(
+            command.contains("exec"),
+            "the session must replace itself with a shell rather than terminating \
+             after cd (#10839): {command}"
+        );
+        assert!(
+            !command.contains(" -l"),
+            "a login shell re-runs profile scripts that may cd away from the \
+             base path this command exists to apply: {command}"
+        );
+    }
+
+    /// Every other shape is unchanged.
+    #[test]
+    fn other_remote_command_shapes_are_untouched() {
+        assert_eq!(
+            effective_remote_command(Some("proj"), Some("/srv/app"), Some("ls -la")).as_deref(),
+            Some("cd '/srv/app' && ls -la")
+        );
+        // Server-only, no base path: the command passes through verbatim.
+        assert_eq!(
+            effective_remote_command(None, None, Some("uptime")).as_deref(),
+            Some("uptime")
+        );
+        // Server-only interactive: ssh opens its own login shell, as before.
+        assert_eq!(effective_remote_command(None, None, None), None);
+        // A project without a base path has nothing to cd to.
+        assert_eq!(
+            effective_remote_command(Some("proj"), None, Some("uptime")).as_deref(),
+            Some("uptime")
+        );
+        assert_eq!(effective_remote_command(Some("proj"), None, None), None);
+    }
 
     #[test]
     fn ssh_success_classification_does_not_depend_on_output() {

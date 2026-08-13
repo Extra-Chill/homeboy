@@ -26,6 +26,7 @@ pub use local_exec::{
     execute_local_command_passthrough_with_timeout, execute_local_command_stderr_passthrough,
     execute_local_command_stderr_passthrough_with_timeout,
 };
+pub use ssh_client::used_clean_ssh_session;
 
 pub struct SshClient {
     pub host: String,

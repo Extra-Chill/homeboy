@@ -37,22 +37,66 @@ else
   [ "$expected" = "$actual" ]
 fi
 
-(cd "$TMP_DIR" && tar -xJf "$ASSET" 2>/dev/null || tar -xf "$ASSET")
-if [ ! -f "$TMP_DIR/homeboy" ]; then
-  echo "Expected extracted binary named homeboy" >&2
+CANDIDATE="${ASSET%.tar.xz}/homeboy"
+MEMBERS="$(tar -tJf "$TMP_DIR/$ASSET" 2>/dev/null || tar -tf "$TMP_DIR/$ASSET")" || {
+  echo "Unable to list release archive" >&2
+  exit 1
+}
+CANDIDATE_COUNT=0
+while IFS= read -r member; do
+  member="${member#./}"
+  case "$member" in
+    '' | /* | ../* | */../* | */.. | *//*)
+      echo "Release archive contains an unsafe member path" >&2
+      exit 1
+      ;;
+  esac
+  case "$member" in
+    homeboy | */homeboy)
+      if [ "$member" = "$CANDIDATE" ]; then
+        CANDIDATE_COUNT=$((CANDIDATE_COUNT + 1))
+      else
+        echo "Release archive contains an additional homeboy candidate" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done <<EOF
+$MEMBERS
+EOF
+if [ "$CANDIDATE_COUNT" -ne 1 ]; then
+  echo "Release archive must contain exactly one homeboy candidate" >&2
   exit 1
 fi
-chmod 0755 "$TMP_DIR/homeboy"
+
+CANDIDATE_DETAILS="$(tar -tvJf "$TMP_DIR/$ASSET" "$CANDIDATE" 2>/dev/null || tar -tvf "$TMP_DIR/$ASSET" "$CANDIDATE")" || {
+  echo "Unable to inspect release candidate" >&2
+  exit 1
+}
+case "$CANDIDATE_DETAILS" in
+  -*) ;;
+  *)
+    echo "Release archive candidate must be a regular file" >&2
+    exit 1
+    ;;
+esac
+
+EXTRACTED_BIN="$TMP_DIR/homeboy"
+(tar -xJOf "$TMP_DIR/$ASSET" "$CANDIDATE" 2>/dev/null || tar -xOf "$TMP_DIR/$ASSET" "$CANDIDATE") > "$EXTRACTED_BIN" || {
+  echo "Unable to extract release candidate" >&2
+  exit 1
+}
+chmod 0755 "$EXTRACTED_BIN"
 
 # The staged candidate owns admission; any failure exits before the installed
 # controller is written. Its report binds the candidate decision to legacy identity.
 LEGACY_IDENTITY="$("$BIN_PATH" self identity 2>/dev/null || "$BIN_PATH" --version 2>/dev/null || printf 'unavailable')"
-"$TMP_DIR/homeboy" self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
+"$EXTRACTED_BIN" self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
 
 if [ "${HOMEBOY_INSTALL_USE_SUDO:-false}" != true ] && { [ -w "$BIN_PATH" ] || [ -w "$BIN_DIR" ]; }; then
-  install -m 0755 "$TMP_DIR/homeboy" "$TMP_BIN"
+  install -m 0755 "$EXTRACTED_BIN" "$TMP_BIN"
   mv "$TMP_BIN" "$BIN_PATH"
 else
-  sudo install -m 0755 "$TMP_DIR/homeboy" "$TMP_BIN"
+  sudo install -m 0755 "$EXTRACTED_BIN" "$TMP_BIN"
   sudo mv "$TMP_BIN" "$BIN_PATH"
 fi

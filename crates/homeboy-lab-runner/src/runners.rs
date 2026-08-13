@@ -17,7 +17,6 @@
 
 pub use crate::daemon_repair_codes;
 pub use crate::peer_session_maintenance;
-pub use crate::runner_capability_inventory;
 pub use crate::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
     broker_submit_token_for_runner, broker_token_from_env, close_reconnected_job_log_owner,
@@ -43,9 +42,10 @@ pub use crate::{
     promote_runner_exec_artifacts, promote_runner_exec_summaries, promoted_output,
     prune_homeboy_binary_cache, prune_workspaces, pull_workspace, reconcile_status,
     reconcile_status_with_outcome, refresh_detached_queue_runner, refresh_homeboy_binary,
-    refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
-    resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token, runner_dev_sync,
-    runner_exec_failure_error, runner_exec_structured_summary, runner_generation_inventory,
+    refresh_lab_runner_readiness_for_admission, refresh_mirrored_daemon_evidence,
+    reportable_artifact_evidence_path, resolve_default_lab_runner, run_reverse_worker,
+    runner_artifact_store_token, runner_dev_sync, runner_exec_failure_error,
+    runner_exec_structured_summary, runner_generation_inventory,
     runner_generation_inventory_for_session, runner_generation_job_owners_for_session,
     runner_homeboy_path_for_command, runner_job_cancel, runner_job_cancel_for_session,
     runner_job_log_snapshot, runner_job_log_snapshot_for_session, status, statuses,
@@ -82,6 +82,7 @@ pub use crate::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
     RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput, RuntimeMaterializationStatus,
 };
+pub use crate::{observe_runner_capabilities, runner_capability_inventory};
 
 // Registry CRUD entry points.
 pub use crate::{

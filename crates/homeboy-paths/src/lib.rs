@@ -9,6 +9,45 @@ pub const CARGO_TARGETS_STORE: &str = "cargo-targets";
 pub const CONTROLLER_RUNTIMES_STORE: &str = "controller-runtimes";
 pub const CONTROLLER_SCRATCH_STORE: &str = "controller-scratch";
 
+/// Immutable filesystem roots resolved at an application boundary.
+///
+/// Stateful services receive this value instead of repeatedly consulting
+/// process-global environment and overrides. This lets independent in-process
+/// workloads own distinct Homeboy state without serializing path resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PathRoots {
+    config: PathBuf,
+    data: PathBuf,
+    artifacts: PathBuf,
+}
+
+impl PathRoots {
+    pub fn new(config: PathBuf, data: PathBuf, artifacts: PathBuf) -> Self {
+        Self {
+            config,
+            data,
+            artifacts,
+        }
+    }
+
+    /// Resolve the current process configuration once.
+    pub fn from_environment() -> Result<Self> {
+        Ok(Self::new(homeboy()?, homeboy_data()?, artifact_root()?))
+    }
+
+    pub fn config(&self) -> &Path {
+        &self.config
+    }
+
+    pub fn data(&self) -> &Path {
+        &self.data
+    }
+
+    pub fn artifacts(&self) -> &Path {
+        &self.artifacts
+    }
+}
+
 mod locations;
 mod rigs;
 #[allow(
@@ -1306,5 +1345,23 @@ mod home_root_override_tests {
             failures, 0,
             "readers must never fail to resolve a home root while it is repointed"
         );
+    }
+}
+
+#[cfg(test)]
+mod path_roots_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_roots_are_available_without_environment() {
+        let roots = PathRoots::new(
+            PathBuf::from("/config/homeboy"),
+            PathBuf::from("/data/homeboy"),
+            PathBuf::from("/artifacts/homeboy"),
+        );
+
+        assert_eq!(roots.config(), Path::new("/config/homeboy"));
+        assert_eq!(roots.data(), Path::new("/data/homeboy"));
+        assert_eq!(roots.artifacts(), Path::new("/artifacts/homeboy"));
     }
 }

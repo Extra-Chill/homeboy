@@ -8,7 +8,6 @@ use homeboy_lab_runner_contract::RunnerKind;
 use homeboy_upgrade::upgrade::version_is_newer;
 use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
 use homeboy_upgrade::upgrade::InstallMethod;
-use homeboy_upgrade::upgrade::RunnerDaemonDriftEntry;
 use homeboy_upgrade::upgrade::RunnerUpgradeEntry;
 use std::path::Path;
 
@@ -940,13 +939,7 @@ fn refresh_managed_immutable_runner(
     let (extensions_synced, extensions_skipped, extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
     let admission_ready = managed_immutable_admission_ready(&reconciled);
-    let stale_daemon = reconciled
-        .stale_daemon
-        .map(|warning| RunnerDaemonDriftEntry {
-            session_homeboy_version: warning.session_homeboy_version,
-            current_homeboy_version: warning.current_homeboy_version,
-            recovery_commands: warning.recovery_commands,
-        });
+    let stale_daemon = reconciled.stale_daemon.map(runner_daemon_drift_entry);
     let success = new_version.is_some()
         && admission_ready
         && stale_daemon.is_none()

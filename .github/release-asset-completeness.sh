@@ -134,8 +134,21 @@ else
   fi
 fi
 
-# cargo-dist attaches this during announce, after the pre-publication upload
-# phase. It remains required at the final published/success boundary.
+# Two different contracts, deliberately kept apart (#12341).
+#
+#   REQUIRED -- what must be PRESENT, uploaded, non-empty and digest-correct.
+#   ALLOWED  -- what may be present at all. Anything outside it is unowned.
+#
+# cargo-dist attaches `dist-manifest.json` during announce, after the
+# pre-publication upload phase, so it is not yet REQUIRED at that boundary. It
+# is still an owned, planned asset and always belongs to ALLOWED. Collapsing
+# the two sets is what made recovery reject the exact inventory it exists to
+# repair: recovery runs against releases that were ALREADY announced, so the
+# announce asset is present, and an allowlist built from the pre-announce
+# REQUIRED set classifies it as unowned. v0.345.0 was published complete with
+# all 14 assets and the recovery run still failed (#12341).
+ALLOWED=("${REQUIRED[@]}")
+
 if [ "${REQUIRE_ANNOUNCE_ASSETS}" != "true" ]; then
   PRE_ANNOUNCE_REQUIRED=()
   for asset in "${REQUIRED[@]}"; do
@@ -192,19 +205,32 @@ if ! jq -e '
 fi
 
 EXPECTED_JSON="$(printf '%s\n' "${REQUIRED[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | sort')"
+ALLOWED_JSON="$(printf '%s\n' "${ALLOWED[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | sort')"
 ACTUAL_JSON="$(jq -Sc '[.assets[].name] | sort' <<< "${INVENTORY}")"
 EXPECTED_COUNT="$(jq -r 'length' <<< "${EXPECTED_JSON}")"
 ACTUAL_COUNT="$(jq -r 'length' <<< "${ACTUAL_JSON}")"
-if [ "${RECONCILE}" = "true" ]; then
-  if ! jq -e --argjson expected "${EXPECTED_JSON}" '
+
+# Every name is owned (within ALLOWED) and appears once. Duplicate detection is
+# by cardinality: a set comparison alone would hide a repeated name.
+#
+# When REQUIRE_ANNOUNCE_ASSETS is true, ALLOWED == REQUIRED, and pairing this
+# with the MISSING check above is exactly the set equality the sweeper has
+# always enforced. When it is false, the announce asset is permitted but not
+# demanded -- which is the whole point of the flag.
+inventory_is_owned() {
+  jq -e --argjson allowed "${ALLOWED_JSON}" '
     [.assets[].name] as $names |
-    ($names | all(.[]; . as $name | $expected | index($name))) and
+    ($names | all(.[]; . as $name | $allowed | index($name))) and
     ($names | length) == ($names | unique | length)
-  ' >/dev/null <<< "${INVENTORY}"; then
-    fail "Release ${RELEASE_TAG} inventory has unexpected or duplicate assets. Recovery only replaces expected assets and refuses to publish an unowned inventory."
+  ' >/dev/null <<< "$1"
+}
+
+if [ "${RECONCILE}" = "true" ]; then
+  if ! inventory_is_owned "${INVENTORY}"; then
+    fail "Release ${RELEASE_TAG} inventory has unexpected or duplicate assets (allowed ${ALLOWED_JSON}; observed ${ACTUAL_COUNT}: ${ACTUAL_JSON}). Recovery only replaces expected assets and refuses to publish an unowned inventory."
   fi
-elif [ "${EXPECTED_JSON}" != "${ACTUAL_JSON}" ] || [ "${EXPECTED_COUNT}" != "${ACTUAL_COUNT}" ]; then
-  fail "Release ${RELEASE_TAG} inventory is not the exact expected asset set (expected ${EXPECTED_COUNT}: ${EXPECTED_JSON}; observed ${ACTUAL_COUNT}: ${ACTUAL_JSON}). Unexpected or duplicate assets must be removed before publication."
+elif ! inventory_is_owned "${INVENTORY}"; then
+  fail "Release ${RELEASE_TAG} inventory is not the exact expected asset set (required ${EXPECTED_COUNT}: ${EXPECTED_JSON}; allowed ${ALLOWED_JSON}; observed ${ACTUAL_COUNT}: ${ACTUAL_JSON}). Unexpected or duplicate assets must be removed before publication."
 fi
 
 if [ -z "${ASSET_DIR}" ]; then
@@ -233,6 +259,15 @@ done
 
 for sidecar in "${REQUIRED[@]}"; do
   case "${sidecar}" in *.sha256|sha256.sum) ;; *) continue ;; esac
+  if [[ "${sidecar}" == *.sha256 ]]; then
+    # The installer uses GNU sha256sum on Linux. Require its strict parser
+    # contract here so a successful install never starts with a format warning.
+    mapfile -t checksum_records < "${ASSET_DIR}/${sidecar}"
+    [ "$(wc -l < "${ASSET_DIR}/${sidecar}")" -eq 1 ] && [ "${#checksum_records[@]}" -eq 1 ] \
+      || fail "Checksum sidecar ${sidecar} must contain exactly one newline-terminated record"
+    (cd "${ASSET_DIR}" && sha256sum --strict --status -c "${sidecar}") \
+      || fail "Checksum sidecar ${sidecar} is rejected by the installer checksum parser"
+  fi
   references=0
   sidecar_payload=""
   while read -r digest name extra || [ -n "${digest:-}" ]; do
@@ -281,8 +316,17 @@ if [ "${RECONCILE}" = "true" ]; then
   fi
   FINAL_JSON="$(jq -Sc '[.assets[].name] | sort' <<< "${INVENTORY}" 2>/dev/null)" || fail "The final asset inventory for ${RELEASE_TAG} is unreadable"
   FINAL_COUNT="$(jq -r 'length' <<< "${FINAL_JSON}")"
-  if [ "${EXPECTED_JSON}" != "${FINAL_JSON}" ] || [ "${EXPECTED_COUNT}" != "${FINAL_COUNT}" ]; then
-    fail "Release ${RELEASE_TAG} final inventory is not the exact rebuilt asset set. No publication is permitted."
+  # The same two contracts as the pre-upload gate, re-proven against the
+  # post-upload inventory: every REQUIRED asset landed, and nothing outside
+  # ALLOWED (or a duplicate name) rode along with it. Comparing against
+  # EXPECTED_JSON alone repeated the #12341 conflation here, so a recovery that
+  # cleared the gate above would still have been rejected at the finish line.
+  MISSING_FINAL=()
+  for asset in "${REQUIRED[@]}"; do
+    jq -e --arg name "${asset}" 'index($name)' >/dev/null <<< "${FINAL_JSON}" || MISSING_FINAL+=("${asset}")
+  done
+  if [ "${#MISSING_FINAL[@]}" -gt 0 ] || ! inventory_is_owned "${INVENTORY}"; then
+    fail "Release ${RELEASE_TAG} final inventory is not the exact rebuilt asset set (required ${EXPECTED_COUNT}: ${EXPECTED_JSON}; allowed ${ALLOWED_JSON}; observed ${FINAL_COUNT}: ${FINAL_JSON}). No publication is permitted."
   fi
 fi
 

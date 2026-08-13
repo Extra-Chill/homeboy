@@ -21,7 +21,7 @@ use super::super::status::{
     runner_artifact_feature_diagnostics, runner_followups, runner_followups_with_admission,
     runner_status_operator_commands, selected_admission_summary,
 };
-use super::super::types::RunnerConnectionOutput;
+use super::super::types::{RunnerConnectionOutput, RunnerReconciliationStatus};
 use crate::cli_surface::Cli;
 use crate::commands::utils::response::{
     cli_response_for_json_result_for_command, map_cmd_result_to_json,
@@ -110,9 +110,15 @@ fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownersh
         &admission,
     );
 
-    assert_eq!(outcome.status, "partial_progress");
+    assert_eq!(outcome.status, RunnerReconciliationStatus::PartialProgress);
+    assert_eq!(outcome.owner, "runner_generations");
+    assert_eq!(
+        outcome.postcondition,
+        "the runner accepts jobs with no unresolved generation projection"
+    );
     assert_eq!(outcome.retired_generation_count, 1);
     assert_eq!(outcome.retired_generation_ids, ["lease-retired"]);
+    assert_eq!(outcome.changed_state, "retired_generations:1");
     assert_eq!(
         outcome.remaining_blocker.as_deref(),
         Some("daemon_version_mismatch")
@@ -120,6 +126,10 @@ fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownersh
     assert_eq!(
         outcome.next_action.as_deref(),
         Some("homeboy runner refresh-homeboy homeboy-lab --reconnect")
+    );
+    assert_eq!(
+        outcome.retry_predicate.as_deref(),
+        Some("daemon_fresh=true after the selected daemon repair completes")
     );
 }
 
@@ -132,8 +142,9 @@ fn reconcile_reports_unchanged_blocked_state_without_self_recommendation() {
     let outcome =
         reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
 
-    assert_eq!(outcome.status, "blocked");
+    assert_eq!(outcome.status, RunnerReconciliationStatus::Blocked);
     assert_eq!(outcome.retired_generation_count, 0);
+    assert_eq!(outcome.changed_state, "unchanged");
     assert_eq!(
         outcome.remaining_blocker.as_deref(),
         Some("unresolved_generation_projection")
@@ -141,6 +152,10 @@ fn reconcile_reports_unchanged_blocked_state_without_self_recommendation() {
     assert_eq!(
         outcome.next_action.as_deref(),
         Some("homeboy runner status homeboy-lab --full")
+    );
+    assert_eq!(
+        outcome.retry_predicate.as_deref(),
+        Some("a fresh authoritative generation projection resolves every retained count")
     );
 }
 
@@ -153,10 +168,38 @@ fn reconcile_reports_ready_admission_as_converged() {
     let outcome =
         reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
 
-    assert_eq!(outcome.status, "converged");
+    assert_eq!(outcome.status, RunnerReconciliationStatus::Converged);
     assert_eq!(outcome.retired_generation_count, 0);
+    assert_eq!(outcome.changed_state, "unchanged");
     assert_eq!(outcome.remaining_blocker, None);
     assert_eq!(outcome.next_action, None);
+    assert_eq!(outcome.retry_predicate, None);
+}
+
+#[test]
+fn reconcile_retained_owner_requires_owner_settlement_before_retry() {
+    let mut admission = admission_fixture();
+    admission.blocking_generation = Some("lease-retained".to_string());
+    admission.admission_blocking_job_ids = vec!["job-retained".to_string()];
+    admission.next_action = Some("homeboy runner reconcile homeboy-lab".to_string());
+
+    let outcome =
+        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
+
+    assert_eq!(outcome.status, RunnerReconciliationStatus::Blocked);
+    assert_eq!(outcome.changed_state, "unchanged");
+    assert_eq!(
+        outcome.remaining_blocker.as_deref(),
+        Some("retained_generation_ownership")
+    );
+    assert_eq!(
+        outcome.next_action.as_deref(),
+        Some("homeboy runner job list homeboy-lab --active")
+    );
+    assert_eq!(
+        outcome.retry_predicate.as_deref(),
+        Some("the retained generation has no authoritative active job owners")
+    );
 }
 
 #[test]
@@ -170,7 +213,7 @@ fn reconcile_does_not_converge_when_admission_accepts_with_unresolved_projection
     let outcome =
         reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
 
-    assert_eq!(outcome.status, "blocked");
+    assert_eq!(outcome.status, RunnerReconciliationStatus::Blocked);
     assert_eq!(
         outcome.remaining_blocker.as_deref(),
         Some("unresolved_generation_projection")
@@ -230,6 +273,14 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
     assert_eq!(serialized["status"], "failed");
     assert_eq!(serialized["data"]["reconciliation"]["status"], "blocked");
     assert_eq!(
+        serialized["data"]["reconciliation"]["changed_state"],
+        "unchanged"
+    );
+    assert_eq!(
+        serialized["data"]["reconciliation"]["owner"],
+        "runner_generations"
+    );
+    assert_eq!(
         serialized["data"]["reconciliation"]["remaining_blocker"],
         "admission_unavailable"
     );
@@ -238,6 +289,14 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
         .is_none_or(|commands| commands
             .iter()
             .all(|command| command["command"] != "homeboy runner reconcile homeboy-lab")));
+    assert_eq!(
+        serialized["data"]["reconciliation"]["next_action"],
+        "homeboy runner status homeboy-lab --full"
+    );
+    assert_eq!(
+        serialized["data"]["reconciliation"]["retry_predicate"],
+        "an authoritative active-job view is available"
+    );
 }
 
 #[test]
@@ -1110,11 +1169,8 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
     assert_eq!(output.active_daemon_version.as_deref(), Some("0.262.0"));
 }
 
-/// A dirty controller alongside a genuinely version-skewed runner: the skew is
-/// the reportable fact and keeps its runner-side recovery. The controller's
-/// dirty tree only removes the *stronger* exact-commit proof, so it must not
-/// rename the finding or replace the remediation with `homeboy upgrade
-/// --force` (#11101).
+/// A dirty controller alongside a genuinely version-skewed runner keeps the
+/// skew visible, but has no immutable target for a mutating refresh.
 #[test]
 fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
     let report = RunnerStatusReport {
@@ -1207,16 +1263,15 @@ fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
         .risk
         .iter()
         .any(|risk| risk.contains("homeboy 0.321.1+configured-dirty")));
-    // The remediation converges the runner, which is what is actually skewed.
-    // Telling an operator with uncommitted work to reinstall the controller
-    // answers a question nobody asked.
-    assert!(summary.next_action.contains("refresh-homeboy"));
+    // Exact ancestry is unavailable, so inspection preserves the skew evidence
+    // without recommending a potentially downgrading runner mutation.
+    assert!(summary
+        .next_action
+        .contains("homeboy runner status homeboy-lab"));
+    assert!(!summary.next_action.contains("refresh-homeboy"));
     assert!(!summary.next_action.contains("upgrade --force"));
     let warning = report.stale_daemon.as_ref().expect("stale daemon warning");
-    assert_eq!(
-        warning.recovery_commands,
-        vec!["homeboy runner refresh-homeboy homeboy-lab --ref configured --reconnect".to_string()]
-    );
+    assert!(warning.safe_recovery_commands().is_empty());
     assert_eq!(
         warning.compatibility_reason,
         Some("controller_configured_version_skew")
@@ -1248,10 +1303,10 @@ fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
 fn runner_status_actions_preserve_runner_ids_for_every_admission_state() {
     let cases = [
         ("disconnected", disconnected_report(), None),
-        ("stale", stale_report(), Some("c8a6673b6abc")),
+        ("stale", stale_report(), None),
         ("active-job", active_job_report(), None),
         ("connected", connected_report(), None),
-        ("version-skew", version_skew_report(), Some("c8a6673b6abc")),
+        ("version-skew", version_skew_report(), None),
     ];
 
     for (state, report, pinned_ref) in cases {
@@ -1263,6 +1318,15 @@ fn runner_status_actions_preserve_runner_ids_for_every_admission_state() {
             assert_rendered_runner_action_parses(state, compact_action, pinned_ref);
         }
         assert_rendered_runner_action_parses(state, &operator.next_action, pinned_ref);
+        if matches!(state, "stale" | "version-skew") {
+            assert!(!operator.next_action.contains("refresh-homeboy"), "{state}");
+            assert!(report
+                .stale_daemon
+                .as_ref()
+                .expect("stale warning")
+                .safe_recovery_commands()
+                .is_empty());
+        }
     }
 }
 

@@ -284,3 +284,30 @@ fn file_edit_force_allows_first_replacement_when_pattern_has_multiple_matches() 
         "thread\nneedle"
     );
 }
+
+/// An empty write is a deletion, so it must be asked for explicitly (#10816).
+///
+/// `files::write` sends `cat > path << 'EOF'`. The redirect truncates the
+/// destination the moment the shell opens it, before any content is
+/// transferred, so writing zero bytes destroys the file rather than doing
+/// nothing. A piped invocation whose producer emitted nothing wiped an existing
+/// remote file exactly this way and returned `success: true` with
+/// `bytes_written: 0`.
+#[test]
+fn an_empty_write_is_refused_unless_explicitly_allowed() {
+    let refusal = super::require_nonempty_write("", false, "config.php")
+        .expect_err("an empty write must not be permitted by default");
+    let rendered = format!("{refusal:?}");
+    assert!(
+        rendered.contains("--allow-empty"),
+        "the refusal must name the flag that expresses the intent: {rendered}"
+    );
+
+    // Truncating is legitimate when it is what the operator asked for.
+    super::require_nonempty_write("", true, "config.php")
+        .expect("--allow-empty must permit truncation");
+
+    // Content of any size is unaffected by the guard.
+    super::require_nonempty_write("x", false, "config.php")
+        .expect("a non-empty write must not be blocked");
+}

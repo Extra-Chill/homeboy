@@ -532,14 +532,39 @@ pub(crate) fn controller_upgrade_admission_for_records(
                             }
                         })
                 };
+                let (owner, scope, postcondition) = if recovery_command
+                    .starts_with("homeboy runner reconcile ")
+                {
+                    (
+                        "runner_generations",
+                        format!("runner `{}` and its persisted daemon generations", record.runner_id().unwrap_or_default()),
+                        "the runner accepts jobs with no unresolved generation projection",
+                    )
+                } else if recovery_command.starts_with("homeboy agent-task reconcile-records") {
+                    (
+                        "durable_agent_task_record_health",
+                        "stored durable agent-task record health".to_string(),
+                        "durable record authority is internally consistent",
+                    )
+                } else {
+                    (
+                        "durable_agent_tasks",
+                        format!("durable run or Cook group `{group_run_id}`"),
+                        "the selected durable records are reconciled to authoritative provider state",
+                    )
+                };
                 ControllerUpgradeBlocker {
                     run_id: group_run_id.clone(),
+                    owner: owner.to_string(),
+                    scope,
+                    postcondition: postcondition.to_string(),
                     liveness: liveness.as_str(),
                     reason: if runner_unverified {
                         "runner_job_unverified_after_daemon_restart".to_string()
                     } else {
                         stale_reason_for_record(record)
                     },
+                    action: recovery_command.clone(),
                     recovery_command,
                 }
             })
@@ -555,29 +580,14 @@ pub(crate) fn controller_upgrade_admission_for_records(
     let mut blockers = grouped
         .into_values()
         .map(|mut group| {
-            group.sort_by(|left, right| left.recovery_command.cmp(&right.recovery_command));
-            let recovery_commands = group
+            group.sort_by(|left, right| left.action.cmp(&right.action));
+            // Runner generation ownership is authoritative for a runner-backed
+            // record; one blocker must route to one owning reconciliation plane.
+            group
                 .iter()
-                .map(|blocker| blocker.recovery_command.clone())
-                .collect::<Vec<_>>();
-            let mut runner_commands = recovery_commands
-                .iter()
-                .filter(|command| command.starts_with("homeboy runner reconcile "))
+                .find(|blocker| blocker.owner == "runner_generations")
                 .cloned()
-                .collect::<Vec<_>>();
-            let mut lifecycle_commands = recovery_commands
-                .iter()
-                .filter(|command| !command.starts_with("homeboy runner reconcile "))
-                .cloned()
-                .collect::<Vec<_>>();
-            runner_commands.sort();
-            runner_commands.dedup();
-            lifecycle_commands.sort();
-            lifecycle_commands.dedup();
-            runner_commands.extend(lifecycle_commands);
-            let mut primary = group.remove(0);
-            primary.recovery_command = runner_commands.join(" && ");
-            primary
+                .unwrap_or_else(|| group.remove(0))
         })
         .collect::<Vec<_>>();
     blockers.sort_by(|left, right| left.recovery_command.cmp(&right.recovery_command));

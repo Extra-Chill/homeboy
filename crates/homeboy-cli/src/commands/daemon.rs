@@ -537,8 +537,9 @@ where
     };
 
     if output.plan.steps.is_empty() {
+        output.blocked_on = Some(output.plan.reason.clone());
         output.next_command = "homeboy daemon status".to_string();
-        return Ok((DaemonOutput::Recover(output), 0));
+        return Ok((DaemonOutput::Recover(output), 1));
     }
     if !output.plan.executable {
         // A read-only diagnosis, or evidence that authorizes nothing. The plan
@@ -568,8 +569,9 @@ where
     }
 
     if dry_run {
+        output.blocked_on = Some("recovery preview was not executed".to_string());
         output.next_command = "homeboy daemon recover --yes".to_string();
-        return Ok((DaemonOutput::Recover(output), 0));
+        return Ok((DaemonOutput::Recover(output), 1));
     }
 
     output.applied_steps = execute(&output.plan, &lease_id, &job_ids)?;
@@ -1098,13 +1100,43 @@ mod tests {
 
             let (output, exit_code) = run(args).expect("an isolated home still resolves a plan");
 
-            assert_eq!(exit_code, 0);
+            assert_eq!(exit_code, 1);
             let DaemonOutput::Recover(output) = output else {
                 panic!("expected recovery output");
             };
             assert!(!output.executed, "a bare recover must not mutate anything");
             assert_eq!(output.command, "daemon.recover");
+            assert_eq!(
+                output.blocked_on.as_deref(),
+                Some("recovery preview was not executed")
+            );
+            assert_eq!(output.next_command, "homeboy daemon recover --yes");
+            assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
         });
+    }
+
+    fn assert_recovery_json_agrees_with_command_outcome(
+        output: &DaemonRecoverOutput,
+        exit_code: i32,
+    ) {
+        let data = serde_json::to_value(output).expect("recovery JSON");
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(data),
+            exit_code,
+            "daemon",
+            None,
+        );
+
+        assert_eq!(envelope.exit_code, exit_code);
+        assert_eq!(envelope.success, exit_code == 0);
+        assert_eq!(
+            envelope.status,
+            if exit_code == 0 {
+                "succeeded"
+            } else {
+                "failed"
+            }
+        );
     }
 
     fn recovery_status(
@@ -1171,25 +1203,32 @@ mod tests {
         assert_eq!(output.plan.steps[0].code, actions::DAEMON_DIAGNOSE);
         assert_eq!(output.next_command, "homeboy daemon status");
 
-        let data = serde_json::to_value(DaemonOutput::Recover(output)).expect("recovery JSON");
-        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
-            &Ok(data),
-            exit_code,
-            "daemon",
-            None,
-        );
-        assert!(!envelope.success);
-        assert_eq!(envelope.exit_code, 1);
-        assert_eq!(envelope.status, "failed");
+        assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
+    }
+
+    #[test]
+    fn fresh_noop_recovery_is_a_typed_nonzero_refusal() {
+        let (output, exit_code) = recover_from_status(
+            recovery_status(true, None, Vec::new()),
+            false,
+            false,
+            |_, _, _| panic!("a fresh daemon has no recovery to execute"),
+            || panic!("a fresh no-op recovery must not read a postcondition"),
+        )
+        .expect("fresh no-op recovery returns its typed report");
+
+        assert_eq!(exit_code, 1);
+        let DaemonOutput::Recover(output) = output else {
+            panic!("expected recovery output");
+        };
+        assert!(!output.executed);
+        assert!(output.fresh);
         assert_eq!(
-            envelope.data.as_ref().expect("recovery payload")["executed"],
-            false
+            output.blocked_on.as_deref(),
+            Some("daemon lease is fresh; there is nothing to recover")
         );
-        assert!(envelope.data.as_ref().expect("recovery payload")["blocked_on"].is_string());
-        assert_eq!(
-            envelope.data.as_ref().expect("recovery payload")["next_command"],
-            "homeboy daemon status"
-        );
+        assert_eq!(output.next_command, "homeboy daemon status");
+        assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
     }
 
     #[test]
@@ -1224,6 +1263,7 @@ mod tests {
         assert!(output.fresh);
         assert!(output.blocked_on.is_none());
         assert_eq!(output.applied_steps, vec![actions::DAEMON_START]);
+        assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
     }
 
     #[test]
@@ -1263,6 +1303,7 @@ mod tests {
             .blocked_on
             .as_deref()
             .is_some_and(|message| message.contains("authoritative status remains stale")));
+        assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
     }
 
     #[test]
@@ -1306,28 +1347,7 @@ mod tests {
             .as_deref()
             .is_some_and(|message| message.contains("freshness verification failed")));
 
-        let data = serde_json::to_value(DaemonOutput::Recover(output)).expect("recovery JSON");
-        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
-            &Ok(data),
-            exit_code,
-            "daemon",
-            None,
-        );
-        assert!(!envelope.success);
-        assert_eq!(envelope.exit_code, exit_code);
-        assert_eq!(envelope.status, "failed");
-        assert_eq!(
-            envelope.data.as_ref().expect("recovery payload")["executed"],
-            true
-        );
-        assert_eq!(
-            envelope.data.as_ref().expect("recovery payload")["applied_steps"],
-            serde_json::json!([actions::DAEMON_START])
-        );
-        assert_eq!(
-            envelope.data.as_ref().expect("recovery payload")["next_command"],
-            "homeboy daemon status"
-        );
+        assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
     }
 
     #[test]
