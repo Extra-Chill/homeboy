@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.344.0] - 2026-08-13
+
+### Added
+- project bounded provider evidence
+
+### Fixed
+- skip empty evidence transfer
+- project fanout admission lifecycle
+- retain claimed fanout coordinator
+- persist fanout admission state
+
 ## [0.343.0] - 2026-08-13
 
 ### Added
