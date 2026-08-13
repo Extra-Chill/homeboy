@@ -140,11 +140,6 @@ case "$1 $2" in
 esac
 "#,
         );
-        // The helper uses GNU `sha256sum`; make the test portable to macOS.
-        write_executable(
-            &bin.join("sha256sum"),
-            "#!/usr/bin/env bash\nif [[ \" $* \" == *\" -c \"* ]]; then exit 0; fi\nshasum -a 256 \"$1\"\n",
-        );
         let digests = write_artifacts(temp.path());
         Self { temp, digests }
     }
@@ -407,23 +402,41 @@ fn rejects_checksum_sidecars_without_one_newline_terminated_record() {
 }
 
 #[test]
-fn rejects_malformed_or_conflicting_unterminated_final_checksum_records() {
-    for trailing_record in [
-        "not a checksum",
-        "0000000000000000000000000000000000000000000000000000000000000000 *payload.tar.gz",
-    ] {
-        let fixture = Fixture::new();
-        let sidecar = fixture.artifact_dir().join("sha256.sum");
-        let contents = fs::read_to_string(&sidecar).expect("read aggregate sidecar");
-        fs::write(&sidecar, format!("{contents}{trailing_record}"))
-            .expect("append unterminated trailing record");
+fn rejects_multiple_checksum_records_before_reconciliation() {
+    let fixture = Fixture::new();
+    let sidecar = fixture.artifact_dir().join("payload.tar.gz.sha256");
+    let contents = fs::read_to_string(&sidecar).expect("read payload sidecar");
+    fs::write(&sidecar, format!("{contents}{contents}")).expect("append second checksum record");
 
-        assert!(!fixture
-            .run(&[inventory(&fixture.digests, &[])])
-            .status
-            .success());
-        assert_eq!(fixture.calls(), ["view"]);
-    }
+    let output = fixture.run(&[inventory(&fixture.digests, &[])]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("must contain exactly one newline-terminated record"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(fixture.calls(), ["view"]);
+}
+
+#[test]
+fn rejects_malformed_checksum_records_with_the_strict_installer_parser() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.artifact_dir().join("payload.tar.gz.sha256"),
+        "not a checksum\n",
+    )
+    .expect("write malformed checksum record");
+
+    let output = fixture.run(&[inventory(&fixture.digests, &[])]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("is rejected by the installer checksum parser"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(fixture.calls(), ["view"]);
 }
 
 #[test]
