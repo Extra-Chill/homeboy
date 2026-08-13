@@ -6002,6 +6002,27 @@ fn cook_persists_materialization_failure_without_provider_execution() {
     });
 }
 
+#[test]
+fn run_cook_persists_recipe_in_explicit_store_only() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("temp source root");
+        let explicit_data = tempfile::tempdir().expect("explicit Cook data root");
+        let store = CookRecipeStore::from_data_root(explicit_data.path().to_path_buf());
+        let cook_id = "cook-explicit-recipe-store";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.provider_command = Some("fixture-provider".to_string());
+        options.initial_run_id = "cook-explicit-recipe-store-attempt-1".to_string();
+        options.source_worktree_path = Some(source.path().to_path_buf());
+
+        let result = run_cook_with_store(&store, options, UnusedExecutor)
+            .expect("Cook reports the lifecycle materialization failure");
+
+        assert_eq!(result.value.status, "durable_failure");
+        assert!(store.recipe_exists(cook_id));
+        assert!(!super::super::recipe_exists(cook_id).expect("ambient recipe lookup"));
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {

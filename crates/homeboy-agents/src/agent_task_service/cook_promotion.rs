@@ -749,6 +749,14 @@ pub struct MovingBaseCookRecovery {
 }
 
 pub(crate) fn moving_base_recovery_for_run(run_id: &str) -> Result<Option<MovingBaseCookRecovery>> {
+    let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
+    moving_base_recovery_for_run_with_store(&store, run_id)
+}
+
+pub(crate) fn moving_base_recovery_for_run_with_store(
+    store: &super::cook_recipe::CookRecipeStore,
+    run_id: &str,
+) -> Result<Option<MovingBaseCookRecovery>> {
     let record = agent_task_lifecycle::exact_record(run_id)?;
     record
         .metadata
@@ -779,7 +787,7 @@ pub(crate) fn moving_base_recovery_for_run(run_id: &str) -> Result<Option<Moving
                     None,
                 ));
             }
-            let recipe = super::load_recipe(&recovery.cook_id)?;
+            let recipe = store.load_recipe(&recovery.cook_id)?;
             if !recipe
                 .attempts
                 .iter()
@@ -1475,7 +1483,18 @@ pub(crate) fn finalize_or_load_cook_pr(
     successful_run_id: &str,
     promotion: &AgentTaskPromotionReport,
 ) -> Result<Value> {
-    finalize_or_load_cook_pr_with_backend(
+    let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
+    finalize_or_load_cook_pr_with_store(&store, options, successful_run_id, promotion)
+}
+
+pub(crate) fn finalize_or_load_cook_pr_with_store(
+    store: &super::cook_recipe::CookRecipeStore,
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+) -> Result<Value> {
+    finalize_or_load_cook_pr_with_backend_with_store(
+        store,
         options,
         successful_run_id,
         promotion,
@@ -1489,13 +1508,48 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend<B: AgentTaskPrFinalizationBa
     promotion: &AgentTaskPromotionReport,
     backend: &mut B,
 ) -> Result<Value> {
-    let finalization =
-        finalize_cook_pr_with_backend(options, successful_run_id, promotion, backend)?;
+    let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
+    finalize_or_load_cook_pr_with_backend_with_store(
+        &store,
+        options,
+        successful_run_id,
+        promotion,
+        backend,
+    )
+}
+
+pub(crate) fn finalize_or_load_cook_pr_with_backend_with_store<
+    B: AgentTaskPrFinalizationBackend,
+>(
+    store: &super::cook_recipe::CookRecipeStore,
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    backend: &mut B,
+) -> Result<Value> {
+    let finalization = finalize_cook_pr_with_backend_with_store(
+        store,
+        options,
+        successful_run_id,
+        promotion,
+        backend,
+    )?;
     agent_task_lifecycle::record_cook_finalization(successful_run_id, finalization.clone())?;
     Ok(finalization)
 }
 
 pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    backend: &mut B,
+) -> Result<Value> {
+    let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
+    finalize_cook_pr_with_backend_with_store(&store, options, successful_run_id, promotion, backend)
+}
+
+pub(crate) fn finalize_cook_pr_with_backend_with_store<B: AgentTaskPrFinalizationBackend>(
+    store: &super::cook_recipe::CookRecipeStore,
     options: &AgentTaskCookServiceOptions,
     successful_run_id: &str,
     promotion: &AgentTaskPromotionReport,
@@ -1511,8 +1565,13 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
         ));
     }
-    let finalization =
-        cook_finalization_options(options, successful_run_id, &promotion, Vec::new())?;
+    let finalization = cook_finalization_options_with_store(
+        store,
+        options,
+        successful_run_id,
+        &promotion,
+        Vec::new(),
+    )?;
     crate::agent_task_lifecycle::record_promotion(
         successful_run_id,
         serde_json::to_value(&promotion).unwrap_or(Value::Null),
@@ -1522,6 +1581,17 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
 }
 
 pub(crate) fn cook_finalization_options(
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    overrides: Vec<AgentTaskReviewOverride>,
+) -> Result<AgentTaskPrFinalizationOptions> {
+    let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
+    cook_finalization_options_with_store(&store, options, successful_run_id, promotion, overrides)
+}
+
+pub(crate) fn cook_finalization_options_with_store(
+    store: &super::cook_recipe::CookRecipeStore,
     options: &AgentTaskCookServiceOptions,
     successful_run_id: &str,
     promotion: &AgentTaskPromotionReport,
@@ -1561,7 +1631,8 @@ pub(crate) fn cook_finalization_options(
                 None,
             )
         })?;
-    let mut review_dossier = cook_review_dossier(options, promotion, successful_run_id)?;
+    let mut review_dossier =
+        cook_review_dossier_with_store(store, options, promotion, successful_run_id)?;
     review_dossier.overrides = overrides;
     // A non-empty option is an explicit operator disclosure. Otherwise retain
     // the validated review form's process statement as durable PR provenance.
@@ -2373,7 +2444,8 @@ fn validate_manual_preflight_report(
     })
 }
 
-fn cook_review_dossier(
+fn cook_review_dossier_with_store(
+    store: &super::cook_recipe::CookRecipeStore,
     options: &AgentTaskCookServiceOptions,
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
@@ -2449,7 +2521,8 @@ fn cook_review_dossier(
     // erase the implementation attempt that produced the delivered patch.
     let terminal_form = review_form_for_finalization(successful_run_id)?;
     let verified_commands = terminal_form.verify_against_promotion(verification_promotion)?;
-    let lineage = cook_ai_lineage(
+    let lineage = cook_ai_lineage_with_store(
+        store,
         options,
         terminal_promotion,
         successful_run_id,
@@ -2694,13 +2767,14 @@ fn required_execution_model(execution: &CookAttemptExecution, run_id: &str) -> R
     })
 }
 
-fn cook_ai_lineage(
+fn cook_ai_lineage_with_store(
+    store: &super::cook_recipe::CookRecipeStore,
     options: &AgentTaskCookServiceOptions,
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
     terminal_form: &crate::agent_task_review_dossier::AiFilledReviewForm,
 ) -> Result<CookAiLineage> {
-    let recipe = super::load_recipe(&options.cook_id)?;
+    let recipe = store.load_recipe(&options.cook_id)?;
     let mut attempts = recipe.attempts;
     attempts.sort_by_key(|attempt| attempt.attempt);
     let Some(terminal_index) = attempts

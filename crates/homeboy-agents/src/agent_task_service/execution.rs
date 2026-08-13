@@ -447,9 +447,10 @@ fn consume_claimed_continuation<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    let store = super::CookRecipeStore::from_current_data_root()?;
     let cook_id = claim.continuation().cook_id.clone();
     let run_id = claim.continuation().run_id.clone();
-    let recipe = match super::load_recipe(&cook_id) {
+    let recipe = match store.load_recipe(&cook_id) {
         Ok(recipe) => recipe,
         Err(error) => {
             claim.fail(&redacted_continuation_failure(&error))?;
@@ -476,10 +477,13 @@ where
         ));
         return Ok(unclaimed_continuation_result(skipped));
     }
-    let exit_code = super::consume_claimed_with_dispatcher(
+    let exit_code = store.consume_claimed_with_dispatcher(
         claim,
         |recipe| dispatcher(recipe),
-        |options| super::run_cook(options, executor.clone()).map(|result| result.exit_code),
+        |options| {
+            super::run_cook_with_store(&store, options, executor.clone())
+                .map(|result| result.exit_code)
+        },
     )?;
     let latest_run_id = agent_task_lifecycle::cook_index(&cook_id)
         .map(|index| index.latest_run_id)
