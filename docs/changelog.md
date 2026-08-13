@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.342.2] - 2026-08-13
+
+### Fixed
+- prove pin identity by digest instead of executing it
+
 ## [0.342.1] - 2026-08-13
 
 ### Changed
