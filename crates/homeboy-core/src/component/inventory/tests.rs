@@ -354,6 +354,106 @@ fn targeted_lookup_preserves_project_attachment_precedence() {
 }
 
 #[test]
+fn targeted_lookup_skips_stale_registration_and_finds_matching_sibling() {
+    let dir = temp_home_dir();
+    let workspace = dir.path().join("workspace");
+    let stale_path = workspace.join("old-plugin");
+    let replacement = workspace.join("replacement");
+    fs::create_dir_all(&replacement).unwrap();
+    fs::write(
+        replacement.join("homeboy.json"),
+        serde_json::json!({ "id": "old-plugin" }).to_string(),
+    )
+    .unwrap();
+    let _home = with_home_override(dir.path());
+    let components = crate::paths::components().unwrap();
+    fs::create_dir_all(&components).unwrap();
+    fs::write(
+        components.join("old-plugin.json"),
+        serde_json::json!({ "local_path": stale_path }).to_string(),
+    )
+    .unwrap();
+
+    let component = registered_by_id("old-plugin")
+        .unwrap()
+        .expect("sibling portable replacement");
+
+    assert_eq!(component.local_path, replacement.to_string_lossy());
+}
+
+#[test]
+fn targeted_lookup_ignores_stale_registration_without_a_matching_sibling() {
+    let dir = temp_home_dir();
+    let workspace = dir.path().join("workspace");
+    let stale_path = workspace.join("old-plugin");
+    let renamed = workspace.join("new-plugin");
+    fs::create_dir_all(&renamed).unwrap();
+    fs::write(
+        renamed.join("homeboy.json"),
+        serde_json::json!({ "id": "new-plugin" }).to_string(),
+    )
+    .unwrap();
+    let _home = with_home_override(dir.path());
+    let components = crate::paths::components().unwrap();
+    fs::create_dir_all(&components).unwrap();
+    fs::write(
+        components.join("old-plugin.json"),
+        serde_json::json!({ "local_path": stale_path }).to_string(),
+    )
+    .unwrap();
+
+    assert!(registered_by_id("old-plugin").unwrap().is_none());
+}
+
+#[test]
+fn targeted_lookup_skips_invalid_project_attachment_for_later_attachment() {
+    let dir = temp_home_dir();
+    let valid_repo = dir.path().join("valid-repo");
+    fs::create_dir_all(&valid_repo).unwrap();
+    fs::write(
+        valid_repo.join("homeboy.json"),
+        serde_json::json!({ "id": "fixture" }).to_string(),
+    )
+    .unwrap();
+    let _home = with_home_override(dir.path());
+    crate::project::save(&Project {
+        id: "invalid".to_string(),
+        components: vec![ProjectComponentAttachment {
+            id: "fixture".to_string(),
+            local_path: dir.path().join("missing").to_string_lossy().to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    crate::project::save(&Project {
+        id: "valid".to_string(),
+        components: vec![ProjectComponentAttachment {
+            id: "fixture".to_string(),
+            local_path: valid_repo.to_string_lossy().to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+
+    let component = registered_by_id("fixture")
+        .unwrap()
+        .expect("later project attachment");
+    assert_eq!(component.local_path, valid_repo.to_string_lossy());
+}
+
+#[test]
+fn targeted_lookup_rejects_traversal_component_id() {
+    let dir = temp_home_dir();
+    let _home = with_home_override(dir.path());
+
+    let error = registered_by_id("../outside").expect_err("traversal must be rejected");
+
+    assert_eq!(error.details["field"], "component_id");
+}
+
+#[test]
 fn load_standalone_skips_missing_local_path() {
     let dir = temp_home_dir();
 

@@ -89,16 +89,18 @@ pub fn registered() -> Result<Vec<Component>> {
 /// Cook admission uses this for an explicit repository identity so stale,
 /// unrelated registrations cannot trigger portable Git enrichment.
 pub fn registered_by_id(id: &str) -> Result<Option<Component>> {
+    crate::engine::identifier::validate_component_id(id)?;
     let projects = project::list().unwrap_or_default();
     let standalone_snapshot = project::StandaloneComponentConfigSnapshot::load();
     for project in &projects {
         if project.components.iter().any(|attachment| attachment.id == id) {
-            return project::resolve_project_component_with_standalone_snapshot(
+            if let Ok(component) = project::resolve_project_component_with_standalone_snapshot(
                 project,
                 id,
                 Some(&standalone_snapshot),
-            )
-            .map(Some);
+            ) {
+                return Ok(Some(component));
+            }
         }
     }
 
@@ -238,9 +240,28 @@ fn component_from_standalone_registration(id: &str, json: serde_json::Value) -> 
                 id, discovered, portable, json,
             ));
         }
+    } else if let Some(parent) = local_dir.parent() {
+        return find_sibling_portable_component(parent, id);
     }
 
     component_from_standalone_config(id, json)
+}
+
+fn find_sibling_portable_component(parent: &Path, id: &str) -> Option<Component> {
+    let entries = std::fs::read_dir(parent).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(component) = discover_from_portable(&path) else {
+            continue;
+        };
+        if component.id == id {
+            return Some(component);
+        }
+    }
+    None
 }
 
 fn overlay_standalone_registration(
