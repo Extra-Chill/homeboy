@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.345.4] - 2026-08-13
+
+### Fixed
+- repair the gate-layer measurement registry and close the action-pin hole
+- give hermetic tests an executable temp root instead of unsetting TMPDIR
+
 ## [0.345.3] - 2026-08-13
 
 ### Changed
