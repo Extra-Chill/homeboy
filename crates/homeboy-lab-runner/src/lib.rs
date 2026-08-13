@@ -790,6 +790,68 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
     ))
 }
 
+/// Refresh a bounded set of connected-runner admission observations before a
+/// hot controller rejects a portable workload. This is read-only: it neither
+/// reconnects sessions nor settles jobs, so it is a targeted alternative to a
+/// full runner doctor while still exposing the current admission predicate.
+pub fn refresh_lab_runner_readiness_for_admission() -> Result<LabRunnerReadiness> {
+    let preferred = defaults::load_config().lab.preferred_runner;
+    let mut runner_ids = configured_lab_runner_ids()?;
+    runner_ids.sort();
+    let candidates = runner_ids
+        .into_iter()
+        .take(DETACHED_QUEUE_REFRESH_LIMIT)
+        .filter_map(|runner_id| {
+            let runner = load(&runner_id).ok()?;
+            runner_probe_gate::invalidate_runner_probes(&runner_id);
+            let status = status(&runner_id).ok();
+            let Some(status) = status else {
+                // A configured runner whose authoritative status is unavailable
+                // is disconnected, not absent. Preserve that distinction for
+                // the recovery command reported by hot-controller admission.
+                return Some(DefaultLabRunnerCandidate {
+                    id: runner_id,
+                    mode: RunnerTunnelMode::DirectSsh,
+                    connected: false,
+                    capacity: runner.settings.concurrency_limit,
+                    stale_daemon: false,
+                    unverified_daemon: false,
+                    admission_fresh: true,
+                    admission_remediation: None,
+                    active_jobs: 0,
+                    active_jobs_available: false,
+                    capabilities_ready: false,
+                });
+            };
+            let capabilities_ready = runner_capability_inventory(&runner_id)
+                .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
+            let mode = status
+                .session
+                .as_ref()
+                .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
+            Some(DefaultLabRunnerCandidate {
+                id: runner_id,
+                mode,
+                connected: status.connected,
+                capacity: runner.settings.concurrency_limit,
+                stale_daemon: status.admission_blocking_stale_daemon().is_some(),
+                unverified_daemon: status.unverified_daemon().is_some(),
+                admission_fresh: status.daemon_fresh_for_admission(),
+                admission_remediation: status
+                    .admission_action()
+                    .map(|action| action.render_command()),
+                active_jobs: status.active_job_count.max(status.active_jobs.len()),
+                active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
+                capabilities_ready,
+            })
+        })
+        .collect();
+    Ok(lab_runner_readiness_from_candidates(
+        preferred.as_deref(),
+        candidates,
+    ))
+}
+
 /// Reconcile the configured Lab inventory before admitting a detached Cook to a
 /// reverse runner's durable capacity queue. This is deliberately narrower than
 /// default selection: only a connected, healthy reverse runner at capacity can
@@ -968,6 +1030,18 @@ impl DefaultLabRunnerCandidate {
             availability
                 .reasons
                 .push("daemon_freshness_unavailable".to_string());
+            availability.accepts_jobs = false;
+        }
+        if !self.active_jobs_available {
+            availability
+                .reasons
+                .push("active_jobs_unavailable".to_string());
+            availability.accepts_jobs = false;
+        }
+        if !self.capabilities_ready {
+            availability
+                .reasons
+                .push("required_capabilities_unavailable".to_string());
             availability.accepts_jobs = false;
         }
         // Named, not fenced: an unverifiable runner keeps accepting work, but
@@ -1571,6 +1645,49 @@ mod tests {
         );
         assert_eq!(refreshed.state, LabRunnerReadinessState::ConnectedReady);
         assert_eq!(refreshed.selected_runner_id.as_deref(), Some("lab-a"));
+    }
+
+    #[test]
+    fn hot_controller_admission_refresh_routes_ready_runner_after_stale_cache() {
+        let mut stale = default_lab_candidate("lab", RunnerTunnelMode::Reverse, true);
+        stale.stale_daemon = true;
+        assert_eq!(
+            lab_runner_readiness_from_candidates(None, vec![stale]).state,
+            LabRunnerReadinessState::Stale
+        );
+
+        let ready = lab_runner_readiness_from_candidates(
+            None,
+            vec![default_lab_candidate(
+                "lab",
+                RunnerTunnelMode::Reverse,
+                true,
+            )],
+        );
+        assert_eq!(ready.state, LabRunnerReadinessState::ConnectedReady);
+        assert_eq!(ready.available_runner_ids, ["lab"]);
+    }
+
+    #[test]
+    fn hot_controller_admission_refresh_reports_connected_blocked_runner() {
+        let mut blocked = default_lab_candidate("lab", RunnerTunnelMode::Reverse, true);
+        blocked.active_jobs_available = false;
+        let blocked = lab_runner_readiness_from_candidates(None, vec![blocked]);
+        assert_eq!(blocked.state, LabRunnerReadinessState::ConnectedIneligible);
+        assert!(blocked
+            .reasons
+            .contains(&"active_jobs_unavailable".to_string()));
+        assert_eq!(blocked.remediation_commands, ["homeboy runner status lab"]);
+    }
+
+    #[test]
+    fn hot_controller_admission_refresh_reports_no_runner() {
+        let absent = lab_runner_readiness_from_candidates(None, Vec::new());
+        assert_eq!(absent.state, LabRunnerReadinessState::Absent);
+        assert_eq!(
+            absent.remediation_commands,
+            ["homeboy runner connect <runner-id>"]
+        );
     }
 
     /// #11106's counter-property. Reverse runners now report an `unverified`
