@@ -867,6 +867,16 @@ const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route
 /// Record that the `cook-continue` lifecycle route selected this exact attempt.
 /// This is durable route authority, not caller-controlled plan metadata.
 pub fn authorize_cook_continue_route(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    authorize_cook_continue_route_with_artifact(options, None)
+}
+
+/// Persist the continuation-only patch selection beside route authority. The
+/// selector is consumed solely by controller promotion and never reaches a
+/// provider request, so retrying promotion cannot spend another execution.
+pub fn authorize_cook_continue_route_with_artifact(
+    options: &AgentTaskCookServiceOptions,
+    artifact_id: Option<&str>,
+) -> Result<()> {
     agent_task_lifecycle::exact_record(&options.initial_run_id)?;
     agent_task_lifecycle::record_metadata_value(
         &options.initial_run_id,
@@ -875,6 +885,7 @@ pub fn authorize_cook_continue_route(options: &AgentTaskCookServiceOptions) -> R
             "schema": COOK_CONTINUE_ROUTE_SCHEMA,
             "cook_id": options.cook_id,
             "run_id": options.initial_run_id,
+            "artifact_id": artifact_id,
         }),
     )
 }
