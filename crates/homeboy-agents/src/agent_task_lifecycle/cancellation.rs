@@ -731,32 +731,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cancellation_propagates_when_a_cook_index_appears_mid_cancellation() {
+    fn cancellation_fence_rejects_a_cook_index_published_after_cancellation() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-index-switch-during-cancel";
             record_detached_cook_handoff_parent(cook_id).expect("persist handoff parent");
             let attempt_id = "cook-index-switch-during-cancel-attempt-1";
             let plan = AgentTaskPlan::new("index-switch-attempt", Vec::new());
             submit_plan(&plan, Some(attempt_id)).expect("persist attempt");
-            install_after_initial_cancellation_for_test({
-                let cook_id = cook_id.to_string();
-                let attempt_id = attempt_id.to_string();
-                move || {
-                    record_cook_attempt(&cook_id, 1, &attempt_id)
-                        .expect("publish Cook index during cancellation");
-                }
-            });
+            let cancelled = cancel_run(cook_id, None).expect("cancel detached Cook parent");
 
-            let cancelled = cancel_run(cook_id, None).expect("cancel Cook across index switch");
-
-            assert_eq!(cancelled.run_id, attempt_id);
+            assert_eq!(cancelled.run_id, cook_id);
             assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+            let error = record_cook_attempt(cook_id, 1, attempt_id)
+                .expect_err("cancelled handoff fence rejects late Cook index publication");
             assert_eq!(
-                exact_record(attempt_id)
-                    .expect("read cancelled attempt")
-                    .state,
-                AgentTaskRunState::Cancelled
+                error.code,
+                homeboy_core::ErrorCode::ValidationInvalidArgument
             );
+            assert!(!cook_index_exists(cook_id).expect("inspect absent Cook index"));
         });
     }
 

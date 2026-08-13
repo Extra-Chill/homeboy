@@ -1860,24 +1860,25 @@ pub(crate) fn canonical_cook_recovery_run_id(cook_id: &str) -> Option<String> {
     if source_run_id.is_empty() {
         return None;
     }
-    let recipe = super::cook_recipe::load_recipe(cook_id).ok()?;
-    for attempt in recipe.attempts.iter().rev() {
-        let Ok(record) = agent_task_lifecycle::exact_record(&attempt.run_id) else {
-            continue;
-        };
-        if review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record).ok()?
-            && persisted_promotion_for_attempt(&attempt.run_id)
-                .ok()
-                .flatten()
-                .is_some_and(|promotion| {
-                    promotion
-                        .provenance
-                        .pointer("/cook_follow_up/source_run_id")
-                        .and_then(Value::as_str)
-                        == Some(source_run_id.as_str())
-                })
-        {
-            return Some(attempt.run_id.clone());
+    if let Ok(recipe) = super::cook_recipe::load_recipe(cook_id) {
+        for attempt in recipe.attempts.iter().rev() {
+            let Ok(record) = agent_task_lifecycle::exact_record(&attempt.run_id) else {
+                continue;
+            };
+            if review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record).ok()?
+                && persisted_promotion_for_attempt(&attempt.run_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|promotion| {
+                        promotion
+                            .provenance
+                            .pointer("/cook_follow_up/source_run_id")
+                            .and_then(Value::as_str)
+                            == Some(source_run_id.as_str())
+                    })
+            {
+                return Some(attempt.run_id.clone());
+            }
         }
     }
     Some(source_run_id)
@@ -1940,8 +1941,10 @@ fn completed_finalization_receipt_for_recovery(
 ) -> Result<Option<Value>> {
     if run_or_cook_id == recipe.cook_id {
         let selected_candidate = canonical_cook_candidate(&recipe.cook_id);
-        let receipt = canonical_candidate_finalization(selected_candidate.as_ref(), None, None);
-        return Ok(receipt.filter(cook_finalization_is_pr_receipt));
+        if selected_candidate.is_some() {
+            let receipt = canonical_candidate_finalization(selected_candidate.as_ref(), None, None);
+            return Ok(receipt.filter(cook_finalization_is_pr_receipt));
+        }
     }
     let run_ids = if recipe
         .attempts
