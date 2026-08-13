@@ -1478,7 +1478,12 @@ pub struct AgentTaskCookBatchReport {
 /// from, so this parses instead of keeping a second copy of that list.
 /// Anything unparseable stays `Unknown` rather than being guessed.
 fn batch_lifecycle_status(status: &str) -> RunLifecycleStatus {
-    serde_json::from_value(Value::String(status.to_string())).unwrap_or(RunLifecycleStatus::Unknown)
+    match status {
+        "planning" => RunLifecycleStatus::Queued,
+        "admitting" => RunLifecycleStatus::Running,
+        _ => serde_json::from_value(Value::String(status.to_string()))
+            .unwrap_or(RunLifecycleStatus::Unknown),
+    }
 }
 
 impl AgentTaskCookBatchReport {
