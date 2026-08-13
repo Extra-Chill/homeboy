@@ -81,7 +81,10 @@ pub(crate) fn promote_attempt(
 ) -> Result<AgentTaskPromotionReport> {
     let (source, source_path) = promotion_source(run_id)?;
     let selected_task_id = selected_candidate_task_id(run_id)?;
-    let artifact_id = canonical_cook_patch_artifact_id(options, run_id)?;
+    let artifact_id = match continuation_artifact_id(run_id)? {
+        Some(artifact_id) => Some(artifact_id),
+        None => canonical_cook_patch_artifact_id(options, run_id)?,
+    };
     promote_with_checkpoint(
         AgentTaskPromotionOptions {
             source,
@@ -93,7 +96,7 @@ pub(crate) fn promote_attempt(
             candidate_ref: None,
             to_worktree: options.to_worktree.clone(),
             task_id: selected_task_id,
-            artifact_id: continuation_artifact_id(run_id)?.or(artifact_id),
+            artifact_id,
             dry_run: false,
             gates: options.gates.clone(),
             provider_command: options.provider_command.clone(),
@@ -3206,6 +3209,7 @@ fn ambiguous_promotion_artifact_ids(
                 .is_some_and(|message| {
                     message.contains("multiple patch artifacts")
                         || message.contains("distinct actionable patches")
+                        || message.contains("distinct canonical patch candidates")
                 })
     });
     if !is_ambiguous_selection {
