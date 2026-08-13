@@ -46,7 +46,11 @@ fn run_installer(
     );
     write_executable(
         &tools.join("tar"),
-        "#!/bin/sh\ncp \"$HOMEBOY_TEST_CANDIDATE\" homeboy\n",
+        "#!/bin/sh\nmkdir -p \"$HOMEBOY_TEST_ARCHIVE_DIR\"\ncp \"$HOMEBOY_TEST_CANDIDATE\" \"$HOMEBOY_TEST_ARCHIVE_DIR/homeboy\"\n",
+    );
+    write_executable(
+        &tools.join("uname"),
+        "#!/bin/sh\ncase \"$1\" in -s) printf 'Linux\\n' ;; -m) printf 'x86_64\\n' ;; esac\n",
     );
     write_executable(
         &tools.join("sudo"),
@@ -63,6 +67,10 @@ fn run_installer(
         .env("HOMEBOY_TEST_EVIDENCE", &evidence)
         .env("HOMEBOY_TEST_EVENTS", &events)
         .env("HOMEBOY_TEST_BIN_DIR", &install_dir)
+        .env(
+            "HOMEBOY_TEST_ARCHIVE_DIR",
+            "homeboy-x86_64-unknown-linux-gnu",
+        )
         .env("PATH", format!("{}:/usr/bin:/bin", tools.display()));
     if force_sudo {
         command.env("HOMEBOY_INSTALL_USE_SUDO", "true");
@@ -80,7 +88,7 @@ fn installer_admits_a_staged_candidate_and_preserves_bytes_on_admission_failure(
     assert!(allowed.status.success(), "{allowed:?}");
     assert!(installed.contains("upgrade-admission"));
     assert!(evidence.contains("legacy-controller-identity"));
-    assert!(evidence.contains("/homeboy"));
+    assert!(evidence.contains("/homeboy-x86_64-unknown-linux-gnu/homeboy"));
 
     for exit_code in [1, 70] {
         let (blocked, installed, evidence, _) = run_installer(exit_code, true, false);
