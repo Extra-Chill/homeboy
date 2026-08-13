@@ -2331,6 +2331,89 @@ mod tests {
         );
     }
 
+    /// The runner must hand the test a temp root it can execute from (#12345).
+    ///
+    /// It used to `unset TMPDIR TMP TEMP`, dropping every test onto the shared
+    /// system `/tmp`. On a host that mounts `/tmp` noexec that is not a loud
+    /// failure: bash's PATH search calls `access(X_OK)`, Linux fails it on a
+    /// noexec mount, so a mock executable written into the temp dir is SKIPPED
+    /// and the REAL binary further down PATH runs instead. The test then
+    /// asserts against the real tool's output without ever reporting that its
+    /// fixture did not exist.
+    ///
+    /// Pinned host-independently by the TMPDIR value, not by probing /tmp: on a
+    /// host where /tmp happens to be executable the old behavior would pass an
+    /// execution-only check, and the regression would stay invisible exactly
+    /// where CI runs.
+    #[cfg(unix)]
+    #[test]
+    fn hermetic_runner_provides_an_executable_temp_root() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let runner = workspace.join("scripts/nextest-hermetic-test-environment.sh");
+
+        let output = Command::new("sh")
+            .arg(&runner)
+            .args([
+                "sh",
+                "-c",
+                // Report the root, then prove an executable written into it
+                // actually runs.
+                r#"printf 'tmpdir=%s\ntmp=%s\ntemp=%s\n' "$TMPDIR" "$TMP" "$TEMP"
+                   printf '#!/bin/sh\necho fixture-executed\n' > "$TMPDIR/fixture"
+                   chmod +x "$TMPDIR/fixture"
+                   "$TMPDIR/fixture""#,
+            ])
+            // The caller's environment must not decide the answer. CI exports
+            // no TMPDIR, which is the case that regressed.
+            .env_remove("TMPDIR")
+            .env_remove("TMP")
+            .env_remove("TEMP")
+            .output()
+            .expect("run hermetic test runner");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let tmpdir = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("tmpdir="))
+            .expect("the runner must export TMPDIR");
+
+        assert!(
+            !tmpdir.is_empty(),
+            "TMPDIR must be set; unsetting it silently falls back to the shared \
+             system /tmp: {stdout}"
+        );
+        assert!(
+            Path::new(tmpdir).starts_with(workspace.join("target")),
+            "the temp root must live under this workspace's target directory, \
+             which is proven exec-capable because cargo runs test binaries from \
+             it. Got {tmpdir:?}"
+        );
+        for spelling in ["tmp=", "temp="] {
+            let value = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(spelling))
+                .unwrap_or_default();
+            assert_eq!(
+                value, tmpdir,
+                "all three temp spellings must name the same root, or code \
+                 reading {spelling} lands somewhere else than code reading TMPDIR"
+            );
+        }
+        assert!(
+            stdout.contains("fixture-executed"),
+            "an executable written into the temp root must run: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !Path::new(tmpdir).exists(),
+            "the per-invocation temp root must be removed when the test exits, \
+             or it accumulates under target/: {tmpdir}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn hermetic_runner_reaps_descendants_after_a_panicking_test_binary() {
