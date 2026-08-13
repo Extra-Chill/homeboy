@@ -34,7 +34,7 @@ use crate::commands::utils::response::{
     CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
 };
 use crate::commands::utils::watch::{
-    parse_duration, watch_loop, WatchConfig, WatchConclusion, WatchPoller, WatchResult,
+    parse_duration, watch_loop, WatchConclusion, WatchConfig, WatchPoller, WatchResult,
     TIMEOUT_EXIT_CODE,
 };
 
@@ -297,7 +297,8 @@ impl StatusWatchProgress {
             self.changes.len() >= STATUS_WATCH_CHANGE_LIMIT,
         ));
         if self.changes.len() < STATUS_WATCH_CHANGE_LIMIT {
-            self.changes.push(json!({ "poll": poll, "status": snapshot }));
+            self.changes
+                .push(json!({ "poll": poll, "status": snapshot }));
         } else {
             self.omitted += 1;
         }
@@ -305,10 +306,11 @@ impl StatusWatchProgress {
 }
 
 fn emit_status_change_event(snapshot: &Value, poll: u64, retained_limit_reached: bool) -> String {
-    let run_id = snapshot
-        .get("run_id")
-        .and_then(Value::as_str)
-        .or_else(|| snapshot.pointer("/identity/resolved_run_id").and_then(Value::as_str));
+    let run_id = snapshot.get("run_id").and_then(Value::as_str).or_else(|| {
+        snapshot
+            .pointer("/identity/resolved_run_id")
+            .and_then(Value::as_str)
+    });
     serde_json::to_string(&json!({
         "schema": "homeboy/agent-task-status-watch-event/v1",
         "event": "status_changed",
@@ -375,7 +377,9 @@ fn watch_status_output(
     let (latest, status_exit) = result.item;
     let continuation = format!(
         "homeboy agent-task status {} --watch --interval {} --timeout {}",
-        quote_arg(&args.run_id), args.interval, args.timeout
+        quote_arg(&args.run_id),
+        args.interval,
+        args.timeout
     );
     let output = json!({
         "schema": "homeboy/agent-task-status-watch/v1",
@@ -2184,9 +2188,11 @@ mod watch_tests {
         let mut progress = StatusWatchProgress::default();
         let mut emitted = Vec::new();
         for poll in 1..=(STATUS_WATCH_CHANGE_LIMIT as u64 + 2) {
-            progress.observe(&json!({ "run_id": "run-1", "state": "running", "progress": poll }), poll, |line| {
-                emitted.push(line)
-            });
+            progress.observe(
+                &json!({ "run_id": "run-1", "state": "running", "progress": poll }),
+                poll,
+                |line| emitted.push(line),
+            );
         }
         let terminal_poll = STATUS_WATCH_CHANGE_LIMIT as u64 + 3;
         progress.observe(
@@ -2201,8 +2207,12 @@ mod watch_tests {
         let first_overflow: Value = serde_json::from_str(&emitted[STATUS_WATCH_CHANGE_LIMIT])
             .expect("first overflow event");
         assert_eq!(first_overflow["poll"], STATUS_WATCH_CHANGE_LIMIT as u64 + 1);
-        assert_eq!(first_overflow["latest"]["progress"], STATUS_WATCH_CHANGE_LIMIT as u64 + 1);
-        let overflow: Value = serde_json::from_str(emitted.last().unwrap()).expect("overflow event");
+        assert_eq!(
+            first_overflow["latest"]["progress"],
+            STATUS_WATCH_CHANGE_LIMIT as u64 + 1
+        );
+        let overflow: Value =
+            serde_json::from_str(emitted.last().unwrap()).expect("overflow event");
         assert_eq!(overflow["retained_limit_reached"], true);
         assert_eq!(overflow["state"], "succeeded");
         assert_eq!(overflow["poll"], terminal_poll);
@@ -2264,7 +2274,11 @@ mod watch_tests {
         assert_eq!(exit, TIMEOUT_EXIT_CODE);
         assert_eq!(output["latest"]["state"], "running");
         assert_eq!(output["changes"].as_array().unwrap().len(), 2);
-        assert_eq!(emitted.len(), 2, "progress was emitted before timeout returned");
+        assert_eq!(
+            emitted.len(),
+            2,
+            "progress was emitted before timeout returned"
+        );
         let queued: Value = serde_json::from_str(&emitted[0]).expect("queued event");
         let running: Value = serde_json::from_str(&emitted[1]).expect("running event");
         assert_eq!(queued["state"], "queued");
