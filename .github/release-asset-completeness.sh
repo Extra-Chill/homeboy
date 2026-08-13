@@ -233,6 +233,15 @@ done
 
 for sidecar in "${REQUIRED[@]}"; do
   case "${sidecar}" in *.sha256|sha256.sum) ;; *) continue ;; esac
+  if [[ "${sidecar}" == *.sha256 ]]; then
+    # The installer uses GNU sha256sum on Linux. Require its strict parser
+    # contract here so a successful install never starts with a format warning.
+    mapfile -t checksum_records < "${ASSET_DIR}/${sidecar}"
+    [ "$(wc -l < "${ASSET_DIR}/${sidecar}")" -eq 1 ] && [ "${#checksum_records[@]}" -eq 1 ] \
+      || fail "Checksum sidecar ${sidecar} must contain exactly one newline-terminated record"
+    (cd "${ASSET_DIR}" && sha256sum --strict --status -c "${sidecar}") \
+      || fail "Checksum sidecar ${sidecar} is rejected by the installer checksum parser"
+  fi
   references=0
   sidecar_payload=""
   while read -r digest name extra || [ -n "${digest:-}" ]; do

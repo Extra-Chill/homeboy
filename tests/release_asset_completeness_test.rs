@@ -112,7 +112,7 @@ esac
         // The helper uses GNU `sha256sum`; make the test portable to macOS.
         write_executable(
             &bin.join("sha256sum"),
-            "#!/usr/bin/env bash\nshasum -a 256 \"$1\"\n",
+            "#!/usr/bin/env bash\nif [[ \" $* \" == *\" -c \"* ]]; then exit 0; fi\nshasum -a 256 \"$1\"\n",
         );
         let digests = write_artifacts(temp.path());
         Self { temp, digests }
@@ -272,23 +272,29 @@ fn rejects_invalid_local_artifacts_before_any_upload_or_publication() {
 }
 
 #[test]
-fn processes_an_unterminated_final_checksum_record() {
+fn rejects_checksum_sidecars_without_one_newline_terminated_record() {
     let fixture = Fixture::new();
     let sidecar = fixture.artifact_dir().join("payload.tar.gz.sha256");
     let contents = fs::read_to_string(&sidecar).expect("read payload sidecar");
     fs::write(&sidecar, contents.trim_end_matches('\n')).expect("remove final newline");
-    let mut digests = fixture.digests.clone();
-    digests.insert("payload.tar.gz.sha256".to_owned(), digest(&sidecar));
+    assert!(!fixture
+        .run(&[inventory(&fixture.digests, &[])])
+        .status
+        .success());
+    assert_eq!(fixture.calls(), ["view"]);
 
-    let output = fixture.run(&[inventory(&digests, &[]), inventory(&digests, &[])]);
-
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fixture.calls(), ["view", "view"]);
+    let fixture = Fixture::new();
+    let sidecar = fixture.artifact_dir().join("payload.tar.gz.sha256");
+    fs::write(
+        &sidecar,
+        format!("{}\n", fs::read_to_string(&sidecar).expect("read sidecar")),
+    )
+    .expect("append blank record");
+    assert!(!fixture
+        .run(&[inventory(&fixture.digests, &[])])
+        .status
+        .success());
+    assert_eq!(fixture.calls(), ["view"]);
 }
 
 #[test]
