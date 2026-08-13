@@ -2359,6 +2359,18 @@ fn cook_batch_result(
     let total = cooks.len();
     let mut totals = crate::agent_task_batch::AgentTaskBatchTotals::default();
     for cell in &cooks {
+        let status = CookStatus::from_status(&cell.status);
+        match status {
+            CookStatus::Queued => {
+                totals.queued += 1;
+                continue;
+            }
+            CookStatus::Running | CookStatus::InFlight => {
+                totals.running += 1;
+                continue;
+            }
+            _ => {}
+        }
         // A provider-success cell can retain its legacy zero exit code while a
         // Cook that requested a PR is still incomplete. Aggregate completion
         // follows the explicit end-to-end projection, not provider evidence.
@@ -2371,9 +2383,7 @@ fn cook_batch_result(
             totals.failed += 1;
             continue;
         }
-        match CookStatus::from_status(&cell.status) {
-            CookStatus::Queued => totals.queued += 1,
-            CookStatus::Running | CookStatus::InFlight => totals.running += 1,
+        match status {
             CookStatus::Cancelled => totals.cancelled += 1,
             CookStatus::TimedOut => totals.timed_out += 1,
             _ if cell.exit_code == 0 => totals.succeeded += 1,

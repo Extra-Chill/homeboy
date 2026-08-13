@@ -5738,7 +5738,19 @@ fn cook_persists_materialization_failure_without_provider_execution() {
         assert!(result.value.attempts.is_empty());
         assert!(result.value.failure_context.is_some());
         assert!(super::super::recipe_exists(cook_id).expect("durable recipe lookup"));
-        assert!(!agent_task_lifecycle::run_record_exists(run_id).expect("run record lookup"));
+        let record = agent_task_lifecycle::status(run_id).expect("persisted failed attempt");
+        assert_eq!(
+            record.state,
+            agent_task_lifecycle::AgentTaskRunState::Queued
+        );
+        assert_eq!(
+            result
+                .value
+                .failure_context
+                .unwrap()
+                .provider_executions_consumed,
+            0
+        );
     });
 }
 
@@ -6556,8 +6568,8 @@ fn cook_batch_preserves_order_concurrency_and_failure_isolation_process() {
     .expect("batch completes despite an individual cook failure");
 
     assert_eq!(entered.load(Ordering::SeqCst), 2);
-    assert_eq!(result.exit_code, 0);
-    assert_eq!(result.value.status, "running");
+    assert_eq!(result.exit_code, 0, "{:#?}", result.value);
+    assert_eq!(result.value.status, "running", "{:#?}", result.value);
     assert_eq!(result.value.total, 2);
     assert_eq!(result.value.succeeded, 0);
     assert_eq!(result.value.running, 1);
@@ -10256,7 +10268,7 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
                 "Close the issue by guarding the reload path.",
                 "Add a null guard in the render path.",
                 "Internal-only change; no compatibility impact.",
-                "Reproduced the failure, isolated the reload path",
+                "Drafted test coverage.",
                 // Deterministic evidence (orchestrator-owned).
                 "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes as recorded by Cook's deterministic gate.",
                 "Verified candidate scope: 1 changed file(s): src/lib.rs.",
