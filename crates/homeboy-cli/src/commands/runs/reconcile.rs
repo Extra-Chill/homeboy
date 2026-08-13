@@ -57,20 +57,16 @@ pub struct ReconciledRunSummary {
     pub owner_pid: Option<u32>,
     pub reason: String,
     pub artifact_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_job_status: Option<String>,
 }
 
 pub fn reconcile_runs(args: RunsReconcileArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
-    runs_service::refresh_running_mirrored_daemon_evidence_best_effort(&store);
-    let inspected = store
-        .list_runs(RunListFilter {
-            status: Some(RunStatus::Running.as_str().to_string()),
-            limit: Some(args.limit.clamp(1, 1000)),
-            ..RunListFilter::default()
-        })?
-        .len();
+    let running = running_runs(&store, args.limit)?;
+    let inspected = running.len();
     let reconciled =
-        reconcile_orphaned_running_runs(&store, args.limit, args.dry_run, pid_is_running)?;
+        reconcile_orphaned_running_runs(&store, running, args.dry_run, pid_is_running)?;
 
     Ok((
         RunsOutput::Reconcile(RunsReconcileOutput {
@@ -87,7 +83,7 @@ pub(crate) fn reconcile_owned_stale_running_runs(
     store: &ObservationStore,
     limit: i64,
 ) -> homeboy::core::Result<Vec<ReconciledRunSummary>> {
-    reconcile_orphaned_running_runs(store, limit, false, pid_is_running)
+    reconcile_orphaned_running_runs(store, running_runs(store, limit)?, false, pid_is_running)
 }
 
 /// Reconcile only the run being read by a focused command. Fleet-wide
@@ -99,46 +95,54 @@ pub(crate) fn reconcile_owned_stale_running_run(
     if run.status != RunStatus::Running.as_str() {
         return Ok(None);
     }
-    reconcile_orphaned_running_run(store, run, false, pid_is_running)
+    let Some(reason) = stale_running_reason(run, &pid_is_running) else {
+        return Ok(None);
+    };
+    reconcile_orphaned_running_run(store, run, reason, false).map(Some)
 }
 
 fn reconcile_orphaned_running_runs<F>(
     store: &ObservationStore,
-    limit: i64,
+    running: Vec<RunRecord>,
     dry_run: bool,
     pid_is_alive: F,
 ) -> homeboy::core::Result<Vec<ReconciledRunSummary>>
 where
     F: Fn(u32) -> bool,
 {
-    let running = store.list_runs(RunListFilter {
+    Ok(running
+        .iter()
+        .filter_map(|run| stale_running_reason(run, &pid_is_alive).map(|reason| (run, reason)))
+        .map(|(run, reason)| reconcile_orphaned_running_run(store, run, reason, dry_run))
+        .collect::<homeboy::core::Result<Vec<_>>>()?)
+}
+
+fn running_runs(store: &ObservationStore, limit: i64) -> homeboy::core::Result<Vec<RunRecord>> {
+    store.list_runs(RunListFilter {
         status: Some(RunStatus::Running.as_str().to_string()),
         limit: Some(limit.clamp(1, 1000)),
         ..RunListFilter::default()
-    })?;
-    Ok(running
-        .iter()
-        .map(|run| reconcile_orphaned_running_run(store, run, dry_run, &pid_is_alive))
-        .collect::<homeboy::core::Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect())
+    })
 }
 
-fn reconcile_orphaned_running_run<F>(
+fn reconcile_orphaned_running_run(
     store: &ObservationStore,
     run: &RunRecord,
+    reason: &str,
     dry_run: bool,
-    pid_is_alive: F,
-) -> homeboy::core::Result<Option<ReconciledRunSummary>>
-where
-    F: Fn(u32) -> bool,
-{
-    let Some(reason) = stale_running_reason(run, &pid_is_alive) else {
-        return Ok(None);
-    };
-
+) -> homeboy::core::Result<ReconciledRunSummary> {
     let owner_pid = run_owner_pid(run);
+    let remote_job_status = runs_service::selected_mirrored_daemon_job_status(run)?;
+    if !dry_run {
+        // Candidate selection is entirely local. Refresh only a selected row,
+        // never the unrelated running mirrors that happen to share the store.
+        runs_service::refresh_selected_mirrored_daemon_evidence(store, run);
+    }
+    let reason = if remote_job_status.as_deref() == Some("not_found") {
+        "daemon_job_not_found"
+    } else {
+        reason
+    };
     let artifact_count = if dry_run {
         store.list_artifacts(&run.id)?.len()
     } else {
@@ -146,23 +150,28 @@ where
     };
     let finished = if dry_run {
         None
+    } else if remote_job_status.as_deref() == Some("not_found") {
+        store.get_run(&run.id)?.and_then(|run| run.finished_at)
     } else {
         let metadata =
             with_reconcile_metadata(run, owner_pid, reason, &reconcile_run_dir_metadata(run));
-        Some(store.finish_run(&run.id, RunStatus::Stale, Some(metadata))?)
+        store
+            .finish_run(&run.id, RunStatus::Stale, Some(metadata))?
+            .finished_at
     };
 
-    Ok(Some(ReconciledRunSummary {
+    Ok(ReconciledRunSummary {
         id: run.id.clone(),
         kind: run.kind.clone(),
         previous_status: run.status.clone(),
         status: RunStatus::Stale.as_str().to_string(),
         started_at: run.started_at.clone(),
-        finished_at: finished.and_then(|run| run.finished_at),
+        finished_at: finished,
         owner_pid,
         reason: reason.to_string(),
         artifact_count,
-    }))
+        remote_job_status,
+    })
 }
 
 pub(crate) fn stale_running_reason<F>(run: &RunRecord, pid_is_alive: &F) -> Option<&'static str>
@@ -451,8 +460,13 @@ mod tests {
                 .record_artifact(&run.id, "bench_results", &artifact_path)
                 .expect("record artifact");
 
-            let reconciled =
-                reconcile_orphaned_running_runs(&store, 1000, false, |_| false).expect("reconcile");
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |_| false,
+            )
+            .expect("reconcile");
             let updated = store
                 .get_run(&run.id)
                 .expect("get run")
@@ -486,8 +500,13 @@ mod tests {
                 ))
                 .expect("import ownerless run");
 
-            let reconciled =
-                reconcile_orphaned_running_runs(&store, 1000, false, |_| true).expect("reconcile");
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |_| true,
+            )
+            .expect("reconcile");
             let unchanged = store
                 .get_run("fresh-ownerless-run")
                 .expect("get run")
@@ -513,8 +532,13 @@ mod tests {
                 .import_run(&phantom_handoff_run("recent-handoff-run", minutes_ago(90)))
                 .expect("import runner-backed run");
 
-            let reconciled =
-                reconcile_orphaned_running_runs(&store, 1000, false, |_| false).expect("reconcile");
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |_| false,
+            )
+            .expect("reconcile");
             let unchanged = store
                 .get_run("recent-handoff-run")
                 .expect("get run")
@@ -541,8 +565,13 @@ mod tests {
                 ))
                 .expect("import runner-backed run");
 
-            let reconciled =
-                reconcile_orphaned_running_runs(&store, 1000, false, |_| false).expect("reconcile");
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |_| false,
+            )
+            .expect("reconcile");
             let updated = store
                 .get_run("phantom-handoff-run")
                 .expect("get run")
@@ -662,8 +691,13 @@ mod tests {
                 ))
                 .expect("run");
 
-            let reconciled =
-                reconcile_orphaned_running_runs(&store, 1000, false, |_| false).expect("reconcile");
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |_| false,
+            )
+            .expect("reconcile");
             let updated = store
                 .get_run(&run.id)
                 .expect("get run")
@@ -689,8 +723,13 @@ mod tests {
                 .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
                 .expect("run");
 
-            let reconciled =
-                reconcile_orphaned_running_runs(&store, 1000, true, |_| false).expect("reconcile");
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                true,
+                |_| false,
+            )
+            .expect("reconcile");
             let unchanged = store
                 .get_run(&run.id)
                 .expect("get run")
@@ -700,6 +739,110 @@ mod tests {
             assert!(reconciled[0].finished_at.is_none());
             assert_eq!(unchanged.status, "running");
             assert!(unchanged.finished_at.is_none());
+        });
+    }
+
+    #[test]
+    fn reconcile_dry_run_leaves_unrelated_running_records_unchanged() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let selected = store
+                .start_run(sample_run(
+                    "trace",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
+                ))
+                .expect("selected run");
+            let unrelated = store
+                .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
+                .expect("unrelated run");
+
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                vec![store
+                    .get_run(&selected.id)
+                    .expect("read")
+                    .expect("selected")],
+                true,
+                |_| false,
+            )
+            .expect("reconcile");
+
+            assert_eq!(reconciled.len(), 1);
+            assert_eq!(
+                store
+                    .get_run(&selected.id)
+                    .expect("read")
+                    .expect("selected")
+                    .status,
+                "running"
+            );
+            assert_eq!(
+                store
+                    .get_run(&unrelated.id)
+                    .expect("read")
+                    .expect("unrelated")
+                    .status,
+                "running"
+            );
+        });
+    }
+
+    #[test]
+    fn reconcile_apply_changes_only_selected_candidate_ids() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let selected = store
+                .start_run(sample_run(
+                    "trace",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
+                ))
+                .expect("selected run");
+            let unrelated = store
+                .start_run(sample_run(
+                    "trace",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
+                ))
+                .expect("unrelated run");
+
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                vec![store
+                    .get_run(&selected.id)
+                    .expect("read")
+                    .expect("selected")],
+                false,
+                |_| false,
+            )
+            .expect("reconcile");
+
+            assert_eq!(
+                reconciled.iter().map(|run| &run.id).collect::<Vec<_>>(),
+                vec![&selected.id]
+            );
+            assert_eq!(
+                store
+                    .get_run(&selected.id)
+                    .expect("read")
+                    .expect("selected")
+                    .status,
+                "stale"
+            );
+            assert_eq!(
+                store
+                    .get_run(&unrelated.id)
+                    .expect("read")
+                    .expect("unrelated")
+                    .status,
+                "running"
+            );
         });
     }
 
@@ -724,9 +867,12 @@ mod tests {
             // parent control plane has no active job, but the child run is still
             // owned by a live process, so owner-PID reconciliation cannot act.
             let parent_active_job_count = 0;
-            let reconciled = reconcile_orphaned_running_runs(&store, 1000, false, |pid| {
-                pid == std::process::id()
-            })
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |pid| pid == std::process::id(),
+            )
             .expect("reconcile");
             let unchanged = store
                 .get_run(&run.id)

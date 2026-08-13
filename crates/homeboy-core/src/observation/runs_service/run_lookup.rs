@@ -324,7 +324,27 @@ pub fn refresh_selected_mirrored_daemon_evidence_best_effort(
     }
 }
 
-pub(crate) fn refresh_selected_mirrored_daemon_evidence(
+/// Read the current daemon job state for one mirrored run without changing the
+/// local observation store. A missing job is a reportable reconciliation
+/// outcome rather than a warning from an unrelated refresh sweep.
+pub fn selected_mirrored_daemon_job_status(run: &RunRecord) -> Result<Option<String>> {
+    let Some((runner_id, job_id)) =
+        runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))
+    else {
+        return Ok(None);
+    };
+    match runner_evidence::with_runner_evidence(|p| {
+        p.daemon_api_get(&runner_id, &format!("/jobs/{job_id}"))
+    }) {
+        Ok(_) => Ok(None),
+        Err(err) if err.details.get("http_status").and_then(Value::as_u64) == Some(404) => {
+            Ok(Some("not_found".to_string()))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+pub fn refresh_selected_mirrored_daemon_evidence(
     store: &ObservationStore,
     run: &RunRecord,
 ) -> Option<Error> {
