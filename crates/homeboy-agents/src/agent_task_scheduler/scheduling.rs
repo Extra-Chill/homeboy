@@ -1364,6 +1364,13 @@ impl AgentTaskScheduleSupport {
             backend: request.executor.backend.clone(),
             selector: request.executor.selector.clone(),
             model: request.executor.model().map(str::to_string),
+            requested_model: request.metadata["model_selection"]["requested"]
+                .as_str()
+                .filter(|model| !model.trim().is_empty())
+                .map(str::to_string)
+                .or_else(|| request.executor.model().map(str::to_string)),
+            attempted_model: request.executor.model().map(str::to_string),
+            candidate_producing_model: outcome.selected_model().map(str::to_string),
             status: outcome.status,
             failure_classification: outcome.failure_classification,
             summary: outcome.summary.clone(),

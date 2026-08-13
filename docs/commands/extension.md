@@ -172,6 +172,30 @@ Updates a git-cloned extension.
 - To update the extension installed on a runner, pass explicit Lab intent with the global runner flag, for example `homeboy --runner <runner-id> extension update <extension_id>`.
 - Homeboy reads `sourceUrl` from the extension's manifest to report the extension URL in JSON output.
 
+### `converge`
+
+```sh
+homeboy extension converge
+```
+
+Refreshes installed extensions without replacing the controller binary. It does
+not request controller-upgrade admission, so active controller ownership cannot
+block compatible extension refresh.
+
+- Preflights installed extension compatibility against the running controller.
+- Preserves dirty sources: each dirty extension is reported in `skipped` with its
+  exact dirty-path blocker; convergence does not force, stash, reset, or discard
+  user changes.
+- Validates the refreshed manifest before provider-catalog refresh or service
+  restart. Linked sources that fail post-refresh validation or setup return to
+  their prior clean revision.
+- `revision_evidence` distinguishes proven `changed` revisions from `unchanged`
+  and `unknown`; only proven changes can restart services.
+- Reports bounded provider catalog diagnostics before and after refresh.
+- Restarts only configured `resident_services` whose `extension_ids` include an
+  extension with a proven changed revision. Services without `extension_ids`
+  remain controller-binary services and are not restarted.
+
 ### `uninstall`
 
 ```sh

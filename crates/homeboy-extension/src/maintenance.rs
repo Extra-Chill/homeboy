@@ -1,7 +1,8 @@
 use homeboy_core::error::{Error, Result};
+use std::collections::HashMap;
 
 use super::exec_context;
-use super::lifecycle::update;
+use super::lifecycle::{update, update_linked_group};
 use super::update_output::{
     SourceMetadataRepairEntry, UpdateAllResult, UpdateEntry, UpdateSkippedEntry,
 };
@@ -14,17 +15,42 @@ pub fn update_all(force: bool) -> UpdateAllResult {
     let mut skipped = Vec::new();
     let mut skipped_details = Vec::new();
     let mut repaired_source_metadata = Vec::new();
+    let mut linked_groups: HashMap<String, Vec<String>> = HashMap::new();
+    for id in &extension_ids {
+        if homeboy_core::extension_store::is_extension_linked(id) {
+            if let Ok(path) = homeboy_core::paths::extension(id) {
+                if let Ok(source) = std::fs::canonicalize(path) {
+                    if let Ok(root) = homeboy_core::git::get_git_root(&source.to_string_lossy()) {
+                        linked_groups.entry(root).or_default().push(id.clone());
+                    }
+                }
+            }
+        }
+    }
+    let mut grouped_results: HashMap<String, Result<super::UpdateResult>> = HashMap::new();
 
     for id in &extension_ids {
         let old_version = load_extension(id).ok().map(|m| m.version.clone());
+        let old_source_revision = homeboy_core::extension_update_check::read_source_revision(id);
 
-        match update(id, force) {
-            Ok(result) => {
+        let update_result = linked_group_result(id, force, &linked_groups, &mut grouped_results);
+        match update_result.unwrap_or_else(|| update(id, force)) {
+            Ok(mut result) => {
                 let new_version = load_extension(id)
                     .ok()
                     .map(|m| m.version.clone())
                     .unwrap_or_default();
                 let repaired = result.repaired_source_metadata;
+                // Copied installs persist revisions in metadata while linked
+                // sources report them directly. Normalize both into before/after
+                // evidence for extension-only convergence.
+                if result.source_update.old_source_revision.is_none() {
+                    result.source_update.old_source_revision = old_source_revision;
+                }
+                if result.source_update.new_source_revision.is_none() {
+                    result.source_update.new_source_revision =
+                        homeboy_core::extension_update_check::read_source_revision(id);
+                }
 
                 if let Some(repair) = repaired.clone() {
                     repaired_source_metadata.push(SourceMetadataRepairEntry {
@@ -43,6 +69,7 @@ pub fn update_all(force: bool) -> UpdateAllResult {
                         .map(|path| path.to_string_lossy().to_string()),
                     git_root: result
                         .git_root
+                        .as_ref()
                         .map(|path| path.to_string_lossy().to_string()),
                     source_update: result.source_update,
                     repaired_source_metadata: repaired,
@@ -65,6 +92,36 @@ pub fn update_all(force: bool) -> UpdateAllResult {
         skipped_details,
         repaired_source_metadata,
     }
+}
+
+/// A linked monorepo is refreshed once per Git root. Every extension still gets
+/// its own compatibility/setup validation and inherits the root's exact revision
+/// transition for independent service targeting.
+fn linked_group_result(
+    id: &str,
+    force: bool,
+    groups: &HashMap<String, Vec<String>>,
+    results: &mut HashMap<String, Result<super::UpdateResult>>,
+) -> Option<Result<super::UpdateResult>> {
+    let path = homeboy_core::paths::extension(id).ok()?;
+    let source = std::fs::canonicalize(path).ok()?;
+    let root = homeboy_core::git::get_git_root(&source.to_string_lossy()).ok()?;
+    let ids = groups.get(&root)?;
+    if !results.contains_key(id) {
+        match update_linked_group(ids, force) {
+            Ok(entries) => {
+                for entry in entries {
+                    results.insert(entry.extension_id.clone(), Ok(entry));
+                }
+            }
+            Err(error) => {
+                for member in ids {
+                    results.insert(member.clone(), Err(error.clone()));
+                }
+            }
+        }
+    }
+    results.get(id).cloned()
 }
 
 /// Execute a tool from an extension's vendor directory.

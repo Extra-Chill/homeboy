@@ -114,7 +114,12 @@ pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> 
         StartupFastPathOutput::Help(help) => print!("{help}"),
         StartupFastPathOutput::Version(version) => println!("{version}"),
         StartupFastPathOutput::Identity(identity) => {
-            output_runtime::emit_json_result(Ok(identity), None, 0);
+            output_runtime::emit_json_result_for_identity(
+                Ok(identity),
+                None,
+                0,
+                &output::CommandIdentity::with_operation("self", "identity"),
+            );
         }
     }
 
@@ -133,6 +138,18 @@ pub fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
         command_surface_from(build_augmented_command(&discovery.info, &discovery.health)),
         &dynamic_descriptors,
     )
+}
+
+/// Installed command/capability metadata for admission checks. Extension
+/// discovery intentionally skips readiness probes at this phase.
+pub fn current_augmented_command_surface() -> crate::cli_surface::CommandSurface {
+    let discovery = collect_extension_cli_info_metadata_only();
+    command_surface_from(build_augmented_command(&discovery.info, &discovery.health))
+}
+
+pub(crate) fn current_augmented_command_contract() -> clap::Command {
+    let discovery = collect_extension_cli_info_metadata_only();
+    build_augmented_command(&discovery.info, &discovery.health)
 }
 
 /// Register every provider hook the CLI wires before the startup terminal-run
@@ -2119,6 +2136,57 @@ mod tests {
         assert_eq!(
             command_identity_from_matches(&matches),
             output::CommandIdentity::with_operation("runner", "status")
+        );
+    }
+
+    #[test]
+    fn every_clap_self_subcommand_uses_canonical_command_identity() {
+        let command = Cli::command_with_scoped_lab_args();
+        let self_command = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "self")
+            .expect("self command");
+
+        for subcommand in self_command.get_subcommands() {
+            let argv: Vec<&str> = match subcommand.get_name() {
+                "status" | "identity" | "doctor" | "cleanup-runtime-tmp" => {
+                    vec!["homeboy", "self", subcommand.get_name()]
+                }
+                "service-supervisor-worker" | "postprocess-worker" => vec![
+                    "homeboy",
+                    "self",
+                    subcommand.get_name(),
+                    "--request",
+                    "request.json",
+                ],
+                "upgrade-admission" => vec![
+                    "homeboy",
+                    "self",
+                    "upgrade-admission",
+                    "--legacy-identity",
+                    "legacy",
+                ],
+                // A topic is intentionally supplied so this covers the direct
+                // markdown `self docs <topic>` surface, not only `docs map`.
+                "docs" => vec!["homeboy", "self", "docs", "commands/self"],
+                name => panic!("self subcommand `{name}` needs an identity fixture"),
+            };
+            let matches = Cli::command_with_scoped_lab_args()
+                .try_get_matches_from(&argv)
+                .expect("parse self subcommand");
+            assert_eq!(
+                command_identity_from_matches(&matches),
+                output::CommandIdentity::with_operation("self", subcommand.get_name()),
+                "argv: {argv:?}"
+            );
+        }
+
+        let matches = Cli::command_with_scoped_lab_args()
+            .try_get_matches_from(["homeboy", "self", "inspect"])
+            .expect("parse self identity alias");
+        assert_eq!(
+            command_identity_from_matches(&matches),
+            output::CommandIdentity::with_operation("self", "identity")
         );
     }
 

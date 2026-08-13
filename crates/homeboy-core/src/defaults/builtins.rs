@@ -99,7 +99,49 @@ fn parse_extension_provided_defaults(content: &str) -> ExtensionProvidedDefaults
 }
 
 pub(super) fn default_install_methods() -> InstallMethodsConfig {
-    extension_provided_defaults().install_methods.clone()
+    let mut methods = extension_provided_defaults().install_methods.clone();
+    methods.binary.upgrade_command =
+        bootstrap_binary_upgrade_command(&methods.binary.upgrade_command);
+    methods
+}
+
+const BINARY_REPLACEMENT_MARKER: &str =
+    "if [ -w \"$BIN_PATH\" ] || [ -w \"$(dirname \"$BIN_PATH\")\" ]; then";
+const BINARY_UPGRADE_BOOTSTRAP: &str = r#"# Keep the installed controller immutable until the staged candidate applies
+# its own read-only ownership admission. This lets a fixed candidate classify
+# durable records that a legacy controller cannot, without bypassing live work.
+chmod 0755 homeboy
+LEGACY_IDENTITY="$("$BIN_PATH" self identity 2>/dev/null || "$BIN_PATH" --version 2>/dev/null || printf 'unavailable')"
+"$TMP_DIR/homeboy" self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
+TMP_BIN="$(dirname "$BIN_PATH")/.homeboy-upgrade.$$"
+
+if [ -w "$BIN_PATH" ] || [ -w "$(dirname "$BIN_PATH")" ]; then"#;
+
+fn bootstrap_binary_upgrade_command(command: &str) -> String {
+    if command.contains("\"$TMP_DIR/homeboy\" self upgrade-admission") {
+        return command.to_string();
+    }
+    let Some(bootstrapped) = command
+        .contains(BINARY_REPLACEMENT_MARKER)
+        .then(|| command.replacen(BINARY_REPLACEMENT_MARKER, BINARY_UPGRADE_BOOTSTRAP, 1))
+    else {
+        return command.to_string();
+    };
+    // The generic `install` substring occurs inside `sudo install`; rewrite the
+    // privileged form first so its atomic rename remains privileged.
+    bootstrapped
+        .replace(
+            "cleanup() { rm -rf \"$TMP_DIR\"; }",
+            "cleanup() { rm -f \"${TMP_BIN:-}\"; rm -rf \"$TMP_DIR\"; }",
+        )
+        .replace(
+            "sudo install -m 0755 homeboy \"$BIN_PATH\"",
+            "sudo install -m 0755 homeboy \"$TMP_BIN\"\n      sudo mv \"$TMP_BIN\" \"$BIN_PATH\"",
+        )
+        .replace(
+            "install -m 0755 homeboy \"$BIN_PATH\"",
+            "install -m 0755 homeboy \"$TMP_BIN\"\n  mv \"$TMP_BIN\" \"$BIN_PATH\"",
+        )
 }
 
 pub(super) fn default_homebrew_config() -> InstallMethodConfig {
@@ -191,6 +233,28 @@ mod tests {
         assert!(config.upgrade_command.contains("target/release/homeboy"));
         assert!(config.upgrade_command.contains("--version"));
         assert!(!config.upgrade_command.contains("cargo install --path"));
+    }
+
+    #[test]
+    fn binary_upgrade_stages_candidate_admission_before_atomic_replacement() {
+        let installer = r#"cleanup() { rm -rf "$TMP_DIR"; }
+if [ -w "$BIN_PATH" ] || [ -w "$(dirname "$BIN_PATH")" ]; then
+  install -m 0755 homeboy "$BIN_PATH"
+else
+  sudo install -m 0755 homeboy "$BIN_PATH"
+fi"#;
+        let command = bootstrap_binary_upgrade_command(installer);
+        let admission = command
+            .find("\"$TMP_DIR/homeboy\" self upgrade-admission")
+            .expect("candidate admission");
+        let swap = command
+            .find("mv \"$TMP_BIN\" \"$BIN_PATH\"")
+            .expect("atomic replacement");
+
+        assert!(admission < swap);
+        assert!(command.contains("LEGACY_IDENTITY=\"$(\"$BIN_PATH\" self identity"));
+        assert!(!command.contains("install -m 0755 homeboy \"$BIN_PATH\""));
+        assert!(command.contains("sudo mv \"$TMP_BIN\" \"$BIN_PATH\""));
     }
 
     #[test]

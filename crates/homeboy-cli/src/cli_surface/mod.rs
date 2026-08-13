@@ -1066,6 +1066,21 @@ mod tests {
     }
 
     #[test]
+    fn extension_converge_manifest_declares_extension_mutation() {
+        let manifest = current_command_safety_manifest();
+        let converge = manifest
+            .find_path(&["extension", "converge"])
+            .expect("extension converge must be present in the command safety manifest");
+
+        assert!(converge.mutates);
+        assert!(!converge.operator);
+        assert!(converge
+            .output
+            .notes
+            .contains("mutates installed extension"));
+    }
+
+    #[test]
     fn rig_lint_manifest_declares_static_read_only_behavior() {
         let manifest = current_command_safety_manifest();
         let lint = manifest

@@ -106,6 +106,8 @@ struct TestInventoryEvidence {
     workspace_fingerprint: String,
     tests: Vec<TestInventoryTest>,
     inventory_fingerprint: String,
+    #[serde(default)]
+    fallback_reason: Option<String>,
 }
 
 #[cfg(unix)]
@@ -483,6 +485,10 @@ fn valid_test_inventory_payload(
         || expected_runner_fingerprint(binding, &inventory.runner).as_deref()
             != Some(inventory.runner_fingerprint.as_str())
         || inventory.workspace_fingerprint != binding.workspace_fingerprint
+        || inventory
+            .fallback_reason
+            .as_deref()
+            .is_some_and(|reason| reason.trim().is_empty() || reason.len() > 1024)
     {
         return None;
     }
@@ -527,6 +533,7 @@ fn valid_test_inventory_payload(
             workspace_fingerprint: inventory.workspace_fingerprint.clone(),
             test_count: inventory.tests.len(),
             inventory_fingerprint: inventory.inventory_fingerprint.clone(),
+            fallback_reason: inventory.fallback_reason.clone(),
         })
 }
 
@@ -768,6 +775,7 @@ fn run_main_test_workflow_inner(
     } else {
         None
     };
+    let inventory_mode = test_inventory_mode(&args.ci_env);
 
     let coverage_enabled = args.coverage || args.coverage_min.is_some();
     let results_file = run_dir.step_file(run_dir::files::TEST_RESULTS);
@@ -779,12 +787,19 @@ fn run_main_test_workflow_inner(
     let failures_file = run_dir.step_file(run_dir::files::TEST_FAILURES);
     let durations_file = run_dir.step_file(run_dir::files::TEST_DURATIONS);
 
-    let changed_test_files = changed_scope
-        .as_ref()
-        .map(|scope| scope.selected_files.as_slice());
+    // Inventory is a complete producer operation, not a changed-test execution.
+    // It must not inherit an empty changed scope that tells the extension there is
+    // nothing to enumerate.
+    let changed_test_files = if inventory_mode {
+        None
+    } else {
+        changed_scope
+            .as_ref()
+            .map(|scope| scope.selected_files.as_slice())
+    };
 
     if let Some(ref scope) = changed_scope {
-        if scope.selected_files.is_empty() {
+        if scope.selected_files.is_empty() && !inventory_mode {
             let changed_ref = scope.changed_since.as_deref().unwrap_or("unknown");
 
             // Fail closed when production/test source changed but the scope
@@ -919,7 +934,6 @@ fn run_main_test_workflow_inner(
     let no_tests_nonce = uuid::Uuid::new_v4().to_string();
     let write_results_helper = write_test_results_helper(run_dir)?;
 
-    let inventory_mode = test_inventory_mode(&args.ci_env);
     #[cfg(unix)]
     let inventory_binding = inventory_mode
         .then(|| {
@@ -1008,14 +1022,18 @@ fn run_main_test_workflow_inner(
     // single summary line — so the suite-level duration survives a timeout.
     let child_started = std::time::Instant::now();
     let output = runner
-        .env_if(args.changed_since.is_some(), "SCOPE_MODE", "changed")
         .env_if(
-            args.changed_since.is_some(),
+            !inventory_mode && args.changed_since.is_some(),
+            "SCOPE_MODE",
+            "changed",
+        )
+        .env_if(
+            !inventory_mode && args.changed_since.is_some(),
             "HOMEBOY_CHANGED_SINCE",
             args.changed_since.as_deref().unwrap_or_default(),
         )
         .env_if(
-            args.changed_since.is_some(),
+            !inventory_mode && args.changed_since.is_some(),
             "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
             "1",
         )
@@ -2708,6 +2726,7 @@ mod tests {
             workspace_fingerprint: "b".repeat(64),
             test_count: 1,
             inventory_fingerprint: "c".repeat(64),
+            fallback_reason: None,
         });
 
         finalize_test_result_after_artifact_hydration(&mut workflow);
@@ -2751,6 +2770,25 @@ mod tests {
         assert_eq!(
             test_run_status_with_inventory(true, None, false, true, Some(evidence)),
             "passed"
+        );
+
+        let mut widened: TestInventoryEvidence =
+            serde_json::from_str(&valid_inventory_document(&binding, "test", "executed"))
+                .expect("parse valid inventory");
+        widened.fallback_reason =
+            Some("Changed test selection no longer matches fixture::lib::fixture.".to_string());
+        std::fs::write(
+            &binding.child_path,
+            serde_json::to_vec(&widened).expect("serialize widened inventory"),
+        )
+        .expect("write widened inventory");
+        assert_eq!(
+            valid_test_inventory(&binding)
+                .expect("widened inventory remains valid")
+                .0
+                .fallback_reason
+                .as_deref(),
+            Some("Changed test selection no longer matches fixture::lib::fixture.")
         );
         assert_eq!(
             test_run_status_with_inventory(false, None, false, true, Some(evidence)),
@@ -2859,6 +2897,250 @@ mod tests {
             valid_test_inventory(&binding).is_none(),
             "every inventory identity must declare its expected outcome"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_mode_runs_the_producer_for_an_empty_changed_scope_and_fails_without_evidence() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            use std::os::unix::fs::PermissionsExt;
+
+            let source = tempfile::tempdir().expect("source workspace");
+            std::fs::write(
+                source.path().join("Cargo.toml"),
+                "[package]\nname = \"inventory-zero-scope\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .expect("workspace manifest");
+            std::fs::create_dir(source.path().join("src")).expect("source directory");
+            std::fs::write(source.path().join("src/lib.rs"), "pub fn fixture() {}\n")
+                .expect("source file");
+            let marker = source.path().join("inventory-producer-ran");
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/inventory-zero-scope-fixture");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("inventory-zero-scope-fixture.json"),
+                r#"{"name":"Inventory zero scope fixture","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
+            )
+            .expect("extension manifest");
+            let script = extension_dir.join("test.sh");
+            std::fs::write(
+                &script,
+                "#!/bin/sh\nset -e\n[ \"$HOMEBOY_TEST_INVENTORY_ONLY\" = 1 ]\n[ -n \"$HOMEBOY_TEST_INVENTORY_FILE\" ]\n[ -z \"${SCOPE_MODE+x}\" ]\n[ -z \"${HOMEBOY_CHANGED_SINCE+x}\" ]\n[ -z \"${HOMEBOY_CHANGED_TEST_FILES+x}\" ]\n[ ! -e \"$HOMEBOY_COMPONENT_PATH/homeboy-test-inventory.json\" ]\ntouch \"$HOMEBOY_COMPONENT_PATH/inventory-producer-ran\"\n",
+            )
+            .expect("producer script");
+            let mut permissions = std::fs::metadata(&script)
+                .expect("script metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).expect("executable script");
+
+            let component = Component {
+                id: "inventory-zero-scope".to_string(),
+                local_path: source.path().to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([(
+                    "inventory-zero-scope-fixture".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+            let run_dir = RunDir::create().expect("run directory");
+            let mut args = fixture_workflow_args(&component);
+            args.changed_since = Some("base".to_string());
+            args.precomputed_changed_files = Some(vec!["README.md".to_string()]);
+            args.ci_env = vec![
+                (TEST_INVENTORY_ONLY_ENV.to_string(), "1".to_string()),
+                (
+                    TEST_INVENTORY_FILE_ENV.to_string(),
+                    TEST_INVENTORY_PUBLIC_FILE.to_string(),
+                ),
+            ];
+
+            let result = run_main_test_workflow(&component, source.path(), args, &run_dir)
+                .expect("missing producer output is a test result");
+
+            assert!(marker.exists(), "inventory producer must run despite zero selected tests");
+            assert_eq!(result.status, "failed");
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(result.runner_exit_code, Some(0));
+            assert!(result.test_inventory.is_none());
+            assert!(
+                !source.path().join(TEST_INVENTORY_PUBLIC_FILE).exists(),
+                "a producer that emits no valid inventory must not publish output"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_mode_publishes_valid_producer_output_for_an_empty_changed_scope() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            use std::os::unix::fs::PermissionsExt;
+
+            let source = tempfile::tempdir().expect("source workspace");
+            std::fs::write(
+                source.path().join("Cargo.toml"),
+                "[package]\nname = \"inventory-zero-scope-valid\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .expect("workspace manifest");
+            std::fs::create_dir(source.path().join("src")).expect("source directory");
+            std::fs::write(source.path().join("src/lib.rs"), "pub fn fixture() {}\n")
+                .expect("source file");
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/inventory-valid-fixture");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("inventory-valid-fixture.json"),
+                r#"{"name":"Inventory valid fixture","version":"1.0.0","test":{"extension_script":"test.py"}}"#,
+            )
+            .expect("extension manifest");
+            let script = extension_dir.join("test.py");
+            std::fs::write(
+                &script,
+                r##"#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import subprocess
+from pathlib import Path
+
+assert os.environ["HOMEBOY_TEST_INVENTORY_ONLY"] == "1"
+assert "SCOPE_MODE" not in os.environ
+assert "HOMEBOY_CHANGED_SINCE" not in os.environ
+assert "HOMEBOY_CHANGED_TEST_FILES" not in os.environ
+root = Path(os.environ["HOMEBOY_COMPONENT_PATH"]).resolve()
+files = sorted(
+    path for path in root.rglob("*")
+    if path.is_file()
+    and ".git" not in path.parts
+    and "target" not in path.parts
+    and (path.name in {"Cargo.toml", "Cargo.lock"} or path.suffix == ".rs")
+)
+workspace = hashlib.sha256(
+    "".join(f"{path.relative_to(root)}\0{path.read_text()}\0" for path in files).encode()
+).hexdigest()
+version = subprocess.check_output(["cargo", "--version"], cwd=root, text=True).strip()
+runner = hashlib.sha256(f"cargo\0{version}".encode()).hexdigest()
+inventory = {
+    "schema": "homeboy/test-inventory/v1",
+    "runner": "cargo",
+    "runner_fingerprint": runner,
+    "workspace_fingerprint": workspace,
+    "tests": [{
+        "id": "fixture::inventory",
+        "package": "fixture",
+        "target": "fixture-tests",
+        "target_kind": "test",
+        "name": "inventory",
+        "expected_outcome": "executed",
+    }],
+}
+inventory["inventory_fingerprint"] = hashlib.sha256(
+    json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory))
+"##,
+            )
+            .expect("producer script");
+            let mut permissions = std::fs::metadata(&script)
+                .expect("script metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).expect("executable script");
+
+            let component = Component {
+                id: "inventory-valid".to_string(),
+                local_path: source.path().to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([(
+                    "inventory-valid-fixture".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+            let run_dir = RunDir::create().expect("run directory");
+            let mut args = fixture_workflow_args(&component);
+            args.changed_since = Some("base".to_string());
+            args.precomputed_changed_files = Some(vec!["README.md".to_string()]);
+            args.ci_env = vec![
+                (TEST_INVENTORY_ONLY_ENV.to_string(), "1".to_string()),
+                (
+                    TEST_INVENTORY_FILE_ENV.to_string(),
+                    TEST_INVENTORY_PUBLIC_FILE.to_string(),
+                ),
+            ];
+
+            let result = run_main_test_workflow(&component, source.path(), args, &run_dir)
+                .expect("valid producer output");
+            let published = source.path().join(TEST_INVENTORY_PUBLIC_FILE);
+
+            assert_eq!(result.status, "passed");
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.runner_exit_code, Some(0));
+            assert_eq!(result.test_inventory.as_ref().map(|inventory| inventory.test_count), Some(1));
+            assert!(published.is_file(), "validated inventory must publish to the requested path");
+            assert_eq!(
+                serde_json::from_slice::<TestInventoryEvidence>(
+                    &std::fs::read(&published).expect("published inventory")
+                )
+                .expect("published inventory JSON")
+                .inventory_fingerprint,
+                result
+                    .test_inventory
+                    .as_ref()
+                    .expect("workflow inventory")
+                    .inventory_fingerprint
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_inventory_mode_keeps_the_empty_changed_scope_fast_path() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source workspace");
+            let marker = source.path().join("runner-ran");
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/zero-scope-fast-path-fixture");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("zero-scope-fast-path-fixture.json"),
+                r#"{"name":"Zero scope fast path fixture","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
+            )
+            .expect("extension manifest");
+            std::fs::write(
+                extension_dir.join("test.sh"),
+                "#!/bin/sh\ntouch \"$HOMEBOY_COMPONENT_PATH/runner-ran\"\n",
+            )
+            .expect("runner script");
+            let component = Component {
+                id: "zero-scope-fast-path".to_string(),
+                local_path: source.path().to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([(
+                    "zero-scope-fast-path-fixture".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+            let mut args = fixture_workflow_args(&component);
+            args.changed_since = Some("base".to_string());
+            args.precomputed_changed_files = Some(vec!["README.md".to_string()]);
+
+            let result = run_main_test_workflow(
+                &component,
+                source.path(),
+                args,
+                &RunDir::create().expect("run directory"),
+            )
+            .expect("zero scope fast path");
+
+            assert_eq!(result.status, "passed");
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.runner_exit_code, None);
+            assert!(!marker.exists(), "normal zero scope must not invoke the runner");
+        });
     }
 
     #[cfg(unix)]
@@ -3290,6 +3572,7 @@ print(hashlib.sha256(content.encode()).hexdigest())
             workspace_fingerprint: binding.workspace_fingerprint.clone(),
             tests,
             inventory_fingerprint: String::new(),
+            fallback_reason: None,
         };
         inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
             &canonical_inventory_json(&inventory),

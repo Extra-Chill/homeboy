@@ -84,6 +84,10 @@ pub struct AgentTaskExecutorProvider {
     pub runner_sources: Vec<AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_failure_patterns: Vec<AgentTaskProviderDependencyFailurePattern>,
+    /// Adapter-owned classifications for failures that prove an otherwise
+    /// statically-ready provider cannot currently dispatch work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub immediate_failure_patterns: Vec<AgentTaskProviderImmediateFailurePattern>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_preflights: Vec<AgentTaskProviderConfigPreflight>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -289,6 +293,24 @@ pub struct AgentTaskProviderDependencyFailurePattern {
     pub remediation: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// A provider-specific failure signature that is safe to circuit-break when it
+/// repeats immediately. Homeboy owns the bounded retry/circuit policy; adapter
+/// manifests own the error semantics and operator-facing log lookup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderImmediateFailurePattern {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub error_contains_any: Vec<String>,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_ref_pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_lookup: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

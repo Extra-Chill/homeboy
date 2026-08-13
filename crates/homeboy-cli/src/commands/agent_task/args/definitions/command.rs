@@ -219,6 +219,10 @@ pub struct AcceptArgs {
     pub token: String,
     #[arg(long = "evidence-ref")]
     pub evidence_refs: Vec<String>,
+    /// Bounded reviewer remediation feedback retained with a rejected Cook
+    /// candidate for its one authorized repair attempt.
+    #[arg(long, value_name = "TEXT")]
+    pub feedback: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -231,6 +235,11 @@ pub struct CookContinueArgs {
     /// Explicitly rearm one failed terminal continuation before consuming it.
     #[arg(long, conflicts_with = "preflight")]
     pub rearm: bool,
+    /// Select the patch artifact to promote when the durable attempt produced
+    /// more than one patch candidate. This resumes controller-side promotion
+    /// without dispatching another provider execution.
+    #[arg(long = "artifact-id", value_name = "ID")]
+    pub artifact_id: Option<String>,
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,

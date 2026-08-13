@@ -4,6 +4,7 @@
 use crate::agent_task::{AgentTaskRequest, AgentTaskSourceRef};
 use crate::agent_task_lifecycle::{self, AgentTaskRecordHealthSummary, AgentTaskRunRecord};
 use crate::agent_task_scheduler::AgentTaskState;
+use std::collections::{BTreeMap, BTreeSet};
 // `agent-task active` treats a `Running` record that has gone this long without
 // an `updated_at` heartbeat as suspect even when its owner process/runner-job
 // liveness cannot be disproven (#5682). Shared with `activity` so the two
@@ -471,8 +472,37 @@ pub(crate) fn controller_upgrade_admission_for_records(
     now: chrono::DateTime<chrono::Utc>,
 ) -> ControllerUpgradeAdmission {
     let summary = liveness_summary_for_records(records, now);
-    let blockers = records
+    let mut parent_by_attempt = BTreeMap::new();
+    let mut invalid_handoff_parents = BTreeSet::new();
+    for record in records {
+        if let Some(attempt) = record
+            .metadata
+            .pointer("/detached_cook_handoff/attempt_run_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            let linked_attempt = records.iter().find(|candidate| candidate.run_id == attempt);
+            let belongs_to_parent = linked_attempt
+                .and_then(|candidate| candidate.metadata.get("cook_id"))
+                .and_then(serde_json::Value::as_str)
+                == Some(record.run_id.as_str());
+            let indexed = agent_task_lifecycle::cook_index(&record.run_id)
+                .ok()
+                .is_some_and(|index| index.attempts.iter().any(|entry| entry.run_id == attempt));
+            if belongs_to_parent && indexed {
+                parent_by_attempt.insert(attempt, &record.run_id);
+            } else {
+                // Do not prescribe the parent alias here: scoped reconciliation
+                // correctly rejects an untrusted handoff link. The record-health
+                // primitive is executable and owns repairing malformed authority.
+                invalid_handoff_parents.insert(record.run_id.as_str());
+            }
+        }
+    }
+    let mut blockers = records
         .iter()
+        // Durable terminal state is authoritative even when stale ownership
+        // metadata remains from the process that produced it.
+        .filter(|record| !record.state.is_terminal())
         .filter_map(|record| {
             let liveness =
                 classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
@@ -484,14 +514,26 @@ pub(crate) fn controller_upgrade_admission_for_records(
                         | AgentTaskLiveness::Unreconciled
                 );
             (!matches!(liveness, AgentTaskLiveness::Stale) || runner_unverified).then(|| {
-                let recovery_command = record
-                    .runner_id()
-                    .map(|runner| format!("homeboy runner reconcile {runner}"))
-                    .unwrap_or_else(|| {
-                        format!("homeboy agent-task reconcile {} --dry-run", record.run_id)
-                    });
+                let group_run_id = parent_by_attempt
+                    .get(record.run_id.as_str())
+                    .copied()
+                    .unwrap_or(&record.run_id);
+                let recovery_command = if invalid_handoff_parents.contains(record.run_id.as_str()) {
+                    "homeboy agent-task reconcile-records --dry-run".to_string()
+                } else {
+                    record
+                        .runner_id()
+                        .map(|runner| format!("homeboy runner reconcile {runner}"))
+                        .unwrap_or_else(|| {
+                            if liveness == AgentTaskLiveness::Active {
+                                format!("homeboy agent-task cancel {group_run_id}")
+                            } else {
+                                format!("homeboy agent-task reconcile {group_run_id} --apply")
+                            }
+                        })
+                };
                 ControllerUpgradeBlocker {
-                    run_id: record.run_id.clone(),
+                    run_id: group_run_id.clone(),
                     liveness: liveness.as_str(),
                     reason: if runner_unverified {
                         "runner_job_unverified_after_daemon_restart".to_string()
@@ -502,7 +544,44 @@ pub(crate) fn controller_upgrade_admission_for_records(
                 }
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let mut grouped = BTreeMap::<String, Vec<ControllerUpgradeBlocker>>::new();
+    for blocker in blockers.drain(..) {
+        grouped
+            .entry(blocker.run_id.clone())
+            .or_default()
+            .push(blocker);
+    }
+    let mut blockers = grouped
+        .into_values()
+        .map(|mut group| {
+            group.sort_by(|left, right| left.recovery_command.cmp(&right.recovery_command));
+            let recovery_commands = group
+                .iter()
+                .map(|blocker| blocker.recovery_command.clone())
+                .collect::<Vec<_>>();
+            let mut runner_commands = recovery_commands
+                .iter()
+                .filter(|command| command.starts_with("homeboy runner reconcile "))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut lifecycle_commands = recovery_commands
+                .iter()
+                .filter(|command| !command.starts_with("homeboy runner reconcile "))
+                .cloned()
+                .collect::<Vec<_>>();
+            runner_commands.sort();
+            runner_commands.dedup();
+            lifecycle_commands.sort();
+            lifecycle_commands.dedup();
+            runner_commands.extend(lifecycle_commands);
+            let mut primary = group.remove(0);
+            primary.recovery_command = runner_commands.join(" && ");
+            primary
+        })
+        .collect::<Vec<_>>();
+    blockers.sort_by(|left, right| left.recovery_command.cmp(&right.recovery_command));
+    blockers.dedup_by(|left, right| left.recovery_command == right.recovery_command);
     ControllerUpgradeAdmission {
         schema: "homeboy/controller-upgrade-admission/v1",
         active: summary.active,
@@ -544,19 +623,14 @@ fn classify_liveness(
         if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
             return AgentTaskLiveness::Unreconciled;
         }
-        // A serialized queued task is not liveness evidence: it can survive a
-        // controller crash indefinitely. A queued record is live only with a
-        // fresh update (or fresh submission before its first update), a live
-        // local owner, or a complete pending runner submission within its
-        // acceptance deadline.
-        let heartbeat_age =
-            last_update_age_minutes.or_else(|| age_minutes(Some(&record.submitted_at), now));
-        let has_fresh_heartbeat =
-            heartbeat_age.is_some_and(|age| age < RUNNING_HEARTBEAT_STALE_MINUTES);
+        // A queued record has no executing work of its own. Fresh timestamps
+        // only prove that it was serialized recently, not that an owner still
+        // exists. Retain it as active solely with a live owner or a complete
+        // runner submission that is still inside its acceptance deadline.
         let has_live_owner = record.owner_process_is_running();
         let has_live_submission_intent =
             agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now);
-        if !has_fresh_heartbeat && !has_live_owner && !has_live_submission_intent {
+        if !has_live_owner && !has_live_submission_intent {
             return AgentTaskLiveness::Stale;
         }
         return AgentTaskLiveness::Active;

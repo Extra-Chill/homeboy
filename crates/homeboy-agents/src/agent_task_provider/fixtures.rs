@@ -5,6 +5,15 @@ pub(super) fn run_fixture_provider(
     request: &AgentTaskRequest,
     artifact_root: &Path,
 ) -> AgentTaskOutcome {
+    if let Some(path) = std::env::var_os("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE") {
+        let _ = std::fs::write(path, "started\n");
+    }
+    if let Some(delay_ms) = std::env::var("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    }
     let mode = request
         .executor
         .config

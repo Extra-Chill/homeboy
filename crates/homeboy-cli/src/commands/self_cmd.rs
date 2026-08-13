@@ -26,6 +26,9 @@ pub enum SelfCommand {
     /// Report the active binary build identity without external probes
     #[command(alias = "inspect")]
     Identity(SelfIdentityArgs),
+    /// Verify whether this candidate controller may replace the installed controller
+    #[command(hide = true)]
+    UpgradeAdmission(UpgradeAdmissionArgs),
     /// Report one authoritative binary/runtime view across the controller and
     /// every configured runner, including version drift signals and host
     /// resource pressure (machine load, hot Homeboy-adjacent processes, rig
@@ -50,6 +53,13 @@ pub struct SelfStatusArgs {}
 #[derive(Args)]
 pub struct SelfIdentityArgs {}
 
+#[derive(Args)]
+pub struct UpgradeAdmissionArgs {
+    /// Build identity reported by the controller invoking the installer
+    #[arg(long)]
+    pub legacy_identity: String,
+}
+
 #[derive(Serialize)]
 struct SelfIdentityReport {
     active_binary: String,
@@ -57,6 +67,15 @@ struct SelfIdentityReport {
     build_identity: build_identity::BuildIdentity,
     lab_handoff_capabilities: Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
     daemon_recovery_capabilities: Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
+}
+
+#[derive(Serialize)]
+struct UpgradeAdmissionReport {
+    schema: &'static str,
+    legacy_identity: String,
+    candidate_identity: String,
+    admission_authority: &'static str,
+    admission: homeboy_upgrade::upgrade::ControllerUpgradeAdmission,
 }
 
 pub fn identity_report() -> Value {
@@ -129,6 +148,19 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
             Ok((json, 0))
         }
         SelfCommand::Identity(_) => Ok((identity_report(), 0)),
+        SelfCommand::UpgradeAdmission(args) => {
+            let admission = homeboy_upgrade::upgrade::ensure_controller_upgrade_admission()?;
+            let report = UpgradeAdmissionReport {
+                schema: "homeboy/controller-upgrade-bootstrap/v1",
+                legacy_identity: args.legacy_identity,
+                candidate_identity: build_identity::current().display,
+                admission_authority: "candidate_controller",
+                admission,
+            };
+            let json = serde_json::to_value(report)
+                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
+            Ok((json, 0))
+        }
         SelfCommand::Doctor(_) => {
             let view = self_status::build_runtime_view(
                 collect_controller_input(),

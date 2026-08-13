@@ -1838,6 +1838,33 @@ fn completed_run_exposes_latest_executor_input_output_and_expectations() {
         }];
 
         let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].metadata = json!({
+            "model": "openai/gpt-5.6-terra",
+            "provider_rotation": {
+                "attempts": [{
+                    "attempt": 1,
+                    "rotation_index": 0,
+                    "backend": "sandbox",
+                    "selector": "fixture",
+                    "model": "gpt-fixture",
+                    "requested_model": "gpt-fixture",
+                    "attempted_model": "gpt-fixture",
+                    "candidate_producing_model": "gpt-fixture",
+                    "status": "provider_error",
+                    "failure_classification": "provider"
+                }, {
+                    "attempt": 2,
+                    "rotation_index": 1,
+                    "backend": "opencode",
+                    "selector": "opencode.agent-task-executor",
+                    "model": "openai/gpt-5.6-terra",
+                    "requested_model": "gpt-fixture",
+                    "attempted_model": "openai/gpt-5.6-terra",
+                    "candidate_producing_model": "openai/gpt-5.6-terra",
+                    "status": "succeeded"
+                }]
+            }
+        });
         aggregate.outcomes[0].outputs = json!({
             "provider_run_result": {
                 "run_id": "provider-run-123",
@@ -1854,9 +1881,17 @@ fn completed_run_exposes_latest_executor_input_output_and_expectations() {
         let artifact_report = artifacts("run-evidence").expect("artifacts loaded");
 
         assert_eq!(evidence.task_id, "task-a");
-        assert_eq!(evidence.backend, "sandbox");
-        assert_eq!(evidence.selector.as_deref(), Some("fixture"));
-        assert_eq!(evidence.model.as_deref(), Some("gpt-fixture"));
+        assert_eq!(evidence.backend, "opencode");
+        assert_eq!(
+            evidence.selector.as_deref(),
+            Some("opencode.agent-task-executor")
+        );
+        assert_eq!(evidence.model.as_deref(), Some("openai/gpt-5.6-terra"));
+        assert_eq!(record.tasks[0].backend, "opencode");
+        assert_eq!(
+            record.tasks[0].model.as_deref(),
+            Some("openai/gpt-5.6-terra")
+        );
         assert_eq!(
             evidence.provider_run_id.as_deref(),
             Some("provider-run-123")
