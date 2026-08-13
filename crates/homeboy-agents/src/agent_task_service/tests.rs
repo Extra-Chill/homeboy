@@ -1773,8 +1773,10 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
         assert_eq!(admission.blockers[0].run_id, cook_id);
         assert_eq!(
             admission.blockers[0].recovery_command,
-            format!("homeboy runner reconcile lab && homeboy agent-task cancel {cook_id}")
+            "homeboy runner reconcile lab"
         );
+        assert_eq!(admission.blockers[0].owner, "runner_generations");
+        assert_eq!(admission.blockers[0].action, "homeboy runner reconcile lab");
     });
 }
 

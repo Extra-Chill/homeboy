@@ -626,6 +626,12 @@ fn runs_reconcile_explicitly_reconciles_owned_dead_running_runs() {
         let RunsOutput::Reconcile(output) = output else {
             panic!("expected reconcile output");
         };
+        assert_eq!(output.owner, "observation_runs");
+        assert_eq!(output.scope, "up to 20 running observation records");
+        assert_eq!(
+            output.postcondition,
+            "every reported orphaned observation record is stale"
+        );
         assert_eq!(output.reconciled.len(), 1);
         assert_eq!(output.reconciled[0].id, "dead-owned-run");
         assert_eq!(output.reconciled[0].status, "stale");

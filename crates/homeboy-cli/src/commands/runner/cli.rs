@@ -312,7 +312,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         apply: bool,
     },
-    /// Reconcile persisted direct-runner generation state and retire verified drained daemons
+    /// Reconcile one runner's persisted daemon generations and retire verified
+    /// drained daemons. Success means that runner accepts jobs with no
+    /// unresolved generation projection; durable agent-task records and
+    /// observation runs have separate reconcilers.
     Reconcile {
         /// Runner ID
         id: String,
