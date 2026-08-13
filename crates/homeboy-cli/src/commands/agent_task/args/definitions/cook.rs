@@ -1,11 +1,20 @@
 use clap::{Args, Subcommand};
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::Read;
+use std::path::Path;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+use sha2::{Digest, Sha256};
 
 use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
 use homeboy::agents::agent_tasks::gate::{
     AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
-    AgentTaskGateExtensionInput, AgentTaskGatePackageArtifactRequirement,
-    AgentTaskGateRevealPolicy, AgentTaskGateToolchainRequirement, VerifyGateOptions,
+    AgentTaskGateExtensionInput, AgentTaskGateInputSource, AgentTaskGatePackageArtifactRequirement,
+    AgentTaskGateRevealPolicy, AgentTaskGateToolchainRequirement, AgentTaskGateVisibility,
+    VerifyGateOptions,
 };
 
 use super::super::super::super::agent_task_dispatch::DispatchArgs;
@@ -20,12 +29,27 @@ pub struct VerifyGateArgs {
     /// gates; every one must pass. Its output is included in the review evidence.
     #[arg(long = "verify", value_name = "COMMAND")]
     pub verify: Vec<String>,
+    /// Read one public verification shell program from a file. Prefer this for
+    /// loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the
+    /// exact file bytes before submission. Relative paths use the controller's
+    /// invocation directory. Example: `--verify-file quality-gate.sh` containing
+    /// `for file in src/*.rs; do cargo fmt --check -- "$file"; done`.
+    #[arg(long = "verify-file", value_name = "PATH")]
+    pub verify_file: Vec<String>,
     /// Like `--verify`, but the command's output is treated as private: only a
     /// pass/fail summary is revealed by default (see `--private-gate-reveal`).
     /// Satisfies the same mandatory-gate requirement as `--verify`. Use for
     /// gates whose logs may contain secrets. Repeatable.
     #[arg(long = "private-verify", value_name = "COMMAND")]
     pub private_verify: Vec<String>,
+    /// Read one private verification shell program from a file. The controller
+    /// snapshots its bytes before submission; durable provenance records its
+    /// digest and redaction policy, not its file path. Relative paths use the
+    /// controller's invocation directory.
+    #[arg(long = "private-verify-file", value_name = "PATH")]
+    pub private_verify_file: Vec<String>,
+    #[arg(skip)]
+    pub input_sources: Vec<AgentTaskGateInputSource>,
     /// How much of a `--private-verify` gate's output to reveal: `summary-only`
     /// (default) shows just pass/fail; other policies expose more detail.
     #[arg(
@@ -126,14 +150,195 @@ pub struct VerifyGateArgs {
 }
 impl VerifyGateArgs {
     pub fn has_deterministic_gate(&self) -> bool {
-        !self.verify.is_empty() || !self.private_verify.is_empty()
+        !self.verify.is_empty()
+            || !self.verify_file.is_empty()
+            || !self.private_verify.is_empty()
+            || !self.private_verify_file.is_empty()
     }
+
+    /// Resolve file inputs while the controller invocation directory still owns
+    /// relative-path semantics, before Cook can provision or dispatch anything.
+    pub fn snapshot_file_inputs(&mut self) -> homeboy::core::Result<()> {
+        if !self.input_sources.is_empty() {
+            return Ok(());
+        }
+        self.input_sources.extend(self.verify.iter().map(|program| {
+            inline_gate_source(
+                program,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+            )
+        }));
+        self.input_sources
+            .extend(self.private_verify.iter().map(|program| {
+                inline_gate_source(
+                    program,
+                    AgentTaskGateVisibility::Private,
+                    self.private_gate_reveal,
+                )
+            }));
+        let public_files = std::mem::take(&mut self.verify_file);
+        for path in public_files {
+            let (program, source) = snapshot_gate_file(
+                &path,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+            )?;
+            self.verify.push(program);
+            self.input_sources.push(source);
+        }
+        let private_files = std::mem::take(&mut self.private_verify_file);
+        for path in private_files {
+            let (program, source) = snapshot_gate_file(
+                &path,
+                AgentTaskGateVisibility::Private,
+                self.private_gate_reveal,
+            )?;
+            self.private_verify.push(program);
+            self.input_sources.push(source);
+        }
+        Ok(())
+    }
+}
+
+fn inline_gate_source(
+    program: &str,
+    visibility: AgentTaskGateVisibility,
+    redaction_policy: AgentTaskGateRevealPolicy,
+) -> AgentTaskGateInputSource {
+    AgentTaskGateInputSource {
+        visibility,
+        source_kind: "inline".to_string(),
+        path: None,
+        sha256: format!("sha256:{:x}", Sha256::digest(program.as_bytes())),
+        size_bytes: program.len() as u64,
+        redaction_policy,
+    }
+}
+
+const MAX_GATE_FILE_BYTES: u64 = 1024 * 1024;
+
+fn snapshot_gate_file(
+    input: &str,
+    visibility: AgentTaskGateVisibility,
+    redaction_policy: AgentTaskGateRevealPolicy,
+) -> homeboy::core::Result<(String, AgentTaskGateInputSource)> {
+    let path = Path::new(input);
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "verification gate file",
+            format!("cannot read `{input}`: {error}"),
+            Some(input.to_string()),
+            Some(vec!["Pass a readable shell-program file relative to the controller invocation directory, or use an inline --verify command.".to_string()]),
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verification gate file",
+            format!("`{input}` is not a regular file"),
+            Some(input.to_string()),
+            None,
+        ));
+    }
+    if metadata.len() == 0 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verification gate file",
+            format!("`{input}` is empty; provide one shell program"),
+            Some(input.to_string()),
+            None,
+        ));
+    }
+    if metadata.len() > MAX_GATE_FILE_BYTES {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verification gate file",
+            format!("`{input}` exceeds the {MAX_GATE_FILE_BYTES}-byte limit"),
+            Some(input.to_string()),
+            None,
+        ));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "verification gate file",
+            format!("cannot safely open `{input}`: {error}"),
+            Some(input.to_string()),
+            None,
+        )
+    })?;
+    let opened = file.metadata().map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "verification gate file",
+            format!("cannot inspect `{input}` after opening: {error}"),
+            Some(input.to_string()),
+            None,
+        )
+    })?;
+    #[cfg(unix)]
+    let same_identity = metadata.dev() == opened.dev() && metadata.ino() == opened.ino();
+    #[cfg(not(unix))]
+    // Platforms without a portable device/inode API still validate the same
+    // opened descriptor as a bounded regular file. Unix adds identity pinning.
+    let same_identity = true;
+    if !opened.is_file() || !same_identity || opened.len() > MAX_GATE_FILE_BYTES {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verification gate file",
+            format!("`{input}` changed to an unsafe file while opening"),
+            Some(input.to_string()),
+            None,
+        ));
+    }
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    file.take(MAX_GATE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "verification gate file",
+                format!("cannot read `{input}`: {error}"),
+                Some(input.to_string()),
+                None,
+            )
+        })?;
+    if bytes.len() as u64 > MAX_GATE_FILE_BYTES {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verification gate file",
+            format!("`{input}` exceeds the {MAX_GATE_FILE_BYTES}-byte limit"),
+            Some(input.to_string()),
+            None,
+        ));
+    }
+    let program = String::from_utf8(bytes.clone()).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "verification gate file",
+            format!("`{input}` is not valid UTF-8 shell text: {error}"),
+            Some(input.to_string()),
+            None,
+        )
+    })?;
+    let sha256 = format!("sha256:{:x}", Sha256::digest(&bytes));
+    Ok((
+        program,
+        AgentTaskGateInputSource {
+            visibility,
+            source_kind: "file".to_string(),
+            path: (visibility == AgentTaskGateVisibility::Visible).then(|| input.to_string()),
+            sha256,
+            size_bytes: bytes.len() as u64,
+            redaction_policy,
+        },
+    ))
 }
 impl From<VerifyGateArgs> for VerifyGateOptions {
     fn from(args: VerifyGateArgs) -> Self {
         Self {
             verify: args.verify,
             private_verify: args.private_verify,
+            input_sources: args.input_sources,
             private_gate_reveal: args.private_gate_reveal,
             execution_policy: match args.gate_execution_policy.as_str() {
                 "continue-all" => AgentTaskGateExecutionPolicy::ContinueAll,
@@ -297,6 +502,127 @@ mod tests {
         assert!(!options.gate_environment.isolate_xdg);
     }
 
+    #[test]
+    fn file_gate_snapshots_exact_bytes_and_private_provenance_is_redacted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let public = temp.path().join("public.sh");
+        let private = temp.path().join("private.sh");
+        let public_program = "for file in src/*.rs; do printf '%s\\n' \"$file\"; done\n";
+        let private_program = "printf 'secret $TOKEN'\n";
+        fs::write(&public, public_program).expect("write public gate");
+        fs::write(&private, private_program).expect("write private gate");
+        let mut gates = VerifyGateArgs {
+            verify_file: vec![public.display().to_string()],
+            private_verify_file: vec![private.display().to_string()],
+            ..TestCli::try_parse_from(["homeboy"])
+                .expect("parse defaults")
+                .gates
+        };
+
+        gates.snapshot_file_inputs().expect("snapshot gate files");
+        fs::write(&public, "exit 1\n").expect("mutate source after snapshot");
+
+        assert_eq!(gates.verify, vec![public_program]);
+        assert_eq!(gates.private_verify, vec![private_program]);
+        assert_eq!(gates.input_sources.len(), 2);
+        assert_eq!(gates.input_sources[0].source_kind, "file");
+        assert_eq!(
+            gates.input_sources[0].path.as_deref(),
+            Some(public.to_str().unwrap())
+        );
+        assert!(gates.input_sources[0].sha256.starts_with("sha256:"));
+        assert_eq!(gates.input_sources[1].path, None);
+        assert_eq!(
+            gates.input_sources[1].redaction_policy,
+            AgentTaskGateRevealPolicy::SummaryOnly
+        );
+        let persisted = serde_json::to_value(VerifyGateOptions::from(gates))
+            .expect("serialize durable gate policy");
+        assert_eq!(persisted["input_sources"][0]["source_kind"], "file");
+        assert_eq!(
+            persisted["input_sources"][1]["path"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            persisted["input_sources"][1]["redaction_policy"],
+            "summary_only"
+        );
+        // Private gate command text follows the established trusted durable
+        // recipe contract so retry/adoption can replay it; public projections
+        // must redact it instead of claiming encrypted storage.
+        assert_eq!(persisted["private_verify"][0], private_program);
+    }
+
+    #[test]
+    fn file_gate_rejects_missing_empty_and_oversized_inputs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let empty = temp.path().join("empty.sh");
+        let oversized = temp.path().join("oversized.sh");
+        fs::write(&empty, "").expect("write empty gate");
+        fs::write(&oversized, vec![b'x'; MAX_GATE_FILE_BYTES as usize + 1])
+            .expect("write oversized gate");
+        for path in [temp.path().join("missing.sh"), empty, oversized] {
+            let error = snapshot_gate_file(
+                path.to_str().unwrap(),
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+            )
+            .expect_err("invalid gate file must fail");
+            assert_eq!(
+                error.code,
+                homeboy::core::ErrorCode::ValidationInvalidArgument
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_gate_rejects_symlinks_and_fifos_without_reading_them() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source.sh");
+        let symlink_path = temp.path().join("link.sh");
+        let fifo_path = temp.path().join("gate.fifo");
+        fs::write(&source, "exit 0\n").expect("write source");
+        symlink(&source, &symlink_path).expect("create symlink");
+        Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .expect("run mkfifo");
+        for path in [&symlink_path, &fifo_path] {
+            snapshot_gate_file(
+                path.to_str().unwrap(),
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+            )
+            .expect_err("unsafe file type must fail");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_gate_rejects_replaced_path_after_preopen_identity_check() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("target.sh");
+        let path = temp.path().join("gate.sh");
+        fs::write(&target, "exit 0\n").expect("write target");
+        fs::write(&path, "exit 0\n").expect("write gate");
+        // The lstat/open identity comparison is deterministic for a path replaced
+        // before open: the symlink is rejected without following it.
+        fs::remove_file(&path).expect("remove gate");
+        symlink(&target, &path).expect("replace with symlink");
+        snapshot_gate_file(
+            path.to_str().unwrap(),
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+        )
+        .expect_err("replacement must fail closed");
+    }
+
     #[derive(Parser)]
     struct CookHelpCli {
         #[command(flatten)]
@@ -338,6 +664,8 @@ mod tests {
             help.contains("Deterministic verification command"),
             "{help}"
         );
+        assert!(help.contains("--verify-file"), "{help}");
+        assert!(help.contains("for file in src/*.rs"), "{help}");
         assert!(help.contains("before opening the pull request"), "{help}");
     }
 

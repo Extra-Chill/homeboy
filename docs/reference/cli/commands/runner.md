@@ -41,6 +41,7 @@ Manage local and SSH execution runners
 | `homeboy runner cache-prune` | Inventory or remove stale managed Homeboy binary slots on a runner |
 | `homeboy runner exec` | Execute a command on a configured runner. Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...` |
 | `homeboy runner recipe-run` | Execute an extension-owned recipe provider in one materialized workspace |
+| `homeboy runner recipe-providers` | List installed extension-owned recipe-run providers |
 | `homeboy runner env` | Show the effective environment injected into runner jobs |
 | `homeboy runner lifecycle` | Evaluate runner workspace lifecycle and finalization readiness without mutating state |
 | `homeboy runner job` | Inspect or follow a runner daemon job stream |
@@ -414,6 +415,14 @@ Execute an extension-owned recipe provider in one materialized workspace
 | `--recipe` | `<RECIPE>` | Recipe path relative to the materialized workspace |
 | `--artifacts` | `<ARTIFACTS>` | Artifact directory relative to the materialized workspace |
 | `--run-id` | `<RUN_ID>` | Durable run identity that receives execution evidence |
+
+## `homeboy runner recipe-providers`
+
+```sh
+homeboy runner recipe-providers
+```
+
+List installed extension-owned recipe-run providers
 
 ## `homeboy runner env`
 

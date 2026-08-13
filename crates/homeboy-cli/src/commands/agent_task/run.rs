@@ -150,7 +150,8 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
     value
 }
 
-pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
+pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
+    args.gates.snapshot_file_inputs()?;
     let args = resolve_cook_destination(args)?;
     validate_cook_request(&args)?;
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
@@ -1546,7 +1547,7 @@ where
 }
 
 pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
-    args: AgentTaskCookArgs,
+    mut args: AgentTaskCookArgs,
     executor: E,
     attempt_dispatcher: Option<
         Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
@@ -1557,6 +1558,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    args.gates.snapshot_file_inputs()?;
     let args = resolve_cook_destination(args)?;
     validate_cook_request_with_provenance(&args, provenance)?;
     // Before any external effect: a backend that cannot execute must say so now
