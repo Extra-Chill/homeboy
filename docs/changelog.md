@@ -4,6 +4,62 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.345.0] - 2026-08-13
+
+### Added
+- classify immediate provider failures
+- follow status changes
+- provide candidate controller continuation
+
+### Changed
+- restore rustfmt cleanliness
+- copy build script dependency
+- Recover Cook artifact-selection failures
+- Report canonical self command identity
+- cover private gate defaults
+- format targeted lookup tests
+- format pinned route discovery
+- format bounded lookup changes
+- format latest list test
+- format notification route discovery
+- isolate macOS candidate artifact dispatch
+- add opt-in macOS candidate build
+
+### Fixed
+- reconcile canonical recovery gates
+- restore merged test compilation
+- own parsed Cook status state
+- expose provider failure result to tests
+- expose provider failure classifier to tests
+- restore workspace compile
+- reconcile merged provider readiness
+- restore provider readiness compilation
+- materialize zero-scope inventory
+- gate detached acceptance
+- canonicalize completion recovery
+- ignore candidate test archive
+- preserve widened inventory provenance
+- fence refresh promotion repairs
+- skip clean nextest runner grace
+- avoid duplicate nextest test wrapper
+- adopt clean issue-owned unpushed worktrees
+- regenerate CLI reference metadata
+- refresh generated CLI reference
+- scope fanout queue dispatch
+- verify refresh topology convergence
+- preserve managed select authority
+- separate freshness from compatibility
+- guard targeted component test environment
+- preserve targeted component fallbacks
+- complete filtered latest discovery
+- preserve targeted component precedence
+- resolve routes in pinned runtime
+- report bounded repository metadata probes
+- bound Cook component identity lookup
+- bound ambient route discovery
+- add latest list filter
+- converge peer session recovery
+
 ## [0.344.0] - 2026-08-13
 
 ### Added
