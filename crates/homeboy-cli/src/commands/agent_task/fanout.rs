@@ -1730,14 +1730,24 @@ fn cook_batch_inner(
             .all(|row| matches!(row.status, worktree::WorktreeQueueCreateStatus::Created));
     let private_artifact_path = if can_run && plan_has_private_gates {
         if let Err(error) = bind_materialized_worktrees(&mut plan, &worktrees) {
-            record_batch_preflight_failure(claim_id.as_deref(), &plan, "worktree_preflight", &error)?;
+            record_batch_preflight_failure(
+                claim_id.as_deref(),
+                &plan,
+                "worktree_preflight",
+                &error,
+            )?;
             return Err(error);
         }
         Some(persist_private_batch_plan(&plan)?)
     } else {
         if can_run {
             if let Err(error) = bind_materialized_worktrees(&mut plan, &worktrees) {
-                record_batch_preflight_failure(claim_id.as_deref(), &plan, "worktree_preflight", &error)?;
+                record_batch_preflight_failure(
+                    claim_id.as_deref(),
+                    &plan,
+                    "worktree_preflight",
+                    &error,
+                )?;
                 return Err(error);
             }
         }
@@ -1761,13 +1771,15 @@ fn cook_batch_inner(
     }
     let run_result = if args.run_plan && can_run {
         let (value, exit_code) = match attempt_dispatcher {
-            Some(dispatcher) => {
-                run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
-                    plan.clone(), dispatcher, claim_id.clone(),
-                )?
-            }
+            Some(dispatcher) => run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
+                plan.clone(),
+                dispatcher,
+                claim_id.clone(),
+            )?,
             None => run_batch_cook_fanout_plan_with_executor_claim(
-                plan.clone(), provider::ExtensionProviderAgentTaskExecutor::discover(), claim_id.clone(),
+                plan.clone(),
+                provider::ExtensionProviderAgentTaskExecutor::discover(),
+                claim_id.clone(),
             )?,
         };
         Some(serde_json::json!({ "exit_code": exit_code, "result": value }))
@@ -1796,37 +1808,37 @@ fn cook_batch_inner(
 
     Ok((
         serde_json::json!({
-            "schema": "homeboy/agent-task-cook-batch/v1",
-            "fanout_id": plan.fanout_id,
-            "status": status,
-            "dry_run": args.dry_run,
-            "summary": {
-                "issues": plan.cooks.len(),
-                "worktrees_total": worktrees.rows.len(),
-                "worktrees_blocked": blocked,
-            },
-            "preflight": {
-                "provider_readiness_command": provider_readiness_command(&args),
-                "provider_selection": provider_selection_preflight(&args),
-                "deterministic_gates": effective_batch_cook_gates(&plan)
-            },
-            "worktrees": worktrees,
-            "plan": public_batch_cook_plan(&plan),
-            "run_result": run_result,
-    "commands": cook_batch_commands(&args, plan_has_private_gates, private_artifact_path.as_deref()),
-            // Named run-plan persists before worktree/provider preflight, so
-            // status and artifacts remain available when admission is blocked.
-            "next_actions": cook_batch_next_actions(
-                &args,
-                &plan.fanout_id,
-                status,
-                persisted,
-                resume_legal,
-                &worktrees,
-                plan_has_private_gates,
-                private_artifact_path.as_deref(),
-            ),
-        }),
+                "schema": "homeboy/agent-task-cook-batch/v1",
+                "fanout_id": plan.fanout_id,
+                "status": status,
+                "dry_run": args.dry_run,
+                "summary": {
+                    "issues": plan.cooks.len(),
+                    "worktrees_total": worktrees.rows.len(),
+                    "worktrees_blocked": blocked,
+                },
+                "preflight": {
+                    "provider_readiness_command": provider_readiness_command(&args),
+                    "provider_selection": provider_selection_preflight(&args),
+                    "deterministic_gates": effective_batch_cook_gates(&plan)
+                },
+                "worktrees": worktrees,
+                "plan": public_batch_cook_plan(&plan),
+                "run_result": run_result,
+        "commands": cook_batch_commands(&args, plan_has_private_gates, private_artifact_path.as_deref()),
+                // Named run-plan persists before worktree/provider preflight, so
+                // status and artifacts remain available when admission is blocked.
+                "next_actions": cook_batch_next_actions(
+                    &args,
+                    &plan.fanout_id,
+                    status,
+                    persisted,
+                    resume_legal,
+                    &worktrees,
+                    plan_has_private_gates,
+                    private_artifact_path.as_deref(),
+                ),
+            }),
         exit_code,
     ))
 }
