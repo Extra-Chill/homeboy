@@ -227,6 +227,16 @@ const OPENCODE_PROVIDER_PREFLIGHT = {
 		guidance: 'Refresh Codex OAuth credentials before launching OpenCode, for example by signing in with Codex locally so ~/.codex/auth.json contains current tokens, then pass the updated AI_PROVIDER_OPENAI_CODEX_* secret environment values to the OpenCode executor.',
 	},
 };
+const OPENCODE_IMMEDIATE_FAILURE_PATTERNS = [
+	{
+		id: 'unexpected_server_error',
+		error_contains_any: ['Unexpected server error. Check server logs for details.'],
+		retryable: true,
+		error_ref_pattern: 'err_[A-Fa-f0-9]{1,64}\\b',
+		log_lookup: 'opencode debug paths; tail -n 200 "$HOME/.local/share/opencode/log/opencode.log"',
+		fallback_action: 'OpenCode has no error-reference lookup command. Inspect the runtime log manually for <provider-error-ref>, then select another configured provider while the service is investigated.',
+	},
+];
 
 function providerContract(options = {}) {
 	const contractFields = agentTaskProviderContractFields();
@@ -247,6 +257,7 @@ function providerContract(options = {}) {
 		workspace_tools: OPENCODE_WORKSPACE_TOOLS,
 		provider_defaults: OPENCODE_PROVIDER_DEFAULTS,
 		provider_preflight: OPENCODE_PROVIDER_PREFLIGHT,
+		immediate_failure_patterns: OPENCODE_IMMEDIATE_FAILURE_PATTERNS,
 		lifecycle: {
 			completion: 'synchronous_process',
 			cancellation: 'provider_signal',

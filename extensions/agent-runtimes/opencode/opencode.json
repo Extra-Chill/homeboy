@@ -2,8 +2,17 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "opencode",
   "name": "OpenCode",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "description": "OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.",
+  "requires": {
+    "homeboy": ">=0.345.0"
+  },
+  "compatibility": {
+    "immediate_failure_patterns": {
+      "owner": "Extra-Chill/homeboy#12293",
+      "requirement": "Homeboy core support for agent-task executor immediate_failure_patterns."
+    }
+  },
   "contract_producers": [
     {
       "id": "opencode.agent-task-result",
@@ -223,6 +232,18 @@
           "guidance": "Refresh Codex OAuth credentials before launching OpenCode, for example by signing in with Codex locally so ~/.codex/auth.json contains current tokens, then pass the updated AI_PROVIDER_OPENAI_CODEX_* secret environment values to the OpenCode executor."
         }
       },
+      "immediate_failure_patterns": [
+        {
+          "id": "unexpected_server_error",
+          "error_contains_any": [
+            "Unexpected server error. Check server logs for details."
+          ],
+          "retryable": true,
+          "error_ref_pattern": "err_[A-Fa-f0-9]{1,64}\\b",
+          "log_lookup": "opencode debug paths; tail -n 200 \"$HOME/.local/share/opencode/log/opencode.log\"",
+          "fallback_action": "OpenCode has no error-reference lookup command. Inspect the runtime log manually for <provider-error-ref>, then select another configured provider while the service is investigated."
+        }
+      ],
       "lifecycle": {
         "completion": "synchronous_process",
         "cancellation": "provider_signal"
