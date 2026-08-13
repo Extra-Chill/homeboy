@@ -421,6 +421,9 @@ mod tests {
                 full: false,
                 no_runner_probe: false,
                 strict_subject_exit: false,
+                watch: false,
+                interval: "5s".to_string(),
+                timeout: "30m".to_string(),
             }),
         };
 

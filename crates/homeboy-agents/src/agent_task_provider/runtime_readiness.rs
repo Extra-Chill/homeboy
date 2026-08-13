@@ -28,8 +28,24 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
             continue;
         };
         if provider.readiness_invocation.is_none() {
+            validate_provider_immediate_failure_patterns(provider).map_err(|message| {
+                Error::validation_invalid_argument(
+                    "immediate_failure_patterns",
+                    format!("provider '{}' has invalid immediate failure configuration: {message}", provider.id),
+                    Some(provider.backend.clone()),
+                    None,
+                )
+            })?;
             continue;
         }
+        validate_provider_immediate_failure_patterns(provider).map_err(|message| {
+            Error::validation_invalid_argument(
+                "immediate_failure_patterns",
+                format!("provider '{}' has invalid immediate failure configuration: {message}", provider.id),
+                Some(provider.backend.clone()),
+                None,
+            )
+        })?;
         let config = effective_provider_config(&task.executor.config, task.executor.model());
         let verdict = readiness_verdict(provider, &config, cache)?;
         if !verdict.ready {

@@ -139,6 +139,38 @@ pub(super) fn run_restart_command(command: &str) -> Result<(), String> {
     Err(detail)
 }
 
+/// Restart only the declared services that load one of `changed_extension_ids`.
+/// Controller-binary services have no extension ids and are deliberately excluded.
+pub fn restart_extension_services(
+    changed_extension_ids: &[String],
+) -> (Vec<ServiceRestartEntry>, Vec<ServiceRestartEntry>) {
+    let services = homeboy_core::defaults::load_config().resident_services;
+    restart_extension_services_from(&services, changed_extension_ids, run_restart_command)
+}
+
+/// Injectable form of [`restart_extension_services`] for deterministic lifecycle
+/// tests. It keeps configuration selection separate from process execution.
+pub fn restart_extension_services_from<R>(
+    services: &[homeboy_core::defaults::ResidentServiceConfig],
+    changed_extension_ids: &[String],
+    run: R,
+) -> (Vec<ServiceRestartEntry>, Vec<ServiceRestartEntry>)
+where
+    R: FnMut(&str) -> Result<(), String>,
+{
+    let affected = services
+        .iter()
+        .cloned()
+        .filter(|service| {
+            service
+                .extension_ids
+                .iter()
+                .any(|id| changed_extension_ids.contains(id))
+        })
+        .collect::<Vec<_>>();
+    restart_resident_services(&affected, run)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +180,7 @@ mod tests {
             id: id.to_string(),
             systemd_unit: unit.map(str::to_string),
             restart_command: cmd.map(str::to_string),
+            extension_ids: Vec::new(),
         }
     }
 
@@ -251,5 +284,28 @@ mod tests {
         let orphan = pending.iter().find(|e| e.service_id == "orphan").unwrap();
         assert!(orphan.restart_command.is_empty());
         assert!(orphan.detail.as_deref().unwrap().contains("cannot restart"));
+    }
+
+    #[test]
+    fn extension_service_filter_excludes_controller_only_services() {
+        let mut extension_service = service("providers", None, Some("restart providers"));
+        extension_service.extension_ids = vec!["wordpress".to_string()];
+        let controller_service = service("controller", None, Some("restart controller"));
+        let changed = vec!["wordpress".to_string()];
+
+        let mut commands = Vec::new();
+        let (restarted, pending) = restart_extension_services_from(
+            &[extension_service, controller_service],
+            &changed,
+            |command| {
+                commands.push(command.to_string());
+                Ok(())
+            },
+        );
+
+        assert_eq!(commands, vec!["restart providers"]);
+        assert_eq!(restarted.len(), 1);
+        assert_eq!(restarted[0].service_id, "providers");
+        assert!(pending.is_empty());
     }
 }

@@ -43,6 +43,17 @@ Binary installs download a release asset named `homeboy-<target triple>.tar.xz`,
 
 The installer honors `HOMEBOY_UPGRADE_RELEASE_TAG` to download from a specific tag instead of `releases/latest/download`; `upgrade` sets it from the release it selected.
 
+Controllers released before the bootstrap admission contract can recover without
+running their legacy `upgrade` command by invoking the pinned release installer:
+
+```sh
+curl -fsSL https://github.com/Extra-Chill/homeboy/releases/download/v<fixed-version>/homeboy-installer.sh | sh
+```
+
+The installer stages the candidate, has that candidate read durable ownership
+with the legacy controller identity, and only replaces the installed binary when
+the candidate admission succeeds.
+
 ## Installation Method Detection
 
 Homeboy detects how it was installed and uses the appropriate upgrade method:

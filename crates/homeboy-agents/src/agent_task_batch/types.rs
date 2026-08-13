@@ -31,6 +31,8 @@ pub struct AgentTaskBatchChildRun {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskBatchState {
+    Planning,
+    Admitting,
     Queued,
     Running,
     Succeeded,
@@ -45,6 +47,8 @@ impl AgentTaskBatchState {
     /// batch status, resume, and their command-result envelopes.
     pub fn outcome_status(self) -> &'static str {
         match self {
+            Self::Planning => "planning",
+            Self::Admitting => "admitting",
             Self::Queued => "queued",
             Self::Running => "running",
             Self::Succeeded => "succeeded",
@@ -59,7 +63,7 @@ impl AgentTaskBatchState {
     /// successful command to shell or JSON-envelope consumers.
     pub fn exit_code(self) -> i32 {
         match self {
-            Self::Queued | Self::Running | Self::Succeeded => 0,
+            Self::Planning | Self::Admitting | Self::Queued | Self::Running | Self::Succeeded => 0,
             Self::PartialFailure | Self::Failed | Self::Cancelled | Self::TimedOut => 1,
         }
     }

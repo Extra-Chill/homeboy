@@ -33,6 +33,7 @@ Execute CLI-compatible extensions
 | `homeboy extension dev-run` | Sync local extension source to a runner, refresh it there, then run a command |
 | `homeboy extension install-for-component` | Install every extension configured by a component |
 | `homeboy extension update` | Update an installed extension (git pull) |
+| `homeboy extension converge` | Converge installed extensions without replacing the controller binary |
 | `homeboy extension uninstall` | Uninstall a extension |
 | `homeboy extension action` | Execute a extension action (API call or builtin) |
 | `homeboy extension exec` | Run a tool from a extension's vendor directory |
@@ -215,6 +216,14 @@ Update an installed extension (git pull)
 | --- | --- | --- |
 | `--all` | flag | Update all installed extensions |
 | `--force` | flag | Force update even with uncommitted changes |
+
+## `homeboy extension converge`
+
+```sh
+homeboy extension converge
+```
+
+Converge installed extensions without replacing the controller binary
 
 ## `homeboy extension uninstall`
 

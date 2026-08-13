@@ -1052,6 +1052,7 @@ mod tests {
             daemon_refreshed: false,
             interrupted_job_ids: Vec::new(),
             selected_binary_path: "/runner/homeboy".to_string(),
+            next_actions: Vec::new(),
             reconnect_required: true,
             followup_commands: Vec::new(),
             readiness: Some(runner::HomeboyRefreshReadiness {
