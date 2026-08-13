@@ -42,6 +42,10 @@ impl CookRecipeStore {
         Self { data_root: data }
     }
 
+    pub fn from_current_data_root() -> Result<Self> {
+        Ok(Self::from_data_root(paths::homeboy_data()?))
+    }
+
     fn recipe_root(&self) -> PathBuf {
         self.data_root.join("agent-task-cooks")
     }
@@ -93,10 +97,36 @@ impl CookRecipeStore {
     pub fn claim_continuation_with_budget(&self, budget: usize) -> Result<CookContinuationClaim> {
         claim_continuation_from(&self.queue_root(), budget)
     }
+
+    pub fn claim_continuation_for(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+    ) -> Result<Option<ClaimedCookContinuation>> {
+        claim_continuation_for_from(&self.queue_root(), cook_id, run_id)
+    }
+
+    pub fn consume_claimed_with_dispatcher(
+        &self,
+        claim: ClaimedCookContinuation,
+        dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+        execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
+    ) -> Result<i32> {
+        let queue_root = self.queue_root();
+        if !paths::local_path_is_contained(&queue_root, &claim.path) {
+            return Err(Error::validation_invalid_argument(
+                "cook_continuation.store",
+                "claimed Cook continuation belongs to a different durable store",
+                Some(claim.path.display().to_string()),
+                None,
+            ));
+        }
+        consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute, false)
+    }
 }
 
 fn default_store() -> Result<CookRecipeStore> {
-    Ok(CookRecipeStore::from_data_root(paths::homeboy_data()?))
+    CookRecipeStore::from_current_data_root()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1155,12 +1185,19 @@ pub fn claim_continuation_for(
     cook_id: &str,
     run_id: &str,
 ) -> Result<Option<ClaimedCookContinuation>> {
+    default_store()?.claim_continuation_for(cook_id, run_id)
+}
+
+fn claim_continuation_for_from(
+    root: &std::path::Path,
+    cook_id: &str,
+    run_id: &str,
+) -> Result<Option<ClaimedCookContinuation>> {
     let key = format!("{cook_id}:{run_id}");
     let hash = content_hash::sha256_hex(key.as_bytes());
-    let root = queue_root()?;
-    fs::create_dir_all(&root)
+    fs::create_dir_all(root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
-    reclaim_dead_claims(&root)?;
+    reclaim_dead_claims(root)?;
     let path = root.join(format!("{hash}.pending"));
     let claimed = path.with_extension(format!("claimed.{}", std::process::id()));
     match fs::rename(&path, &claimed) {
@@ -1605,7 +1642,7 @@ pub fn consume_claimed_with_dispatcher(
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
 ) -> Result<i32> {
-    consume_claimed_with_dispatcher_policy(claim, dispatcher, execute, false)
+    default_store()?.consume_claimed_with_dispatcher(claim, dispatcher, execute)
 }
 
 pub fn consume_claimed_terminal_with_dispatcher(
@@ -1613,16 +1650,17 @@ pub fn consume_claimed_terminal_with_dispatcher(
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
 ) -> Result<i32> {
-    consume_claimed_with_dispatcher_policy(claim, dispatcher, execute, true)
+    consume_claimed_with_dispatcher_policy(&default_store()?, claim, dispatcher, execute, true)
 }
 
 fn consume_claimed_with_dispatcher_policy(
+    store: &CookRecipeStore,
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
     allow_historical_terminal: bool,
 ) -> Result<i32> {
-    let recipe = match load_recipe(&claim.continuation().cook_id) {
+    let recipe = match store.load_recipe(&claim.continuation().cook_id) {
         Ok(recipe) => recipe,
         Err(error) => {
             claim.fail(&error.message)?;
@@ -2125,17 +2163,36 @@ mod tests {
             left_store.persist_recipe(&left_recipe)?;
             left_store.enqueue_continuation(&left_continuation, false)?;
             let claim = left_store.claim_continuation_with_budget(1)?;
-            Ok::<_, Error>((left_store, claim.claim.expect("left claim")))
+            let exit_code = left_store.consume_claimed_with_dispatcher(
+                claim.claim.expect("left claim"),
+                |_| Ok(None),
+                |options| {
+                    assert_eq!(options.source_refs, ["issue"]);
+                    Ok(0)
+                },
+            )?;
+            Ok::<_, Error>((left_store, exit_code))
         });
         let right = std::thread::spawn(move || {
             right_store.persist_recipe(&right_recipe)?;
             right_store.enqueue_continuation(&continuation, false)?;
-            let claim = right_store.claim_continuation_with_budget(1)?;
-            Ok::<_, Error>((right_store, claim.claim.expect("right claim")))
+            let claim = right_store
+                .claim_continuation_for("cook", "run")?
+                .expect("right exact claim");
+            let exit_code = right_store.consume_claimed_with_dispatcher(
+                claim,
+                |_| Ok(None),
+                |options| {
+                    assert_eq!(options.source_refs, ["other-issue"]);
+                    Ok(0)
+                },
+            )?;
+            Ok::<_, Error>((right_store, exit_code))
         });
 
-        let (left_store, left_claim) = left.join().expect("left thread").expect("left store");
-        let (right_store, right_claim) = right.join().expect("right thread").expect("right store");
+        let (left_store, left_exit_code) = left.join().expect("left thread").expect("left store");
+        let (right_store, right_exit_code) =
+            right.join().expect("right thread").expect("right store");
 
         assert_eq!(
             left_store.load_recipe("cook").unwrap().source_refs,
@@ -2145,8 +2202,8 @@ mod tests {
             right_store.load_recipe("cook").unwrap().source_refs,
             ["other-issue"]
         );
-        assert_eq!(left_claim.continuation().key, "cook:run");
-        assert_eq!(right_claim.continuation().key, "cook:run");
+        assert_eq!(left_exit_code, 0);
+        assert_eq!(right_exit_code, 0);
         assert!(left_store
             .recipe_path("cook")
             .starts_with(left_context.data_dir()));
@@ -2154,6 +2211,38 @@ mod tests {
             .recipe_path("cook")
             .starts_with(right_context.data_dir()));
         assert_ne!(left_store.recipe_root(), right_store.recipe_root());
+    }
+
+    #[test]
+    fn store_rejects_a_claim_from_another_root() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_store = CookRecipeStore::new(left_context.path_roots());
+        let right_store = CookRecipeStore::new(right_context.path_roots());
+        let recipe = recipe();
+        let continuation = AgentTaskCookContinuation {
+            schema: CONTINUATION_SCHEMA.to_string(),
+            key: "cook:run".to_string(),
+            cook_id: "cook".to_string(),
+            run_id: "run".to_string(),
+            retries: 0,
+        };
+        left_store.persist_recipe(&recipe).unwrap();
+        right_store.persist_recipe(&recipe).unwrap();
+        left_store
+            .enqueue_continuation(&continuation, false)
+            .unwrap();
+        let claim = left_store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .expect("left claim");
+
+        let error = right_store
+            .consume_claimed_with_dispatcher(claim, |_| Ok(None), |_| Ok(0))
+            .expect_err("foreign claim must be rejected");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("different durable store"));
     }
 
     fn persist_recipe_run() -> (AgentTaskCookRecipe, AgentTaskPlan) {
