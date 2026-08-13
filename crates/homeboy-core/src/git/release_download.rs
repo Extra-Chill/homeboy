@@ -909,13 +909,15 @@ mod tests {
             format!(
                 "{}:{}",
                 bin.path().display(),
-                previous_path.as_deref().unwrap_or_default().to_string_lossy()
+                previous_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string_lossy()
             ),
         );
 
         let started = std::time::Instant::now();
-        let result =
-            detect_remote_url_within(repo.path(), std::time::Duration::from_millis(200));
+        let result = detect_remote_url_within(repo.path(), std::time::Duration::from_millis(200));
         match previous_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),

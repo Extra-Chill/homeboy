@@ -220,10 +220,7 @@ fn component_from_standalone_config(id: &str, mut json: serde_json::Value) -> Op
     serde_json::from_value(json).ok()
 }
 
-fn component_from_standalone_registration(
-    id: &str,
-    json: serde_json::Value,
-) -> Option<Component> {
+fn component_from_standalone_registration(id: &str, json: serde_json::Value) -> Option<Component> {
     let local_path = json.get("local_path")?.as_str()?.trim();
     if local_path.is_empty() {
         return None;
@@ -237,7 +234,9 @@ fn component_from_standalone_registration(
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| serde_json::json!({}));
-            return Some(overlay_standalone_registration(id, discovered, portable, json));
+            return Some(overlay_standalone_registration(
+                id, discovered, portable, json,
+            ));
         }
     }
 

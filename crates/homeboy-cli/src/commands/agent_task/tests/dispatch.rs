@@ -158,7 +158,10 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
             format!(
                 "{}:{}",
                 bin.path().display(),
-                previous_path.as_deref().unwrap_or_default().to_string_lossy()
+                previous_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string_lossy()
             ),
         );
 
