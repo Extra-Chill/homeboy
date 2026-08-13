@@ -562,6 +562,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
                 cook_or_attempt_id: cook_id.to_string(),
                 preflight: false,
                 rearm: false,
+                artifact_id: None,
                 full: true,
             },
             executor.clone(),
@@ -692,6 +693,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 cook_or_attempt_id: cook_id.to_string(),
                 preflight: false,
                 rearm: false,
+                artifact_id: None,
                 full: true,
             },
             executor.clone(),
@@ -754,6 +756,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 cook_or_attempt_id: cook_id.to_string(),
                 preflight: false,
                 rearm: false,
+                artifact_id: None,
                 full: false,
             },
             executor.clone(),
@@ -782,6 +785,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 cook_or_attempt_id: cook_id.to_string(),
                 preflight: false,
                 rearm: false,
+                artifact_id: None,
                 full: true,
             },
             executor.clone(),
@@ -804,6 +808,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 cook_or_attempt_id: cook_id.to_string(),
                 preflight: false,
                 rearm: true,
+                artifact_id: None,
                 full: true,
             },
             executor.clone(),
@@ -861,6 +866,253 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
             "the later promotion terminal record must outrank the stale controller diagnostic"
         );
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn cook_continue_selects_a_recoverable_candidate_without_provider_redispatch() {
+    with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        let origin = tempfile::tempdir().expect("bare origin");
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch=main"])
+            .current_dir(origin.path())
+            .status()
+            .expect("initialize local origin")
+            .success()
+            .then_some(())
+            .expect("local origin initialized");
+        for arguments in [
+            vec!["remote", "add", "origin", origin.path().to_str().unwrap()],
+            vec!["push", "-u", "origin", "main"],
+        ] {
+            Command::new("git")
+                .args(arguments)
+                .current_dir(workspace.path())
+                .status()
+                .expect("configure local origin")
+                .success()
+                .then_some(())
+                .expect("local origin configured");
+        }
+        let provider = workspace.path().join("worktree-provider.sh");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@recoverable\",\"path\":\"{}\",\"branch\":\"main\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                workspace.path().display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).unwrap();
+        let mut config = homeboy::core::defaults::load_config();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        provider.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).unwrap();
+        let selected = workspace.path().join("selected.patch");
+        let alternate = workspace.path().join("alternate.patch");
+        let selected_patch = "diff --git a/selected.txt b/selected.txt\nnew file mode 100644\nindex 0000000..e69de29\n--- /dev/null\n+++ b/selected.txt\n@@ -0,0 +1 @@\n+selected\n";
+        std::fs::write(&selected, selected_patch).unwrap();
+        std::fs::write(
+            &alternate,
+            selected_patch
+                .replace("selected.txt", "alternate.txt")
+                .replace("+selected", "+alternate"),
+        )
+        .unwrap();
+        let promotion_provider = workspace.path().join("promotion-provider.sh");
+        let provider_patch = workspace.path().join("provider.patch");
+        std::fs::write(
+            &promotion_provider,
+            format!(
+                r#"#!/bin/sh
+set -eu
+python3 -c 'import json,sys; open(sys.argv[1], "w").write(json.load(sys.stdin)["patch"])' '{}'
+git -C '{}' apply '{}'
+printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","workspace_path":"{}"}}'
+"#,
+                provider_patch.display(),
+                workspace.path().display(),
+                provider_patch.display(),
+                workspace.path().display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&promotion_provider)
+            .unwrap()
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&promotion_provider, permissions).unwrap();
+        let cook_id = "cook-recoverable-selection";
+        let run_id = "cook-recoverable-selection-attempt-1";
+        let plan = AgentTaskPlan::new("cook-recoverable-selection-plan", vec![serde_json::from_value(json!({"task_id":"provider","executor":{"backend":"fixture","model":"fixture-model"},"instructions":"recover candidate","workspace":{"root":workspace.path()}})).unwrap()]);
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(), initial_run_id: run_id.to_string(), initial_plan: plan.clone(), to_worktree: "fixture@recoverable".to_string(), source_worktree_path: Some(workspace.path().to_path_buf()), provider_command: None,
+            provider_invocation: Some(homeboy::core::command_invocation::CommandInvocation { argv: vec!["sh".to_string(), promotion_provider.display().to_string()], ..Default::default() }), gates: Default::default(), max_attempts: 1, no_finalize: true, draft_pr: false, base: "main".to_string(), task_base_sha: None, head: None, title: "recoverable".to_string(), commit_message: "recoverable".to_string(), source_refs: Vec::new(), protected_branches: Vec::new(), ai_tool: "fixture".to_string(), ai_model: Some("fixture-model".to_string()), ai_used_for: "test".to_string(), attempt_dispatcher: None, harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process().unwrap(),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).unwrap();
+        let provenance = |id: &str, path: &std::path::Path, patch: &str| AgentTaskArtifact {
+            id: id.to_string(),
+            kind: "patch".to_string(),
+            path: Some(path.display().to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(format!("{:x}", Sha256::digest(patch.as_bytes()))),
+            metadata: json!({"task_id":"provider","run_id":run_id,"producer_attempt":1,"base_ref":"main","provider_backend":"fixture","repository_identity":"fixture","workspace_identity":"fixture"}),
+            ..Default::default()
+        };
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &AgentTaskAggregate { schema: "homeboy/agent-task-aggregate/v1".to_string(), plan_id: plan.plan_id.clone(), status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable, totals: Default::default(), outcomes: vec![AgentTaskOutcome { schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(), task_id: "provider".to_string(), status: AgentTaskOutcomeStatus::CandidateRecoverable, summary: None, failure_classification: None, artifacts: vec![provenance("selected", &selected, selected_patch), provenance("alternate", &alternate, &std::fs::read_to_string(&alternate).unwrap()), AgentTaskArtifact { id: "mime-shaped".to_string(), kind: "log".to_string(), mime: Some("text/x-patch".to_string()), path: Some(workspace.path().join("missing.patch").display().to_string()), size_bytes: Some(1), sha256: Some("a".repeat(64)), metadata: json!({"actionable": false}), ..Default::default() }], typed_artifacts: Vec::new(), evidence_refs: Vec::new(), diagnostics: Vec::new(), outputs: Value::Null, workflow: None, follow_up: None, metadata: Value::Null }], events: Vec::new(), artifact_lineage: Vec::new(), child_runs: Vec::new(), artifact_bindings: Vec::new(), queue: Default::default() }).unwrap();
+        let store = homeboy::core::observation::ObservationStore::open_initialized().unwrap();
+        let stale_id = format!("agent-task-{}", {
+            use sha2::Digest;
+            let mut hash = sha2::Sha256::new();
+            hash.update(run_id.as_bytes());
+            hash.update([0]);
+            hash.update(b"provider");
+            hash.update([0]);
+            hash.update(b"selected");
+            format!("{:x}", hash.finalize())
+        });
+        for artifact in store.list_artifacts(run_id).unwrap() {
+            if artifact
+                .metadata_json
+                .pointer("/agent_task/logical_artifact_id")
+                .and_then(Value::as_str)
+                == Some("selected")
+            {
+                store.delete_artifact_record(&artifact.id).unwrap();
+            }
+        }
+        store
+            .record_verified_artifact_with_id(
+                run_id,
+                "patch",
+                &selected,
+                &stale_id,
+                Some(selected_patch.len() as i64),
+                Some(&format!("{:x}", Sha256::digest(selected_patch.as_bytes()))),
+                json!({"agent_task":{"task_id":"provider","logical_artifact_id":"selected"}}),
+            )
+            .unwrap();
+        homeboy::agents::agent_tasks::lifecycle::reconcile_terminal_artifact_projection(run_id)
+            .unwrap();
+        let projected =
+            homeboy::agents::agent_tasks::lifecycle::verified_controller_artifact_projection_path(
+                run_id,
+                "provider",
+                &provenance("selected", &selected, selected_patch),
+            )
+            .unwrap()
+            .expect("controller projected selected artifact");
+        let projected_record = store
+            .list_artifacts(run_id)
+            .unwrap()
+            .into_iter()
+            .find(|artifact| artifact.path == projected.display().to_string())
+            .expect("projection record");
+        assert_eq!(
+            projected_record.metadata_json["agent_task"]["projection"],
+            "controller_local"
+        );
+        std::fs::remove_file(&selected).expect("producer artifact can be cleaned up");
+        assert!(projected.is_file());
+        homeboy::agents::agent_tasks::lifecycle::materialize_recovered_patch_artifact(
+            run_id,
+            Some("provider"),
+            Some("selected"),
+        )
+        .expect("restart rewrites the aggregate to the controller projection");
+        let executor = CountingCookExecutor::default();
+        let ambiguous = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: false,
+                rearm: false,
+                artifact_id: None,
+                full: true,
+            },
+            executor.clone(),
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(
+            ambiguous.0["failure_context"]["legal_actions"][2]["command"],
+            format!("homeboy agent-task cook-continue {run_id} --rearm --artifact-id alternate")
+        );
+        assert!(!ambiguous.0.to_string().contains("mime-shaped"));
+        let invalid = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: false,
+                rearm: true,
+                artifact_id: Some("mime-shaped".to_string()),
+                full: true,
+            },
+            executor.clone(),
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(invalid.1, 1);
+        let selected_result = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: false,
+                rearm: true,
+                artifact_id: Some("selected".to_string()),
+                full: true,
+            },
+            executor.clone(),
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(
+            selected_result.1, 0,
+            "selected continuation must complete promotion: {}",
+            selected_result.0
+        );
+        assert_eq!(selected_result.0["status"], "green_no_finalize");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("selected.txt")).unwrap(),
+            "selected\n"
+        );
+        assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            agent_task_lifecycle::status(run_id).unwrap().metadata["cook_continue_route"]
+                ["artifact_id"],
+            "selected"
+        );
     });
 }
 
@@ -3149,6 +3401,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
                             cook_or_attempt_id: run_id,
                             preflight: false,
                             rearm: false,
+                            artifact_id: None,
                             full: false,
                         },
                         CountingCookExecutor::default(),

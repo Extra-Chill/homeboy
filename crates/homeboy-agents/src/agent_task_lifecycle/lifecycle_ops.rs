@@ -3301,6 +3301,24 @@ fn retry_with_force_inner(
     let mut plan = load_controller_plan(&source.run_id)?;
     super::cook_workspace_restore::restore_initial_cook_candidate_workspace(&mut plan)?;
     super::cook_workspace_restore::restore_follow_up_cook_candidate_workspace(&mut plan)?;
+    if source
+        .acceptance
+        .as_ref()
+        .is_some_and(|acceptance| acceptance.verdict == AgentTaskAcceptanceVerdict::Rejected)
+    {
+        if let Some(feedback) = source.metadata["acceptance_repair"]["feedback"].as_str() {
+            for task in &mut plan.tasks {
+                task.instructions.push_str(&format!(
+                    "\n\nAddress this reviewer remediation feedback, then preserve the Cook's normal verification and review-form contract:\n{feedback}"
+                ));
+                task.inputs["cook_loop"]["reviewer_remediation"] = json!({
+                    "source_run_id": source.run_id,
+                    "feedback": feedback,
+                    "max_attempts": 1,
+                });
+            }
+        }
+    }
     let mut metadata = serde_json::Map::new();
     if let Some(route) =
         homeboy_core::notification_route::NotificationRoute::from_metadata(&source.metadata)
@@ -4282,11 +4300,45 @@ pub fn record_acceptance_verdict(
     evidence_refs: Vec<String>,
     token: String,
 ) -> Result<AgentTaskRunRecord> {
+    record_acceptance_verdict_with_feedback(run_id, verdict, evidence_refs, token, None)
+}
+
+/// Record a verdict with bounded reviewer feedback for the single durable Cook
+/// remediation that follows a rejection.
+pub fn record_acceptance_verdict_with_feedback(
+    run_id: &str,
+    verdict: AgentTaskAcceptanceVerdict,
+    evidence_refs: Vec<String>,
+    token: String,
+    feedback: Option<String>,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     if token.trim().is_empty() || evidence_refs.is_empty() {
         return Err(Error::validation_invalid_argument(
             "acceptance",
             "acceptance requires an authority token and at least one evidence reference",
+            None,
+            None,
+        ));
+    }
+    let feedback = feedback
+        .map(|feedback| feedback.trim().to_string())
+        .filter(|feedback| !feedback.is_empty());
+    if feedback
+        .as_ref()
+        .is_some_and(|feedback| feedback.len() > 2000)
+    {
+        return Err(Error::validation_invalid_argument(
+            "feedback",
+            "reviewer remediation feedback must be at most 2000 bytes",
+            None,
+            None,
+        ));
+    }
+    if feedback.is_some() && verdict != AgentTaskAcceptanceVerdict::Rejected {
+        return Err(Error::validation_invalid_argument(
+            "feedback",
+            "reviewer remediation feedback is only valid with a rejected verdict",
             None,
             None,
         ));
@@ -4403,6 +4455,7 @@ pub fn record_acceptance_verdict(
                 "attempts": acceptance.repair_attempts,
                 "max_attempts": 1,
                 "evidence_refs": acceptance.evidence_refs,
+                "feedback": feedback,
             }))
         } else {
             None

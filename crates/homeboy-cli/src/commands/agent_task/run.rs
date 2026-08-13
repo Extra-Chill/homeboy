@@ -251,7 +251,10 @@ where
         let dispatcher = reconstruct_dispatcher;
         let executor = executor.clone();
         let execute = |options| {
-            agent_task_service::authorize_cook_continue_route(&options)?;
+            agent_task_service::authorize_cook_continue_route_with_artifact(
+                &options,
+                args.artifact_id.as_deref(),
+            )?;
             let cook = if historical_terminal {
                 agent_task_service::run_terminal_cook_continuation(options, executor.clone())?
             } else {
@@ -304,7 +307,10 @@ where
     };
     options.initial_run_id = attempt.run_id.clone();
     options.initial_plan = attempt.plan.clone();
-    agent_task_service::authorize_cook_continue_route(&options)?;
+    agent_task_service::authorize_cook_continue_route_with_artifact(
+        &options,
+        args.artifact_id.as_deref(),
+    )?;
     let result = if terminal_review_form_continuation {
         agent_task_service::run_terminal_cook_continuation(options, executor)?
     } else {
@@ -2369,6 +2375,7 @@ where
                     cook_or_attempt_id: result.record.run_id,
                     preflight: false,
                     rearm: false,
+                    artifact_id: None,
                     full: false,
                 },
                 executor,
@@ -2555,6 +2562,7 @@ mod tests {
                 cook_or_attempt_id: "missing-cook".to_string(),
                 preflight: true,
                 rearm: false,
+                artifact_id: None,
                 full: false,
             })
             .expect("preflight returns a machine-readable rejection");

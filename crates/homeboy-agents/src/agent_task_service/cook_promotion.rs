@@ -24,8 +24,9 @@ use crate::agent_task_finalization::{
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
-    candidate_fingerprint, promote_with_checkpoint, resume_promoted_patch,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    candidate_fingerprint, canonical_recoverable_patch_artifacts, promote_with_checkpoint,
+    resume_promoted_patch, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+    AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -90,7 +91,7 @@ pub(crate) fn promote_attempt(
             candidate_ref: None,
             to_worktree: options.to_worktree.clone(),
             task_id: selected_task_id,
-            artifact_id: None,
+            artifact_id: continuation_artifact_id(run_id)?,
             dry_run: false,
             gates: options.gates.clone(),
             provider_command: options.provider_command.clone(),
@@ -163,7 +164,7 @@ pub(crate) fn promote_or_load_attempt(
                     // A resumed verification must retain the scheduler-selected
                     // candidate rather than falling back to aggregate outcome order.
                     task_id: selected_candidate_task_id(run_id)?,
-                    artifact_id: None,
+                    artifact_id: continuation_artifact_id(run_id)?,
                     dry_run: false,
                     gates: options.gates.clone(),
                     provider_command: options.provider_command.clone(),
@@ -193,6 +194,21 @@ pub(crate) fn promote_or_load_attempt(
         })?,
     )?;
     Ok(promotion)
+}
+
+/// A selector is accepted only from the route authority written by
+/// `cook-continue`; normal Cook promotion retains automatic selection.
+fn continuation_artifact_id(run_id: &str) -> Result<Option<String>> {
+    let record = agent_task_lifecycle::exact_record(run_id)?;
+    let Some(route) = record.metadata.get("cook_continue_route") else {
+        return Ok(None);
+    };
+    let artifact_id = route
+        .get("artifact_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string);
+    Ok(artifact_id)
 }
 
 pub(crate) fn persisted_promotion_for_attempt(
@@ -2928,6 +2944,7 @@ fn cook_failure_context(
                 .as_u64()
                 .unwrap_or_default(),
         exact_checkpoint_candidate_mismatch(&diagnostic),
+        ambiguous_promotion_artifact_ids(record_run_id, promotion_diagnostic.as_ref(), &recipe),
         record.as_ref().and_then(lab_handoff_runtime_recovery),
     );
     let promotion_provenance = promotion.cloned();
@@ -2958,6 +2975,89 @@ fn cook_failure_context(
     })
 }
 
+/// Artifact IDs are durable controller metadata. Expose them only when the
+/// promotion claim proves selection was the blocker, so a recovery command is
+/// executable rather than a replay of the known-invalid promotion.
+fn ambiguous_promotion_artifact_ids(
+    run_id: &str,
+    diagnostic: Option<&Value>,
+    recipe: &super::AgentTaskCookRecipe,
+) -> Vec<String> {
+    let is_ambiguous_selection = diagnostic.is_some_and(|diagnostic| {
+        diagnostic.pointer("/details/field").and_then(Value::as_str) == Some("artifact_id")
+            && diagnostic
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| {
+                    message.contains("multiple patch artifacts")
+                        || message.contains("distinct actionable patches")
+                })
+    });
+    if !is_ambiguous_selection {
+        return Vec::new();
+    }
+    let Ok(aggregate) = agent_task_lifecycle::read_attempt_aggregate(run_id) else {
+        return Vec::new();
+    };
+    let Some(outcome) = aggregate.selected_outcome().or_else(|| {
+        (aggregate.outcomes.len() == 1)
+            .then(|| aggregate.outcomes.first())
+            .flatten()
+    }) else {
+        return Vec::new();
+    };
+    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
+        return outcome
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
+            })
+            .map(|artifact| artifact.id.clone())
+            .collect();
+    }
+    if !recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == run_id)
+    {
+        return Vec::new();
+    }
+    let Ok(recipe_options) = super::reconstruct_options(recipe) else {
+        return Vec::new();
+    };
+    let Ok((source, source_path)) = promotion_source(run_id) else {
+        return Vec::new();
+    };
+    canonical_recoverable_patch_artifacts(
+        outcome,
+        &AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some(run_id.to_string()),
+            source_path,
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: recipe_options.to_worktree,
+            task_id: selected_candidate_task_id(run_id).ok().flatten(),
+            artifact_id: None,
+            dry_run: false,
+            gates: crate::agent_task_gate::VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+    )
+    .map(|canonical| {
+        canonical
+            .artifacts
+            .into_iter()
+            .map(|artifact| artifact.id)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 struct CookRecoveryActions {
     legal_actions: Vec<super::AgentTaskCookRecoveryAction>,
     next_actions: Vec<super::AgentTaskCookRecoveryAction>,
@@ -2973,6 +3073,7 @@ fn cook_recovery_actions(
     blocking_claim: bool,
     provider_retry_available: bool,
     exact_checkpoint_candidate_mismatch: bool,
+    ambiguous_artifact_ids: Vec<String>,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
 ) -> CookRecoveryActions {
     if !recovery_legal {
@@ -3017,6 +3118,15 @@ fn cook_recovery_actions(
             action: "fork_replacement".to_string(),
             command: format!("homeboy agent-task retry {run_id} --run"),
         });
+    } else if !ambiguous_artifact_ids.is_empty() {
+        actions.extend(ambiguous_artifact_ids.into_iter().map(|artifact_id| {
+            super::AgentTaskCookRecoveryAction {
+                action: "resume_with_artifact".to_string(),
+                command: format!(
+                    "homeboy agent-task cook-continue {run_id} --rearm --artifact-id {artifact_id}"
+                ),
+            }
+        }));
     } else if continuation_eligible {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "resume".to_string(),
@@ -3092,6 +3202,7 @@ mod recovery_action_tests {
                 false,
                 retry_available,
                 exact_checkpoint_candidate_mismatch,
+                Vec::new(),
                 None,
             );
             let actions = recovery
@@ -3140,6 +3251,7 @@ mod recovery_action_tests {
             false,
             false,
             true,
+            Vec::new(),
             None,
         );
 
@@ -3184,6 +3296,58 @@ mod recovery_action_tests {
                 "details": { "recovery": { "action": "resume" } },
             })
         )));
+    }
+
+    #[test]
+    fn ambiguous_artifact_selection_advertises_only_selector_continuations() {
+        let recovery = cook_recovery_actions(
+            "promotion_failed",
+            "ambiguous-attempt-1",
+            true,
+            false,
+            false,
+            false,
+            vec!["first-patch".to_string(), "second-patch".to_string()],
+            None,
+        );
+
+        assert_eq!(
+            recovery
+                .legal_actions
+                .iter()
+                .map(|action| action.command.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "homeboy agent-task status ambiguous-attempt-1 --full",
+                "homeboy agent-task diagnose ambiguous-attempt-1",
+                "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id first-patch",
+                "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id second-patch",
+            ]
+        );
+    }
+
+    #[test]
+    fn ambiguous_selector_actions_do_not_advertise_mime_shaped_or_invalid_artifacts() {
+        let recovery = cook_recovery_actions(
+            "promotion_failed",
+            "ambiguous-attempt-1",
+            true,
+            false,
+            false,
+            false,
+            vec!["canonical-patch".to_string()],
+            None,
+        );
+        assert_eq!(
+            recovery.legal_actions.last().map(|action| action.command.as_str()),
+            Some(
+                "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id canonical-patch"
+            )
+        );
+        assert!(!recovery
+            .legal_actions
+            .iter()
+            .any(|action| action.command.contains("mime-shaped")));
     }
 }
 
