@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.342.1] - 2026-08-13
+
+### Changed
+- repin Test to homeboy-action v2.11.26
+- repin Test to homeboy-action v2.11.24
+
 ## [0.342.0] - 2026-08-12
 
 ### Added
