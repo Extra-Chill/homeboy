@@ -106,6 +106,8 @@ struct TestInventoryEvidence {
     workspace_fingerprint: String,
     tests: Vec<TestInventoryTest>,
     inventory_fingerprint: String,
+    #[serde(default)]
+    fallback_reason: Option<String>,
 }
 
 #[cfg(unix)]
@@ -483,6 +485,10 @@ fn valid_test_inventory_payload(
         || expected_runner_fingerprint(binding, &inventory.runner).as_deref()
             != Some(inventory.runner_fingerprint.as_str())
         || inventory.workspace_fingerprint != binding.workspace_fingerprint
+        || inventory
+            .fallback_reason
+            .as_deref()
+            .is_some_and(|reason| reason.trim().is_empty() || reason.len() > 1024)
     {
         return None;
     }
@@ -527,6 +533,7 @@ fn valid_test_inventory_payload(
             workspace_fingerprint: inventory.workspace_fingerprint.clone(),
             test_count: inventory.tests.len(),
             inventory_fingerprint: inventory.inventory_fingerprint.clone(),
+            fallback_reason: inventory.fallback_reason.clone(),
         })
 }
 
@@ -2708,6 +2715,7 @@ mod tests {
             workspace_fingerprint: "b".repeat(64),
             test_count: 1,
             inventory_fingerprint: "c".repeat(64),
+            fallback_reason: None,
         });
 
         finalize_test_result_after_artifact_hydration(&mut workflow);
@@ -2751,6 +2759,25 @@ mod tests {
         assert_eq!(
             test_run_status_with_inventory(true, None, false, true, Some(evidence)),
             "passed"
+        );
+
+        let mut widened: TestInventoryEvidence =
+            serde_json::from_str(&valid_inventory_document(&binding, "test", "executed"))
+                .expect("parse valid inventory");
+        widened.fallback_reason =
+            Some("Changed test selection no longer matches fixture::lib::fixture.".to_string());
+        std::fs::write(
+            &binding.child_path,
+            serde_json::to_vec(&widened).expect("serialize widened inventory"),
+        )
+        .expect("write widened inventory");
+        assert_eq!(
+            valid_test_inventory(&binding)
+                .expect("widened inventory remains valid")
+                .0
+                .fallback_reason
+                .as_deref(),
+            Some("Changed test selection no longer matches fixture::lib::fixture.")
         );
         assert_eq!(
             test_run_status_with_inventory(false, None, false, true, Some(evidence)),
@@ -3290,6 +3317,7 @@ print(hashlib.sha256(content.encode()).hexdigest())
             workspace_fingerprint: binding.workspace_fingerprint.clone(),
             tests,
             inventory_fingerprint: String::new(),
+            fallback_reason: None,
         };
         inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
             &canonical_inventory_json(&inventory),

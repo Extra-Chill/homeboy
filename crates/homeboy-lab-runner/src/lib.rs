@@ -285,9 +285,9 @@ pub(crate) use git_dependency_materialization::{
 pub use homeboy_refresh::{
     plan_homeboy_binary_refresh, refresh_homeboy_binary, runner_dev_sync,
     HomeboyBinaryRefreshFailure, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
-    HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, HomeboyRefreshPhase,
-    HomeboyRefreshReadiness, HomeboyRefreshReadinessState, RunnerDevSyncExtensionProvenance,
-    RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
+    HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, HomeboyControllerContinuationAction,
+    HomeboyRefreshPhase, HomeboyRefreshReadiness, HomeboyRefreshReadinessState,
+    RunnerDevSyncExtensionProvenance, RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
 };
 pub use job_preparation::register as register_runner_job_preparation_provider;
 pub use lab::offload::hydrate_runner_workspace_dependencies;

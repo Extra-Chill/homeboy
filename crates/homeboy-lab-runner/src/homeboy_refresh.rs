@@ -99,6 +99,10 @@ pub struct HomeboyBinaryRefreshOutput {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interrupted_job_ids: Vec<String>,
     pub selected_binary_path: String,
+    /// Explicit controller-side work needed before the stale controller can
+    /// continue with this verified runner candidate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<HomeboyControllerContinuationAction>,
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
     /// The observed admission postcondition after a reconnect. A rotated daemon
@@ -114,6 +118,16 @@ pub struct HomeboyBinaryRefreshOutput {
     pub bootstrap_provenance: Option<HomeboyBootstrapProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback: Option<HomeboyBinaryRefreshRollback>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyControllerContinuationAction {
+    pub label: String,
+    pub command: Vec<String>,
+    pub source: String,
+    pub commit: String,
+    pub identity: String,
+    pub invocation: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -419,6 +433,7 @@ pub fn refresh_homeboy_binary(
                 daemon_refreshed: false,
                 interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
+                next_actions: Vec::new(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
                 readiness: None,
@@ -463,6 +478,7 @@ pub fn refresh_homeboy_binary(
                 daemon_refreshed: false,
                 interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
+                next_actions: Vec::new(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
                 readiness: Some(failed_refresh_readiness(&plan)),
@@ -503,6 +519,7 @@ pub fn refresh_homeboy_binary(
                 daemon_refreshed: false,
                 interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
+                next_actions: Vec::new(),
                 reconnect_required: true,
                 followup_commands: followup_commands.clone(),
                 readiness: Some(HomeboyRefreshReadiness {
@@ -673,6 +690,7 @@ pub fn refresh_homeboy_binary(
                     daemon_refreshed: false,
                     interrupted_job_ids: Vec::new(),
                     selected_binary_path: plan.binary_path.clone(),
+                    next_actions: Vec::new(),
                     reconnect_required: !plan.reconnect,
                     followup_commands: plan.followup_commands.clone(),
                     readiness: Some(failed_refresh_readiness(&plan)),
@@ -756,6 +774,7 @@ pub fn refresh_homeboy_binary(
                 if converged { 0 } else { 1 },
             ));
             let followup_commands = readiness.continuation.clone().into_iter().collect();
+            let next_actions = controller_continuation_actions(&plan, &identity)?;
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -772,6 +791,7 @@ pub fn refresh_homeboy_binary(
                     daemon_refreshed: true,
                     interrupted_job_ids: Vec::new(),
                     selected_binary_path: selected_binary_path.clone(),
+                    next_actions,
                     reconnect_required: reconnect_required_after_refresh(true),
                     followup_commands,
                     readiness: Some(readiness),
@@ -809,6 +829,7 @@ pub fn refresh_homeboy_binary(
                         daemon_refreshed: false,
                         interrupted_job_ids: Vec::new(),
                         selected_binary_path: selected_binary_path.clone(),
+                        next_actions: Vec::new(),
                         reconnect_required: true,
                         followup_commands: deferred.followup_commands.clone(),
                         readiness: Some(HomeboyRefreshReadiness {
@@ -879,6 +900,7 @@ pub fn refresh_homeboy_binary(
                         daemon_refreshed: false,
                         interrupted_job_ids,
                         selected_binary_path: selected_binary_path.clone(),
+                        next_actions: Vec::new(),
                         reconnect_required: true,
                         followup_commands: readiness.continuation.clone().into_iter().collect(),
                         readiness: Some(readiness),
@@ -931,6 +953,7 @@ pub fn refresh_homeboy_binary(
                     daemon_refreshed: false,
                     interrupted_job_ids,
                     selected_binary_path: selected_binary_path.clone(),
+                    next_actions: Vec::new(),
                     reconnect_required: true,
                     followup_commands: blocked_refresh_readiness(&plan)
                         .continuation
@@ -988,6 +1011,7 @@ pub fn refresh_homeboy_binary(
                         daemon_refreshed: false,
                         interrupted_job_ids,
                         selected_binary_path: selected_binary_path.clone(),
+                        next_actions: Vec::new(),
                         reconnect_required: true,
                         followup_commands: blocked_refresh_readiness(&plan)
                             .continuation
@@ -1036,6 +1060,7 @@ pub fn refresh_homeboy_binary(
         .and_then(|readiness| readiness.continuation.clone())
         .map(|continuation| vec![continuation])
         .unwrap_or_else(|| plan.followup_commands.clone());
+    let next_actions = controller_continuation_actions(&plan, &identity)?;
     Ok((
         HomeboyBinaryRefreshOutput {
             variant: "refresh_homeboy",
@@ -1049,6 +1074,7 @@ pub fn refresh_homeboy_binary(
             daemon_refreshed,
             interrupted_job_ids,
             selected_binary_path: selected_binary_path.clone(),
+            next_actions,
             reconnect_required: reconnect_required_after_refresh(daemon_refreshed),
             followup_commands,
             readiness,
@@ -2652,6 +2678,68 @@ fn build_local_homeboy_binary(
         ));
     }
     Ok((target.target_dir().join("release/homeboy"), Some(target)))
+}
+
+fn controller_continuation_actions(
+    plan: &HomeboyBinaryRefreshPlan,
+    identity: &Value,
+) -> Result<Vec<HomeboyControllerContinuationAction>> {
+    if plan.mode != "materialize" {
+        return Ok(Vec::new());
+    }
+    let source = plan.source.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "controller_continuation",
+            "a controller continuation needs the verified candidate source URL",
+            Some(plan.runner_id.clone()),
+            None,
+        )
+    })?;
+    let expected = identity
+        .get("data")
+        .unwrap_or(identity)
+        .get("display")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "identity",
+                "refresh did not report a candidate build identity",
+                Some(plan.runner_id.clone()),
+                None,
+            )
+        })?;
+    let exact_commit = identity
+        .get("data")
+        .unwrap_or(identity)
+        .get("git_commit")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "identity",
+                "refresh did not report the candidate Git commit",
+                Some(plan.runner_id.clone()),
+                None,
+            )
+        })?;
+    let command = vec![
+        "homeboy".to_string(),
+        "runtime".to_string(),
+        "materialize-controller".to_string(),
+        "--source".to_string(),
+        source.to_string(),
+        "--commit".to_string(),
+        exact_commit.to_string(),
+        "--identity".to_string(),
+        expected.to_string(),
+    ];
+    Ok(vec![HomeboyControllerContinuationAction {
+        label: "materialize_controller_candidate".to_string(),
+        command,
+        source: source.to_string(),
+        commit: exact_commit.to_string(),
+        identity: expected.to_string(),
+        invocation: Vec::new(),
+    }])
 }
 
 const RUNNER_SOURCE_SNAPSHOT_SCHEMA: &str = "homeboy/runner-dev-source-snapshot/v1";
