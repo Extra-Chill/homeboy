@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -51,6 +52,8 @@ pub const EXECUTOR_RESULT_FILE: &str = "executor-result.json";
 
 /// File name for the redacted runtime evidence index.
 pub const RUNTIME_EVIDENCE_FILE: &str = "executor-runtime-evidence.json";
+
+const STRUCTURED_PROGRESS_EVENT_LIMIT: usize = 128;
 
 /// Persist the latest raw executor request and result for `request`/`outcome`
 /// and append linking evidence refs onto the outcome.
@@ -117,6 +120,9 @@ fn link_runtime_evidence(
         .as_deref()
         .map(discover_runtime_files)
         .unwrap_or_default();
+    if request.request.executor.backend == "opencode" {
+        hydrate_structured_runtime_evidence(outcome, &runtime_files, policy);
+    }
     let sessions = provider_session_metadata(outcome);
     let index = json!({
         "artifact_root": artifact_root.as_ref().map(|path| format!("file://{}", path.display())),
@@ -174,6 +180,118 @@ fn link_runtime_evidence(
     }
 }
 
+/// Derive compact progress from structured runtime stdout. The full transcript
+/// remains in its original artifact; this sidecar contains lifecycle facts only.
+fn hydrate_structured_runtime_evidence(
+    outcome: &mut AgentTaskOutcome,
+    runtime_files: &BTreeMap<String, Vec<PathBuf>>,
+    policy: &RedactionPolicy,
+) {
+    let Some(stdout_paths) = runtime_files.get(RUNTIME_STDOUT_EVIDENCE_KIND) else {
+        return;
+    };
+    let mut session_ids = Vec::new();
+    let mut events = Vec::new();
+    let mut dropped_events = 0;
+    for path in stdout_paths {
+        let Ok(file) = fs::File::open(path) else {
+            continue;
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if let Some(session_id) = structured_session_id(&event) {
+                if !session_ids.iter().any(|existing| existing == session_id) {
+                    session_ids.push(session_id.to_string());
+                }
+            }
+            if let Some(progress) = structured_progress_event(&event) {
+                if events.len() < STRUCTURED_PROGRESS_EVENT_LIMIT {
+                    events.push(progress);
+                } else {
+                    dropped_events += 1;
+                }
+            }
+        }
+    }
+    if session_ids.len() != 1 {
+        return;
+    }
+
+    let session_id = session_ids.pop().expect("one stable session id");
+    if outcome.metadata.is_null() {
+        outcome.metadata = json!({});
+    }
+    let Some(metadata) = outcome.metadata.as_object_mut() else {
+        return;
+    };
+    metadata.insert(
+        "opencode_session".to_string(),
+        json!({ "status": "discovered", "id": session_id }),
+    );
+    metadata.insert(
+        "opencode_progress".to_string(),
+        json!({
+            "emitted": events.len(),
+            "coalesced_or_dropped": dropped_events,
+            "last_type": events.last().and_then(|event| event.get("type")).and_then(Value::as_str).unwrap_or(""),
+        }),
+    );
+
+    let progress = events
+        .iter()
+        .map(|event| serde_json::to_string(&policy.redact_json(event)))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+        .map(|lines| format!("{}\n", lines.join("\n")));
+    if let (Some(progress), Some(progress_paths)) =
+        (progress, runtime_files.get(RUNTIME_PROGRESS_EVIDENCE_KIND))
+    {
+        for path in progress_paths {
+            // A provider-produced progress stream is authoritative. The derived
+            // compact stream only fills the empty artifact reserved for it.
+            if fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0) {
+                let _ = fs::write(path, &progress);
+            }
+        }
+    }
+}
+
+fn structured_session_id(event: &Value) -> Option<&str> {
+    structured_event_type(event)?;
+    event
+        .get("sessionID")
+        .and_then(Value::as_str)
+        .or_else(|| event.pointer("/part/sessionID").and_then(Value::as_str))
+        .filter(|id| !id.trim().is_empty())
+}
+
+fn structured_progress_event(event: &Value) -> Option<Value> {
+    let event_type = structured_event_type(event)?;
+    let part = event.get("part")?;
+    let status = part.pointer("/state/status").and_then(Value::as_str);
+    let is_progress = matches!(event_type, "step_start" | "step_finish")
+        || event_type == "tool_use" && matches!(status, Some("completed" | "error"));
+    if !is_progress {
+        return None;
+    }
+    Some(json!({
+        "type": event_type,
+        "timestamp": event.get("timestamp"),
+        "part_id": part.get("id"),
+        "message_id": part.get("messageID"),
+        "status": status,
+        "tool": part.get("tool"),
+    }))
+}
+
+fn structured_event_type(event: &Value) -> Option<&str> {
+    let event_type = event.get("type")?.as_str()?;
+    event.get("part")?.as_object()?;
+    matches!(event_type, "step_start" | "step_finish" | "tool_use").then_some(event_type)
+}
+
 fn provider_session_metadata(outcome: &AgentTaskOutcome) -> Vec<Value> {
     outcome
         .metadata
@@ -185,7 +303,7 @@ fn provider_session_metadata(outcome: &AgentTaskOutcome) -> Vec<Value> {
             let id = value
                 .as_object()
                 .and_then(|session| {
-                    ["id", "session_id", "sessionId"]
+                    ["id", "session_id", "sessionId", "sessionID"]
                         .iter()
                         .find_map(|key| session.get(*key).and_then(Value::as_str))
                 })
@@ -586,6 +704,106 @@ mod tests {
             assert!(raw.contains("session-123"));
             assert!(!raw.contains("secret-session-token"));
             assert!(raw.contains("[REDACTED]"));
+        });
+    }
+
+    #[test]
+    fn extracts_opencode_session_and_bounded_progress_from_structured_stdout() {
+        with_artifact_root(|_| {
+            let request = executor_test_request();
+            let mut request = request;
+            request.request.executor.backend = "opencode".to_string();
+            let fixture = include_str!("fixtures/opencode-structured-transcript.jsonl");
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stdout.log"),
+                fixture,
+            )
+            .expect("write structured stdout");
+            let progress_path = request.artifacts_path.join("provider-progress.jsonl");
+            fs::write(&progress_path, "").expect("create progress artifact");
+            let mut outcome = test_outcome();
+            outcome.metadata = json!({
+                "opencode_session": { "status": "not_discovered" },
+                "opencode_progress": { "emitted": 0, "coalesced_or_dropped": 0, "last_type": "" }
+            });
+
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+            assert_eq!(
+                outcome.metadata["opencode_session"],
+                json!({ "status": "discovered", "id": "ses_sanitized_progress_fixture" })
+            );
+            assert_eq!(outcome.metadata["opencode_progress"]["emitted"], 3);
+            let progress: Vec<Value> = fs::read_to_string(&progress_path)
+                .expect("read progress")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("parse progress event"))
+                .collect();
+            assert_eq!(progress.len(), 3);
+            assert_eq!(progress[1]["tool"], "read");
+            assert!(!fs::read_to_string(&progress_path)
+                .expect("read progress")
+                .contains("private transcript content"));
+        });
+    }
+
+    #[test]
+    fn keeps_existing_provider_progress_while_linking_opencode_session() {
+        with_artifact_root(|_| {
+            let mut request = executor_test_request();
+            request.request.executor.backend = "opencode".to_string();
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stdout.log"),
+                include_str!("fixtures/opencode-structured-transcript.jsonl"),
+            )
+            .expect("write structured stdout");
+            let progress_path = request.artifacts_path.join("provider-progress.jsonl");
+            fs::write(&progress_path, "{\"provider\":\"progress\"}\n")
+                .expect("write provider progress");
+            let mut outcome = test_outcome();
+
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+            assert_eq!(
+                fs::read_to_string(progress_path).expect("read provider progress"),
+                "{\"provider\":\"progress\"}\n"
+            );
+            assert_eq!(
+                outcome.metadata["opencode_session"]["id"],
+                "ses_sanitized_progress_fixture"
+            );
+        });
+    }
+
+    #[test]
+    fn leaves_unknown_runtime_format_undiscovered_and_progress_empty() {
+        with_artifact_root(|_| {
+            let request = executor_test_request();
+            let mut request = request;
+            request.request.executor.backend = "opencode".to_string();
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stdout.log"),
+                "unstructured provider output\n",
+            )
+            .expect("write stdout");
+            let progress_path = request.artifacts_path.join("provider-progress.jsonl");
+            fs::write(&progress_path, "").expect("create progress artifact");
+            let mut outcome = test_outcome();
+            outcome.metadata = json!({
+                "opencode_session": { "status": "not_discovered" },
+                "opencode_progress": { "emitted": 0, "coalesced_or_dropped": 0, "last_type": "" }
+            });
+
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+            assert_eq!(
+                outcome.metadata["opencode_session"]["status"],
+                "not_discovered"
+            );
+            assert_eq!(outcome.metadata["opencode_progress"]["emitted"], 0);
+            assert!(fs::read_to_string(progress_path)
+                .expect("read progress")
+                .is_empty());
         });
     }
 

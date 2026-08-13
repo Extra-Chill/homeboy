@@ -263,6 +263,26 @@ fn provider_readiness_selector_mismatch_explains_runtime_provider_confusion() {
 }
 
 #[test]
+fn provider_readiness_rejects_invalid_immediate_failure_configuration_before_execution() {
+    let (_, mut provider) = request("task-a", "node provider.js".to_string());
+    provider.immediate_failure_patterns = vec![AgentTaskProviderImmediateFailurePattern {
+        id: "invalid".to_string(),
+        error_contains_any: vec!["server error".to_string()],
+        retryable: true,
+        error_ref_pattern: Some("[".to_string()),
+        log_lookup: None,
+        fallback_action: None,
+    }];
+
+    let error =
+        validate_provider_runner_readiness_for_backend_with_providers(&[provider], "test", None)
+            .expect_err("invalid adapter configuration must fail pre-dispatch");
+
+    assert_eq!(error.details["field"], "immediate_failure_patterns");
+    assert!(error.message.contains("invalid error_ref_pattern"));
+}
+
+#[test]
 fn provider_selection_matches_unique_extension_alias() {
     let (_, mut provider) = request("task-a", "node provider.js".to_string());
     provider.id = "extension-a.provider".to_string();

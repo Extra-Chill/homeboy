@@ -1,0 +1,3 @@
+{"type":"step_start","timestamp":1710000000000,"sessionID":"ses_sanitized_progress_fixture","part":{"id":"prt_step_1","messageID":"msg_1","sessionID":"ses_sanitized_progress_fixture","type":"step-start"}}
+{"type":"tool_use","timestamp":1710000000100,"sessionID":"ses_sanitized_progress_fixture","part":{"id":"prt_tool_1","messageID":"msg_1","sessionID":"ses_sanitized_progress_fixture","type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"/sanitized/repo/file.rs"},"output":"private transcript content"}}}
+{"type":"step_finish","timestamp":1710000000200,"sessionID":"ses_sanitized_progress_fixture","part":{"id":"prt_step_2","messageID":"msg_1","sessionID":"ses_sanitized_progress_fixture","type":"step-finish","reason":"tool-calls"}}

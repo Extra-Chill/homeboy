@@ -69,8 +69,8 @@ pub use admission::{
 pub use catalog::*;
 pub use command_runner::{
     probe_provider_executor_resolves, provider_command_parts, run_provider_readiness_invocation,
-    ProviderExecutorResolution, ProviderReadinessInvocationResult,
-    PROVIDER_READINESS_RESULT_SCHEMA,
+    validate_provider_immediate_failure_patterns, ProviderExecutorResolution,
+    ProviderReadinessInvocationResult, PROVIDER_READINESS_RESULT_SCHEMA,
 };
 pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
 pub use credential_readiness::{
@@ -116,8 +116,9 @@ use catalog::{
 };
 #[cfg(test)]
 use command_runner::{
-    is_transient_provider_error, provider_command_env, render_provider_command_display,
-    run_provider_command, run_provider_command_once, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
+    immediate_provider_failure, is_transient_provider_error, provider_command_env,
+    render_provider_command_display, run_provider_command, run_provider_command_once,
+    PROVIDER_TRANSIENT_MAX_ATTEMPTS,
 };
 #[cfg(test)]
 use fixtures::fixture_artifact;

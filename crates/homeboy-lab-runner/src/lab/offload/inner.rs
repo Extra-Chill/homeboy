@@ -1161,6 +1161,64 @@ fn final_preflight_homeboy_path<'a>(
         .unwrap_or_else(|| remote_runner_homeboy_path(runner, "Lab offload preflight"))
 }
 
+/// Direct SSH status already probes the configured job binary while deriving
+/// stale-daemon diagnostics. Reuse that proof instead of requiring a second
+/// transient SSH probe during admission.
+fn configured_build_identity_for_admission<Probe>(
+    status: &RunnerStatusReport,
+    probe: Probe,
+) -> Result<Option<String>>
+where
+    Probe: FnOnce() -> Result<Option<String>>,
+{
+    if status
+        .session
+        .as_ref()
+        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+    {
+        if let Some(identity) = &status.configured_job_binary_build_identity {
+            return Ok(Some(identity.clone()));
+        }
+    }
+    probe()
+}
+
+fn apply_direct_ssh_configured_identity_freshness(
+    status: &mut RunnerStatusReport,
+    runner_id: &str,
+    homeboy_path: &str,
+    configured_build_identity: Option<String>,
+) {
+    if !status
+        .session
+        .as_ref()
+        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+        || status.admission_blocking_stale_daemon().is_some()
+    {
+        return;
+    }
+    let session = status.session.as_ref().expect("checked direct SSH session");
+    let active_identity = session.homeboy_build_identity.clone();
+    if configured_build_identity.is_none()
+        || configured_build_identity.as_deref() != active_identity.as_deref()
+    {
+        status.stale_daemon = Some(
+            RunnerStaleDaemonWarning::new(
+                runner_id,
+                session.homeboy_version.clone(),
+                session.homeboy_version.clone(),
+                active_identity,
+                configured_build_identity.clone(),
+            )
+            .with_identity_unverifiable(
+                runner_id,
+                homeboy_path,
+                configured_build_identity.is_none(),
+            ),
+        );
+    }
+}
+
 pub(crate) fn run_lab_offload_inner(
     request: LabOffloadRequest<'_>,
     selection: LabRunnerSelection,
@@ -1412,38 +1470,15 @@ pub(crate) fn run_lab_offload_inner(
     let homeboy_path = final_preflight_homeboy_path(converged_homeboy_path.as_deref(), &runner)?;
     let require_exact_runner_version = require_exact_runner_version(&runner.settings);
     let configured_build_identity =
-        configured_runner_homeboy_build_identity(&runner, homeboy_path)?;
-    if runner_status
-        .session
-        .as_ref()
-        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
-        // An unverified reverse session is an availability warning rather than
-        // a freshness fence. Only a typed blocking verdict can suppress this
-        // direct-SSH identity comparison.
-        && runner_status.admission_blocking_stale_daemon().is_none()
-    {
-        let session = runner_status
-            .session
-            .as_ref()
-            .expect("checked direct SSH session");
-        let active_identity = session.homeboy_build_identity.clone();
-        if configured_build_identity.as_deref() != active_identity.as_deref() {
-            runner_status.stale_daemon = Some(
-                RunnerStaleDaemonWarning::new(
-                    runner_id,
-                    session.homeboy_version.clone(),
-                    session.homeboy_version.clone(),
-                    active_identity,
-                    configured_build_identity.clone(),
-                )
-                .with_identity_unverifiable(
-                    runner_id,
-                    homeboy_path,
-                    configured_build_identity.is_none(),
-                ),
-            );
-        }
-    }
+        configured_build_identity_for_admission(&runner_status, || {
+            configured_runner_homeboy_build_identity(&runner, homeboy_path)
+        })?;
+    apply_direct_ssh_configured_identity_freshness(
+        &mut runner_status,
+        runner_id,
+        homeboy_path,
+        configured_build_identity.clone(),
+    );
     let direct_capability_admission = if runner_status
         .session
         .as_ref()
@@ -2906,6 +2941,89 @@ mod tests {
     }
 
     #[test]
+    fn direct_ssh_admission_reuses_matching_status_identity_when_a_second_probe_fails() {
+        let identity = "homeboy 0.339.0+83a9bd058619";
+        let mut status = runner_status(true);
+        status.session = Some(admission_session(
+            RunnerTunnelMode::DirectSsh,
+            Some("http://127.0.0.1:7421"),
+            Some("lease-a"),
+        ));
+        status
+            .session
+            .as_mut()
+            .expect("direct session")
+            .homeboy_build_identity = Some(identity.to_string());
+        status.configured_job_binary_build_identity = Some(identity.to_string());
+
+        let configured = configured_build_identity_for_admission(&status, || {
+            Err(Error::internal_unexpected(
+                "transient second SSH probe failure",
+            ))
+        })
+        .expect("authoritative status evidence avoids a second probe");
+        apply_direct_ssh_configured_identity_freshness(
+            &mut status,
+            "homeboy-lab",
+            "/runner/homeboy",
+            configured,
+        );
+
+        require_available_lab_runner("homeboy-lab", &status, None, "cook")
+            .expect("matching authoritative status evidence admits the offload");
+    }
+
+    #[test]
+    fn direct_ssh_admission_without_configured_identity_fails_closed() {
+        let mut status = runner_status(true);
+        status.session = Some(admission_session(
+            RunnerTunnelMode::DirectSsh,
+            Some("http://127.0.0.1:7421"),
+            Some("lease-a"),
+        ));
+
+        let configured = configured_build_identity_for_admission(&status, || {
+            Err(Error::internal_unexpected(
+                "configured identity probe failed",
+            ))
+        })
+        .expect_err("failed fallback probe must reject the direct SSH admission");
+        assert!(configured
+            .message
+            .contains("configured identity probe failed"));
+    }
+
+    #[test]
+    fn direct_ssh_admission_rejects_mismatched_status_identity() {
+        let mut status = runner_status(true);
+        status.session = Some(admission_session(
+            RunnerTunnelMode::DirectSsh,
+            Some("http://127.0.0.1:7421"),
+            Some("lease-a"),
+        ));
+        status
+            .session
+            .as_mut()
+            .expect("direct session")
+            .homeboy_build_identity = Some("homeboy 0.339.0+daemon".to_string());
+        status.configured_job_binary_build_identity =
+            Some("homeboy 0.339.0+configured".to_string());
+
+        let configured = configured_build_identity_for_admission(&status, || {
+            panic!("direct SSH must use authoritative status evidence")
+        })
+        .expect("status evidence");
+        apply_direct_ssh_configured_identity_freshness(
+            &mut status,
+            "homeboy-lab",
+            "/runner/homeboy",
+            configured,
+        );
+
+        assert!(require_available_lab_runner("homeboy-lab", &status, None, "cook").is_err());
+    }
+
+    #[test]
     fn inner_rejects_connected_but_stale_daemon_with_recovery_command() {
         // #8811: a runner can be `connected: true` while its daemon is
         // version-stale. The old bare-boolean gate passed such a runner and
@@ -2986,7 +3104,7 @@ mod tests {
         let details = serde_json::to_string(&error.details).expect("serialize details");
 
         assert!(details.contains("daemon_freshness_unavailable"));
-        assert!(details.contains("runner doctor homeboy-lab --scope lab-offload"));
+        assert!(details.contains("ambiguous daemon candidates"));
     }
 
     #[test]
@@ -3220,6 +3338,7 @@ mod tests {
             },
             session: None,
             stale_daemon: None,
+            configured_job_binary_build_identity: None,
             daemon_freshness: None,
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),

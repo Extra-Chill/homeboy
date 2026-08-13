@@ -16,6 +16,7 @@ use homeboy_core::{Error, Result};
 #[derive(Debug, Clone)]
 pub(crate) struct ExecutorArtifactRootIdentity {
     path: PathBuf,
+    finalized_root: PathBuf,
     finalized_path: PathBuf,
     #[cfg(unix)]
     device: u64,
@@ -54,14 +55,14 @@ impl ExecutorArtifactRootIdentity {
         })?;
         // Finalized evidence belongs to Homeboy's canonical artifact store, not
         // beside the provider-writable executor directory.
-        let finalized_path = homeboy_core::paths::artifact_root()?
-            .join("executor-finalized")
-            .join(uuid::Uuid::new_v4().to_string());
+        let finalized_root = homeboy_core::paths::artifact_root()?.join("executor-finalized");
+        let finalized_path = finalized_root.join(uuid::Uuid::new_v4().to_string());
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             Ok(Self {
                 path,
+                finalized_root,
                 finalized_path,
                 device: metadata.dev(),
                 inode: metadata.ino(),
@@ -77,6 +78,7 @@ impl ExecutorArtifactRootIdentity {
             })?;
             Ok(Self {
                 path,
+                finalized_root,
                 finalized_path,
                 volume_serial_number: identity.volume_serial_number,
                 file_id: identity.file_id,
@@ -86,6 +88,7 @@ impl ExecutorArtifactRootIdentity {
         #[cfg(not(windows))]
         Ok(Self {
             path,
+            finalized_root,
             finalized_path,
         })
     }
@@ -526,7 +529,39 @@ fn staged_file(
         )
     })?;
     let sha256 = format!("{:x}", hash.finalize());
-    match fs::hard_link(&temporary, &destination) {
+    let blob = root.finalized_root.join("blobs").join(&sha256);
+    fs::create_dir_all(blob.parent().expect("finalized blob parent")).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create finalized artifact blob directory".to_string()),
+        )
+    })?;
+    match fs::hard_link(&temporary, &blob) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing_size = fs::metadata(&blob)
+                .map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some("inspect finalized artifact blob".to_string()),
+                    )
+                })?
+                .len();
+            let existing_sha256 = homeboy_core::artifact_metadata::sha256_file(&blob)?;
+            if existing_size != size || existing_sha256 != sha256 {
+                return Err(Error::internal_unexpected(
+                    "finalized artifact digest blob has inconsistent bytes",
+                ));
+            }
+        }
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("publish finalized artifact blob".to_string()),
+            ))
+        }
+    }
+    match fs::hard_link(&blob, &destination) {
         Ok(()) => {
             fs::remove_file(&temporary).map_err(|error| {
                 Error::internal_io(
@@ -939,6 +974,155 @@ mod tests {
                         .expect("persisted hash")
                 )
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalization_deduplicates_identical_bytes_while_preserving_typed_aliases() {
+        use std::os::unix::fs::MetadataExt;
+
+        with_isolated_home(|home| {
+            let root_path = home.path().join("executor");
+            fs::create_dir(&root_path).expect("executor root");
+            fs::write(root_path.join("transcript.log"), b"shared runtime evidence")
+                .expect("transcript");
+            fs::write(root_path.join("runtime.log"), b"shared runtime evidence")
+                .expect("runtime stdout");
+            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
+            let mut value = outcome("transcript.log");
+            value.artifacts[0].id = "transcript".to_string();
+            value.artifacts[0].kind = "transcript".to_string();
+            value.artifacts.push(AgentTaskArtifact {
+                id: "runtime-stdout".to_string(),
+                kind: "provider-runtime-stdout".to_string(),
+                path: Some("runtime.log".to_string()),
+                ..value.artifacts[0].clone()
+            });
+            value
+                .typed_artifacts
+                .push(crate::agent_task::AgentTaskTypedArtifact {
+                    name: "transcript".to_string(),
+                    artifact_type: Some("transcript".to_string()),
+                    artifact_schema: None,
+                    payload: serde_json::Value::Null,
+                    artifact: Some(value.artifacts[0].clone()),
+                    metadata: serde_json::Value::Null,
+                });
+            value
+                .typed_artifacts
+                .push(crate::agent_task::AgentTaskTypedArtifact {
+                    name: "runtime_stdout".to_string(),
+                    artifact_type: Some("provider-runtime-stdout".to_string()),
+                    artifact_schema: None,
+                    payload: serde_json::Value::Null,
+                    artifact: Some(value.artifacts[1].clone()),
+                    metadata: serde_json::Value::Null,
+                });
+
+            finalize_provider_file_artifacts(&mut value, &root).expect("finalize");
+
+            let transcript =
+                Path::new(value.artifacts[0].path.as_deref().expect("transcript path"));
+            let runtime = Path::new(value.artifacts[1].path.as_deref().expect("runtime path"));
+            assert_ne!(
+                transcript, runtime,
+                "each logical artifact retains its alias"
+            );
+            assert_eq!(
+                fs::metadata(transcript).expect("transcript metadata").ino(),
+                fs::metadata(runtime).expect("runtime metadata").ino()
+            );
+            let blob = root.finalized_root.join("blobs").join(
+                value.artifacts[0]
+                    .sha256
+                    .as_deref()
+                    .expect("transcript digest"),
+            );
+            assert_eq!(
+                fs::metadata(transcript).expect("transcript metadata").ino(),
+                fs::metadata(&blob).expect("canonical blob metadata").ino(),
+                "logical aliases resolve to the digest-addressed canonical bytes"
+            );
+            assert_eq!(
+                value.typed_artifacts[0]
+                    .artifact
+                    .as_ref()
+                    .expect("typed transcript")
+                    .path
+                    .as_deref(),
+                value.artifacts[0].path.as_deref()
+            );
+            assert_eq!(
+                value.typed_artifacts[1]
+                    .artifact
+                    .as_ref()
+                    .expect("typed runtime")
+                    .path
+                    .as_deref(),
+                value.artifacts[1].path.as_deref()
+            );
+            assert_eq!(
+                fs::read(transcript).expect("resolve transcript alias"),
+                b"shared runtime evidence"
+            );
+            assert_eq!(
+                fs::read(runtime).expect("resolve runtime alias"),
+                b"shared runtime evidence"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalization_keeps_distinct_content_in_separate_blobs() {
+        use std::os::unix::fs::MetadataExt;
+
+        with_isolated_home(|home| {
+            let root_path = home.path().join("executor");
+            fs::create_dir(&root_path).expect("executor root");
+            fs::write(root_path.join("transcript.log"), b"transcript evidence")
+                .expect("transcript");
+            fs::write(root_path.join("runtime.log"), b"runtime stdout").expect("runtime stdout");
+            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
+            let mut value = outcome("transcript.log");
+            value.artifacts.push(AgentTaskArtifact {
+                id: "runtime-stdout".to_string(),
+                kind: "provider-runtime-stdout".to_string(),
+                path: Some("runtime.log".to_string()),
+                ..value.artifacts[0].clone()
+            });
+
+            finalize_provider_file_artifacts(&mut value, &root).expect("finalize");
+
+            let transcript =
+                Path::new(value.artifacts[0].path.as_deref().expect("transcript path"));
+            let runtime = Path::new(value.artifacts[1].path.as_deref().expect("runtime path"));
+            assert_ne!(
+                fs::metadata(transcript).expect("transcript metadata").ino(),
+                fs::metadata(runtime).expect("runtime metadata").ino()
+            );
+            assert_ne!(value.artifacts[0].sha256, value.artifacts[1].sha256);
+            assert!(root
+                .finalized_root
+                .join("blobs")
+                .join(
+                    value.artifacts[0]
+                        .sha256
+                        .as_deref()
+                        .expect("transcript digest")
+                )
+                .is_file());
+            assert!(root
+                .finalized_root
+                .join("blobs")
+                .join(
+                    value.artifacts[1]
+                        .sha256
+                        .as_deref()
+                        .expect("runtime digest")
+                )
+                .is_file());
         });
     }
 

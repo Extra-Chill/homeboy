@@ -1712,7 +1712,8 @@ fn lab_cook_materializes_goal_and_prompt_as_one_durable_cell() {
         git_add_remote(primary.path(), FIXTURE_REPOSITORY_REMOTE);
         register_component("homeboy", primary.path(), FIXTURE_REPOSITORY_REMOTE);
         let workspace = primary.path().join("provenance-worktree");
-        let linked = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .args([
                 "worktree",
                 "add",
@@ -1720,9 +1721,8 @@ fn lab_cook_materializes_goal_and_prompt_as_one_durable_cell() {
                 "provenance-worktree",
                 workspace.to_str().expect("utf8 workspace"),
             ])
-            .current_dir(primary.path())
-            .output()
-            .expect("create linked workspace");
+            .current_dir(primary.path());
+        let linked = homeboy::core::test_support::bounded_output(command);
         assert!(linked.status.success(), "{linked:?}");
         let workspace = workspace.display().to_string();
         let cook = Cli::parse_from([
@@ -1788,7 +1788,8 @@ fn lab_cook_plan_preserves_actual_cli_provenance_through_handoff_serialization()
         let primary = tempfile::tempdir().expect("primary workspace");
         git_init(primary.path());
         let workspace = primary.path().join("provenance-worktree");
-        let linked = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .args([
                 "worktree",
                 "add",
@@ -1796,9 +1797,8 @@ fn lab_cook_plan_preserves_actual_cli_provenance_through_handoff_serialization()
                 "provenance-worktree",
                 workspace.to_str().expect("utf8 workspace"),
             ])
-            .current_dir(primary.path())
-            .output()
-            .expect("create linked workspace");
+            .current_dir(primary.path());
+        let linked = homeboy::core::test_support::bounded_output(command);
         assert!(linked.status.success(), "{linked:?}");
         let workspace = workspace.display().to_string();
         let matches = Cli::command_with_scoped_lab_args()
@@ -2359,7 +2359,8 @@ fn lab_cook_materializes_derived_provider_destination_and_preserves_it_for_retry
         git_add_remote(workspace.path(), FIXTURE_REPOSITORY_REMOTE);
         let provider_dir = tempfile::tempdir().expect("provider dir");
         let provider_workspace = provider_dir.path().join("worktree");
-        let commit = Command::new("git")
+        let mut commit_command = Command::new("git");
+        commit_command
             .args([
                 "-c",
                 "user.email=fixture@example.com",
@@ -2370,11 +2371,11 @@ fn lab_cook_materializes_derived_provider_destination_and_preserves_it_for_retry
                 "-m",
                 "fixture",
             ])
-            .current_dir(workspace.path())
-            .output()
-            .expect("create fixture commit");
+            .current_dir(workspace.path());
+        let commit = homeboy::core::test_support::bounded_output(commit_command);
         assert!(commit.status.success(), "{:?}", commit);
-        let worktree = Command::new("git")
+        let mut worktree_command = Command::new("git");
+        worktree_command
             .args([
                 "worktree",
                 "add",
@@ -2384,9 +2385,8 @@ fn lab_cook_materializes_derived_provider_destination_and_preserves_it_for_retry
                     .to_str()
                     .expect("utf8 provider workspace"),
             ])
-            .current_dir(workspace.path())
-            .output()
-            .expect("create linked provider workspace");
+            .current_dir(workspace.path());
+        let worktree = homeboy::core::test_support::bounded_output(worktree_command);
         assert!(worktree.status.success(), "{:?}", worktree);
         let provider = provider_dir.path().join("provider");
         let payload = serde_json::json!({

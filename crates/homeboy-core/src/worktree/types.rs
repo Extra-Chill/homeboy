@@ -584,12 +584,19 @@ pub struct WorktreeCleanupOptions {
 #[derive(Debug, Clone)]
 pub struct WorktreeQueueCreateOptions {
     pub repo: String,
-    pub branches: Vec<String>,
+    pub requests: Vec<WorktreeQueueCreateRequest>,
     pub from: String,
-    pub task_url: Option<String>,
-    pub task_ref: Option<String>,
     pub dry_run: bool,
     pub retry_after_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorktreeQueueCreateRequest {
+    pub branch: String,
+    pub task_url: Option<String>,
+    pub task_ref: Option<String>,
+    pub run_id: Option<String>,
+    pub provider_lifecycle: Option<crate::worktree_providers::WorktreeProviderLifecycleIntent>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -621,6 +628,7 @@ pub struct WorktreeQueueCreateRow {
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeQueueCreateStatus {
     Queued,
+    WouldCreate,
     ActiveLockHolder,
     Created,
     Failed,

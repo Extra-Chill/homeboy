@@ -168,7 +168,13 @@ fn run_with_release_artifacts(
     // A version-pinned release asset is resolved remotely before orchestration;
     // requiring its configured checkout to exist would reintroduce a mutable
     // source gate. Other modes retain the existing early local-path validation.
-    if config.expected_version.is_none()
+    //
+    // `--check` is read-only and returns before any build or remote write, so
+    // this fail-closed gate protects nothing there — it only aborts the status
+    // pass and hides every other component (#12214). Check mode reports each
+    // absent checkout as a scoped skipped result instead.
+    if !config.check
+        && config.expected_version.is_none()
         && config.prepared_projection.is_none()
         && config.prepared_artifact.is_none()
     {

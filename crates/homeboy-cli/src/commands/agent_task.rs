@@ -17,6 +17,7 @@ pub mod contract;
 pub mod controller;
 pub mod doctor;
 pub mod fanout;
+pub(crate) mod gate_contract;
 pub mod loop_definition;
 pub mod prompts;
 pub mod retained_artifacts;
@@ -84,7 +85,7 @@ fn cook_progress_message(phase: &str, cook_id: Option<&str>, run_id: Option<&str
     };
     match run_id {
         Some(run_id) => format!(
-            "Cook {phase}: durable run `{run_id}`. Status: `homeboy agent-task status {run_id}`. Evidence: `homeboy agent-task evidence {run_id} --full`."
+            "Cook {phase}: durable run `{run_id}`. Follow: `homeboy agent-task status {run_id} --watch`. Status: `homeboy agent-task status {run_id}`. Evidence: `homeboy agent-task evidence {run_id} --full`."
         ),
         None => format!("Cook {phase}{identity}."),
     }
@@ -242,7 +243,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Loop(loop_args) => controller::loop_command(loop_args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),
-        AgentTaskCommand::RunNext => run::run_next(),
+        AgentTaskCommand::RunNext(args) => run::run_next(args),
         AgentTaskCommand::Submit(submit_args) => run::submit(submit_args),
         AgentTaskCommand::Status(status_args) => status::status(status_args),
         // Alias, not a second watch loop: route straight into `activity watch`,
@@ -306,12 +307,14 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             } else {
                 homeboy::agents::agent_tasks::lifecycle::AgentTaskAcceptanceVerdict::Rejected
             };
-            let record = homeboy::agents::agent_tasks::lifecycle::record_acceptance_verdict(
-                &args.run_id,
-                verdict,
-                args.evidence_refs,
-                args.token,
-            )?;
+            let record =
+                homeboy::agents::agent_tasks::lifecycle::record_acceptance_verdict_with_feedback(
+                    &args.run_id,
+                    verdict,
+                    args.evidence_refs,
+                    args.token,
+                    args.feedback,
+                )?;
             Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
         }
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
@@ -347,6 +350,7 @@ mod progress_tests {
         // after an interrupted observation without guessing the run identity.
         let message = cook_progress_message("provider_ready", None, Some("run-123"));
         assert!(message.contains("agent-task status run-123"));
+        assert!(message.contains("agent-task status run-123 --watch"));
         assert!(message.contains("agent-task evidence run-123 --full"));
     }
 
@@ -448,3 +452,76 @@ pub(crate) fn command_json_value<T: Serialize>(value: T) -> homeboy::core::Resul
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod output_projection_tests {
+    use super::status::project_operator_output;
+    use serde_json::json;
+
+    const REALISTIC_OPERATOR_RESPONSE_MAX_BYTES: usize = 24 * 1024;
+
+    fn production_shaped_evidence() -> serde_json::Value {
+        let event = json!({ "timestamp": "2026-08-12T00:00:00Z", "message": "x".repeat(512) });
+        json!({
+            "hydrated_evidence": [{
+                "kind": "provider-transcript",
+                "uri": "file:///tmp/provider-transcript.json",
+                "status": "ok",
+                "content": {
+                    "current_diff": "d".repeat(256 * 1024),
+                    "transcript": "t".repeat(256 * 1024),
+                    "runtime_log": "r".repeat(256 * 1024),
+                    "body": "b".repeat(256 * 1024),
+                    "raw_events": vec![event.clone(); 80],
+                    "resource_timeline": vec![event; 80],
+                }
+            }],
+            "artifact_refs": [{ "kind": "patch", "uri": "file:///tmp/change.patch" }],
+            "next_actions": [{ "command": "homeboy agent-task status run-1 --full" }],
+            "identity": { "run_id": "run-1" },
+            "gates": [{ "name": "check", "status": "passed" }],
+        })
+    }
+
+    #[test]
+    fn default_operator_projection_has_a_fixed_bound_for_huge_evidence() {
+        let mut value = production_shaped_evidence();
+        let original = value.clone();
+
+        project_operator_output(&mut value);
+
+        assert!(
+            serde_json::to_vec(&value)
+                .expect("serialize projection")
+                .len()
+                < REALISTIC_OPERATOR_RESPONSE_MAX_BYTES
+        );
+        let content = &value["hydrated_evidence"][0]["content"];
+        for field in ["current_diff", "transcript", "runtime_log", "body"] {
+            assert!(
+                content[field].is_string(),
+                "{field} keeps its string schema"
+            );
+            assert!(content[field].as_str().unwrap().len() < 256);
+        }
+        assert_eq!(content["raw_events"].as_array().unwrap().len(), 12);
+        assert_eq!(content["raw_events_projection"]["omitted_items"], 68);
+        assert_eq!(content["resource_timeline"].as_array().unwrap().len(), 12);
+        assert_eq!(content["resource_timeline_projection"]["omitted_items"], 68);
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "homeboy agent-task status run-1 --full"
+        );
+        assert_eq!(value["identity"]["run_id"], "run-1");
+        assert_eq!(value["gates"][0]["status"], "passed");
+        assert_eq!(value["artifact_refs"], original["artifact_refs"]);
+    }
+
+    #[test]
+    fn full_projection_is_lossless() {
+        let value = production_shaped_evidence();
+        let expected = value.clone();
+
+        assert_eq!(value, expected);
+    }
+}

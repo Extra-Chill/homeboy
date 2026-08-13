@@ -683,7 +683,7 @@ fn materialize_follow_up_baseline_at(
             )
         })?;
         git_output(&baseline.path, &["add", "--all"])?;
-        git_output(
+        git_output_with_env(
             &baseline.path,
             &[
                 "-c",
@@ -694,6 +694,10 @@ fn materialize_follow_up_baseline_at(
                 "--no-verify",
                 "-m",
                 "homeboy: cook promoted baseline",
+            ],
+            &[
+                ("GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z"),
+                ("GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z"),
             ],
         )?;
         (

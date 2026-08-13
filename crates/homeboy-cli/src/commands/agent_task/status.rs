@@ -9,6 +9,7 @@ use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_tasks::lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
@@ -32,6 +33,10 @@ use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandNextAction,
     CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
 };
+use crate::commands::utils::watch::{
+    parse_duration, watch_loop, WatchConclusion, WatchConfig, WatchPoller, WatchResult,
+    TIMEOUT_EXIT_CODE,
+};
 
 /// Cap the number of detail refs rendered in the compact summary so a noisy
 /// aggregate cannot flood recovery output. Overflow is reported as an
@@ -39,7 +44,7 @@ use crate::commands::utils::response::{
 const COMPACT_REF_LIMIT: usize = 12;
 const COMPACT_TASK_LIMIT: usize = 12;
 const COMPACT_TEXT_LIMIT: usize = 512;
-const FULL_TEXT_LIMIT: usize = 4 * 1024;
+const STATUS_WATCH_CHANGE_LIMIT: usize = 12;
 
 /// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
 /// attempt readers, even when a newer Cook attempt produced no patch.
@@ -100,6 +105,16 @@ pub(super) fn resolve_cook_reader_target(
 }
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
+    if args.watch {
+        return watch_status(args);
+    }
+    status_once(args)
+}
+
+fn status_once(args: StatusArgs) -> CmdResult<Value> {
+    if let Some(recipe_only) = recipe_only_status(&args.run_id, args.exact)? {
+        return Ok((recipe_only, 0));
+    }
     let target = resolve_cook_reader_target(&args.run_id, args.exact)?;
     if args.bridge {
         // `--bridge` routes through `agent_task_lifecycle::status()`, which is a
@@ -158,6 +173,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     attach_status_identity(&mut value, &args.run_id, &target);
     attach_cook_notification_delivery(&mut value, &record, &target);
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
+    attach_cook_completion(&mut value, &record);
     let acceptance_is_actionable = record.state
         == agent_task_lifecycle::AgentTaskRunState::Succeeded
         && record
@@ -204,7 +220,6 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     if args.full {
         let aggregate = completed_run_aggregate(run_id).and_then(Result::ok);
         attach_full_status_candidate(&mut value, aggregate.as_ref(), run_id);
-        bound_full_reader_payload(&mut value);
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, run_id);
         preserve_controller_owner_placement(&mut value, run_id);
@@ -223,6 +238,215 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     preserve_controller_owner_placement(&mut summary, run_id);
     let exit_code = subject_exit_code(&summary, args.strict_subject_exit);
     Ok((summary, exit_code))
+}
+
+struct StatusPoller {
+    args: StatusArgs,
+}
+
+impl WatchPoller for StatusPoller {
+    type Item = (Value, i32);
+
+    fn poll(&self, _id: &str) -> homeboy::core::Result<Self::Item> {
+        status_once(self.args.clone())
+    }
+
+    fn is_terminal(&self, item: &Self::Item) -> bool {
+        status_is_terminal(&item.0)
+    }
+}
+
+fn watch_status(mut args: StatusArgs) -> CmdResult<Value> {
+    let interval = parse_duration("--interval", &args.interval)?;
+    let timeout = parse_duration("--timeout", &args.timeout)?;
+    args.watch = false;
+    let poller = StatusPoller { args: args.clone() };
+    let started = Instant::now();
+    let mut progress = StatusWatchProgress::default();
+    let result = watch_loop(
+        &poller,
+        &args.run_id,
+        &WatchConfig {
+            interval,
+            timeout: Some(timeout),
+        },
+        std::thread::sleep,
+        || started.elapsed(),
+        |(snapshot, _), poll| progress.observe(snapshot, poll, |line| eprintln!("{line}")),
+    )?;
+    Ok(watch_status_output(&args, result, progress))
+}
+
+#[derive(Default)]
+struct StatusWatchProgress {
+    last_change: Option<Value>,
+    changes: Vec<Value>,
+    omitted: u64,
+}
+
+impl StatusWatchProgress {
+    fn observe(&mut self, snapshot: &Value, poll: u64, mut emit: impl FnMut(String)) {
+        let change = status_change_projection(snapshot);
+        if self.last_change.as_ref() == Some(&change) {
+            return;
+        }
+        self.last_change = Some(change);
+        emit(emit_status_change_event(
+            snapshot,
+            poll,
+            self.changes.len() >= STATUS_WATCH_CHANGE_LIMIT,
+        ));
+        if self.changes.len() < STATUS_WATCH_CHANGE_LIMIT {
+            self.changes
+                .push(json!({ "poll": poll, "status": snapshot }));
+        } else {
+            self.omitted += 1;
+        }
+    }
+}
+
+fn emit_status_change_event(snapshot: &Value, poll: u64, retained_limit_reached: bool) -> String {
+    let run_id = snapshot.get("run_id").and_then(Value::as_str).or_else(|| {
+        snapshot
+            .pointer("/identity/resolved_run_id")
+            .and_then(Value::as_str)
+    });
+    serde_json::to_string(&json!({
+        "schema": "homeboy/agent-task-status-watch-event/v1",
+        "event": "status_changed",
+        "run_id": run_id,
+        "state": snapshot.get("state"),
+        "poll": poll,
+        "latest": snapshot,
+        "retained_limit_reached": retained_limit_reached,
+        "continuation_command": run_id.map(|run_id| format!(
+            "homeboy agent-task status {} --watch", quote_arg(run_id)
+        )),
+    }))
+    .expect("status watch JSONL event serializes")
+}
+
+/// Watch output follows lifecycle progress rather than volatile read metadata
+/// such as timestamps. The complete status remains in each emitted/final snapshot.
+fn status_change_projection(status: &Value) -> Value {
+    json!({
+        "state": status.get("state"),
+        "terminal_status": status.get("terminal_status"),
+        "child_run_state": status.get("child_run_state"),
+        "totals": status.get("totals"),
+        "tasks": status.get("tasks"),
+        "progress": status.get("progress"),
+        "liveness": status.get("liveness"),
+        "normalized_events": status.get("normalized_events"),
+    })
+}
+
+fn status_is_terminal(status: &Value) -> bool {
+    !matches!(
+        status.get("state").and_then(Value::as_str),
+        Some("queued" | "running" | "in_flight")
+    )
+}
+
+fn status_is_failure(status: &Value) -> bool {
+    let Some(state) = status.get("state").and_then(Value::as_str) else {
+        // Recipe-only Cook status is a successful read whose recovery state is
+        // intentionally carried under `status`, not lifecycle `state`.
+        return false;
+    };
+    !matches!(
+        state,
+        "queued"
+            | "running"
+            | "in_flight"
+            | "succeeded"
+            | "review_ready"
+            | "draft_published"
+            | "green_no_finalize"
+            | "no_changes"
+            | "intentional_no_change"
+    )
+}
+
+fn watch_status_output(
+    args: &StatusArgs,
+    result: WatchResult<(Value, i32)>,
+    progress: StatusWatchProgress,
+) -> (Value, i32) {
+    let timed_out = result.conclusion == WatchConclusion::TimedOut;
+    let (latest, status_exit) = result.item;
+    let continuation = format!(
+        "homeboy agent-task status {} --watch --interval {} --timeout {}",
+        quote_arg(&args.run_id),
+        args.interval,
+        args.timeout
+    );
+    let output = json!({
+        "schema": "homeboy/agent-task-status-watch/v1",
+        "command": "agent-task.status.watch",
+        "run_id": args.run_id,
+        "terminal": !timed_out,
+        "timed_out": timed_out,
+        "poll_count": result.poll_count,
+        "waited_secs": result.waited.as_secs(),
+        "changes": progress.changes,
+        "changes_omitted": progress.omitted,
+        "latest": latest,
+        "continuation_command": continuation,
+    });
+    let exit_code = if timed_out {
+        TIMEOUT_EXIT_CODE
+    } else if status_is_failure(&output["latest"]) {
+        1
+    } else {
+        status_exit
+    };
+    (output, exit_code)
+}
+
+/// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
+/// its exact attempt id, but only `cook-continue` may materialize that attempt.
+fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Result<Option<Value>> {
+    let recipe = match agent_task_service_direct::load_recipe(run_or_cook_id) {
+        Ok(recipe) => recipe,
+        Err(_) => match agent_task_service_direct::load_recipe_for_attempt(run_or_cook_id)? {
+            Some(recipe) => recipe,
+            None => return Ok(None),
+        },
+    };
+    let attempt = if recipe.cook_id == run_or_cook_id && !exact {
+        recipe
+            .attempts
+            .last()
+            .expect("validated recipe has an attempt")
+    } else {
+        let Some(attempt) = recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == run_or_cook_id)
+        else {
+            return Ok(None);
+        };
+        attempt
+    };
+    if agent_task_lifecycle::run_record_exists_readonly(&attempt.run_id)? {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "schema": "homeboy/agent-task-cook/v1",
+        "cook_id": recipe.cook_id,
+        "run_id": attempt.run_id,
+        "latest_run_id": attempt.run_id,
+        "status": "recipe_only_recovery_required",
+        "lifecycle_state": "recipe_persisted_without_lifecycle_record",
+        "provider_budget_consumed": false,
+        "provider_executions_consumed": 0,
+        "guidance": {
+            "action": "materialize_recipe_attempt",
+            "command": format!("homeboy agent-task cook-continue {}", attempt.run_id),
+            "message": "The immutable Cook recipe is durable but its lifecycle record is absent. Continue the exact attempt to materialize the controller lifecycle before provider work."
+        }
+    })))
 }
 
 /// Record whether this read reconciled — i.e. whether producing this answer
@@ -647,26 +871,87 @@ mod runner_probe_tests {
     }
 }
 
-/// Full recovery output remains a local reader: retain a stable digest for a
-/// large value instead of repeating multi-attempt patches in every projection.
-pub(super) fn bound_full_reader_payload(value: &mut Value) {
+const OPERATOR_HEAVY_FIELDS: &[&str] = &[
+    "diff",
+    "patch",
+    "stdout",
+    "stderr",
+    "current_diff",
+    "transcript",
+    "runtime_log",
+];
+const OPERATOR_HEAVY_COLLECTIONS: &[&str] =
+    &["raw_events", "resource_timeline", "cook_resource_timeline"];
+
+/// Project only explicitly heavy evidence fields. This preserves every other
+/// payload type and collection, including actions, identities, gates, and refs.
+pub(crate) fn project_operator_output(value: &mut Value) {
+    project_operator_value(value, false);
+}
+
+fn project_operator_value(value: &mut Value, evidence_content: bool) {
     match value {
-        Value::String(text) if text.len() > FULL_TEXT_LIMIT => {
-            let digest = content_hash::sha256_hex(text.as_bytes());
-            *text = format!("[omitted {} bytes; sha256={digest}]", text.len());
-        }
         Value::Array(items) => {
             for item in items {
-                bound_full_reader_payload(item);
+                project_operator_value(item, evidence_content);
             }
         }
         Value::Object(fields) => {
-            for item in fields.values_mut() {
-                bound_full_reader_payload(item);
+            let hydrated_evidence = fields.contains_key("kind")
+                && fields.contains_key("uri")
+                && fields.contains_key("status")
+                && fields.contains_key("content");
+            let collection_keys = fields
+                .keys()
+                .filter(|key| OPERATOR_HEAVY_COLLECTIONS.contains(&key.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in collection_keys {
+                project_heavy_collection(fields, &key);
+            }
+            for (key, item) in fields.iter_mut() {
+                if OPERATOR_HEAVY_FIELDS.contains(&key.as_str())
+                    || (evidence_content && key == "body")
+                {
+                    if let Value::String(text) = item {
+                        if text.len() > COMPACT_TEXT_LIMIT {
+                            let digest = content_hash::sha256_hex(text.as_bytes());
+                            *text = format!("[omitted {} bytes; sha256={digest}]", text.len());
+                        }
+                    }
+                    continue;
+                }
+                if OPERATOR_HEAVY_COLLECTIONS.contains(&key.as_str()) {
+                    continue;
+                }
+                project_operator_value(item, hydrated_evidence && key == "content");
             }
         }
         _ => {}
     }
+}
+
+/// Known event streams retain their array/item schema. The owning evidence
+/// object receives additive metadata describing the omitted durable events.
+fn project_heavy_collection(fields: &mut serde_json::Map<String, Value>, key: &str) {
+    let Some(items) = fields.get_mut(key).and_then(Value::as_array_mut) else {
+        return;
+    };
+    if items.len() <= COMPACT_REF_LIMIT {
+        return;
+    }
+    let total_items = items.len();
+    let digest = content_hash::sha256_hex(serde_json::to_vec(items).as_deref().unwrap_or_default());
+    items.truncate(COMPACT_REF_LIMIT);
+    fields.insert(
+        format!("{key}_projection"),
+        json!({
+            "total_items": total_items,
+            "returned_items": COMPACT_REF_LIMIT,
+            "omitted_items": total_items - COMPACT_REF_LIMIT,
+            "sha256": digest,
+        }),
+    );
 }
 
 fn is_missing_agent_task_run_metadata_error(error: &homeboy::core::Error) -> bool {
@@ -721,8 +1006,9 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), exit))
 }
 
-/// `agent-task reconcile <run-id>` always addresses exactly one durable run.
-/// It previews by default; `--apply` is the explicit operator authorization.
+/// `agent-task reconcile <run-id>` addresses one exact record or the explicit
+/// parent/attempt group named by a logical Cook ID. It previews by default;
+/// `--apply` is the explicit operator authorization.
 pub(super) fn reconcile_run(run_id: &str, dry_run: bool) -> CmdResult<Value> {
     let report = agent_task_service_direct::reconcile_run(run_id, dry_run)?;
     let exit = if report.failed > 0 { 1 } else { 0 };
@@ -1148,7 +1434,6 @@ pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
     };
     let mut value = serde_json::to_value(log).unwrap_or(Value::Null);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
-    bound_full_reader_payload(&mut value);
     Ok((value, 0))
 }
 
@@ -1307,11 +1592,11 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let root_cause = ranked_reasons
         .first()
         .cloned()
-        .map(collected_diagnostic_value);
+        .map(|item| collected_diagnostic_value_with_details(item, args.full));
     let diagnostic_chain = ranked_reasons
         .into_iter()
         .take(FAILURE_REASON_LIMIT)
-        .map(collected_diagnostic_value)
+        .map(|item| collected_diagnostic_value_with_details(item, args.full))
         .collect::<Vec<_>>();
 
     let missing_artifacts = aggregate
@@ -1341,6 +1626,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "retry_replay": retry.projection(),
         "next_commands": next_commands,
     });
+    attach_cook_completion(&mut value, &record);
     if let Some(selection) = target.selection {
         value["candidate_selection"] = selection;
     }
@@ -1367,9 +1653,34 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         retry.action.as_ref(),
         retry.continuation.as_ref(),
     );
-    bound_full_reader_payload(&mut value);
     preserve_controller_owner_placement(&mut value, run_id);
     Ok((value, 0))
+}
+
+/// Add the Cook-level completion fact to record readers. Aggregate success is
+/// nested provider evidence; only a durable PR receipt completes a requested
+/// Cook publication.
+fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRecord) {
+    let Ok(Some(recipe)) = agent_task_service::load_recipe_for_attempt(&record.run_id) else {
+        return;
+    };
+    let selected_candidate = record
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .and_then(|cook_id| agent_task_service_direct::select_cook_candidate(cook_id).ok())
+        .and_then(|selection| serde_json::to_value(selection).ok());
+    let finalization_requested = recipe.finalization["no_finalize"] != true;
+    if let Some(completion) = agent_task_service_direct::cook_completion(
+        selected_candidate.as_ref(),
+        finalization_requested,
+        // `cook_completion` resolves this receipt from the selected candidate
+        // whenever selection exists. This fallback only serves pre-index reports.
+        record.metadata.get("cook_finalization"),
+        Some(&record.run_id),
+    ) {
+        value["cook_completion"] = serde_json::to_value(completion).expect("completion serializes");
+    }
 }
 
 /// Basis marker for `next_actions`: the diagnosis mapped a typed failure
@@ -1780,7 +2091,311 @@ fn diagnose_run_ref(record: &AgentTaskRunRecord, runner_id: Option<&str>) -> Com
         updated_at: record.updated_at.clone(),
         finished_at: None,
         status_command: format!("homeboy agent-task status {run} --full"),
-        watch_command: format!("homeboy agent-task logs {run}"),
+        watch_command: format!("homeboy agent-task status {run} --watch"),
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    fn args() -> StatusArgs {
+        StatusArgs {
+            run_id: "run-1".to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: false,
+            strict_subject_exit: false,
+            no_runner_probe: false,
+            watch: true,
+            interval: "250ms".to_string(),
+            timeout: "2m".to_string(),
+        }
+    }
+
+    fn result(state: &str, conclusion: WatchConclusion) -> WatchResult<(Value, i32)> {
+        WatchResult {
+            item: (json!({ "run_id": "run-1", "state": state }), 0),
+            conclusion,
+            poll_count: 3,
+            waited: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn changed_status_emission_is_live_and_skips_identical_heartbeat_polls() {
+        let mut progress = StatusWatchProgress::default();
+        let mut emitted = Vec::new();
+        let running = json!({ "run_id": "run-1", "state": "running", "progress": 1 });
+        let succeeded = json!({ "run_id": "run-1", "state": "succeeded", "progress": 2 });
+
+        progress.observe(&running, 1, |line| emitted.push(line));
+        progress.observe(&running, 2, |line| emitted.push(line));
+        progress.observe(&succeeded, 3, |line| emitted.push(line));
+
+        let first: Value = serde_json::from_str(&emitted[0]).expect("first JSONL event");
+        let second: Value = serde_json::from_str(&emitted[1]).expect("second JSONL event");
+        assert_eq!(first["schema"], "homeboy/agent-task-status-watch-event/v1");
+        assert_eq!(first["event"], "status_changed");
+        assert_eq!(first["poll"], 1);
+        assert_eq!(first["run_id"], "run-1");
+        assert_eq!(first["state"], "running");
+        assert_eq!(first["latest"], running);
+        assert_eq!(
+            first["continuation_command"],
+            "homeboy agent-task status run-1 --watch"
+        );
+        assert_eq!(second["poll"], 3);
+        assert_eq!(second["state"], "succeeded");
+        assert_eq!(progress.changes.len(), 2);
+        assert_eq!(progress.changes[0]["poll"], 1);
+        assert_eq!(progress.changes[1]["poll"], 3);
+    }
+
+    #[test]
+    fn changed_status_ignores_volatile_read_metadata() {
+        let mut progress = StatusWatchProgress::default();
+        let mut emitted = Vec::new();
+        progress.observe(
+            &json!({ "run_id": "run-1", "state": "running", "updated_at": "2026-08-13T00:00:00Z" }),
+            1,
+            |line| emitted.push(line),
+        );
+        progress.observe(
+            &json!({ "run_id": "run-1", "state": "running", "updated_at": "2026-08-13T00:00:01Z" }),
+            2,
+            |line| emitted.push(line),
+        );
+
+        assert_eq!(emitted.len(), 1);
+    }
+
+    #[test]
+    fn changed_status_retention_and_live_output_are_bounded() {
+        let mut progress = StatusWatchProgress::default();
+        let mut emitted = Vec::new();
+        for poll in 1..=(STATUS_WATCH_CHANGE_LIMIT as u64 + 2) {
+            progress.observe(
+                &json!({ "run_id": "run-1", "state": "running", "progress": poll }),
+                poll,
+                |line| emitted.push(line),
+            );
+        }
+        let terminal_poll = STATUS_WATCH_CHANGE_LIMIT as u64 + 3;
+        progress.observe(
+            &json!({ "run_id": "run-1", "state": "succeeded", "progress": terminal_poll }),
+            terminal_poll,
+            |line| emitted.push(line),
+        );
+
+        assert_eq!(progress.changes.len(), STATUS_WATCH_CHANGE_LIMIT);
+        assert_eq!(progress.omitted, 3);
+        assert_eq!(emitted.len(), STATUS_WATCH_CHANGE_LIMIT + 3);
+        let first_overflow: Value = serde_json::from_str(&emitted[STATUS_WATCH_CHANGE_LIMIT])
+            .expect("first overflow event");
+        assert_eq!(first_overflow["poll"], STATUS_WATCH_CHANGE_LIMIT as u64 + 1);
+        assert_eq!(
+            first_overflow["latest"]["progress"],
+            STATUS_WATCH_CHANGE_LIMIT as u64 + 1
+        );
+        let overflow: Value =
+            serde_json::from_str(emitted.last().unwrap()).expect("overflow event");
+        assert_eq!(overflow["retained_limit_reached"], true);
+        assert_eq!(overflow["state"], "succeeded");
+        assert_eq!(overflow["poll"], terminal_poll);
+    }
+
+    struct ScriptedStatusPoller {
+        snapshots: RefCell<VecDeque<Value>>,
+    }
+
+    impl ScriptedStatusPoller {
+        fn new(snapshots: Vec<Value>) -> Self {
+            Self {
+                snapshots: RefCell::new(snapshots.into()),
+            }
+        }
+    }
+
+    impl WatchPoller for ScriptedStatusPoller {
+        type Item = (Value, i32);
+
+        fn poll(&self, _id: &str) -> homeboy::core::Result<Self::Item> {
+            let mut snapshots = self.snapshots.borrow_mut();
+            let snapshot = if snapshots.len() > 1 {
+                snapshots.pop_front().expect("scripted snapshot")
+            } else {
+                snapshots.front().expect("scripted snapshot").clone()
+            };
+            Ok((snapshot, 0))
+        }
+
+        fn is_terminal(&self, item: &Self::Item) -> bool {
+            status_is_terminal(&item.0)
+        }
+    }
+
+    #[test]
+    fn scripted_watch_emits_progress_before_returning_timeout_partial_status() {
+        let poller = ScriptedStatusPoller::new(vec![
+            json!({ "run_id": "run-1", "state": "queued" }),
+            json!({ "run_id": "run-1", "state": "running" }),
+        ]);
+        let clock = Cell::new(Duration::ZERO);
+        let mut progress = StatusWatchProgress::default();
+        let mut emitted = Vec::new();
+        let result = watch_loop(
+            &poller,
+            "run-1",
+            &WatchConfig {
+                interval: Duration::from_secs(1),
+                timeout: Some(Duration::from_secs(2)),
+            },
+            |duration| clock.set(clock.get() + duration),
+            || clock.get(),
+            |(snapshot, _), poll| progress.observe(snapshot, poll, |line| emitted.push(line)),
+        )
+        .expect("scripted status watch");
+        let (output, exit) = watch_status_output(&args(), result, progress);
+
+        assert_eq!(exit, TIMEOUT_EXIT_CODE);
+        assert_eq!(output["latest"]["state"], "running");
+        assert_eq!(output["changes"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            emitted.len(),
+            2,
+            "progress was emitted before timeout returned"
+        );
+        let queued: Value = serde_json::from_str(&emitted[0]).expect("queued event");
+        let running: Value = serde_json::from_str(&emitted[1]).expect("running event");
+        assert_eq!(queued["state"], "queued");
+        assert_eq!(running["state"], "running");
+    }
+
+    #[test]
+    fn terminal_success_returns_latest_status_and_zero() {
+        let (output, exit) = watch_status_output(
+            &args(),
+            result("succeeded", WatchConclusion::Terminal),
+            StatusWatchProgress {
+                changes: vec![json!({ "poll": 1, "status": { "state": "succeeded" } })],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(exit, 0);
+        assert_eq!(output["terminal"], true);
+        assert_eq!(output["latest"]["state"], "succeeded");
+        assert_eq!(output["changes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            output["continuation_command"],
+            "homeboy agent-task status run-1 --watch --interval 250ms --timeout 2m"
+        );
+    }
+
+    #[test]
+    fn terminal_failure_and_cancellation_exit_nonzero() {
+        for state in ["failed", "cancelled", "gate_failed", "finalization_failed"] {
+            let (_, exit) = watch_status_output(
+                &args(),
+                result(state, WatchConclusion::Terminal),
+                StatusWatchProgress::default(),
+            );
+            assert_eq!(exit, 1, "{state}");
+        }
+    }
+
+    #[test]
+    fn recipe_only_watch_uses_the_successful_one_shot_status_exit() {
+        let (output, exit) = watch_status_output(
+            &args(),
+            WatchResult {
+                item: (
+                    json!({
+                        "schema": "homeboy/agent-task-cook/v1",
+                        "run_id": "run-1",
+                        "status": "recipe_only_recovery_required"
+                    }),
+                    0,
+                ),
+                conclusion: WatchConclusion::Terminal,
+                poll_count: 1,
+                waited: Duration::ZERO,
+            },
+            StatusWatchProgress::default(),
+        );
+
+        assert_eq!(exit, 0);
+        assert_eq!(output["latest"]["status"], "recipe_only_recovery_required");
+    }
+
+    #[test]
+    fn timeout_retains_partial_runner_status_and_uses_shared_exit_code() {
+        let (output, exit) = watch_status_output(
+            &args(),
+            WatchResult {
+                item: (
+                    json!({
+                        "run_id": "run-1",
+                        "state": "running",
+                        "reconciled": true,
+                        "runner_probe": { "performed": true }
+                    }),
+                    0,
+                ),
+                conclusion: WatchConclusion::TimedOut,
+                poll_count: 5,
+                waited: Duration::from_secs(120),
+            },
+            StatusWatchProgress::default(),
+        );
+
+        assert_eq!(exit, TIMEOUT_EXIT_CODE);
+        assert_eq!(output["terminal"], false);
+        assert_eq!(output["timed_out"], true);
+        assert_eq!(output["latest"]["reconciled"], true);
+        assert_eq!(output["latest"]["runner_probe"]["performed"], true);
+    }
+
+    #[test]
+    fn bridge_snapshot_is_retained_without_projection_loss() {
+        let bridge = json!({
+            "schema": "homeboy/agent-task-run-status/v1",
+            "state": "succeeded",
+            "reconciled": true,
+            "normalized_events": [{ "type": "agent_task.state_changed" }]
+        });
+        let (output, exit) = watch_status_output(
+            &args(),
+            WatchResult {
+                item: (bridge.clone(), 0),
+                conclusion: WatchConclusion::Terminal,
+                poll_count: 1,
+                waited: Duration::ZERO,
+            },
+            StatusWatchProgress {
+                changes: vec![json!({ "poll": 1, "status": bridge })],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(exit, 0);
+        assert_eq!(output["latest"]["reconciled"], true);
+        assert!(output["latest"]["normalized_events"].is_array());
+    }
+
+    #[test]
+    fn terminality_keeps_active_states_open_and_accepts_unknown_terminal_states() {
+        for state in ["queued", "running", "in_flight"] {
+            assert!(!status_is_terminal(&json!({ "state": state })), "{state}");
+        }
+        assert!(status_is_terminal(&json!({ "state": "succeeded" })));
+        assert!(status_is_terminal(&json!({ "state": "failed" })));
+        assert!(status_is_terminal(&json!({ "state": "cancelled" })));
     }
 }
 
@@ -3373,7 +3988,11 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             class: cause.get("code")?.as_str()?.to_string(),
             message: cause.get("message")?.as_str()?.to_string(),
             source: "terminal_operation_failure".to_string(),
-            data: json!({ "field": cause.get("field") }),
+            data: diagnostic.get("details").cloned().unwrap_or_else(|| {
+                json!({
+                    "field": cause.get("field"),
+                })
+            }),
         });
     }
     let diagnostic = record.metadata.get("cook_controller_failure")?;
@@ -3386,7 +4005,11 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
         class: cause.get("code")?.as_str()?.to_string(),
         message: cause.get("message")?.as_str()?.to_string(),
         source: "controller_failure".to_string(),
-        data: json!({ "field": cause.get("field") }),
+        data: diagnostic.get("details").cloned().unwrap_or_else(|| {
+            json!({
+                "field": cause.get("field"),
+            })
+        }),
     })
 }
 
@@ -3504,6 +4127,17 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
     let provider_boundary_recorded =
         provider_handle_count > 0 || runner_job_id.is_some() || has_active_provider_execution;
     let local_provider_ownership = metadata.get("local_provider_ownership");
+    let local_supervisor = metadata.get("local_cook_supervisor").cloned().or_else(|| {
+        metadata
+            .get("detached_cook_handoff")
+            .filter(|handoff| handoff.get("supervisor_job_id").is_some())
+            .map(|handoff| {
+                json!({
+                    "job_id": handoff.get("supervisor_job_id"),
+                    "reattach_command": handoff.get("reattach_command"),
+                })
+            })
+    });
 
     json!({
         "status": if terminal { "terminal" } else if stale { "stale" } else if waiting_for_capacity { "waiting_for_capacity" } else { "active" },
@@ -3520,6 +4154,7 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
         },
         "provider_activity": provider_activity_summary(metadata),
         "supervision": supervision_summary(metadata),
+        "local_cook_supervisor": local_supervisor,
         "stale_reason": metadata.get("stale_running_reason"),
         "runner_queue": metadata.get("runner_queue"),
         "next_action": if terminal && candidate_recoverable {
@@ -4123,6 +4758,13 @@ fn evidence_is_test(kind: &str, uri: &str) -> bool {
 }
 
 fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
+    collected_diagnostic_value_with_details(item, false)
+}
+
+fn collected_diagnostic_value_with_details(
+    item: CollectedDiagnostic,
+    include_details: bool,
+) -> Value {
     let owner = diagnostic_owner(&item.class, &item.source);
     let mut value = json!({
         "task_id": item.task_id,
@@ -4131,7 +4773,9 @@ fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
         "source": item.source,
         "owner": owner,
     });
-    if let Some(details) = policy_denial_details(&item.data) {
+    if include_details && !item.data.is_null() {
+        value["details"] = bounded_diagnostic_value(&item.data);
+    } else if let Some(details) = policy_denial_details(&item.data) {
         value["details"] = details;
     }
     if let Some(field) = item.data.get("field").filter(|field| !field.is_null()) {
@@ -4939,6 +5583,29 @@ mod tests {
         assert_eq!(
             accepted_handoff["liveness"]["provider_boundary"]["runner_job_id"],
             "accepted-daemon-job"
+        );
+
+        let supervised = compact_status_summary(
+            &json!({
+                "run_id": "cook-attempt-1",
+                "state": "running",
+                "tasks": [],
+                "metadata": {
+                    "local_cook_supervisor": {
+                        "job_id": "controller-job-1",
+                        "reattach_command": "homeboy agent-task status cook-1 --full"
+                    }
+                }
+            }),
+            "cook-attempt-1",
+        );
+        assert_eq!(
+            supervised["liveness"]["local_cook_supervisor"]["job_id"],
+            "controller-job-1"
+        );
+        assert_eq!(
+            supervised["liveness"]["local_cook_supervisor"]["reattach_command"],
+            "homeboy agent-task status cook-1 --full"
         );
     }
 

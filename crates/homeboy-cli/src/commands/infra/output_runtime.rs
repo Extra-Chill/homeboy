@@ -330,6 +330,11 @@ impl CommandRun {
         self
     }
 
+    pub fn with_output_file_result(mut self, result: homeboy::core::Result<Value>) -> Self {
+        self.output_file_result = Some(result);
+        self
+    }
+
     pub fn with_command(mut self, command: impl Into<String>) -> Self {
         self.command = command.into();
         self
@@ -377,7 +382,8 @@ impl CommandRun {
         mode: CommandOutputFileMode,
     ) -> &homeboy::core::Result<Value> {
         match mode {
-            CommandOutputFileMode::TraceJsonSummaryArtifact => self
+            CommandOutputFileMode::TraceJsonSummaryArtifact
+            | CommandOutputFileMode::GenericEnvelope => self
                 .output_file_result
                 .as_ref()
                 .unwrap_or(&self.stdout_result),
@@ -688,14 +694,14 @@ mod tests {
     }
 
     #[test]
-    fn generic_output_file_uses_stdout_result() {
+    fn generic_output_file_prefers_explicit_output_file_result() {
         let run = run_with_output_file_result(Some(Ok(json!({ "kind": "summary" }))));
 
         assert_eq!(
             run.output_file_result(CommandOutputFileMode::GenericEnvelope)
                 .as_ref()
                 .unwrap(),
-            &json!({ "kind": "stdout" })
+            &json!({ "kind": "summary" })
         );
     }
 
@@ -752,6 +758,30 @@ mod tests {
                 .unwrap()
                 .len(),
             2 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn generic_output_file_writes_lossless_payload_when_stdout_is_projected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agent-task.json");
+        let large = "x".repeat(512 * 1024);
+        let run = CommandRun::from_stdout_result(
+            Ok(json!({ "stdout": "[omitted 524288 bytes; sha256=digest]" })),
+            0,
+        )
+        .with_output_file_result(Ok(json!({ "stdout": large })));
+
+        write_output_file(
+            &run,
+            CommandOutputFileMode::GenericEnvelope,
+            Some(path.to_str().expect("utf8 path")),
+        );
+
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            written["data"]["stdout"].as_str().unwrap().len(),
+            512 * 1024
         );
     }
 
@@ -824,7 +854,11 @@ mod tests {
 
         lease
             .finish(
-                &Ok(json!({ "status": "green_no_finalize", "latest_run_id": "run-current" })),
+                &Ok(json!({
+                    "status": "green_no_finalize",
+                    "latest_run_id": "run-current",
+                    "stdout": "x".repeat(512 * 1024),
+                })),
                 0,
                 &CommandIdentity::with_operation("agent-task", "cook"),
                 None,
@@ -835,6 +869,10 @@ mod tests {
         assert_eq!(terminal["schema"], "homeboy/command-result/v3");
         assert_eq!(terminal["success"], true);
         assert_eq!(terminal["data"]["latest_run_id"], "run-current");
+        assert_eq!(
+            terminal["data"]["stdout"].as_str().unwrap().len(),
+            512 * 1024
+        );
     }
 
     #[test]

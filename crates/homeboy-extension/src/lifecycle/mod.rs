@@ -333,9 +333,9 @@ mod update;
 pub use homeboy_core::extension_update_check::{read_source_revision, read_source_url};
 #[cfg(test)]
 use update::is_extension_update_workdir_clean;
-pub use update::update;
 pub(crate) use update::write_requested_source_ref;
 pub(crate) use update::write_source_metadata;
+pub use update::{extension_update_dirty_paths, update, update_linked_group};
 
 /// Uninstall a extension. Automatically detects symlinks vs cloned directories.
 /// - Symlinked extensions: removes symlink only (source preserved)
@@ -1065,7 +1065,7 @@ exec '{}' "$@"
             .expect("source revision metadata");
 
         assert!(
-            is_extension_update_workdir_clean(repo, &extension_dir),
+            is_extension_update_workdir_clean(repo, &extension_dir).is_ok(),
             "generated extension metadata should not block update"
         );
     }
@@ -1087,9 +1087,12 @@ exec '{}' "$@"
         .expect("source url metadata");
         fs::write(extension_dir.join("notes.txt"), "user work").expect("user-authored dirty file");
 
+        let dirty_paths = is_extension_update_workdir_clean(repo, &extension_dir)
+            .expect_err("user-authored dirt should still block update");
         assert!(
-            !is_extension_update_workdir_clean(repo, &extension_dir),
-            "user-authored dirt should still block update"
+            dirty_paths.iter().any(|path| path == "wordpress/notes.txt"),
+            "the gate must name the offending paths, got {:?}",
+            dirty_paths
         );
     }
 

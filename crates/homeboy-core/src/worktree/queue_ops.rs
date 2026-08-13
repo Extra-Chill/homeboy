@@ -80,7 +80,7 @@ pub(super) fn queue_row(
 
 pub(super) fn worktree_create_command(
     options: &WorktreeQueueCreateOptions,
-    branch: &str,
+    request: &WorktreeQueueCreateRequest,
 ) -> Vec<String> {
     let mut args = vec![
         "homeboy".to_string(),
@@ -88,11 +88,11 @@ pub(super) fn worktree_create_command(
         "create".to_string(),
         options.repo.clone(),
         "--branch".to_string(),
-        branch.to_string(),
+        request.branch.clone(),
         "--from".to_string(),
         options.from.clone(),
     ];
-    if let Some(task_url) = &options.task_url {
+    if let Some(task_url) = &request.task_url {
         args.push("--task-url".to_string());
         args.push(task_url.clone());
     }

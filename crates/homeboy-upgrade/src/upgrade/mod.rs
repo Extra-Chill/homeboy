@@ -10,8 +10,8 @@ mod types;
 pub mod update_check;
 mod validation;
 
-pub(crate) use admission::with_controller_upgrade_admission;
 pub use admission::{
+    controller_upgrade_admission, ensure_controller_upgrade_admission,
     register_controller_upgrade_admission_provider, ControllerUpgradeAdmission,
     ControllerUpgradeAdmissionProvider, ControllerUpgradeBlocker,
 };
@@ -26,9 +26,11 @@ pub use release_catalog::{
 };
 pub(crate) use runner_upgrade_provider::with_runner_upgrade;
 pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgradeProvider};
+pub use services::restart_extension_services;
 pub use types::{
-    ExtensionUpgradeEntry, InstallMethod, RunnerDaemonDriftEntry, RunnerExtensionSyncEntry,
-    RunnerUpgradeEntry, ServiceRestartEntry, UpgradeComponentStatus, UpgradeResult, VersionCheck,
+    ExtensionUpgradeEntry, ExtensionUpgradeSkip, InstallMethod, RunnerDaemonDriftEntry,
+    RunnerExtensionSyncEntry, RunnerUpgradeEntry, ServiceRestartEntry, UpgradeComponentStatus,
+    UpgradeResult, VersionCheck,
 };
 pub use validation::check_for_updates;
 

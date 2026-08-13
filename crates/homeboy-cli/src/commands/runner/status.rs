@@ -19,9 +19,10 @@ use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
     RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
     RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOperatorSummary, RunnerOutput,
-    RunnerRuntimeDiagnostics, RunnerRuntimePackageDiagnostics, RunnerStatusInspection,
-    RunnerStatusUnavailable, RunnerToolDiagnostics, RunnerTruncation, RunnerWorkflowBinaryGuidance,
-    RuntimeDiagnostic, RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
+    RunnerReconciliationOutcome, RunnerRuntimeDiagnostics, RunnerRuntimePackageDiagnostics,
+    RunnerStatusInspection, RunnerStatusUnavailable, RunnerToolDiagnostics, RunnerTruncation,
+    RunnerWorkflowBinaryGuidance, RuntimeDiagnostic, RuntimePackageOutput, RuntimeProbeValue,
+    SelectedRuntimeOutput,
 };
 
 const DEFAULT_STATUS_SESSION_LIMIT: usize = 20;
@@ -190,31 +191,137 @@ pub(super) fn status(
 }
 
 pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
-    let report = runner::reconcile_status(id)?;
+    let outcome = runner::reconcile_status_with_outcome(id)?;
+    reconcile_output(id, outcome.status, outcome.retired_generation_ids)
+}
+
+pub(super) fn reconcile_output(
+    id: &str,
+    report: homeboy::runner::runners::RunnerStatusReport,
+    retired_generation_ids: Vec<String>,
+) -> CmdResult<RunnerOutput> {
     let generation_inventory =
         runner::runner_generation_inventory_for_session(id, report.session.as_ref())?;
     let generation_owners =
         runner::runner_generation_job_owners_for_session(id, report.session.as_ref())?;
+    let admission_summary = report.admission_summary_with_generations(
+        &generation_inventory,
+        &generation_owners,
+        generation_inventory.len(),
+    );
+    let reconciliation =
+        reconciliation_outcome(id, retired_generation_ids, &report, &admission_summary);
+    let exit_code = if reconciliation.status == "converged" {
+        0
+    } else {
+        1
+    };
+    let reconcile_command = format!("homeboy runner reconcile {}", shell_arg(id));
     Ok((
         RunnerOutput {
             command: "runner.reconcile".to_string(),
             id: Some(id.to_string()),
             extra: RunnerExtra {
-                admission_summary: Some(report.admission_summary_with_generations(
-                    &generation_inventory,
-                    &generation_owners,
-                    generation_inventory.len(),
-                )),
+                admission_summary: Some(admission_summary),
+                reconciliation: Some(reconciliation),
                 connection: Some(RunnerConnectionOutput::Status(Box::new(report.clone()))),
                 generation_inventory,
                 operator_hints: runner_status_operator_hints(&report),
-                operator_commands: runner_status_operator_commands(&report),
+                // Reconcile has already consumed the current evidence. A repeat
+                // is valid only after new evidence, never as its own follow-up.
+                operator_commands: runner_status_operator_commands(&report)
+                    .into_iter()
+                    .filter(|command| command.command != reconcile_command)
+                    .collect(),
                 ..Default::default()
             },
             ..Default::default()
         },
-        0,
+        exit_code,
     ))
+}
+
+pub(super) fn reconciliation_outcome(
+    runner_id: &str,
+    retired_generation_ids: Vec<String>,
+    report: &homeboy::runner::runners::RunnerStatusReport,
+    admission: &homeboy::runner::runners::RunnerAdmissionSummary,
+) -> RunnerReconciliationOutcome {
+    let retired_generation_count = retired_generation_ids.len();
+    let unresolved_projection = admission.unresolved_retained_projection_count > 0
+        || !admission.unresolved_generation_ids.is_empty();
+    if admission.accepting_jobs && !unresolved_projection {
+        return RunnerReconciliationOutcome {
+            status: "converged",
+            retired_generation_count,
+            retired_generation_ids,
+            remaining_blocker: None,
+            next_action: None,
+        };
+    }
+
+    let remaining_blocker = if unresolved_projection {
+        "unresolved_generation_projection".to_string()
+    } else if !admission.connected {
+        "runner_disconnected".to_string()
+    } else if !admission.daemon_fresh {
+        daemon_freshness_blocker(report)
+    } else if !admission.daemon_compatible {
+        "daemon_compatibility".to_string()
+    } else if admission.blocking_generation.is_some() {
+        "retained_generation_ownership".to_string()
+    } else {
+        "admission_unavailable".to_string()
+    };
+    let reconcile_command = format!("homeboy runner reconcile {}", shell_arg(runner_id));
+    let next_action = admission
+        .next_action
+        .as_ref()
+        .filter(|action| *action != &reconcile_command)
+        .cloned()
+        .or_else(|| {
+            Some(format!(
+                "homeboy runner status {} --full",
+                shell_arg(runner_id)
+            ))
+        });
+
+    RunnerReconciliationOutcome {
+        status: if retired_generation_count > 0 {
+            "partial_progress"
+        } else {
+            "blocked"
+        },
+        retired_generation_count,
+        retired_generation_ids,
+        remaining_blocker: Some(remaining_blocker),
+        next_action,
+    }
+}
+
+fn daemon_freshness_blocker(report: &homeboy::runner::runners::RunnerStatusReport) -> String {
+    match report
+        .daemon_freshness
+        .as_ref()
+        .and_then(|freshness| freshness.stale_reason_code)
+    {
+        Some(reason) => format!("daemon_{}", daemon_stale_reason_code(reason)),
+        None => "daemon_freshness_unavailable".to_string(),
+    }
+}
+
+fn daemon_stale_reason_code(reason: DaemonStaleReasonCode) -> &'static str {
+    match reason {
+        DaemonStaleReasonCode::LeaseMissing => "lease_missing",
+        DaemonStaleReasonCode::LeaseCorrupt => "lease_corrupt",
+        DaemonStaleReasonCode::LeaseSchemaMismatch => "lease_schema_mismatch",
+        DaemonStaleReasonCode::PidDead => "pid_dead",
+        DaemonStaleReasonCode::BuildIdentityMismatch => "build_identity_mismatch",
+        DaemonStaleReasonCode::BinaryHashMismatch => "binary_hash_mismatch",
+        DaemonStaleReasonCode::VersionMismatch => "version_mismatch",
+        DaemonStaleReasonCode::RuntimePathsDrift => "runtime_paths_drift",
+        DaemonStaleReasonCode::TransportUnreachable => "transport_unreachable",
+    }
 }
 
 /// Operator-facing hints for read-only probes that hit their bound while this
@@ -1703,6 +1810,7 @@ mod tests {
                 Some("homeboy 0.259.0+daemon".to_string()),
                 Some("homeboy 0.262.0+binary".to_string()),
             )),
+            configured_job_binary_build_identity: None,
             daemon_freshness: None,
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),

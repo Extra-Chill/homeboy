@@ -157,6 +157,11 @@ pub struct ResidentServiceConfig {
     /// Use this for non-systemd supervisors or custom restart logic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_command: Option<String>,
+
+    /// Extensions whose changed source revision requires this service to reload.
+    /// An empty list means the service is controller-binary-resident only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_ids: Vec<String>,
 }
 
 impl Default for HomeboyConfig {
@@ -628,6 +633,11 @@ pub struct WorktreeProviderCommands {
     /// `{cleanup_policy}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ensure: Option<Vec<String>>,
+    /// Read-only projection of an `ensure` request. It receives the same
+    /// placeholders as `ensure` and returns the prospective workspace through
+    /// `list_result_mapping`, without creating a branch or checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_preview: Option<Vec<String>>,
     /// Maximum time allowed for the cleanup preview command.
@@ -660,6 +670,7 @@ impl Default for WorktreeProviderCommands {
             resolve_not_found_exit_codes: Vec::new(),
             list: None,
             ensure: None,
+            plan: None,
             cleanup_preview: None,
             cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
             cleanup_apply: None,
@@ -1095,6 +1106,7 @@ mod tests {
             resolve_not_found_exit_codes: Vec::new(),
             list: Some(vec!["provider".to_string(), "list".to_string()]),
             ensure: Some(vec!["provider".to_string(), "ensure".to_string()]),
+            plan: None,
             cleanup_preview: None,
             cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
             cleanup_apply: None,

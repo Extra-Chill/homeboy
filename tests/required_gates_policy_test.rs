@@ -168,14 +168,35 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
         let reusable_test = context == "homeboy / Test"
             && ci_workflow().contains("uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@")
             && ci_workflow().contains("commands: review test");
+        // Anchored to a whole YAML key. A bare `contains("title: Test")` also
+        // matches `comment-section-title: Test`, which made this assertion — and
+        // the shipped validator's matching branch — vacuous for `homeboy / Test`.
+        let declares_matrix_title = ci_workflow().contains("name: homeboy / ${{ matrix.title }}")
+            && ci_workflow()
+                .lines()
+                .any(|line| line.trim() == format!("title: {matrix_title}"));
         assert!(
             ci_workflow().contains(&format!("name: {context}"))
-                || (ci_workflow().contains("name: homeboy / ${{ matrix.title }}")
-                    && ci_workflow().contains(&format!("title: {matrix_title}")))
+                || declares_matrix_title
                 || reusable_test,
             "required context {context:?} is not emitted by the always-run CI workflow"
         );
     }
+
+    // The reusable-workflow branch is the ONLY thing that can legitimately
+    // satisfy `homeboy / Test`: there is no literal `name: homeboy / Test`, and
+    // no matrix entry titled Test. Pin that, so a future edit cannot leave the
+    // context green through an unrelated substring again.
+    assert!(
+        !ci_workflow().contains("name: homeboy / Test"),
+        "if a literal Test job appears, the reusable-workflow branch below is no longer load-bearing and this test must be revisited"
+    );
+    assert!(
+        !ci_workflow()
+            .lines()
+            .any(|line| line.trim() == "title: Test"),
+        "no matrix entry is titled Test, so the matrix branch must not be what keeps `homeboy / Test` declared"
+    );
     assert!(
         !ci_workflow().contains("paths:"),
         "a required CI check cannot be path-filtered because unrelated PRs would wait forever"
@@ -216,6 +237,10 @@ fn ci_job_claims_only_the_declaration_and_reports_live_enforcement() {
     assert!(
         !ci_workflow().contains("name: homeboy / Required Gates Policy"),
         "'Required Gates Policy' asserts live enforcement this job does not verify"
+    );
+    assert!(
+        ci_workflow().contains("bash .github/validate-action-pin.sh"),
+        "the declaration job must verify reusable-workflow pins resolve to commits"
     );
     assert!(
         ci_workflow().contains("bash .github/validate-required-gates.sh --report"),
@@ -629,6 +654,45 @@ fn unknown_mode_is_refused() {
     assert_eq!(output.status.code(), Some(2));
     assert!(
         stderr_of(&output).contains("usage:"),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+/// The pin validator's parser must be exercisable without network: a workflow
+/// with no SHA-pinned reusable call has nothing to dereference and must not be
+/// treated as a failure. The positive and negative dereferencing paths need the
+/// GitHub API and are exercised by the `Required Gates Declaration` job itself.
+#[test]
+fn action_pin_validator_is_a_noop_without_sha_pinned_reusable_workflows() {
+    let dir = Scratch::new("action-pin-no-pins");
+    let workflow = dir.write(
+        "ci.yml",
+        "jobs:\n  homeboy:\n    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2\n",
+    );
+    let output = Command::new("bash")
+        .arg(".github/validate-action-pin.sh")
+        .env("ACTION_PIN_WORKFLOW", &workflow)
+        .output()
+        .expect("run validate-action-pin.sh");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert!(
+        stdout_of(&output).contains("nothing to verify"),
+        "{}",
+        stdout_of(&output)
+    );
+}
+
+#[test]
+fn action_pin_validator_refuses_a_missing_workflow() {
+    let output = Command::new("bash")
+        .arg(".github/validate-action-pin.sh")
+        .env("ACTION_PIN_WORKFLOW", "/nonexistent/ci.yml")
+        .output()
+        .expect("run validate-action-pin.sh");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr_of(&output).contains("not found"),
         "{}",
         stderr_of(&output)
     );

@@ -1358,6 +1358,70 @@ mod tests {
         });
     }
 
+    /// A stale attachment (the checkout was moved or deleted) must not blind the
+    /// operator to every other component in a read-only project-wide check (#12214).
+    #[test]
+    fn check_mode_skips_component_with_absent_local_path_instead_of_aborting() {
+        with_isolated_home(|_| {
+            let present = TempDir::new().expect("present dir");
+            write_component_manifest(present.path(), "present", None);
+            let absent = present.path().join("deleted-checkout");
+
+            let project = project_with_component_dirs(&[
+                ("absent", absent.as_path()),
+                ("present", present.path()),
+            ]);
+
+            // --all --check: requested_ids empty, check = true.
+            let loaded = load_project_components(&project, &[], true)
+                .expect("check mode must not hard-fail on an absent local_path");
+
+            // Every component with a valid checkout is still checked.
+            assert_eq!(
+                loaded
+                    .deployable
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["present"]
+            );
+
+            // The absent one is a scoped finding carrying the remedy, not a silent drop.
+            assert_eq!(loaded.extension_skipped.len(), 1);
+            let skip = &loaded.extension_skipped[0];
+            assert_eq!(skip.id, "absent");
+            assert!(
+                skip.reason.contains("does not exist") && skip.reason.contains("attach-path"),
+                "reason should name the missing checkout and its remedy, got: {}",
+                skip.reason
+            );
+        });
+    }
+
+    /// The absent-checkout skip is scoped to the read-only path: a real deploy
+    /// must still fail closed rather than deploy from a path that does not exist.
+    #[test]
+    fn non_check_mode_still_hard_fails_on_absent_local_path() {
+        with_isolated_home(|_| {
+            let present = TempDir::new().expect("present dir");
+            write_component_manifest(present.path(), "present", None);
+            let absent = present.path().join("deleted-checkout");
+
+            let project = project_with_component_dirs(&[
+                ("absent", absent.as_path()),
+                ("present", present.path()),
+            ]);
+
+            let err = match load_project_components(&project, &[], false) {
+                Ok(_) => panic!("non-check mode must hard-fail on an absent local_path"),
+                Err(err) => err,
+            };
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("missing local_path"));
+        });
+    }
+
     #[test]
     fn non_check_mode_still_hard_fails_on_missing_extension() {
         with_isolated_home(|_| {

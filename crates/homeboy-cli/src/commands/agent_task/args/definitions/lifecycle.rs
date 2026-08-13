@@ -22,6 +22,12 @@ pub struct RunArgs {
     pub timeout_ms: Option<u64>,
 }
 #[derive(Args, Debug)]
+pub struct RunNextArgs {
+    /// Claim only queued child runs belonging to this durable fanout.
+    #[arg(long, value_name = "ID")]
+    pub fanout: Option<String>,
+}
+#[derive(Args, Debug)]
 pub struct SubmitArgs {
     /// Agent-task plan as a JSON spec: inline JSON, `@FILE` to read a file, or
     /// `-` to read stdin. A bare path is NOT accepted — use `@/path/plan.json`.
@@ -53,7 +59,7 @@ pub struct LifecycleReadArgs {
     pub no_runner_probe: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct StatusArgs {
     pub run_id: String,
     #[arg(long, conflicts_with = "bridge")]
@@ -73,6 +79,25 @@ pub struct StatusArgs {
     pub strict_subject_exit: bool,
     #[arg(long = "no-runner-probe", conflicts_with = "bridge")]
     pub no_runner_probe: bool,
+    /// Follow this durable status until it reaches a terminal state or the timeout expires.
+    #[arg(long)]
+    pub watch: bool,
+    /// Delay between status reads while following. Accepts ms, s, m, h, or d.
+    #[arg(
+        long,
+        default_value = "5s",
+        value_name = "DURATION",
+        requires = "watch"
+    )]
+    pub interval: String,
+    /// Total time to follow before returning the latest partial status. Accepts ms, s, m, h, or d.
+    #[arg(
+        long,
+        default_value = "30m",
+        value_name = "DURATION",
+        requires = "watch"
+    )]
+    pub timeout: String,
 }
 
 impl From<StatusArgs> for LifecycleReadArgs {
@@ -265,6 +290,49 @@ mod tests {
     }
 
     #[test]
+    fn status_watch_uses_bounded_duration_flags() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "status",
+            "run-a",
+            "--watch",
+            "--interval",
+            "250ms",
+            "--timeout",
+            "2m",
+        ])
+        .expect("watch status parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::Status(args) = agent_task.command else {
+            panic!("expected status command");
+        };
+        assert!(args.watch);
+        assert_eq!(args.interval, "250ms");
+        assert_eq!(args.timeout, "2m");
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "status",
+            "run-a",
+            "--interval",
+            "1s",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "status",
+            "run-a",
+            "--timeout",
+            "1m",
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn promotion_provider_help_documents_argv_contract_for_cook_review_and_promote() {
         for command in ["cook", "review", "promote"] {
             let Err(error) = Cli::try_parse_from(["homeboy", "agent-task", command, "--help"])
@@ -289,6 +357,44 @@ mod tests {
             );
             assert!(help.contains("Migrate `--provider-command"), "{help}");
         }
+    }
+
+    #[test]
+    fn promote_and_finalize_pr_parse_full_output() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "promote",
+            "run-a",
+            "--to-worktree",
+            "repo@task",
+            "--full",
+        ])
+        .expect("promote full parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent task")
+        };
+        let AgentTaskCommand::Promote(args) = agent_task.command else {
+            panic!("promote")
+        };
+        assert!(args.full);
+
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "finalize-pr",
+            "--recover",
+            "run-a",
+            "--full",
+        ])
+        .expect("finalize full parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent task")
+        };
+        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
+            panic!("finalize")
+        };
+        assert!(args.full);
     }
 }
 #[derive(Args, Debug)]
@@ -376,6 +482,9 @@ pub struct PromoteArgs {
     pub artifact_id: Option<String>,
     #[arg(long)]
     pub dry_run: bool,
+    /// Include complete promotion and gate evidence.
+    #[arg(long)]
+    pub full: bool,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
 }
@@ -407,6 +516,9 @@ pub struct AdoptArgs {
 }
 #[derive(Args, Debug)]
 pub struct FinalizePrArgs {
+    /// Include complete finalization and gate evidence.
+    #[arg(long)]
+    pub full: bool,
     /// Hydrate finalization from a durable Cook recipe or a validated manual-finalization record.
     #[arg(
         long,

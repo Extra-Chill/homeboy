@@ -230,13 +230,14 @@ pub use connection::{
     close_reconnected_job_log_owner, connect, connect_reverse, connect_with_live_lease_adoption,
     connect_with_orphan_adoption, diagnostic_status, disconnect, disconnect_local_recovery,
     peer_session_maintenance, persisted_status, persisted_status_until, persisted_statuses,
-    reconcile_status, reconcile_terminal_jobs, reconnect_job_log_owner, reverse_broker_artifact,
-    reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content, status,
-    statuses, statuses_indexed, submit_reverse_broker_job, PeerSessionMaintenanceReport,
+    reconcile_status, reconcile_status_with_outcome, reconcile_terminal_jobs,
+    reconnect_job_log_owner, reverse_broker_artifact, reverse_broker_artifact_content,
+    reverse_broker_reconcile, runner_artifact_content, status, statuses, statuses_indexed,
+    submit_reverse_broker_job, PeerSessionMaintenanceReport,
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,
-    daemon_lab_handoff_capabilities, local_live_session, status_for_admission,
+    daemon_lab_handoff_capabilities, status_for_admission,
 };
 #[allow(
     dead_code,
@@ -285,9 +286,9 @@ pub(crate) use git_dependency_materialization::{
 pub use homeboy_refresh::{
     plan_homeboy_binary_refresh, refresh_homeboy_binary, runner_dev_sync,
     HomeboyBinaryRefreshFailure, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
-    HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, HomeboyRefreshPhase,
-    HomeboyRefreshReadiness, HomeboyRefreshReadinessState, RunnerDevSyncExtensionProvenance,
-    RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
+    HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, HomeboyControllerContinuationAction,
+    HomeboyRefreshPhase, HomeboyRefreshReadiness, HomeboyRefreshReadinessState,
+    RunnerDevSyncExtensionProvenance, RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
 };
 pub use job_preparation::register as register_runner_job_preparation_provider;
 pub use lab::offload::hydrate_runner_workspace_dependencies;
@@ -332,7 +333,8 @@ pub use session::{
     RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner, RunnerMutationArtifacts,
     RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerSession, RunnerSessionRole,
     RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
-    RunnerTunnelMode, RunnerUnresolvedJobOwner, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
+    RunnerTunnelMode, RunnerTunnelProcessStartIdentity, RunnerUnresolvedJobOwner,
+    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};

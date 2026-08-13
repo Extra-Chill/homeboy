@@ -38,6 +38,7 @@ pub fn run_command_output(
                 crate::commands::agent_task::AgentTaskCommand::Cook(_)
             ) {
                 if let Some(path) = output_file {
+                    let full = agent_task_requests_full_output(&args);
                     let lease = match super::output_runtime::CookOutputLease::claim(path) {
                         Ok(lease) => lease,
                         Err(error) => {
@@ -72,25 +73,20 @@ pub fn run_command_output(
                         return CommandRun::from_stdout_result(Err(error), 2)
                             .with_command(spec.name);
                     }
-                    return CommandRun::from_stdout_result(result, exit_code)
+                    return agent_task_command_run(result, exit_code, summary_kind, full)
                         .with_command(spec.name)
                         .with_output_file_already_written();
                 }
             }
-            command_run_with_summary(
-                dispatch(Commands::AgentTask(args), spec, placement),
-                |payload, exit_code| {
-                    if let Some(output_file) = run_from_spec_output_ref {
-                        return render_controller_run_from_spec_output_ref(
-                            payload,
-                            exit_code,
-                            output_file,
-                        );
-                    }
-
-                    summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
-                },
-            )
+            let full = agent_task_requests_full_output(&args);
+            let result = dispatch(Commands::AgentTask(args), spec, placement);
+            if let Some(output_file) = run_from_spec_output_ref {
+                command_run_with_summary(result, |payload, exit_code| {
+                    render_controller_run_from_spec_output_ref(payload, exit_code, output_file)
+                })
+            } else {
+                agent_task_command_run(result.0, result.1, summary_kind, full)
+            }
         }
         Commands::Runner(args) => runner::run_command_output(args),
         Commands::Activity(args) => command_run_with_summary(
@@ -174,6 +170,50 @@ fn command_run_with_summary(
             stderr: None,
         },
     )
+}
+
+/// `--output` is the durable, lossless response artifact. Stdout is an operator
+/// projection only, with the same command payload schema and bounded evidence.
+fn agent_task_command_run(
+    output_file_result: homeboy::core::Result<Value>,
+    exit_code: i32,
+    summary_kind: Option<super::agent_task_summary::AgentTaskSummaryKind>,
+    full: bool,
+) -> CommandRun {
+    let stdout_result = output_file_result.clone().map(|mut value| {
+        if !full {
+            crate::commands::agent_task::status::project_operator_output(&mut value);
+        }
+        value
+    });
+    let summary_stdout = stdout_result
+        .as_ref()
+        .ok()
+        .and_then(|payload| summary_kind.and_then(|kind| render_agent_task_summary(kind, payload)));
+    CommandRun::from_command_stdout_result("agent-task", stdout_result, exit_code)
+        .with_output_file_result(output_file_result)
+        .with_presentation(CommandPresentation {
+            stdout: summary_stdout,
+            stderr: None,
+        })
+}
+
+fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTaskArgs) -> bool {
+    use crate::commands::agent_task::AgentTaskCommand;
+
+    match &args.command {
+        AgentTaskCommand::Cook(args) => args.full,
+        AgentTaskCommand::CookContinue(args) => args.full,
+        AgentTaskCommand::Status(args) => args.full,
+        AgentTaskCommand::Artifacts(args) | AgentTaskCommand::Resume(args) => args.full,
+        AgentTaskCommand::Evidence(args) => args.full,
+        AgentTaskCommand::Diagnose(args) => args.full,
+        AgentTaskCommand::Review(args) => args.full,
+        AgentTaskCommand::Promote(args) => args.full,
+        AgentTaskCommand::Adopt(args) => args.full,
+        AgentTaskCommand::FinalizePr(args) => args.full,
+        _ => false,
+    }
 }
 
 fn agent_task_controller_run_from_spec_output_ref_eligible<'a>(
@@ -381,6 +421,9 @@ mod tests {
                 full: false,
                 no_runner_probe: false,
                 strict_subject_exit: false,
+                watch: false,
+                interval: "5s".to_string(),
+                timeout: "30m".to_string(),
             }),
         };
 
@@ -409,6 +452,26 @@ mod tests {
             )
             .as_ref()
             .expect("output-file payload"),
+            &payload
+        );
+    }
+
+    #[test]
+    fn agent_task_stdout_is_bounded_while_output_file_result_is_lossless() {
+        let payload = serde_json::json!({ "stdout": "x".repeat(512 * 1024) });
+        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false);
+
+        assert!(
+            run.stdout_result.as_ref().expect("stdout")["stdout"]
+                .as_str()
+                .expect("string schema preserved")
+                .len()
+                < 256
+        );
+        assert_eq!(
+            run.output_file_result(crate::command_contract::CommandOutputFileMode::GenericEnvelope)
+                .as_ref()
+                .expect("lossless output file"),
             &payload
         );
     }

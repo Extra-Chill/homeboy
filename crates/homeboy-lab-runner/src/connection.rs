@@ -149,8 +149,9 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
     let Some(proxy) = controller_proxy_from_env()? else {
         return Ok(None);
     };
-    let tunnel = remote_daemon::open_reverse_proxy_tunnel(server, &proxy.host, proxy.port);
+    let mut tunnel = remote_daemon::open_reverse_proxy_tunnel(server, &proxy.host, proxy.port);
     if !tunnel.success {
+        tunnel.contain_child();
         return Err(Error::validation_invalid_argument(
             "controller_proxy",
             format!(
@@ -162,11 +163,12 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
         ));
     }
     let tunnel_pid = tunnel.pid.expect("remote SSH forward has a child process");
-    let tunnel_process_start_identity = capture_tunnel_process_start_identity(Some(tunnel_pid))?;
     let port = tunnel.stderr.parse::<u16>().map_err(|_| {
-        terminate_tunnel_if_owned_parts(tunnel_pid, tunnel_process_start_identity.as_ref());
+        tunnel.contain_child();
         Error::internal_unexpected("controller proxy forward returned no allocated port")
     })?;
+    let tunnel_process_start_identity = tunnel.process_start_identity.clone();
+    tunnel.release_child();
     Ok(Some(RunnerProxyForward {
         runner_url: format!("{}://127.0.0.1:{port}", proxy.scheme),
         tunnel_pid,
@@ -197,7 +199,7 @@ pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String
             ));
         }
         if let Some(forward) = session.proxy_forward.as_ref() {
-            if homeboy_core::process::pid_is_running(forward.tunnel_pid) {
+            if proxy_forward_is_owned(forward, homeboy_core::process::process_start_identity) {
                 return Ok(forward.runner_url.clone());
             }
         }
@@ -253,6 +255,32 @@ pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String
         }
         Ok(forward.runner_url)
     })
+}
+
+fn proxy_forward_is_owned<Inspect>(forward: &RunnerProxyForward, inspect: Inspect) -> bool
+where
+    Inspect:
+        Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
+{
+    let Some(expected) = forward.tunnel_process_start_identity.as_ref() else {
+        return false;
+    };
+    let actual = inspect(forward.tunnel_pid)
+        .ok()
+        .flatten()
+        .map(|identity| match identity {
+            homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+            }
+            homeboy_core::process::ProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            } => RunnerTunnelProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            },
+        });
+    actual.as_ref() == Some(expected)
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
@@ -534,7 +562,7 @@ fn cleanup_direct_generation_with<Fallback, Tunnel>(
 ) -> Result<()>
 where
     Fallback: FnMut(u32) -> Result<()>,
-    Tunnel: FnMut(u32),
+    Tunnel: FnMut(&RunnerSession),
 {
     let cleanup_result = match graceful_stop {
         Ok(()) => Ok(()),
@@ -548,9 +576,7 @@ where
             None => Err(graceful_error),
         },
     };
-    if let Some(pid) = session.tunnel_pid {
-        terminate_tunnel(pid);
-    }
+    terminate_tunnel(session);
     cleanup_result
 }
 
@@ -1801,7 +1827,8 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let session = read_session_for_status(runner_id)?;
     let state = status_session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
-    let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
+    let (stale_daemon, configured_job_binary_build_identity) =
+        stale_daemon_warning(&runner, session.as_ref(), connected)?;
     let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
     let mut daemon_freshness =
         local_daemon_freshness.or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
@@ -1912,6 +1939,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         state,
         session,
         stale_daemon,
+        configured_job_binary_build_identity,
         daemon_freshness,
         active_jobs,
         active_runner_jobs,
@@ -1930,6 +1958,13 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
 /// This is an explicit lifecycle command because it may persist observations,
 /// promote admission, stop a drained daemon, and terminate its local tunnel.
 pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
+    reconcile_status_with_outcome(runner_id).map(|outcome| outcome.status)
+}
+
+/// Reconcile a runner and retain the exact generations this operation retired.
+/// The report is a fresh postcondition observation; retirement IDs come only
+/// from the generation reconciler's locked removal path.
+pub fn reconcile_status_with_outcome(runner_id: &str) -> Result<RunnerReconcileStatusOutcome> {
     let runner = load(runner_id)?;
     let mut report = status(runner_id)?;
     if report.connected {
@@ -1941,11 +1976,13 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
     if report.connected {
         reconcile_terminal_jobs(runner_id)?;
     }
-    if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(&runner) {
-        super::generation_store::reconcile_with_ssh(runner_id, report.session.as_ref(), &client)?;
+    let generation_reconcile = if let Ok(Some((_, _, client))) =
+        remote_daemon::resolve_ssh_runner(&runner)
+    {
+        super::generation_store::reconcile_with_ssh(runner_id, report.session.as_ref(), &client)?
     } else {
-        super::generation_store::reconcile(runner_id, report.session.as_ref())?;
-    }
+        super::generation_store::reconcile(runner_id, report.session.as_ref())?
+    };
     if report.connected {
         if let (Some(session), Some(_)) =
             (report.session.as_ref(), report.daemon_freshness.as_ref())
@@ -1953,7 +1990,16 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
             super::generation_store::reconcile_admission_session(runner_id, session)?;
         }
     }
-    status(runner_id)
+    Ok(RunnerReconcileStatusOutcome {
+        status: status(runner_id)?,
+        retired_generation_ids: generation_reconcile.retired_generation_ids,
+    })
+}
+
+#[derive(Debug)]
+pub struct RunnerReconcileStatusOutcome {
+    pub status: RunnerStatusReport,
+    pub retired_generation_ids: Vec<String>,
 }
 
 /// Return the persisted controller-side session projection without reconnecting,
@@ -1981,6 +2027,7 @@ pub fn persisted_status_until(
         state,
         session,
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
@@ -2714,6 +2761,67 @@ fn runner_jobs(
     runner_jobs_with_client(runner_id, session, &client, timeout)
 }
 
+/// Probe typed jobs through a direct daemon endpoint whose ownership was
+/// already verified by an operation-scoped caller.
+pub(crate) fn probe_verified_direct_daemon_jobs(
+    runner_id: &str,
+    session: &RunnerSession,
+) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
+    if session.mode != RunnerTunnelMode::DirectSsh || session.local_url.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "verified runner connect has no direct daemon endpoint for typed job admission",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    runner_jobs(runner_id, session)
+}
+
+/// Re-probe the typed health endpoint before a one-operation admission relies
+/// on a connect result that status has not yet projected as live.
+pub(crate) fn probe_verified_direct_daemon_health(
+    local_url: &str,
+) -> std::result::Result<connection_daemon::DaemonHealthReport, String> {
+    connection_daemon::daemon_health_report_with_timeout(
+        local_url,
+        crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+pub(crate) fn tunnel_process_is_owned(
+    pid: u32,
+    identity: &RunnerTunnelProcessStartIdentity,
+) -> bool {
+    session_store::tunnel_process_is_owned(
+        pid,
+        Some(identity),
+        homeboy_core::process::process_start_identity,
+    )
+}
+
+pub(crate) fn tunnel_process_ownership(
+    pid: u32,
+    identity: &RunnerTunnelProcessStartIdentity,
+) -> session_store::TunnelProcessOwnership {
+    session_store::tunnel_process_ownership(
+        pid,
+        Some(identity),
+        homeboy_core::process::process_start_identity,
+    )
+}
+
+pub(crate) fn tunnel_process_is_owned_with_observation(
+    pid: u32,
+    identity: &RunnerTunnelProcessStartIdentity,
+) -> (bool, String) {
+    let ownership = tunnel_process_ownership(pid, identity);
+    (
+        ownership == session_store::TunnelProcessOwnership::Owned,
+        format!("{ownership:?}"),
+    )
+}
+
 fn runner_jobs_with_client(
     runner_id: &str,
     session: &RunnerSession,
@@ -3401,24 +3509,24 @@ fn stale_daemon_warning(
     runner: &Runner,
     session: Option<&RunnerSession>,
     connected: bool,
-) -> Result<Option<RunnerStaleDaemonWarning>> {
+) -> Result<(Option<RunnerStaleDaemonWarning>, Option<String>)> {
     if !connected {
-        return Ok(None);
+        return Ok((None, None));
     }
     let Some(session) = session else {
-        return Ok(None);
+        return Ok((None, None));
     };
     // The verification gap is a property of the tunnel, not of the runner
     // transport kind, so it is decided before the SSH-only probe path below.
     if let Some(gap) = tunnel_verification_gap(runner, session) {
-        return Ok(Some(gap));
+        return Ok((Some(gap), None));
     }
     if runner.kind != RunnerKind::Ssh || session.mode != RunnerTunnelMode::DirectSsh {
-        return Ok(None);
+        return Ok((None, None));
     }
     let homeboy = remote_runner_homeboy_path(runner, "runner status stale-daemon diagnostics")?;
     let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
-        return Ok(None);
+        return Ok((None, None));
     };
     // A failed probe read nothing, so there is nothing to compare. Substituting
     // the session's own version here made `versions_match` trivially true and
@@ -3428,16 +3536,20 @@ fn stale_daemon_warning(
     {
         Ok(identity) => identity,
         Err(probe_error) => {
-            return Ok(Some(RunnerStaleDaemonWarning::probe_failed(
-                &runner.id,
-                session.homeboy_version.clone(),
-                session.homeboy_build_identity.clone(),
-                homeboy,
-                probe_error,
-            )));
+            return Ok((
+                Some(RunnerStaleDaemonWarning::probe_failed(
+                    &runner.id,
+                    session.homeboy_version.clone(),
+                    session.homeboy_build_identity.clone(),
+                    homeboy,
+                    probe_error,
+                )),
+                None,
+            ));
         }
     };
     let current_version = current_identity.version.clone();
+    let configured_job_binary_build_identity = current_identity.build_identity.clone();
     let controller_identity = homeboy_product_identity::build_identity();
     let observed_session_version = session
         .local_url
@@ -3485,31 +3597,34 @@ fn stale_daemon_warning(
         controller_commit_comparison,
     );
     if daemon_matches_configured && controller_matches_configured {
-        return Ok(None);
+        return Ok((None, configured_job_binary_build_identity));
     }
-    Ok(Some(
-        RunnerStaleDaemonWarning::new(
-            &runner.id,
-            observed_session_version,
-            current_version,
-            session_identity,
-            current_identity.build_identity,
-        )
-        .with_identity_unverifiable(
-            &runner.id,
-            homeboy,
-            identity_comparison == IdentityComparison::Unverifiable,
-        )
-        .with_controller_compatibility(
-            &runner.id,
-            controller_identity.version,
-            controller_identity.display,
-            controller_version_matches,
-            daemon_matches_configured,
-            controller_reference == ControllerReference::Unverifiable,
-        )
-        .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths)
-        .with_persisted_session_version(&runner.id, session.homeboy_version.clone()),
+    Ok((
+        Some(
+            RunnerStaleDaemonWarning::new(
+                &runner.id,
+                observed_session_version,
+                current_version,
+                session_identity,
+                current_identity.build_identity,
+            )
+            .with_identity_unverifiable(
+                &runner.id,
+                homeboy,
+                identity_comparison == IdentityComparison::Unverifiable,
+            )
+            .with_controller_compatibility(
+                &runner.id,
+                controller_identity.version,
+                controller_identity.display,
+                controller_version_matches,
+                daemon_matches_configured,
+                controller_reference == ControllerReference::Unverifiable,
+            )
+            .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths)
+            .with_persisted_session_version(&runner.id, session.homeboy_version.clone()),
+        ),
+        configured_job_binary_build_identity,
     ))
 }
 

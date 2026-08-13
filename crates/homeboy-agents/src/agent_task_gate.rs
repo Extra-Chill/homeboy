@@ -64,6 +64,10 @@ pub struct VerifyGateOptions {
     /// gated from follow-up agents.
     #[serde(default)]
     pub private_verify: Vec<String>,
+    /// Provenance for each gate input captured by the controller before Cook
+    /// becomes durable. Commands remain the execution contract for compatibility.
+    #[serde(default)]
+    pub input_sources: Vec<AgentTaskGateInputSource>,
     /// Feedback policy for failed private gates.
     #[serde(default = "default_private_gate_reveal")]
     pub private_gate_reveal: AgentTaskGateRevealPolicy,
@@ -110,6 +114,19 @@ pub struct VerifyGateOptions {
     /// checkout before deterministic verification.
     #[serde(default = "default_hydrate_dependencies")]
     pub hydrate_dependencies: bool,
+}
+
+/// Controller-captured provenance for an inline or file-backed gate program.
+/// Private sources intentionally retain only path-independent metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateInputSource {
+    pub visibility: AgentTaskGateVisibility,
+    pub source_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub redaction_policy: AgentTaskGateRevealPolicy,
 }
 
 fn default_hydrate_dependencies() -> bool {
@@ -343,6 +360,7 @@ impl Default for VerifyGateOptions {
         Self {
             verify: Vec::new(),
             private_verify: Vec::new(),
+            input_sources: Vec::new(),
             private_gate_reveal: default_private_gate_reveal(),
             execution_policy: AgentTaskGateExecutionPolicy::OrderedFailFast,
             gate_timeout_seconds: default_gate_timeout_seconds(),
@@ -605,6 +623,9 @@ pub struct AgentTaskGateReport {
     pub failure_evidence: Option<AgentTaskGateFailureEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_result: Option<AgentTaskGateTestResult>,
+    /// Cargo filter provenance for reviewer-visible focused gate evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_selection: Option<AgentTaskGateCargoSelection>,
     /// Why this declared gate was not invoked. This remains durable evidence so
     /// downstream consumers do not have to infer skipped work from a missing row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -679,6 +700,16 @@ pub struct AgentTaskGateCargoTargetEvidence {
     pub path: String,
     pub resolution: String,
     pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_before: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_after: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -893,6 +924,25 @@ pub struct AgentTaskGateTestResult {
     pub failed: u64,
     pub filtered: u64,
     pub runner_exit_code: i32,
+}
+
+/// The Cargo test population actually observed by a deterministic gate.
+///
+/// A positional Cargo filter is substring matching unless the test harness gets
+/// `--exact`; recording both the declared interpretation and test IDs makes
+/// focused evidence independently reviewable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateCargoSelection {
+    pub effective_argv: Vec<String>,
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    pub filter_interpretation: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovered_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_ids: Vec<String>,
+    pub selected_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1114,6 +1164,7 @@ impl AgentTaskGateReport {
             capture: AgentTaskGateCapture::default(),
             failure_evidence,
             test_result: None,
+            cargo_selection: None,
             skip_reason: None,
             baseline_comparison: None,
             candidate_checkout: None,
@@ -1166,6 +1217,7 @@ impl AgentTaskGateReport {
             capture: AgentTaskGateCapture::default(),
             failure_evidence: None,
             test_result: None,
+            cargo_selection: None,
             skip_reason: Some(skip_reason),
             baseline_comparison: None,
             candidate_checkout: None,
@@ -1345,7 +1397,10 @@ mod baseline_tests {
             .trim()
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
-        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+        assert!(
+            !homeboy_engine_primitives::command::process_is_running(descendant_pid as u32),
+            "bounded baseline gate left descendant {descendant_pid} runnable"
+        );
     }
 }
 
@@ -1467,6 +1522,7 @@ pub(crate) fn run_gate_command_with_supervision(
         }
         homeboy_core::engine::command::isolate_process_tree(&mut process);
     }
+    let target_started = Instant::now();
     let mut child = process.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1564,10 +1620,25 @@ pub(crate) fn run_gate_command_with_supervision(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let test_result = cargo_test_result(command, runner_exit_code, &stdout, &stderr);
-    let exit_code = effective_gate_exit_code(runner_exit_code, test_result.as_ref());
-    let failure_evidence = (exit_code != 0)
-        .then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr, test_result.as_ref()));
+    let cargo_selection = cargo_selection(
+        command,
+        &command_vec,
+        &stdout,
+        &stderr,
+        test_result.as_ref(),
+    );
+    let exit_code = effective_gate_exit_code(runner_exit_code, cargo_selection.as_ref());
+    let failure_evidence = (exit_code != 0).then(|| {
+        gate_failure_evidence(
+            command,
+            exit_code,
+            &stdout,
+            &stderr,
+            cargo_selection.as_ref(),
+        )
+    });
 
+    selected_environment.finish_cargo_target(target_started.elapsed())?;
     let mut report = AgentTaskGateReport::new(
         format!("gate-{index}"),
         command_vec,
@@ -1580,6 +1651,7 @@ pub(crate) fn run_gate_command_with_supervision(
         selected_environment.report,
     );
     report.test_result = test_result;
+    report.cargo_selection = cargo_selection;
     report.termination = termination;
     report.capture = AgentTaskGateCapture {
         stdout: output.capture.stdout,
@@ -1622,6 +1694,7 @@ pub(crate) fn run_gate_command_with_timeout(
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
     homeboy_core::engine::command::isolate_process_tree(&mut process);
+    let target_started = Instant::now();
     let mut child = process.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1656,9 +1729,24 @@ pub(crate) fn run_gate_command_with_timeout(
         output.status.code().unwrap_or(1)
     };
     let test_result = cargo_test_result(command, runner_exit_code, &stdout, &stderr);
-    let exit_code = effective_gate_exit_code(runner_exit_code, test_result.as_ref());
-    let failure_evidence = (exit_code != 0)
-        .then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr, test_result.as_ref()));
+    let cargo_selection = cargo_selection(
+        command,
+        &command_vec,
+        &stdout,
+        &stderr,
+        test_result.as_ref(),
+    );
+    let exit_code = effective_gate_exit_code(runner_exit_code, cargo_selection.as_ref());
+    let failure_evidence = (exit_code != 0).then(|| {
+        gate_failure_evidence(
+            command,
+            exit_code,
+            &stdout,
+            &stderr,
+            cargo_selection.as_ref(),
+        )
+    });
+    selected_environment.finish_cargo_target(target_started.elapsed())?;
     let mut report = AgentTaskGateReport::new(
         format!("gate-{index}"),
         command_vec,
@@ -1671,6 +1759,7 @@ pub(crate) fn run_gate_command_with_timeout(
         selected_environment.report,
     );
     report.test_result = test_result;
+    report.cargo_selection = cargo_selection;
     report.termination = if timed_out {
         AgentTaskGateTermination::TimedOut
     } else {
@@ -1754,7 +1843,7 @@ impl SelectedGateEnvironment {
                             error.to_string(),
                             Some("lock Rust gate cache".to_string()),
                         )
-                        .with_hint(rust_cache_repair_command()))
+                        .with_hint(rust_cache_repair_command()));
                     }
                 };
                 if acquired {
@@ -1808,8 +1897,8 @@ impl SelectedGateEnvironment {
         let overlay = home
             .join(".homeboy-rust-cache")
             .join(uuid::Uuid::new_v4().to_string());
-        copy_tree_without_symlinks(&cache.join("cargo"), &overlay.join("cargo"))?;
-        copy_tree_without_symlinks(&cache.join("rustup"), &overlay.join("rustup"))?;
+        copy_tree_preserving_safe_symlinks(&cache.join("cargo"), &overlay.join("cargo"))?;
+        copy_tree_preserving_safe_symlinks(&cache.join("rustup"), &overlay.join("rustup"))?;
         self.values.insert(
             "CARGO_HOME".to_string(),
             overlay.join("cargo").display().to_string(),
@@ -1868,6 +1957,15 @@ impl SelectedGateEnvironment {
             cwd,
             explicit_target.as_deref(),
         )?;
+        // Store sizing is evidence only. A concurrent gate may update the
+        // shared target while this observation walks it.
+        let bytes_before = target.size_bytes().ok();
+        // The managed store identity is repository-scoped. Cargo separates all
+        // source, feature, profile, target, and toolchain fingerprints within it.
+        let identity = (target.resolution() == "shared")
+            .then(|| target.target_dir().file_name())
+            .flatten()
+            .map(|name| name.to_string_lossy().to_string());
         self.values.insert(
             "CARGO_TARGET_DIR".to_string(),
             target.target_dir().to_string_lossy().to_string(),
@@ -1876,8 +1974,23 @@ impl SelectedGateEnvironment {
             path: target.target_dir().to_string_lossy().to_string(),
             resolution: target.resolution().to_string(),
             owner: target.evidence().owner,
+            identity,
+            state: bytes_before.map(|bytes| if bytes == 0 { "miss" } else { "hit" }.to_string()),
+            bytes_before,
+            bytes_after: None,
+            elapsed_ms: None,
         });
         self._cargo_target = Some(target);
+        Ok(())
+    }
+
+    fn finish_cargo_target(&mut self, elapsed: Duration) -> Result<()> {
+        let (Some(target), Some(evidence)) = (&self._cargo_target, &mut self.report.cargo_target)
+        else {
+            return Ok(());
+        };
+        evidence.bytes_after = target.size_bytes().ok();
+        evidence.elapsed_ms = Some(elapsed.as_millis());
         Ok(())
     }
 }
@@ -1967,12 +2080,16 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
             cache.join("rustup").display().to_string(),
         ),
     ]);
+    // The host rustup proxy refuses to run after CARGO_HOME is isolated unless
+    // the proxy itself lives under that new home. Seed the cache with a real
+    // file rather than inheriting the host home into controller-owned state.
+    let rustup_proxy = prepare_rustup_proxy(cache)?;
     let rustup = run_rust_cache_command(
         cwd,
         cache,
         &environment,
         "install_toolchain",
-        Path::new("rustup"),
+        &rustup_proxy,
         &["toolchain", "install"],
         timeout,
     )?;
@@ -1982,7 +2099,7 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
         cache,
         &environment,
         "resolve_toolchain_cargo",
-        Path::new("rustup"),
+        &rustup_proxy,
         &["which", "cargo"],
         timeout,
     )?;
@@ -2018,6 +2135,44 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
         timeout,
     )?;
     Ok(relative.to_path_buf())
+}
+
+fn prepare_rustup_proxy(cache: &Path) -> Result<PathBuf> {
+    let host_path = std::env::var_os("PATH").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "PATH",
+            "unavailable for Rust gate cache hydration",
+            None,
+            None,
+        )
+    })?;
+    let source = std::env::split_paths(&host_path)
+        .map(|directory| directory.join("rustup"))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "rustup",
+                "unavailable for Rust gate cache hydration",
+                None,
+                None,
+            )
+        })?;
+    let destination = cache.join("cargo/bin/rustup");
+    fs::create_dir_all(destination.parent().expect("rustup proxy has a parent")).map_err(
+        |error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("prepare isolated Rust gate cache rustup proxy".to_string()),
+            )
+        },
+    )?;
+    fs::copy(&source, &destination).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("prepare isolated Rust gate cache rustup proxy".to_string()),
+        )
+    })?;
+    Ok(destination)
 }
 
 fn run_rust_cache_command(
@@ -2087,10 +2242,10 @@ fn run_rust_cache_command(
     Ok(output)
 }
 
-/// Clone controller-owned cache bytes into a gate-owned overlay. Symlinks are
-/// rejected on both sides so a gate cannot turn a later write into a controller
-/// cache mutation.
-fn copy_tree_without_symlinks(source: &Path, destination: &Path) -> Result<()> {
+/// Clone controller-owned cache bytes into a gate-owned overlay. Links may only
+/// resolve within the authoritative source tree, and absolute links are rebased
+/// so the gate never retains a path back into controller-owned cache state.
+fn copy_tree_preserving_safe_symlinks(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -2104,21 +2259,41 @@ fn copy_tree_without_symlinks(source: &Path, destination: &Path) -> Result<()> {
         )
         .with_hint(rust_cache_repair_command()));
     }
+    let source_root = source.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("resolve Rust cache root {}", source.display())),
+        )
+        .with_hint(rust_cache_repair_command())
+    })?;
+    copy_rust_cache_tree(source, destination, &source_root, destination)
+}
+
+fn copy_rust_cache_tree(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<()> {
     fs::create_dir_all(destination).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("create Rust overlay {}", destination.display())),
         )
     })?;
-    for entry in fs::read_dir(source).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("read Rust cache {}", source.display())),
-        )
-    })? {
-        let entry = entry.map_err(|error| {
+    let mut entries = fs::read_dir(source)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read Rust cache {}", source.display())),
+            )
+        })?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| {
             Error::internal_io(error.to_string(), Some("read Rust cache entry".to_string()))
         })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let file_type = entry.file_type().map_err(|error| {
@@ -2128,14 +2303,19 @@ fn copy_tree_without_symlinks(source: &Path, destination: &Path) -> Result<()> {
             )
         })?;
         if file_type.is_symlink() {
-            return Err(Error::internal_io(
-                "Rust cache contains a symlink".to_string(),
-                Some("copy Rust gate cache".to_string()),
-            )
-            .with_hint(rust_cache_repair_command()));
-        }
-        if file_type.is_dir() {
-            copy_tree_without_symlinks(&source_path, &destination_path)?;
+            copy_safe_rust_cache_symlink(
+                &source_path,
+                &destination_path,
+                source_root,
+                destination_root,
+            )?;
+        } else if file_type.is_dir() {
+            copy_rust_cache_tree(
+                &source_path,
+                &destination_path,
+                source_root,
+                destination_root,
+            )?;
         } else if file_type.is_file() {
             fs::copy(&source_path, &destination_path).map_err(|error| {
                 Error::internal_io(
@@ -2152,6 +2332,82 @@ fn copy_tree_without_symlinks(source: &Path, destination: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn copy_safe_rust_cache_symlink(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<()> {
+    let target = fs::read_link(source).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("read Rust cache symlink {}", source.display())),
+        )
+    })?;
+    let resolved = source.canonicalize().map_err(|error| {
+        let kind = if error.raw_os_error() == Some(libc::ELOOP) {
+            "cycle"
+        } else if error.kind() == std::io::ErrorKind::NotFound {
+            "dangling target"
+        } else {
+            "unresolvable target"
+        };
+        Error::internal_io(
+            format!(
+                "Rust cache symlink {} has a {kind}: {}",
+                source.display(),
+                target.display()
+            ),
+            Some("copy Rust gate cache".to_string()),
+        )
+        .with_hint(rust_cache_repair_command())
+    })?;
+    let relative = resolved.strip_prefix(source_root).map_err(|_| {
+        Error::internal_io(
+            format!(
+                "Rust cache symlink {} escapes its source root: {}",
+                source.display(),
+                resolved.display()
+            ),
+            Some("copy Rust gate cache".to_string()),
+        )
+        .with_hint(rust_cache_repair_command())
+    })?;
+    let overlay_target = if target.is_absolute() {
+        destination_root.join(relative)
+    } else {
+        target
+    };
+    create_rust_cache_symlink(&overlay_target, destination, resolved.is_dir()).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("copy Rust cache symlink {}", source.display())),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn create_rust_cache_symlink(
+    target: &Path,
+    link: &Path,
+    _target_is_dir: bool,
+) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_rust_cache_symlink(
+    target: &Path,
+    link: &Path,
+    target_is_dir: bool,
+) -> std::io::Result<()> {
+    if target_is_dir {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
 }
 
 fn rust_cache_repair_command() -> String {
@@ -2783,7 +3039,7 @@ fn gate_failure_evidence(
     exit_code: i32,
     stdout: &str,
     stderr: &str,
-    test_result: Option<&AgentTaskGateTestResult>,
+    cargo_selection: Option<&AgentTaskGateCargoSelection>,
 ) -> AgentTaskGateFailureEvidence {
     let stdout_tail = text_tail(stdout, 20);
     let stderr_tail = text_tail(stderr, 20);
@@ -2791,9 +3047,11 @@ fn gate_failure_evidence(
         stderr.contains(&format!("Missing script: \"{script}\""))
             || stderr.contains(&format!("Missing script: {script}"))
     });
-    let zero_tests_selected =
-        test_result.is_some_and(|result| result.runner_exit_code == 0 && result.total == 0);
-    let classification = zero_tests_selected
+    let invalid_focused_selection = cargo_selection.is_some_and(|selection| {
+        selection.mode == "focused"
+            && (selection.filter_interpretation != "exact" || selection.selected_count != 1)
+    });
+    let classification = invalid_focused_selection
         .then_some(AgentTaskGateFailureClassification::ZeroTestsSelected)
         .or_else(|| {
             missing_script
@@ -2801,10 +3059,13 @@ fn gate_failure_evidence(
                 .then_some(AgentTaskGateFailureClassification::GateDeclaration)
         })
         .unwrap_or(AgentTaskGateFailureClassification::CandidateCode);
-    let summary = if let Some(result) = test_result.filter(|_| zero_tests_selected) {
+    let summary = if let Some(selection) = cargo_selection.filter(|_| invalid_focused_selection) {
         format!(
-            "zero_tests_selected: cargo test selected 0 tests (0 passed, 0 failed, {} filtered): {command}",
-            result.filtered
+            "invalid_focused_cargo_selection: filter {:?} selected {} test IDs ({:?}) with {} interpretation",
+            selection.filter,
+            selection.selected_count,
+            selection.selected_ids,
+            selection.filter_interpretation,
         )
     } else {
         match missing_script {
@@ -2812,9 +3073,9 @@ fn gate_failure_evidence(
             None => format!("deterministic gate failed with exit code {exit_code}: {command}"),
         }
     };
-    let agent_feedback = if zero_tests_selected {
+    let agent_feedback = if invalid_focused_selection {
         format!(
-            "The Cargo test gate selected zero tests. Correct the test filter in `{command}` so it executes the intended test before rerunning Cook."
+            "The Cargo test gate must use an exact filter and execute exactly one test. Correct the filter in `{command}` before rerunning Cook."
         )
     } else {
         match missing_script {
@@ -2841,13 +3102,117 @@ fn gate_failure_evidence(
 
 fn effective_gate_exit_code(
     runner_exit_code: i32,
-    test_result: Option<&AgentTaskGateTestResult>,
+    cargo_selection: Option<&AgentTaskGateCargoSelection>,
 ) -> i32 {
-    if test_result.is_some_and(|result| result.runner_exit_code == 0 && result.total == 0) {
+    if cargo_selection.is_some_and(|selection| {
+        selection.mode == "focused"
+            && (selection.filter_interpretation != "exact" || selection.selected_count != 1)
+    }) {
         1
     } else {
         runner_exit_code
     }
+}
+
+fn cargo_selection(
+    command: &str,
+    effective_argv: &[String],
+    stdout: &str,
+    stderr: &str,
+    test_result: Option<&AgentTaskGateTestResult>,
+) -> Option<AgentTaskGateCargoSelection> {
+    let tokens = crate::agent_task::tokenize_command(command);
+    let cargo_index = cargo_test_index(&tokens)?;
+    let args = &tokens[cargo_index + 1..];
+    let test_index = args.iter().position(|token| token == "test")?;
+    let harness = args.iter().position(|token| token == "--");
+    let filter = cargo_test_filter(&args[test_index + 1..harness.unwrap_or(args.len())]);
+    let exact =
+        harness.is_some_and(|index| args[index + 1..].iter().any(|token| token == "--exact"));
+    let mode = if filter.is_some() { "focused" } else { "broad" };
+    let mut selected_ids = cargo_test_ids(stdout, stderr);
+    if selected_ids.is_empty() && exact && test_result.is_some_and(|result| result.total == 1) {
+        if let Some(filter) = &filter {
+            selected_ids.push(filter.clone());
+        }
+    }
+    let discovered_ids = {
+        let listed = cargo_test_list_ids(stdout, stderr);
+        if listed.is_empty() {
+            selected_ids.clone()
+        } else {
+            listed
+        }
+    };
+    Some(AgentTaskGateCargoSelection {
+        effective_argv: effective_argv.to_vec(),
+        mode: mode.to_string(),
+        filter: filter.clone(),
+        filter_interpretation: match (filter.is_some(), exact) {
+            (false, _) => "broad_explicit".to_string(),
+            (true, true) => "exact".to_string(),
+            (true, false) => "substring_ambiguous".to_string(),
+        },
+        discovered_ids,
+        selected_count: selected_ids.len(),
+        selected_ids,
+    })
+}
+
+fn cargo_test_filter(args: &[String]) -> Option<String> {
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        if !argument.starts_with('-') {
+            return Some(argument.clone());
+        }
+        let takes_value = matches!(
+            argument.as_str(),
+            "-p" | "--package"
+                | "--exclude"
+                | "--bin"
+                | "--example"
+                | "--test"
+                | "--bench"
+                | "--features"
+                | "--target"
+                | "--target-dir"
+                | "--manifest-path"
+                | "--profile"
+                | "-j"
+                | "--jobs"
+                | "--config"
+                | "--message-format"
+                | "--timings"
+        );
+        index += 1 + usize::from(takes_value);
+    }
+    None
+}
+
+fn cargo_test_ids(stdout: &str, stderr: &str) -> Vec<String> {
+    let mut ids = stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter_map(|line| line.trim().strip_prefix("test "))
+        .filter_map(|line| line.split_once(" ... "))
+        .filter_map(|(id, outcome)| matches!(outcome, "ok" | "FAILED" | "ignored").then_some(id))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn cargo_test_list_ids(stdout: &str, stderr: &str) -> Vec<String> {
+    let mut ids = stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter_map(|line| line.trim().strip_suffix(": test"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 fn cargo_test_result(
@@ -2885,6 +3250,10 @@ fn cargo_test_result(
 
 fn is_cargo_test_declaration(command: &str) -> bool {
     let tokens = crate::agent_task::tokenize_command(command);
+    cargo_test_index(&tokens).is_some()
+}
+
+fn cargo_test_index(tokens: &[String]) -> Option<usize> {
     let mut index = 0;
     while tokens
         .get(index)
@@ -2893,19 +3262,19 @@ fn is_cargo_test_declaration(command: &str) -> bool {
         index += 1;
     }
     let Some(first_command) = tokens.get(index) else {
-        return false;
+        return None;
     };
     let cargo_index = if first_command == "cargo" {
         index
     } else if first_command == "timeout" {
         let Some(cargo_index) = timeout_cargo_index(&tokens, index + 1) else {
-            return false;
+            return None;
         };
         cargo_index
     } else {
-        return false;
+        return None;
     };
-    is_cargo_test_subcommand(&tokens[cargo_index + 1..])
+    is_cargo_test_subcommand(&tokens[cargo_index + 1..]).then_some(cargo_index)
 }
 
 fn timeout_cargo_index(tokens: &[String], mut index: usize) -> Option<usize> {
@@ -3109,6 +3478,7 @@ fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
         "capture": report.capture,
         "failure_evidence": report.failure_evidence,
         "test_result": report.test_result,
+        "cargo_selection": report.cargo_selection,
         "environment": report.environment,
     })
 }
@@ -3130,7 +3500,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_test_results_preserve_selected_counts_and_reject_zero_test_output() {
+    fn cargo_test_results_preserve_selected_counts_without_rejecting_broad_gates() {
         let summary = "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1675 filtered out; finished in 0.00s\n";
         let zero = cargo_test_result(
             "RUSTFLAGS=-Dwarnings timeout 30 cargo --quiet test selected_test -- --exact",
@@ -3141,7 +3511,7 @@ mod tests {
         .expect("Cargo summary is parsed");
         assert_eq!(zero.total, 0);
         assert_eq!(zero.filtered, 1675);
-        assert_eq!(effective_gate_exit_code(0, Some(&zero)), 1);
+        assert_eq!(effective_gate_exit_code(0, None), 0);
 
         let empty = cargo_test_result(
             "cargo test --locked -p empty-crate",
@@ -3152,7 +3522,7 @@ mod tests {
         .expect("empty Cargo summary is parsed");
         assert_eq!(empty.total, 0);
         assert_eq!(empty.filtered, 0);
-        assert_eq!(effective_gate_exit_code(0, Some(&empty)), 1);
+        assert_eq!(effective_gate_exit_code(0, None), 0);
 
         let selected = cargo_test_result(
             "cargo test --locked selected_test",
@@ -3163,7 +3533,7 @@ mod tests {
         .expect("Cargo summary is parsed");
         assert_eq!(selected.total, 1);
         assert_eq!(selected.passed, 1);
-        assert_eq!(effective_gate_exit_code(0, Some(&selected)), 0);
+        assert_eq!(effective_gate_exit_code(0, None), 0);
 
         assert!(cargo_test_result("echo cargo test", 0, summary, "").is_none());
         assert!(cargo_test_result("timeout 30 echo cargo test", 0, summary, "").is_none());
@@ -3176,11 +3546,167 @@ mod tests {
         .is_none());
     }
 
+    #[test]
+    fn cargo_selection_requires_one_exact_id_and_keeps_broad_gates_explicit() {
+        let focused = cargo_selection(
+            "cargo test selected_test -- --exact",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test selected_test -- --exact".to_string(),
+            ],
+            "selected_test: test\nselected_test_unrelated: test\ntest selected_test ... ok\n",
+            "",
+            None,
+        )
+        .expect("Cargo selection");
+        assert_eq!(focused.mode, "focused");
+        assert_eq!(focused.filter_interpretation, "exact");
+        assert_eq!(
+            focused.discovered_ids,
+            vec!["selected_test", "selected_test_unrelated"]
+        );
+        assert_eq!(focused.selected_ids, vec!["selected_test"]);
+        assert_eq!(focused.selected_count, 1);
+        assert_eq!(effective_gate_exit_code(0, Some(&focused)), 0);
+
+        let broad = cargo_selection(
+            "cargo test --locked",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test --locked".to_string(),
+            ],
+            "selected_test: test\nselected_test_unrelated: test\ntest selected_test ... ok\ntest selected_test_unrelated ... ok\n",
+            "",
+            None,
+        )
+        .expect("Cargo selection");
+        assert_eq!(broad.mode, "broad");
+        assert_eq!(broad.filter_interpretation, "broad_explicit");
+        assert_eq!(broad.selected_count, 2);
+        assert_eq!(effective_gate_exit_code(0, Some(&broad)), 0);
+
+        let ambiguous = cargo_selection(
+            "cargo test selected_test",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test selected_test".to_string(),
+            ],
+            "selected_test: test\nselected_test_unrelated: test\ntest selected_test ... ok\ntest selected_test_unrelated ... ok\n",
+            "",
+            None,
+        )
+        .expect("Cargo selection");
+        assert_eq!(ambiguous.filter_interpretation, "substring_ambiguous");
+        assert_eq!(
+            ambiguous.selected_ids,
+            vec!["selected_test", "selected_test_unrelated"]
+        );
+        assert_eq!(ambiguous.selected_count, 2);
+        assert_eq!(effective_gate_exit_code(0, Some(&ambiguous)), 1);
+
+        let non_exact_single = cargo_selection(
+            "cargo test selected_test",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test selected_test".to_string(),
+            ],
+            "test selected_test ... ok\n",
+            "",
+            None,
+        )
+        .expect("Cargo selection");
+        assert_eq!(non_exact_single.selected_count, 1);
+        assert_eq!(effective_gate_exit_code(0, Some(&non_exact_single)), 1);
+
+        let zero_match = cargo_selection(
+            "cargo test missing_test -- --exact",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test missing_test -- --exact".to_string(),
+            ],
+            "selected_test: test\nselected_test_unrelated: test\n",
+            "",
+            None,
+        )
+        .expect("Cargo selection");
+        assert_eq!(zero_match.filter_interpretation, "exact");
+        assert!(zero_match.selected_ids.is_empty());
+        assert_eq!(zero_match.selected_count, 0);
+        assert_eq!(effective_gate_exit_code(0, Some(&zero_match)), 1);
+
+        let package_only = cargo_selection(
+            "cargo test --locked -p empty-crate",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test --locked -p empty-crate".to_string(),
+            ],
+            "",
+            "",
+            None,
+        )
+        .expect("Cargo selection");
+        assert_eq!(package_only.mode, "broad");
+        assert_eq!(effective_gate_exit_code(0, Some(&package_only)), 0);
+
+        let quiet_exact = cargo_selection(
+            "cargo --quiet test selected_test -- --exact",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo --quiet test selected_test -- --exact".to_string(),
+            ],
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s\n",
+            "",
+            Some(&AgentTaskGateTestResult {
+                runner: "cargo".to_string(),
+                total: 1,
+                passed: 1,
+                failed: 0,
+                filtered: 1,
+                runner_exit_code: 0,
+            }),
+        )
+        .expect("quiet exact Cargo selection");
+        assert_eq!(quiet_exact.selected_ids, vec!["selected_test"]);
+        assert_eq!(quiet_exact.selected_count, 1);
+        assert_eq!(effective_gate_exit_code(0, Some(&quiet_exact)), 0);
+
+        let quiet_zero_match = cargo_selection(
+            "cargo --quiet test missing_test -- --exact",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo --quiet test missing_test -- --exact".to_string(),
+            ],
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n",
+            "",
+            Some(&AgentTaskGateTestResult {
+                runner: "cargo".to_string(),
+                total: 0,
+                passed: 0,
+                failed: 0,
+                filtered: 2,
+                runner_exit_code: 0,
+            }),
+        )
+        .expect("quiet zero-match Cargo selection");
+        assert!(quiet_zero_match.selected_ids.is_empty());
+        assert_eq!(quiet_zero_match.selected_count, 0);
+        assert_eq!(effective_gate_exit_code(0, Some(&quiet_zero_match)), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn cargo_gate_rejects_zero_match_and_accepts_one_match_through_supported_declarations() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = env_mutex();
         let temp = tempfile::tempdir().expect("temporary Cargo fixture");
         std::fs::create_dir(temp.path().join("src")).expect("fixture source directory");
         std::fs::write(
@@ -3198,7 +3724,7 @@ mod tests {
         let timeout = bin.join("timeout");
         std::fs::write(
             &timeout,
-            "#!/bin/sh\nwhile [ \"$1\" = -s ] || [ \"$1\" = --signal ]; do shift; shift; done\nshift\nshift\nPATH=\"$HOMEBOY_ORIGINAL_PATH\"\nexport PATH\nexec cargo \"$@\"\n",
+            "#!/bin/sh\nwhile [ \"$1\" = -s ] || [ \"$1\" = --signal ]; do shift; shift; done\nshift\nshift\nHOME=\"$HOMEBOY_ORIGINAL_HOME\"\nPATH=\"$HOMEBOY_ORIGINAL_PATH\"\nexport HOME PATH\nexec cargo \"$@\"\n",
         )
         .expect("timeout wrapper");
         let mut permissions = std::fs::metadata(&timeout)
@@ -3209,7 +3735,8 @@ mod tests {
         let target = temp.path().join("target");
         let command = |timeout_options: &str, filter: &str| {
             format!(
-                "RUSTFLAGS=\"-D warnings\" HOMEBOY_ORIGINAL_PATH='{}' CARGO_TARGET_DIR='{}' PATH='{}' timeout {timeout_options} 30 cargo --quiet test {filter} -- --exact",
+                "RUSTFLAGS=\"-D warnings\" HOMEBOY_ORIGINAL_HOME='{}' HOMEBOY_ORIGINAL_PATH='{}' CARGO_TARGET_DIR='{}' PATH='{}' timeout {timeout_options} 30 cargo --quiet test {filter} -- --exact",
+                std::env::var("HOME").expect("host HOME"),
                 std::env::var("PATH").expect("host PATH"),
                 target.display(),
                 bin.display(),
@@ -3317,6 +3844,115 @@ mod tests {
                 "shared"
             );
         });
+    }
+
+    #[test]
+    fn shared_cargo_target_reports_miss_then_hit_and_metrics() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("gate fixture");
+            let mut policy = AgentTaskGateEnvironmentPolicy::default();
+            policy.shared_cargo_target = Some(true);
+            policy
+                .variables
+                .insert("CARGO_TARGET_DIR".to_string(), String::new());
+
+            let first = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                temp.path(),
+                1,
+                "printf artifact > \"$CARGO_TARGET_DIR/artifact\"",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                &policy,
+                &[],
+            )
+            .expect("first managed gate");
+            let first = first
+                .environment
+                .cargo_target
+                .expect("first target evidence");
+            assert_eq!(first.state.as_deref(), Some("miss"));
+            assert_eq!(first.bytes_before, Some(0));
+            assert!(first.bytes_after.expect("target bytes") > 0);
+            assert!(first.elapsed_ms.is_some());
+
+            let second = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                temp.path(),
+                2,
+                "printf artifact > \"$CARGO_TARGET_DIR/artifact\"",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                &policy,
+                &[],
+            )
+            .expect("reused managed gate");
+            let second = second
+                .environment
+                .cargo_target
+                .expect("second target evidence");
+            assert_eq!(second.state.as_deref(), Some("hit"));
+            assert_eq!(first.identity, second.identity);
+            assert_eq!(first.path, second.path);
+        });
+    }
+
+    #[test]
+    fn concurrent_shared_cargo_target_gates_reuse_one_live_store() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("gate fixture");
+            let barrier = std::sync::Barrier::new(2);
+            let reports = std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    barrier.wait();
+                    run_shared_target_fixture_gate(temp.path(), 1)
+                });
+                let second = scope.spawn(|| {
+                    barrier.wait();
+                    run_shared_target_fixture_gate(temp.path(), 2)
+                });
+                [
+                    first.join().expect("first gate thread"),
+                    second.join().expect("second gate thread"),
+                ]
+            });
+
+            let first = reports[0]
+                .as_ref()
+                .expect("first managed gate")
+                .environment
+                .cargo_target
+                .as_ref()
+                .expect("first target evidence");
+            let second = reports[1]
+                .as_ref()
+                .expect("second managed gate")
+                .environment
+                .cargo_target
+                .as_ref()
+                .expect("second target evidence");
+            assert_eq!(first.path, second.path);
+            assert_eq!(first.identity, second.identity);
+            assert!(std::path::Path::new(&first.path).is_dir());
+        });
+    }
+
+    fn run_shared_target_fixture_gate(cwd: &Path, index: usize) -> Result<AgentTaskGateReport> {
+        let mut policy = AgentTaskGateEnvironmentPolicy::default();
+        policy.shared_cargo_target = Some(true);
+        policy
+            .variables
+            .insert("CARGO_TARGET_DIR".to_string(), String::new());
+        run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            cwd,
+            index,
+            "sleep 0.1; printf artifact > \"$CARGO_TARGET_DIR/artifact-$$\"",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            &policy,
+            &[],
+        )
     }
 
     /// Restores process-global environment variables when dropped.
@@ -4548,7 +5184,7 @@ mod tests {
         fs::write(
             &rustup,
             format!(
-                "#!/bin/sh\nif test \"$1\" = toolchain; then\n  /bin/mkdir -p \"$CARGO_HOME/registry\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin\"\n  /bin/cp \"{}\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\n  printf '%s\\n' rustup >> \"$CARGO_HOME/registry/hydration.log\"\nelif test \"$1\" = which; then\n  printf '%s\\n' \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\nfi\n/bin/sleep 0.1\n",
+                "#!/bin/sh\ntest \"$0\" = \"$CARGO_HOME/bin/rustup\"\nif test \"$1\" = toolchain; then\n  /bin/mkdir -p \"$CARGO_HOME/registry\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin\"\n  /bin/cp \"{}\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\n  printf '%s\\n' rustup >> \"$CARGO_HOME/registry/hydration.log\"\nelif test \"$1\" = which; then\n  printf '%s\\n' \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\nfi\n/bin/sleep 0.1\n",
                 direct_cargo.display()
             ),
         )
@@ -4701,13 +5337,71 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rust_gate_cache_rejects_symlinked_content_and_bounds_stalled_hydration() {
+    fn rust_gate_cache_preserves_safe_symlinks_and_rejects_unsafe_content() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
         let source = tempfile::tempdir().expect("source");
         let overlay = tempfile::tempdir().expect("overlay");
-        symlink("/tmp", source.path().join("escape")).expect("cache symlink");
-        assert!(copy_tree_without_symlinks(source.path(), overlay.path()).is_err());
+        fs::create_dir_all(source.path().join("bin")).expect("cache bin");
+        let rustup = source.path().join("bin/rustup");
+        fs::write(&rustup, "#!/bin/sh\nprintf 'rustup\\n'\n").expect("rustup proxy");
+        let mut permissions = fs::metadata(&rustup)
+            .expect("rustup metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&rustup, permissions).expect("rustup executable");
+        symlink("rustup", source.path().join("bin/cargo")).expect("normal cargo proxy");
+        symlink(&rustup, source.path().join("absolute-rustup")).expect("absolute safe link");
+        copy_tree_preserving_safe_symlinks(source.path(), overlay.path()).expect("copy cache");
+        assert_eq!(
+            fs::read_link(overlay.path().join("bin/cargo")).expect("relative cargo link"),
+            PathBuf::from("rustup")
+        );
+        assert_eq!(
+            fs::read_link(overlay.path().join("absolute-rustup")).expect("absolute rustup link"),
+            overlay.path().join("bin/rustup")
+        );
+        assert_eq!(
+            Command::new(overlay.path().join("bin/cargo"))
+                .output()
+                .expect("execute copied cargo proxy")
+                .stdout,
+            b"rustup\n"
+        );
+
+        let reused_overlay = tempfile::tempdir().expect("reused overlay");
+        copy_tree_preserving_safe_symlinks(source.path(), reused_overlay.path())
+            .expect("reuse cache");
+        assert_eq!(
+            fs::read_link(reused_overlay.path().join("bin/cargo")).expect("reused cargo link"),
+            PathBuf::from("rustup")
+        );
+
+        for (name, target, expected) in [
+            ("escape", PathBuf::from("/tmp"), "escapes its source root"),
+            ("dangling", PathBuf::from("missing"), "dangling target"),
+            ("cycle-a", PathBuf::from("cycle-b"), "cycle"),
+        ] {
+            let malicious = tempfile::tempdir().expect("malicious cache");
+            symlink(&target, malicious.path().join(name)).expect("malicious symlink");
+            if name == "cycle-a" {
+                symlink("cycle-a", malicious.path().join("cycle-b")).expect("cycle link");
+            }
+            let error = copy_tree_preserving_safe_symlinks(
+                malicious.path(),
+                tempfile::tempdir().expect("malicious overlay").path(),
+            )
+            .expect_err("reject malicious cache link");
+            let diagnostic = error.details["error"].as_str().unwrap_or_default();
+            assert!(diagnostic.contains(name), "{diagnostic}");
+            assert!(diagnostic.contains(expected), "{diagnostic}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_gate_cache_bounds_stalled_hydration() {
+        use std::os::unix::fs::PermissionsExt;
 
         let _guard = env_mutex();
         let bin = tempfile::tempdir().expect("tool bin");
@@ -4859,7 +5553,10 @@ mod tests {
             .trim()
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
-        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+        assert!(
+            !homeboy_engine_primitives::command::process_is_running(descendant_pid as u32),
+            "toolchain preflight left descendant {descendant_pid} runnable"
+        );
     }
 
     #[cfg(unix)]

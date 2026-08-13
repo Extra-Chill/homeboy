@@ -11,7 +11,7 @@ use super::cli::{RunnerArgs, RunnerCommand};
 use super::exec::exec_with_hydration;
 use super::jobs::RunnerJobCommandOutput;
 use super::registry::{add, connect, enable, list, remove, set, show, RunnerAddInput};
-use super::types::{RunnerCommandOutput, RunnerEnvOutput, RunnerOutput};
+use super::types::{RecipeRunProvidersOutput, RunnerCommandOutput, RunnerEnvOutput, RunnerOutput};
 use super::{
     doctor, env as env_mod, jobs, lifecycle, policy, refresh_plan, registry, status as status_mod,
     workspace,
@@ -305,6 +305,14 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             raw,
             command,
             extension_env_providers,
+        )),
+        RunnerCommand::RecipeProviders => Ok((
+            RunnerCommandOutput::RecipeRunProviders(Box::new(RecipeRunProvidersOutput {
+                variant: "recipe_run_providers",
+                command: "list",
+                providers: homeboy_extension::recipe_run_provider_inventory(),
+            })),
+            0,
         )),
         RunnerCommand::RecipeRun {
             runner_id,
@@ -1018,6 +1026,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recipe_run_provider_inventory_has_typed_command_output() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let (output, exit_code) = run(RunnerArgs {
+                command: RunnerCommand::RecipeProviders,
+            })
+            .expect("inventory output");
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                serde_json::to_value(output).expect("serialize output"),
+                serde_json::json!({
+                    "variant": "recipe_run_providers",
+                    "command": "list",
+                    "providers": []
+                })
+            );
+        });
+    }
+
+    #[test]
     fn refresh_failure_maps_parent_run_job_evidence_and_recovery_actions() {
         let output = runner::HomeboyBinaryRefreshOutput {
             variant: "refresh_homeboy",
@@ -1041,6 +1068,7 @@ mod tests {
             daemon_refreshed: false,
             interrupted_job_ids: Vec::new(),
             selected_binary_path: "/runner/homeboy".to_string(),
+            next_actions: Vec::new(),
             reconnect_required: true,
             followup_commands: Vec::new(),
             readiness: Some(runner::HomeboyRefreshReadiness {

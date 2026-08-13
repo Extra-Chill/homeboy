@@ -140,7 +140,7 @@ pub fn reconcile_runner_generation_after_evidence(runner_id: &str) -> Result<()>
     let session = super::connection::status(runner_id)
         .ok()
         .and_then(|report| report.session);
-    super::generation_store::reconcile(runner_id, session.as_ref())
+    super::generation_store::reconcile(runner_id, session.as_ref()).map(|_| ())
 }
 
 #[derive(Debug, Clone)]

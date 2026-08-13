@@ -1439,7 +1439,15 @@ where
 /// endpoint remains recorded and routable. Each reachable draining daemon first
 /// settles terminal durable handoffs, then its own health response becomes the
 /// authoritative count for that generation.
-pub(crate) fn reconcile(runner_id: &str, legacy: Option<&RunnerSession>) -> Result<()> {
+#[derive(Debug, Default)]
+pub(crate) struct GenerationReconcileResult {
+    pub retired_generation_ids: Vec<String>,
+}
+
+pub(crate) fn reconcile(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+) -> Result<GenerationReconcileResult> {
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(5))
@@ -1462,7 +1470,7 @@ pub(crate) fn reconcile_with_ssh(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
     ssh_client: &SshClient,
-) -> Result<()> {
+) -> Result<GenerationReconcileResult> {
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(5))
@@ -1486,9 +1494,9 @@ fn reconcile_with(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
     operations: &impl GenerationEndpointOperations,
-) -> Result<()> {
+) -> Result<GenerationReconcileResult> {
     let Some(generations) = read(runner_id, legacy)? else {
-        return Ok(());
+        return Ok(GenerationReconcileResult::default());
     };
     let observations = generations
         .generations
@@ -1578,10 +1586,11 @@ fn reconcile_with(
             }
         })
         .collect::<Vec<_>>();
-    with_registry_lock(runner_id, || {
+    let retired_generation_ids = with_registry_lock(runner_id, || {
         let Some(mut generations) = read_locked(runner_id, legacy)? else {
-            return Ok(());
+            return Ok(Vec::new());
         };
+        let mut retired = Vec::new();
         for generation in &stopped {
             let should_remove = generations
                 .generations
@@ -1600,9 +1609,14 @@ fn reconcile_with(
                 generations
                     .job_owners
                     .retain(|_, owner| !owner_matches_generation(owner, generation, &endpoint));
+                retired.push(generation.clone());
             }
         }
-        write(runner_id, &generations)
+        write(runner_id, &generations)?;
+        Ok(retired)
+    })?;
+    Ok(GenerationReconcileResult {
+        retired_generation_ids,
     })
 }
 
@@ -1844,7 +1858,7 @@ fn retire_result_owner(
         // endpoint without restoring an owner whose lifecycle was already removed.
         write(runner_id, &generations)
     })?;
-    reconcile(runner_id, legacy)
+    reconcile(runner_id, legacy).map(|_| ())
 }
 
 /// Reconcile a bounded page of authoritative retained result ids. This repairs
@@ -1862,7 +1876,7 @@ pub(crate) fn reconcile_result_owners(
         generations.reconcile_result_owners(retained_run_ids, retained_artifact_ids);
         write(runner_id, &generations)
     })?;
-    reconcile(runner_id, legacy)
+    reconcile(runner_id, legacy).map(|_| ())
 }
 
 pub(crate) fn activate(
@@ -3168,6 +3182,7 @@ mod tests {
                 state: RunnerSessionState::Connected,
                 session: Some(b.clone()),
                 stale_daemon: None,
+                configured_job_binary_build_identity: None,
                 daemon_freshness: None,
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
@@ -3195,6 +3210,7 @@ mod tests {
                 state: RunnerSessionState::Connected,
                 session: Some(b.clone()),
                 stale_daemon: None,
+                configured_job_binary_build_identity: None,
                 daemon_freshness: None,
                 active_jobs: vec![homeboy_core::api_jobs::ActiveRunnerJobSummary {
                     runner_id: "runner-a".to_string(),
@@ -3321,7 +3337,9 @@ mod tests {
                 .active_jobs
                 .borrow_mut()
                 .extend([("lease-a".to_string(), 0), ("lease-b".to_string(), 1)]);
-            reconcile_with("runner-a", Some(&c), &operations).expect("reconcile terminal A");
+            let first =
+                reconcile_with("runner-a", Some(&c), &operations).expect("reconcile terminal A");
+            assert_eq!(first.retired_generation_ids, ["lease-a"]);
 
             let projected = status_projection("runner-a", Some(&c)).expect("project after A");
             assert_eq!(projected.len(), 2);
@@ -3342,7 +3360,9 @@ mod tests {
                 .active_jobs
                 .borrow_mut()
                 .insert("lease-b".to_string(), 0);
-            reconcile_with("runner-a", Some(&c), &operations).expect("reconcile terminal B");
+            let second =
+                reconcile_with("runner-a", Some(&c), &operations).expect("reconcile terminal B");
+            assert_eq!(second.retired_generation_ids, ["build-b"]);
             let projected = status_projection("runner-a", Some(&c)).expect("final projection");
             assert_eq!(projected.len(), 1);
             assert_eq!(projected[0].generation, "build-c");

@@ -1007,6 +1007,7 @@ const EXTENSION_MUTATING_PATHS: &[&str] = &[
     "relink",
     "dev-run",
     "install-for-component",
+    "converge",
     "set",
 ];
 const EXTENSION_MUTATION_NOTES: &str =
@@ -1136,4 +1137,20 @@ pub fn support_command_doc_slugs() -> impl Iterator<Item = &'static str> {
 
 pub fn non_core_command_doc_slugs() -> impl Iterator<Item = &'static str> {
     COMMAND_DOC_REGISTRY.iter().map(|entry| entry.slug)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_converge_is_declared_mutating() {
+        let extension = registered_command("extension").expect("extension command spec");
+        let safety = extension
+            .path_safety(&["converge"])
+            .expect("extension converge safety");
+
+        assert!(safety.safety.mutates);
+        assert!(!safety.safety.operator);
+    }
 }

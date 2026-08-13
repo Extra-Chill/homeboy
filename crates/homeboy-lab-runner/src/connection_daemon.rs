@@ -28,9 +28,10 @@ struct DaemonVersionResponse {
 }
 
 #[derive(Debug)]
-struct DaemonHealthReport {
-    freshness: DaemonFreshnessReport,
-    pid: Option<u32>,
+pub(crate) struct DaemonHealthReport {
+    pub(crate) freshness: DaemonFreshnessReport,
+    pub(crate) pid: Option<u32>,
+    pub(crate) build_identity: Option<String>,
 }
 
 pub(super) struct RemoteDaemonConnectRequest<'a> {
@@ -79,6 +80,7 @@ pub(super) fn connect_remote_daemon(
         |tunnel_pid: Option<u32>,
          tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
          message: String,
+         durability_stage: Option<String>,
          health_attempts: Vec<String>,
          local_url: &str| {
             if let Some(pid) = tunnel_pid {
@@ -102,6 +104,7 @@ pub(super) fn connect_remote_daemon(
                 remote_address: Some(daemon.address.clone()),
                 local_address: Some(local_url.to_string()),
                 tunnel_state: Some("established_then_health_failed".to_string()),
+                durability_stage,
                 health_attempt_count: health_attempts.len(),
                 health_attempts,
             });
@@ -109,7 +112,12 @@ pub(super) fn connect_remote_daemon(
         };
     let (local_port, tunnel_pid, tunnel_process_start_identity, local_url) =
         open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
-    match probe_daemon_health_until_ready(&local_url, &daemon) {
+    match probe_daemon_health_until_durable(
+        &local_url,
+        &daemon,
+        tunnel_pid,
+        tunnel_process_start_identity.as_ref(),
+    ) {
         Ok(()) if endpoint_identity_matches(&local_url, expected_version, expected_identity) => {
             Ok((
                 local_port,
@@ -123,29 +131,46 @@ pub(super) fn connect_remote_daemon(
             tunnel_pid,
             tunnel_process_start_identity,
             "remote daemon endpoint identity did not match the controller-selected generation; refusing to publish it".to_string(),
+            Some("endpoint_identity".to_string()),
             Vec::new(),
             &local_url,
         )),
-        Err(DaemonHealthProbeFailure::IdentityMismatch(report)) => Err(failed_after_tunnel(
-            tunnel_pid,
-            tunnel_process_start_identity,
-            format!(
-                "remote daemon health identity changed or is unavailable (expected lease {:?}, PID {:?}; got lease {:?}, PID {:?}); refusing to write session{}",
-                daemon.lease_id, daemon.pid, report.freshness.lease_id, report.pid,
-                active_job_recovery_guidance(&daemon),
-            ),
-            Vec::new(),
-            &local_url,
-        )),
-        Err(DaemonHealthProbeFailure::Unreachable { message, attempts }) => {
-            Err(failed_after_tunnel(
-                tunnel_pid,
-                tunnel_process_start_identity,
-                message,
-                attempts,
-                &local_url,
-            ))
+        Err(failure) => {
+            let durability_stage = Some(failure_stage(&failure).to_string());
+            match failure {
+                DaemonHealthProbeFailure::IdentityMismatch(report) => Err(failed_after_tunnel(
+                    tunnel_pid,
+                    tunnel_process_start_identity,
+                    format!(
+                        "remote daemon health identity changed or is unavailable (expected lease {:?}, PID {:?}; got lease {:?}, PID {:?}); refusing to write session{}",
+                        daemon.lease_id, daemon.pid, report.freshness.lease_id, report.pid,
+                        active_job_recovery_guidance(&daemon),
+                    ),
+                    durability_stage,
+                    Vec::new(),
+                    &local_url,
+                )),
+                DaemonHealthProbeFailure::Unreachable { message, attempts }
+                | DaemonHealthProbeFailure::TunnelExited { message, attempts } => {
+                    Err(failed_after_tunnel(
+                        tunnel_pid,
+                        tunnel_process_start_identity,
+                        message,
+                        durability_stage,
+                        attempts,
+                        &local_url,
+                    ))
+                }
+            }
         }
+    }
+}
+
+fn failure_stage(failure: &DaemonHealthProbeFailure) -> &'static str {
+    match failure {
+        DaemonHealthProbeFailure::IdentityMismatch(_) => "health_identity",
+        DaemonHealthProbeFailure::Unreachable { .. } => "health_settle",
+        DaemonHealthProbeFailure::TunnelExited { .. } => "tunnel_durability",
     }
 }
 
@@ -154,14 +179,15 @@ fn endpoint_identity_matches(
     expected_version: &str,
     expected_identity: &str,
 ) -> bool {
+    let Ok(response) = daemon_http_body(local_url) else {
+        return false;
+    };
     let identity_matches = expected_identity.trim().is_empty()
-        || daemon_http_identity(local_url)
-            .ok()
+        || daemon_identity_from_body(&response.body)
             .is_some_and(|identity| identity.trim() == expected_identity.trim());
     let version_matches = expected_version.trim().is_empty()
-        || daemon_http_version(local_url)
-            .ok()
-            .is_some_and(|version| versions_match(&version, expected_version));
+        || daemon_version_from_body(&response.body)
+            .is_some_and(|version| versions_match(version, expected_version));
     identity_matches && version_matches
 }
 
@@ -172,6 +198,12 @@ enum DaemonHealthProbeFailure {
     IdentityMismatch(Box<DaemonHealthReport>),
     /// The daemon endpoint could not be reached within the settle budget.
     Unreachable {
+        message: String,
+        attempts: Vec<String>,
+    },
+    /// The captured local tunnel process no longer has the exact identity that
+    /// opened this connection, so it cannot be published as a live session.
+    TunnelExited {
         message: String,
         attempts: Vec<String>,
     },
@@ -186,17 +218,20 @@ enum DaemonHealthProbeFailure {
 ///
 /// An identity mismatch is authoritative — the daemon is up but is the wrong
 /// one — so it is never retried.
-fn probe_daemon_health_until_ready(
+fn probe_daemon_health_until_durable(
     local_url: &str,
     daemon: &RemoteDaemon,
+    tunnel_pid: Option<u32>,
+    tunnel_process_start_identity: Option<&RunnerTunnelProcessStartIdentity>,
 ) -> std::result::Result<(), DaemonHealthProbeFailure> {
-    const MAX_ATTEMPTS: usize = 2;
+    const MAX_ATTEMPTS: usize = 4;
     const RETRY_INTERVAL: Duration = Duration::from_millis(250);
+    const DURABILITY_OBSERVATIONS: usize = 2;
 
     let mut attempts = Vec::with_capacity(MAX_ATTEMPTS);
     for attempt in 1..=MAX_ATTEMPTS {
         match daemon_health_report(local_url) {
-            Ok(report) if health_identity_matches(&report, daemon) => return Ok(()),
+            Ok(report) if health_identity_matches(&report, daemon) => break,
             Ok(report) => return Err(DaemonHealthProbeFailure::IdentityMismatch(Box::new(report))),
             Err(message) => attempts.push(format!("attempt {attempt}: {message}")),
         }
@@ -204,15 +239,77 @@ fn probe_daemon_health_until_ready(
             std::thread::sleep(RETRY_INTERVAL);
         }
     }
-    Err(DaemonHealthProbeFailure::Unreachable {
-        message: format!(
-            "remote daemon health endpoint failed after {MAX_ATTEMPTS} bounded requests: {}",
-            attempts
-                .last()
-                .expect("health probe records failed attempt")
-        ),
-        attempts,
-    })
+    if attempts.len() == MAX_ATTEMPTS {
+        return Err(DaemonHealthProbeFailure::Unreachable {
+            message: format!(
+                "remote daemon health endpoint failed after {MAX_ATTEMPTS} bounded requests: {}",
+                attempts
+                    .last()
+                    .expect("health probe records failed attempt")
+            ),
+            attempts,
+        });
+    }
+
+    if !tunnel_process_identity_matches(tunnel_pid, tunnel_process_start_identity) {
+        attempts.push(
+            "durability observation 0: owned tunnel process exited or changed identity".to_string(),
+        );
+        return Err(DaemonHealthProbeFailure::TunnelExited {
+            message: "owned SSH tunnel exited or changed identity before the post-establishment durability window".to_string(),
+            attempts,
+        });
+    }
+
+    // SSH may report its forward ready while its parent command is still
+    // handing off. Observe beyond that window before publishing the PID.
+    for observation in 1..=DURABILITY_OBSERVATIONS {
+        std::thread::sleep(RETRY_INTERVAL);
+        if !tunnel_process_identity_matches(tunnel_pid, tunnel_process_start_identity) {
+            attempts.push(format!("durability observation {observation}: owned tunnel process exited or changed identity"));
+            return Err(DaemonHealthProbeFailure::TunnelExited {
+                message: "owned SSH tunnel exited or changed identity during the post-establishment durability window".to_string(),
+                attempts,
+            });
+        }
+        match daemon_health_report(local_url) {
+            Ok(report) if health_identity_matches(&report, daemon) => {}
+            Ok(report) => return Err(DaemonHealthProbeFailure::IdentityMismatch(Box::new(report))),
+            Err(message) => {
+                attempts.push(format!("durability observation {observation}: {message}"));
+                return Err(DaemonHealthProbeFailure::Unreachable {
+                    message: format!("remote daemon health endpoint failed during post-establishment durability observation {observation}"),
+                    attempts,
+                });
+            }
+        }
+        if !tunnel_process_identity_matches(tunnel_pid, tunnel_process_start_identity) {
+            attempts.push(format!("durability observation {observation}: owned tunnel process exited after health response"));
+            return Err(DaemonHealthProbeFailure::TunnelExited {
+                message: "owned SSH tunnel exited after a health response during the post-establishment durability window".to_string(),
+                attempts,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn tunnel_process_identity_matches(
+    pid: Option<u32>,
+    expected: Option<&RunnerTunnelProcessStartIdentity>,
+) -> bool {
+    match (pid, expected) {
+        (Some(pid), Some(expected)) => {
+            super::capture_tunnel_process_start_identity(Some(pid))
+                .ok()
+                .flatten()
+                .as_ref()
+                == Some(expected)
+        }
+        // Loopback connections have no SSH child to own.
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 fn active_job_recovery_guidance(daemon: &RemoteDaemon) -> String {
@@ -252,7 +349,18 @@ fn open_daemon_tunnel(
     // A loopback runner already shares the controller network namespace, so
     // its published endpoint is the reachable local endpoint. Avoid reserving
     // an unrelated port when no SSH forwarding process is needed.
-    let local_port = if matches!(server.host.as_str(), "localhost" | "127.0.0.1" | "::1") {
+    let loopback_transport = match homeboy_core::server::server_uses_loopback_transport(server) {
+        Ok(loopback) => loopback,
+        Err(error) => {
+            return Err(Box::new(failed_connect(
+                runner_id,
+                session_path.to_path_buf(),
+                RunnerFailureKind::TunnelFailure,
+                format!("resolve SSH tunnel transport: {error}"),
+            )));
+        }
+    };
+    let local_port = if loopback_transport {
         remote_addr.port()
     } else {
         reserve_loopback_port().map_err(|err| {
@@ -264,11 +372,12 @@ fn open_daemon_tunnel(
             ))
         })?
     };
-    let tunnel = open_loopback_tunnel(
+    let mut tunnel = open_loopback_tunnel(
         server,
         local_port,
         &remote_addr.ip().to_string(),
         remote_addr.port(),
+        loopback_transport,
     );
     if !tunnel.success {
         return Err(Box::new(failed_connect(
@@ -281,27 +390,11 @@ fn open_daemon_tunnel(
 
     // Capture the local process identity before readiness can cause a fast SSH
     // child to exit and be reaped. Session cleanup relies on this exact identity.
-    let (tunnel_process_start_identity, tunnel_ready) =
-        match capture_identity_before_tunnel_readiness(
-            tunnel.pid,
-            super::capture_tunnel_process_start_identity,
-            || wait_for_tcp(local_port, Duration::from_secs(5)),
-        ) {
-            Ok(identity) => identity,
-            Err(error) => {
-                return Err(Box::new(failed_connect(
-                    runner_id,
-                    session_path.to_path_buf(),
-                    RunnerFailureKind::TunnelFailure,
-                    error.message,
-                )));
-            }
-        };
+    let tunnel_process_start_identity = tunnel.process_start_identity.clone();
+    let tunnel_ready = wait_for_tcp(local_port, Duration::from_secs(5));
 
     if !tunnel_ready {
-        if let Some(pid) = tunnel.pid {
-            super::terminate_tunnel_if_owned_parts(pid, tunnel_process_start_identity.as_ref());
-        }
+        tunnel.contain_child();
         return Err(Box::new(failed_connect(
             runner_id,
             session_path.to_path_buf(),
@@ -312,6 +405,7 @@ fn open_daemon_tunnel(
             ),
         )));
     }
+    tunnel.release_child();
     Ok((
         local_port,
         tunnel.pid,
@@ -480,7 +574,7 @@ fn daemon_health_report(local_url: &str) -> std::result::Result<DaemonHealthRepo
     daemon_health_report_with_timeout(local_url, Duration::from_secs(2))
 }
 
-fn daemon_health_report_with_timeout(
+pub(crate) fn daemon_health_report_with_timeout(
     local_url: &str,
     timeout: Duration,
 ) -> std::result::Result<DaemonHealthReport, String> {
@@ -494,6 +588,7 @@ fn daemon_health_report_with_timeout(
     Ok(DaemonHealthReport {
         freshness,
         pid: daemon_pid_from_body(&response.body),
+        build_identity: daemon_identity_from_body(&response.body).map(str::to_string),
     })
 }
 
@@ -737,6 +832,7 @@ mod tests {
                 repair_plan: Vec::new(),
             },
             pid: Some(pid),
+            build_identity: None,
         }
     }
 
@@ -968,19 +1064,21 @@ mod tests {
             // `error sending request` transport failure on the controller side.
             let (first, _) = listener.accept().expect("first health request");
             drop(first);
-            // Second connection: answer correctly so the retry converges.
-            let (mut stream, _) = listener.accept().expect("second health request");
-            let mut request = [0; 1024];
-            let _ = stream.read(&mut request).expect("read request");
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(), body
+            // The retry and both post-establishment observations must answer.
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("health request");
+                let mut request = [0; 1024];
+                let _ = stream.read(&mut request).expect("read request");
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), body
+                        )
+                        .as_bytes(),
                     )
-                    .as_bytes(),
-                )
-                .expect("health response");
+                    .expect("health response");
+            }
         });
 
         let daemon = RemoteDaemon {
@@ -991,12 +1089,45 @@ mod tests {
             build_identity: None,
             inspected_freshness: None,
         };
-        let result = probe_daemon_health_until_ready(&format!("http://{address}"), &daemon);
+        let started = std::time::Instant::now();
+        let result =
+            probe_daemon_health_until_durable(&format!("http://{address}"), &daemon, None, None);
         assert!(
             result.is_ok(),
-            "probe must retry through the transient startup failure: {result:?}"
+            "probe must retry through startup and observe durable health: {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "bounded health settle and durability observations must not hang"
         );
         server.join().expect("server");
+    }
+
+    #[test]
+    fn unreachable_health_probe_is_bounded() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        drop(listener);
+        let daemon = RemoteDaemon {
+            address: address.to_string(),
+            pid: Some(7331),
+            lease_id: Some("lease-live".to_string()),
+            version: None,
+            build_identity: None,
+            inspected_freshness: None,
+        };
+
+        let started = std::time::Instant::now();
+        let result =
+            probe_daemon_health_until_durable(&format!("http://{address}"), &daemon, None, None);
+        assert!(matches!(
+            result,
+            Err(DaemonHealthProbeFailure::Unreachable { attempts, .. }) if attempts.len() == 4
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "four bounded refused health probes must not hang"
+        );
     }
 
     /// An identity mismatch is authoritative — the daemon is up but is the
@@ -1035,7 +1166,8 @@ mod tests {
             inspected_freshness: None,
         };
         let started = std::time::Instant::now();
-        let result = probe_daemon_health_until_ready(&format!("http://{address}"), &daemon);
+        let result =
+            probe_daemon_health_until_durable(&format!("http://{address}"), &daemon, None, None);
         assert!(
             matches!(result, Err(DaemonHealthProbeFailure::IdentityMismatch(_))),
             "identity mismatch must fail immediately: {result:?}"
@@ -1079,6 +1211,120 @@ mod tests {
             None,
             "the former post-readiness capture would report the child exited"
         );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn durability_check_rejects_a_tunnel_that_exits_after_apparent_readiness() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let body = serde_json::json!({
+            "freshness": report("lease-live", 7331).freshness,
+            "pid": 7331,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("initial health request");
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).expect("read request");
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .expect("health response");
+        });
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 0.05")
+            .spawn()
+            .expect("start tunnel child");
+        let pid = child.id();
+        let identity = super::super::capture_tunnel_process_start_identity(Some(pid))
+            .expect("capture child identity")
+            .expect("child identity");
+        let daemon = RemoteDaemon {
+            address: address.to_string(),
+            pid: Some(7331),
+            lease_id: Some("lease-live".to_string()),
+            version: None,
+            build_identity: None,
+            inspected_freshness: None,
+        };
+
+        let started = std::time::Instant::now();
+        let result = probe_daemon_health_until_durable(
+            &format!("http://{address}"),
+            &daemon,
+            Some(pid),
+            Some(&identity),
+        );
+        let Err(failure) = result else {
+            panic!("exited tunnel must fail the durability window");
+        };
+        assert!(matches!(
+            failure,
+            DaemonHealthProbeFailure::TunnelExited { .. }
+        ));
+        assert_eq!(failure_stage(&failure), "tunnel_durability");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "an exited tunnel must fail within the bounded durability window"
+        );
+        assert!(child.wait().expect("reap tunnel child").success());
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn loopback_durability_has_no_ssh_identity_requirement() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let body = serde_json::json!({
+            "freshness": report("lease-live", 7331).freshness,
+            "pid": 7331,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("health request");
+                let mut request = [0; 1024];
+                let _ = stream.read(&mut request).expect("read request");
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), body
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("health response");
+            }
+        });
+        let daemon = RemoteDaemon {
+            address: address.to_string(),
+            pid: Some(7331),
+            lease_id: Some("lease-live".to_string()),
+            version: None,
+            build_identity: None,
+            inspected_freshness: None,
+        };
+
+        let started = std::time::Instant::now();
+        assert!(probe_daemon_health_until_durable(
+            &format!("http://{address}"),
+            &daemon,
+            None,
+            None,
+        )
+        .is_ok());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "loopback durability observations must not hang"
+        );
+        server.join().expect("server");
     }
 
     #[test]

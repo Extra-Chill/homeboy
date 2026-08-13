@@ -26,7 +26,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `run <run-id>` | Execute one exact durable run id, bypassing older queued work. |
 | `run-next` | Claim and execute the oldest eligible queued durable run, reporting skipped quarantined work. |
 | `submit` | Persist an agent-task plan and return a durable run id without executing it. |
-| `status <run-id> [--exact]` | Read durable run status; `--exact` bypasses Cook alias resolution to inspect that concrete lifecycle record. |
+| `status <run-id> [--exact] [--watch]` | Read durable run status; `--exact` bypasses Cook alias resolution to inspect that concrete lifecycle record. `--watch` emits changed snapshots and exits when terminal or timed out. |
 | `list [--limit <n>]` | List durable runs, newest first. |
 | `active [--limit <n>] [--cursor <n>] [--reconcile [--dry-run\|--apply]]` | List queued and running durable runs, newest first, or preview/reconcile the explicit fleet mutation set. |
 | `reconcile <run-id> [--dry-run\|--apply]` | Preview or reconcile one durable run after refreshing its authoritative provider state. |
@@ -42,6 +42,8 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
 `agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `list` and `active` default to 20 newest rows and return `next_cursor` when another page exists; continue active discovery with `agent-task active --limit <n> --cursor <next_cursor>`. Active discovery emits at most eight prioritized `next_actions`: fleet reconciliation when stale records exist, page continuation when truncated, and focused per-run inspection actions. `list --full` and `active --full` return every matching row. Filter list discovery by `--task-url`, `--repo`, `--worktree`, `--submitted-after`, `--state`, `--run-placement`, or `--parent-id`. `agent-task reconcile <run-id>` is the recovery path emitted by status and activity: it previews only that run by default, refreshes runner/provider state before classification, and requires `--apply` to mutate it. If ownership or provider state changes before apply, it reports a no-op. `agent-task active --reconcile` is an explicit fleet operation: it previews every candidate by default and requires `--apply` to reconcile the fleet-wide candidate set. Its `--limit`, `--cursor`, and `--full` selectors are rejected so discovery pagination cannot imply a reconciliation scope.
+
+`agent-task status <run-id> --watch` follows the same durable status abstraction used by one-shot status reads, including `--bridge` runner reconciliation. Every changed state, including transitions after final-envelope retention fills, is emitted immediately as one `homeboy/agent-task-status-watch-event/v1` JSONL event on stderr with the run id, state, poll number, latest snapshot, and continuation command, so interruption preserves already-observed machine-consumable progress while stdout remains the final `homeboy/agent-task-status-watch/v1` envelope. That envelope retains at most 12 changed snapshots, reports omitted changes, includes the latest status, poll accounting, and a continuation command. Polls default to every `5s` and stop after `30m`; `--interval <duration>` and `--timeout <duration>` require `--watch`. The shared watcher caps each sleep to the remaining timeout, so its wall-clock bound is not extended by the polling interval. A terminal failure exits nonzero; a timeout returns the latest partial status and exits `124`.
 
 ### Resource Behavior
 
@@ -89,6 +91,66 @@ ordering and output bindings belong in the existing single-run `fanout submit` /
 `run-plan` scheduler path.
 
 ### Cook/Review
+
+### File-backed verification gates
+
+Use `--verify-file <path>` or `--private-verify-file <path>` for shell programs
+with loops, quotes, newlines, or `$variables`. Each option is repeatable. Homeboy
+reads the regular UTF-8 file from the controller invocation directory before it
+provisions a worktree or dispatches a provider, then executes and persists that
+exact snapshot. Changing the source file afterwards cannot change the Cook.
+
+```sh
+homeboy agent-task cook --prompt @task.md --to-worktree project@fix-gate \
+  --verify-file ./quality-gate.sh \
+  --private-verify-file ./private-gate.sh
+```
+
+For example, `quality-gate.sh` can contain this program without shell-argument
+interpolation:
+
+```sh
+for file in src/*.rs; do
+  cargo fmt --check -- "$file"
+done
+```
+
+Relative paths resolve from the directory where the `homeboy` controller command
+starts, not from the destination worktree. Quote inline gates with single quotes
+when they are concise, such as `--verify 'cargo fmt --check'`; use a file for
+complex programs. Files must be readable, non-empty, regular files no larger than
+1 MiB. Durable gate policy records `source_kind`, SHA-256 digest, byte size, and
+redaction policy. Public file paths are retained as provenance; private file paths
+and private program text are redacted from that provenance. Existing inline
+`--verify` and `--private-verify` commands remain supported.
+
+Private gate programs, whether inline or file-backed, use the existing trusted
+durable Cook recipe boundary so retries and adoption can replay the declared gate.
+They are not protected as secret material at rest. Homeboy excludes private gate
+text and paths from public Cook-batch plans, preflight summaries, reviewer-facing
+evidence, and agent feedback according to `--private-gate-reveal`; operators who
+need encrypted secret storage should supply a non-secret command that retrieves
+credentials at execution time rather than place credentials in a gate program.
+
+For a Cook-batch with private gates, Homeboy atomically retains the exact plan in
+`$HOMEBOY_DATA_DIR/agent-task/private-batch-plans/<fanout-id>.json` before it
+returns its public result. The returned `run-plan --input @<absolute-path>` command
+uses that controller-owned artifact; its private contents are never included in
+public JSON. Its SHA-256 checksum detects accidental corruption in trusted local
+state; it is not adversarial authentication. On Unix, the private artifact
+directory is mode `0700` and temporary/final artifacts are created mode `0600`
+before private bytes are written; rename preserves that mode. Other platforms use
+their platform-default owner-private file semantics where exposed by the runtime.
+Artifacts are retained with Homeboy controller data until data-root cleanup. On
+platforms without Unix device/inode identity APIs, Homeboy retains
+the portable descriptor-bound contract: it opens once, validates the opened
+descriptor as a regular bounded file, and reads that descriptor; Unix additionally
+uses no-follow, nonblocking open flags and verifies device/inode identity.
+
+`fanout plan --input @<private-artifact>` may inspect this trusted local artifact,
+but it returns only the same public projection used by Cook-batch output: private
+gate commands and paths remain redacted. `fanout run-plan` is the execution path
+that loads the private gate bytes.
 
 ### Provider Execution Budgets
 
@@ -852,6 +914,26 @@ Cook entries accept dispatch fields such as `prompt`, `tasks`, `repo`, `cwd`,
 `provider_config`, and `client_context`. Review fields include `to_worktree`,
 `provider_command`, `verify`, `private_verify`, `max_attempts`, `base`, `head`,
 `title`, `commit_message`, `protected_branches`, `ai_tool`, and `ai_used_for`.
+
+## Gate Command Contracts
+
+Before Cook provisions a worktree or dispatches a provider, Homeboy validates
+each exact simple `homeboy ...` deterministic gate against the installed Clap
+contract, including global flags and required arguments. Compound shell gates
+remain external and unvalidated during admission. Gate validation is recorded as
+`gate_contract_validation` in the Cook plan; gate execution remains separate
+promotion evidence.
+
+Repository `homeboy.json` entries under `scripts.lint` and `scripts.test` are
+capability identities, not top-level CLI verbs. Use their canonical gate forms:
+
+```sh
+homeboy review lint --path .
+homeboy review test --path .
+```
+
+Other shell gates remain unvalidated during admission. Declare a `--gate-toolchain`
+when Homeboy must probe an external executable before provider dispatch.
 Each cook must declare at least one deterministic `verify` or `private_verify`
 gate so PR finalization is reviewer-ready.
 

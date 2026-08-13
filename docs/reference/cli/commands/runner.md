@@ -34,12 +34,15 @@ Manage local and SSH execution runners
 | `homeboy runner preflight` | Evaluate workload placement without creating a run, rig lease, runner job, or connection |
 | `homeboy runner connect` | Connect to a runner by starting a loopback-only remote daemon and SSH tunnel |
 | `homeboy runner status` | Show persisted runner tunnel status |
+| `homeboy runner peer-sessions` | Inspect and safely remove persisted peer sessions whose local tunnels are proven dead |
 | `homeboy runner reconcile` | Reconcile persisted direct-runner generation state and retire verified drained daemons |
 | `homeboy runner disconnect` | Close a runner tunnel and remove its persisted session state |
 | `homeboy runner refresh-homeboy` | Build or select the Homeboy binary used for runner/Lab jobs |
 | `homeboy runner dev-sync` | Sync a controller-local Homeboy dev binary to the runner and select it for Lab jobs |
 | `homeboy runner cache-prune` | Inventory or remove stale managed Homeboy binary slots on a runner |
 | `homeboy runner exec` | Execute a command on a configured runner. Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...` |
+| `homeboy runner recipe-run` | Execute an extension-owned recipe provider in one materialized workspace |
+| `homeboy runner recipe-providers` | List installed extension-owned recipe-run providers |
 | `homeboy runner env` | Show the effective environment injected into runner jobs |
 | `homeboy runner lifecycle` | Evaluate runner workspace lifecycle and finalization readiness without mutating state |
 | `homeboy runner job` | Inspect or follow a runner daemon job stream |
@@ -268,6 +271,23 @@ Show persisted runner tunnel status
 | `--generations` | flag | Include the full historical draining-generation inventory. By default status leads with the compact authoritative admission summary and omits the expanded per-generation ledger, which can run to thousands of lines on a long-lived runner |
 | `--full` | flag | Return complete status, runtime diagnostics, followups, and generation detail |
 
+## `homeboy runner peer-sessions`
+
+```sh
+homeboy runner peer-sessions [OPTIONS] <ID>
+```
+
+Inspect and safely remove persisted peer sessions whose local tunnels are proven dead
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<ID>` | yes | Runner ID |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--cursor` | `<CURSOR>` | Continue after this cursor returned by a prior peer-session command |
+| `--apply` | flag | Remove only peer-session snapshots proven dead during this inspection |
+
 ## `homeboy runner reconcile`
 
 ```sh
@@ -393,6 +413,34 @@ Execute a command on a configured runner. Use `homeboy runner exec [HOMEBOY_OPTI
 | `--json` | flag | Print the full structured runner execution envelope to stdout |
 | `--raw` | flag | Print remote stdout/stderr directly instead of the structured JSON envelope. Use global --output to still write the full structured envelope to a file |
 | `--read-only-artifact` | flag | Treat this exec as a read-only retrieval of evidence the runner already retains (for example, hydrating a completed run's artifact). Routes to the generation that owns the retained run/artifact and never rotates the shared tunnel, so a stale admission daemon does not block the read |
+
+## `homeboy runner recipe-run`
+
+```sh
+homeboy runner recipe-run [OPTIONS] <RUNNER_ID>
+```
+
+Execute an extension-owned recipe provider in one materialized workspace
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<RUNNER_ID>` | yes | Runner ID |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--provider` | `<PROVIDER>` | Stable extension-owned recipe execution provider ID |
+| `--sync-workspace` | `<SYNC_WORKSPACE>` | Controller-local workspace to snapshot once before execution |
+| `--recipe` | `<RECIPE>` | Recipe path relative to the materialized workspace |
+| `--artifacts` | `<ARTIFACTS>` | Artifact directory relative to the materialized workspace |
+| `--run-id` | `<RUN_ID>` | Durable run identity that receives execution evidence |
+
+## `homeboy runner recipe-providers`
+
+```sh
+homeboy runner recipe-providers
+```
+
+List installed extension-owned recipe-run providers
 
 ## `homeboy runner env`
 

@@ -776,6 +776,7 @@ fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookSe
     }
 
     for request in &mut options.initial_plan.tasks {
+        request.controller_owns_publication();
         request.output_declarations.retain(|declaration| {
             declaration.name != crate::agent_task_review_dossier::AI_REVIEW_FORM_OUTPUT_KEY
         });
@@ -785,6 +786,14 @@ fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookSe
         if !request.instructions.contains("reviewer-facing PR dossier") {
             request.instructions.push_str(
                 "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), optional structured `verification` entries (exact command plus total/passed/failed/ignored counts), and `used_for` (a concise reflection of the process used). Homeboy links verification entries to durable candidate gate evidence. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
+            );
+        }
+        if !request
+            .instructions
+            .contains("controller-owned publication")
+        {
+            request.instructions.push_str(
+                "\n\nThis is a non-publishable attempt workspace. controller-owned publication is not attempted by this provider: produce the commit or patch and reviewer-facing dossier, but do not push, create a pull request, release, or deploy. Homeboy's controller finalization handles any authorized publication after this attempt.",
             );
         }
     }
@@ -858,6 +867,16 @@ const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route
 /// Record that the `cook-continue` lifecycle route selected this exact attempt.
 /// This is durable route authority, not caller-controlled plan metadata.
 pub fn authorize_cook_continue_route(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    authorize_cook_continue_route_with_artifact(options, None)
+}
+
+/// Persist the continuation-only patch selection beside route authority. The
+/// selector is consumed solely by controller promotion and never reaches a
+/// provider request, so retrying promotion cannot spend another execution.
+pub fn authorize_cook_continue_route_with_artifact(
+    options: &AgentTaskCookServiceOptions,
+    artifact_id: Option<&str>,
+) -> Result<()> {
     agent_task_lifecycle::exact_record(&options.initial_run_id)?;
     agent_task_lifecycle::record_metadata_value(
         &options.initial_run_id,
@@ -866,6 +885,7 @@ pub fn authorize_cook_continue_route(options: &AgentTaskCookServiceOptions) -> R
             "schema": COOK_CONTINUE_ROUTE_SCHEMA,
             "cook_id": options.cook_id,
             "run_id": options.initial_run_id,
+            "artifact_id": artifact_id,
         }),
     )
 }
@@ -935,6 +955,27 @@ pub struct AgentTaskCookReport {
     /// recipe was materialized. This intentionally contains no provider or gate
     /// evidence; operators retrieve that through the listed diagnose command.
     pub failure_context: Option<AgentTaskCookFailureContext>,
+}
+
+/// The end-to-end publication state of a Cook candidate.
+///
+/// Provider success is evidence that a candidate was produced; it is not proof
+/// that the requested PR exists. This additive v1 projection leaves the legacy
+/// `status` and `finalization` payloads intact for persisted consumers.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskCookCompletion {
+    pub schema: &'static str,
+    /// The selected provider candidate, when one was durably produced.
+    pub candidate_produced: bool,
+    /// Whether this Cook requested controller-side PR finalization.
+    pub finalization_requested: bool,
+    /// `true` only when durable finalization evidence identifies a PR.
+    pub pr_finalized: bool,
+    /// Closed end-to-end outcome vocabulary for consumers that must not treat
+    /// a provider-only success as Cook completion.
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<AgentTaskCookRecoveryAction>,
 }
 
 /// The closed-vocabulary classification emitted beside an open `status`
@@ -1039,6 +1080,8 @@ impl serde::Serialize for AgentTaskCookReport {
             moving_base_recovery: Option<&'a MovingBaseCookRecovery>,
             #[serde(skip_serializing_if = "Option::is_none")]
             failure_context: Option<&'a AgentTaskCookFailureContext>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            completion: Option<AgentTaskCookCompletion>,
             // Additive. `status` above is unchanged and remains the field
             // callers match on.
             lifecycle_status: RunLifecycleStatus,
@@ -1047,6 +1090,7 @@ impl serde::Serialize for AgentTaskCookReport {
         }
 
         let lifecycle = self.lifecycle();
+        let completion = self.completion();
         let wire = Wire {
             schema: self.schema,
             cook_id: &self.cook_id,
@@ -1064,6 +1108,7 @@ impl serde::Serialize for AgentTaskCookReport {
             terminal_failure_classification: self.terminal_failure_classification.as_ref(),
             moving_base_recovery: self.moving_base_recovery.as_ref(),
             failure_context: self.failure_context.as_ref(),
+            completion,
             lifecycle_status: lifecycle.lifecycle_status,
             terminal: lifecycle.terminal,
             retryable: lifecycle.retryable,
@@ -1077,6 +1122,224 @@ impl AgentTaskCookReport {
     pub fn lifecycle(&self) -> RunLifecycleProjection {
         RunLifecycleProjection::from_status_and_disposition(&self.status, self.disposition)
     }
+
+    /// Project the Cook's end-to-end PR completion separately from provider
+    /// output and raw legacy status strings.
+    pub fn completion(&self) -> Option<AgentTaskCookCompletion> {
+        let finalization_requested = !matches!(
+            self.status.as_str(),
+            "green_no_finalize" | "intentional_no_change"
+        );
+        cook_completion(
+            self.selected_candidate.as_ref(),
+            finalization_requested,
+            self.finalization.as_ref(),
+            self.latest_run_id.as_deref(),
+        )
+    }
+}
+
+/// A finalization receipt is completion evidence only when it names the PR it
+/// published. Older receipt shapes remain serialized unchanged, but cannot make
+/// a Cook look complete without that durable identity.
+pub fn cook_finalization_is_pr_receipt(finalization: &Value) -> bool {
+    matches!(
+        finalization["status"].as_str(),
+        Some("review_ready" | "draft_published")
+    ) && (finalization["pr_number"].is_u64()
+        || finalization["pr"]["number"].is_u64()
+        || finalization["pr_url"].as_str().is_some()
+        || finalization["pr"]["url"].as_str().is_some())
+}
+
+/// Project durable candidate and publication facts for both immediate Cook
+/// reports and record readers.
+pub fn cook_completion(
+    selected_candidate: Option<&Value>,
+    finalization_requested: bool,
+    finalization: Option<&Value>,
+    finalization_run_id: Option<&str>,
+) -> Option<AgentTaskCookCompletion> {
+    let candidate_produced = canonical_candidate_produced(selected_candidate);
+    let canonical_finalization =
+        canonical_candidate_finalization(selected_candidate, finalization, finalization_run_id);
+    // A report can carry a receipt before the Cook index is available. Once a
+    // canonical selection exists, however, only that selected attempt owns the
+    // completion receipt; a newer non-substantive attempt cannot replace it.
+    let finalization = canonical_finalization.as_ref().or_else(|| {
+        selected_candidate
+            .is_none_or(|candidate| candidate["cook_id"].as_str().is_none())
+            .then_some(finalization)
+            .flatten()
+    });
+    let pr_finalized = finalization.is_some_and(cook_finalization_is_pr_receipt);
+    let recovery_run_id = (!pr_finalized && finalization_requested)
+        .then(|| canonical_finalization_recovery_run_id(selected_candidate))
+        .flatten();
+    let state = if pr_finalized {
+        "pr_finalized"
+    } else if recovery_run_id.is_some() {
+        "candidate_awaiting_finalization"
+    } else if candidate_produced {
+        "candidate_produced"
+    } else {
+        return None;
+    };
+    let next_action = (state == "candidate_awaiting_finalization")
+        .then_some(recovery_run_id)
+        .flatten()
+        .map(|run_id| AgentTaskCookRecoveryAction {
+            action: "finalize_pr".to_string(),
+            command: format!("homeboy agent-task finalize-pr --recover {run_id}"),
+        });
+    Some(AgentTaskCookCompletion {
+        schema: "homeboy/agent-task-cook-completion/v1",
+        candidate_produced,
+        finalization_requested,
+        pr_finalized,
+        state,
+        next_action,
+    })
+}
+
+/// A candidate selection is substantive only when the controller named the
+/// immutable task and patch artifact it selected. The legacy fallback selection
+/// leaves those fields empty for empty, unknown, and conflicting attempts.
+fn canonical_candidate_produced(selected_candidate: Option<&Value>) -> bool {
+    let Some(candidate) = selected_candidate else {
+        return false;
+    };
+    candidate["incomplete"] != true
+        && candidate["run_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+        && candidate["selected_task_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+        && candidate["selected_artifact_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+}
+
+/// Recovery needs the exact selected immutable artifact, a finalizable promotion,
+/// required-gate evidence accepted by the Cook recipe, and reviewer metadata.
+fn canonical_finalization_recovery_run_id(selected_candidate: Option<&Value>) -> Option<String> {
+    if !canonical_candidate_produced(selected_candidate) {
+        return None;
+    }
+    let candidate = selected_candidate?;
+    let run_id = candidate["run_id"].as_str()?;
+    let task_id = candidate["selected_task_id"].as_str()?;
+    let artifact_id = candidate["selected_artifact_id"].as_str()?;
+    let cook_id = candidate["cook_id"].as_str()?;
+    let recipe = super::cook_recipe::load_recipe(cook_id).ok()?;
+    let options = super::cook_recipe::reconstruct_adoption_options(&recipe).ok()?;
+    let promotion = super::cook_promotion::persisted_promotion_for_attempt(run_id)
+        .ok()
+        .flatten()?;
+    let recovery_run_id = super::cook_promotion::canonical_cook_recovery_run_id(cook_id)?;
+    if !canonical_finalization_eligible(
+        &promotion,
+        options.gates.accept_inherited_failures,
+        review_form_from_aggregate(
+            &agent_task_lifecycle::read_attempt_aggregate(&recovery_run_id).ok()?,
+        )
+        .ok()
+        .flatten()
+        .is_some_and(|form| form.validate().is_ok()),
+    ) || promotion.source.run_id.as_deref() != Some(run_id)
+        || promotion.source.task_id != task_id
+        || promotion.patch_artifact.id != artifact_id
+        || promotion
+            .patch_artifact
+            .sha256
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        return None;
+    }
+    Some(recovery_run_id)
+}
+
+fn canonical_finalization_eligible(
+    promotion: &AgentTaskPromotionReport,
+    accept_inherited_failures: bool,
+    has_valid_review_form: bool,
+) -> bool {
+    matches!(
+        promotion.status,
+        AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
+    ) && promotion.finalization_eligible(accept_inherited_failures)
+        && has_valid_review_form
+}
+
+/// Read finalization from the canonical selected attempt or its authenticated
+/// form-only continuation. An exact status read may target a later attempt, but
+/// only a continuation that carries this candidate's verified promotion may own
+/// its reviewer-metadata receipt.
+pub(crate) fn canonical_candidate_finalization(
+    selected_candidate: Option<&Value>,
+    inspected_finalization: Option<&Value>,
+    inspected_run_id: Option<&str>,
+) -> Option<Value> {
+    if !canonical_candidate_produced(selected_candidate) {
+        return None;
+    }
+    let candidate = selected_candidate?;
+    let cook_id = candidate["cook_id"].as_str()?;
+    let run_id = candidate["run_id"].as_str()?;
+    if inspected_run_id == Some(run_id) {
+        if let Some(finalization) = inspected_finalization {
+            return Some(finalization.clone());
+        }
+    }
+    let record = agent_task_lifecycle::exact_record(run_id).ok()?;
+    if record.metadata["cook_id"].as_str() == Some(cook_id) {
+        if let Some(finalization) = record.metadata.get("cook_finalization") {
+            return Some(finalization.clone());
+        }
+    }
+    let recipe = super::cook_recipe::load_recipe(cook_id).ok()?;
+    for attempt in recipe.attempts.iter().rev() {
+        if attempt.run_id == run_id {
+            continue;
+        }
+        let Ok(record) = agent_task_lifecycle::exact_record(&attempt.run_id) else {
+            continue;
+        };
+        if record.metadata["cook_id"].as_str() != Some(cook_id)
+            || !review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record).ok()?
+        {
+            continue;
+        }
+        let Some(promotion) =
+            super::cook_promotion::persisted_promotion_for_attempt(&attempt.run_id)
+                .ok()
+                .flatten()
+        else {
+            continue;
+        };
+        if promotion
+            .provenance
+            .pointer("/cook_follow_up/source_run_id")
+            .and_then(Value::as_str)
+            != Some(run_id)
+        {
+            continue;
+        }
+        if let Some(finalization) = record.metadata.get("cook_finalization") {
+            return Some(finalization.clone());
+        }
+    }
+    None
+}
+
+/// Resolve the controller-owned candidate selection for a Cook alias. Callers
+/// that publish or recover must use this instead of ranking attempt history.
+pub(crate) fn canonical_cook_candidate(cook_id: &str) -> Option<Value> {
+    agent_task_lifecycle::select_cook_candidate(cook_id)
+        .ok()
+        .and_then(|selection| serde_json::to_value(selection).ok())
 }
 
 /// `skip_serializing_if` predicate for a borrowed slice field.
@@ -1375,7 +1638,12 @@ pub struct AgentTaskCookBatchReport {
 /// from, so this parses instead of keeping a second copy of that list.
 /// Anything unparseable stays `Unknown` rather than being guessed.
 fn batch_lifecycle_status(status: &str) -> RunLifecycleStatus {
-    serde_json::from_value(Value::String(status.to_string())).unwrap_or(RunLifecycleStatus::Unknown)
+    match status {
+        "planning" => RunLifecycleStatus::Queued,
+        "admitting" => RunLifecycleStatus::Running,
+        _ => serde_json::from_value(Value::String(status.to_string()))
+            .unwrap_or(RunLifecycleStatus::Unknown),
+    }
 }
 
 impl AgentTaskCookBatchReport {
@@ -1564,6 +1832,8 @@ mod run_lifecycle_projection_tests {
         use crate::agent_task_batch::AgentTaskBatchState;
 
         for state in [
+            AgentTaskBatchState::Planning,
+            AgentTaskBatchState::Admitting,
             AgentTaskBatchState::Queued,
             AgentTaskBatchState::Running,
             AgentTaskBatchState::Succeeded,
@@ -1573,6 +1843,8 @@ mod run_lifecycle_projection_tests {
             AgentTaskBatchState::TimedOut,
         ] {
             let expected = match state {
+                AgentTaskBatchState::Planning => RunLifecycleStatus::Queued,
+                AgentTaskBatchState::Admitting => RunLifecycleStatus::Running,
                 AgentTaskBatchState::Queued => RunLifecycleStatus::Queued,
                 AgentTaskBatchState::Running => RunLifecycleStatus::Running,
                 AgentTaskBatchState::Succeeded => RunLifecycleStatus::Succeeded,
@@ -1616,6 +1888,192 @@ mod run_lifecycle_projection_tests {
             value["retryable"], false,
             "a partially failed batch must not be advertised as blanket-retryable"
         );
+    }
+
+    #[test]
+    fn candidate_without_canonical_finalization_evidence_is_not_recoverable() {
+        let mut candidate = report("completed", CookDisposition::Terminal);
+        candidate.selected_candidate = Some(serde_json::json!({
+            "run_id": "cook-projection-attempt-1",
+            "incomplete": false,
+            "selected_task_id": "task-1",
+            "selected_artifact_id": "patch-1",
+        }));
+
+        let serialized = serde_json::to_value(&candidate).expect("serialize");
+        assert_eq!(
+            serialized["status"], "completed",
+            "legacy status is preserved"
+        );
+        assert_eq!(serialized["completion"]["state"], "candidate_produced");
+        assert_eq!(serialized["completion"]["pr_finalized"], false);
+        assert!(serialized["completion"].get("next_action").is_none());
+
+        let batch = cook_batch_result(
+            "batch-projection".to_string(),
+            vec![cell("completed", Some(candidate))],
+        );
+        assert_eq!(batch.value.succeeded, 1);
+        assert_eq!(batch.value.failed, 0);
+        assert_eq!(batch.value.status, "succeeded");
+        assert_eq!(batch.exit_code, 0);
+    }
+
+    #[test]
+    fn finalized_pr_requires_a_durable_pr_identity() {
+        let mut candidate = report("review_ready", CookDisposition::Terminal);
+        candidate.selected_candidate = Some(serde_json::json!({
+            "run_id": "cook-projection-attempt-1",
+            "incomplete": false,
+            "selected_task_id": "task-1",
+            "selected_artifact_id": "patch-1",
+        }));
+        candidate.finalization = Some(serde_json::json!({
+            "status": "review_ready",
+            "pr_number": 12162,
+        }));
+
+        let completion = candidate.completion().expect("candidate completion");
+        assert_eq!(completion.state, "pr_finalized");
+        assert!(completion.pr_finalized);
+        assert!(completion.next_action.is_none());
+    }
+
+    #[test]
+    fn finalization_status_without_pr_identity_is_not_cook_completion() {
+        let mut candidate = report("review_ready", CookDisposition::Terminal);
+        candidate.selected_candidate = Some(serde_json::json!({
+            "run_id": "cook-projection-attempt-1",
+            "incomplete": false,
+            "selected_task_id": "task-1",
+            "selected_artifact_id": "patch-1",
+        }));
+        // Legacy receipts can establish that finalization was attempted, but
+        // cannot establish publication without the PR identity.
+        candidate.finalization = Some(serde_json::json!({
+            "status": "review_ready",
+        }));
+
+        let completion = candidate.completion().expect("candidate completion");
+        assert_eq!(completion.state, "candidate_produced");
+        assert!(!completion.pr_finalized);
+    }
+
+    #[test]
+    fn empty_unknown_and_conflicting_selections_never_produce_candidates() {
+        for candidate in [
+            serde_json::json!({"run_id": "run", "incomplete": false}),
+            serde_json::json!({"run_id": "", "incomplete": false, "selected_task_id": "task", "selected_artifact_id": "patch"}),
+            serde_json::json!({"run_id": "run", "incomplete": true, "selected_task_id": "task", "selected_artifact_id": "patch"}),
+        ] {
+            assert!(
+                cook_completion(Some(&candidate), true, None, None).is_none(),
+                "non-canonical selection cannot advertise a candidate or recovery"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_candidate_without_green_finalization_evidence_has_no_recovery_action() {
+        let candidate = serde_json::json!({
+            "run_id": "failed-provider-run",
+            "incomplete": false,
+            "selected_task_id": "task",
+            "selected_artifact_id": "patch",
+        });
+
+        let completion = cook_completion(Some(&candidate), true, None, None)
+            .expect("canonical candidate is reported without treating it as publishable");
+
+        assert_eq!(completion.state, "candidate_produced");
+        assert!(completion.next_action.is_none());
+    }
+
+    #[test]
+    fn canonical_selection_rejects_a_newer_attempt_receipt() {
+        let candidate = serde_json::json!({
+            "cook_id": "cook",
+            "run_id": "older-canonical-run",
+            "incomplete": false,
+            "selected_task_id": "task",
+            "selected_artifact_id": "patch",
+        });
+        let newer_receipt = serde_json::json!({"status": "review_ready", "pr_number": 12291});
+
+        assert!(
+            canonical_candidate_finalization(
+                Some(&candidate),
+                Some(&newer_receipt),
+                Some("newer-non-substantive-run"),
+            )
+            .is_none(),
+            "a receipt on an exact newer non-substantive attempt cannot finalize the older candidate"
+        );
+    }
+
+    #[test]
+    fn canonical_selection_uses_its_own_inspected_receipt() {
+        let candidate = serde_json::json!({
+            "cook_id": "cook",
+            "run_id": "canonical-run",
+            "incomplete": false,
+            "selected_task_id": "task",
+            "selected_artifact_id": "patch",
+        });
+        let receipt = serde_json::json!({"status": "review_ready", "pr_number": 12291});
+
+        assert_eq!(
+            canonical_candidate_finalization(
+                Some(&candidate),
+                Some(&receipt),
+                Some("canonical-run")
+            ),
+            Some(receipt)
+        );
+    }
+
+    #[test]
+    fn finalized_canonical_candidate_does_not_reopen_finalization_recovery() {
+        let receipt = serde_json::json!({"status": "review_ready", "pr_number": 12291});
+        let completion = cook_completion(None, true, Some(&receipt), None)
+            .expect("receipt produces terminal completion");
+
+        assert_eq!(completion.state, "pr_finalized");
+        assert!(completion.next_action.is_none());
+    }
+
+    #[test]
+    fn unbound_finalization_receipt_does_not_make_a_cook_exit_successfully() {
+        let mut report = report("review_ready", CookDisposition::Terminal);
+        report.latest_run_id = Some("newer-attempt".to_string());
+        report.selected_candidate = Some(serde_json::json!({
+            "cook_id": "cook",
+            "run_id": "older-canonical-attempt",
+            "incomplete": false,
+            "selected_task_id": "task",
+            "selected_artifact_id": "patch",
+        }));
+        report.finalization = Some(serde_json::json!({
+            "status": "review_ready",
+            "pr_number": 12291,
+        }));
+
+        assert_eq!(cook_report_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn a_pr_receipt_remains_completed_without_reloading_candidate_evidence() {
+        let completion = cook_completion(
+            None,
+            true,
+            Some(&serde_json::json!({"status": "review_ready", "pr_number": 12291})),
+            None,
+        )
+        .expect("durable PR receipt completes Cook publication");
+
+        assert_eq!(completion.state, "pr_finalized");
+        assert!(completion.pr_finalized);
+        assert!(completion.next_action.is_none());
     }
 }
 
@@ -2187,9 +2645,31 @@ fn cook_batch_result(
     let total = cooks.len();
     let mut totals = crate::agent_task_batch::AgentTaskBatchTotals::default();
     for cell in &cooks {
-        match CookStatus::from_status(&cell.status) {
-            CookStatus::Queued => totals.queued += 1,
-            CookStatus::Running | CookStatus::InFlight => totals.running += 1,
+        let status = CookStatus::from_status(&cell.status);
+        match status {
+            CookStatus::Queued => {
+                totals.queued += 1;
+                continue;
+            }
+            CookStatus::Running | CookStatus::InFlight => {
+                totals.running += 1;
+                continue;
+            }
+            _ => {}
+        }
+        // A provider-success cell can retain its legacy zero exit code while a
+        // Cook that requested a PR is still incomplete. Aggregate completion
+        // follows the explicit end-to-end projection, not provider evidence.
+        if cell
+            .result
+            .as_ref()
+            .and_then(AgentTaskCookReport::completion)
+            .is_some_and(|completion| completion.state == "candidate_awaiting_finalization")
+        {
+            totals.failed += 1;
+            continue;
+        }
+        match status {
             CookStatus::Cancelled => totals.cancelled += 1,
             CookStatus::TimedOut => totals.timed_out += 1,
             _ if cell.exit_code == 0 => totals.succeeded += 1,
@@ -2367,25 +2847,21 @@ fn child_finalization_value(cell: &AgentTaskCookBatchCellReport) -> Value {
 }
 
 fn cook_report_exit_code(report: &AgentTaskCookReport) -> i32 {
-    // A review-ready or already-finalized cook is a success; anything the cook
-    // could not carry to a green, finalized state is a non-zero resume result
-    // the operator must still act on.
-    match CookStatus::from_status(&report.status) {
-        status if status.is_success_exit() => 0,
-        _ => {
-            if report
-                .finalization
-                .as_ref()
-                .and_then(|value| value.get("status"))
-                .and_then(Value::as_str)
-                .is_some_and(|status| matches!(status, "review_ready" | "draft_published"))
-            {
-                0
-            } else {
-                1
-            }
-        }
+    let finalization_requested = !matches!(
+        report.status.as_str(),
+        "green_no_finalize" | "intentional_no_change"
+    );
+    if finalization_requested {
+        return report
+            .completion()
+            .is_some_and(|completion| completion.pr_finalized)
+            .then_some(0)
+            .unwrap_or(1);
     }
+    CookStatus::from_status(&report.status)
+        .is_success_exit()
+        .then_some(0)
+        .unwrap_or(1)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2845,7 +3321,7 @@ fn adopted_attempt_is_ready_for_cook_continuation(
     Ok(None)
 }
 
-fn review_form_attempt_is_ready_for_cook_continuation(
+pub(crate) fn review_form_attempt_is_ready_for_cook_continuation(
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<bool> {
@@ -2952,7 +3428,7 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
     {
-        crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)?;
+        preflight_initial_cook_workspace_provider(options)?;
     }
     if cook_attempt_needs_execution(&options.initial_run_id)
         && !cook_workspace_lookup_pending(&options.initial_plan)
@@ -3280,7 +3756,7 @@ where
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
     {
-        crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)?;
+        preflight_initial_cook_workspace_provider(&options)?;
     }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
@@ -3349,6 +3825,10 @@ where
     if let Some(model) = adopted_model {
         options.ai_model = Some(model);
     }
+    // Recipe persistence and lifecycle materialization are a recoverable saga.
+    // Complete it before any capacity, workspace, or provider-facing work so a
+    // controller interruption leaves a status-addressable, resumable attempt.
+    materialize_initial_cook_attempt(&options)?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -3389,7 +3869,6 @@ where
         })
         .transpose()?;
     agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
-    materialize_initial_cook_attempt(&options)?;
     if cook_workspace_lookup_pending(&options.initial_plan) {
         if let Err(error) = materialize_pending_cook_workspace(&mut options) {
             let error = with_pre_execution_phase(error, "worktree_provider_lookup");
@@ -4341,14 +4820,28 @@ where
                     promotion: None,
                     feedback: None,
                 });
-                let recovery = "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string();
+                let selection_required = error.details["selection_required"] == Value::Bool(true);
+                let recovery = if selection_required {
+                    agent_task_lifecycle::record_metadata_value(
+                        &run_id,
+                        "cook_selection_required",
+                        error.details.clone(),
+                    )?;
+                    "Cook found distinct canonical patch candidates. Select one of the exact commands in failure_context before promotion.".to_string()
+                } else {
+                    "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string()
+                };
                 agent_task_lifecycle::record_cook_controller_failure(
                     &run_id,
                     &bounded_error_diagnostic(&error),
                 )?;
                 return Ok(cook_report(CookReportInput {
                     cook_id,
-                    status: "policy_failure",
+                    status: if selection_required {
+                        "selection_required"
+                    } else {
+                        "policy_failure"
+                    },
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -4956,7 +5449,7 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
                 ));
             }
         }
-        source.to_path_buf()
+        trusted_initial_cook_workspace(options, source)?.unwrap_or_else(|| source.to_path_buf())
     } else if std::path::Path::new(&options.to_worktree).is_dir() {
         std::path::Path::new(&options.to_worktree).to_path_buf()
     } else if let Some(record) =
@@ -5029,32 +5522,159 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         .into()
     };
     homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
-    let source = source.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "workspace",
-            "Cook requires the provider workspace to be the declared task worktree",
-            Some(options.to_worktree.clone()),
-            Some(vec!["Create or select the task worktree through the configured workspace provider, then retry Cook.".to_string()]),
-        )
-    })?;
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
     if let Some(continuation) = continuation {
         authenticate_tracked_promotion_continuation(&target, &continuation)?;
     }
-    let source = std::fs::canonicalize(source).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(source.display().to_string()))
-    })?;
-    if source != target {
-        return Err(Error::validation_invalid_argument(
-            "workspace",
-            "Cook provider workspace differs from its declared task worktree; refusing provider execution",
-            Some(options.to_worktree.clone()),
-            Some(vec!["Re-run Cook without a source CWD override so Homeboy binds the declared task worktree.".to_string()]),
-        ));
+    if let Some(source) = source {
+        let source = std::fs::canonicalize(source).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(source.display().to_string()))
+        })?;
+        if source != target {
+            return Err(Error::validation_invalid_argument(
+                "workspace",
+                "Cook provider workspace differs from its declared task worktree; refusing provider execution",
+                Some(options.to_worktree.clone()),
+                Some(vec!["Re-run Cook without a source CWD override so Homeboy binds the declared task worktree.".to_string()]),
+            ));
+        }
     }
     Ok(())
+}
+
+/// Admit a locally committed, unpushed provider checkout only when Cook can
+/// bind the exception to the exact clean, issue-owned linked worktree and the
+/// task's immutable base. The provider resolver consumes the existing
+/// path+HEAD capability; no broader unpushed exception is introduced here.
+fn trusted_initial_cook_workspace(
+    options: &AgentTaskCookServiceOptions,
+    source: &Path,
+) -> Result<Option<PathBuf>> {
+    let task_url = options
+        .initial_plan
+        .tasks
+        .first()
+        .and_then(|task| task.workspace.task_url.as_deref())
+        .filter(|task_url| !task_url.trim().is_empty());
+    let Some(task_base_sha) = options.task_base_sha.as_deref() else {
+        return Ok(None);
+    };
+    if task_url.is_none() {
+        return Ok(None);
+    }
+    let source = std::fs::canonicalize(source).map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!("cannot resolve explicitly targeted Cook checkout: {error}"),
+            Some(options.to_worktree.clone()),
+            None,
+        )
+    })?;
+    let head = homeboy_core::git::run_git(
+        &source,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        "resolve explicitly targeted Cook checkout HEAD",
+    )?
+    .trim()
+    .to_string();
+    let clean = homeboy_core::git::run_git(
+        &source,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+        "verify explicitly targeted Cook checkout cleanliness",
+    )?
+    .trim()
+    .is_empty();
+    let safe_ancestry =
+        homeboy_core::git::is_ancestor(&source.display().to_string(), task_base_sha, &head)
+            .unwrap_or(false);
+    let config = homeboy_core::defaults::load_config();
+    match homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+        &options.to_worktree,
+        &config,
+        None,
+        None,
+    ) {
+        Ok(resolution) => return Ok(Some(PathBuf::from(resolution.worktree.path))),
+        Err(error)
+            if error.details.pointer("/workspace/classification")
+                != Some(&Value::String("workspace.untrusted_unpushed".to_string())) =>
+        {
+            return Err(error);
+        }
+        Err(_) => {}
+    }
+    if !clean || task_url.is_none() || !safe_ancestry {
+        let mut error = Error::validation_invalid_argument(
+            "to_worktree",
+            "clean unpushed provider checkout cannot be trusted for initial Cook adoption",
+            Some(options.to_worktree.clone()),
+            Some(vec![format!(
+                "Adopt or continue this exact Cook with: homeboy agent-task cook-continue {}",
+                options.cook_id
+            )]),
+        );
+        if !clean {
+            error.details["workspace"] = serde_json::json!({
+                "classification": "workspace.resolved_but_dirty",
+                "reason": "unattributed_drift",
+                "owning_layer": "cook",
+                "path": source,
+            });
+        }
+        return Err(error);
+    }
+    homeboy_core::worktree_providers::validate_task_worktree_root(&source, &options.to_worktree)?;
+    let trust = homeboy_core::worktree_providers::TrustedUnpushedWorktree {
+        path: source.clone(),
+        head,
+    };
+    let resolution = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+        &options.to_worktree,
+        &config,
+        None,
+        Some(&trust),
+    )?;
+    if resolution.worktree.task_url.as_deref() != task_url {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "explicitly targeted provider worktree is not owned by this Cook task",
+            Some(options.to_worktree.clone()),
+            Some(vec![format!(
+                "Continue the owning Cook with: homeboy agent-task cook-continue {}",
+                options.cook_id
+            )]),
+        ));
+    }
+    let resolved = std::fs::canonicalize(&resolution.worktree.path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!("provider returned an unresolved targeted Cook checkout: {error}"),
+            Some(options.to_worktree.clone()),
+            None,
+        )
+    })?;
+    if resolved != source {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "provider resolved a different checkout than the explicitly targeted Cook checkout",
+            Some(options.to_worktree.clone()),
+            Some(vec![format!(
+                "Continue the owning Cook with: homeboy agent-task cook-continue {}",
+                options.cook_id
+            )]),
+        ));
+    }
+    Ok(Some(source))
+}
+
+fn preflight_initial_cook_workspace_provider(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    if let Some(source) = options.source_worktree_path.as_deref() {
+        trusted_initial_cook_workspace(options, source)?;
+        return Ok(());
+    }
+    crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)
 }
 
 fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {

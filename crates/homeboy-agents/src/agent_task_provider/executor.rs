@@ -118,6 +118,19 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             }
         };
         let workspace_root = request.request.workspace.root.clone();
+        if let Err(message) = validate_provider_immediate_failure_patterns(&provider) {
+            return failure_outcome(
+                &request,
+                AgentTaskOutcomeStatus::Failed,
+                AgentTaskFailureClassification::InvalidInput,
+                "agent_task.provider_immediate_failure_configuration_invalid",
+                format!(
+                    "provider '{}' has invalid immediate failure configuration: {message}",
+                    provider.id
+                ),
+                json!({ "provider_id": provider.id, "backend": provider.backend }),
+            );
+        }
         bind_workspace_permission_root(
             &mut request.request.executor,
             workspace_root.as_deref(),

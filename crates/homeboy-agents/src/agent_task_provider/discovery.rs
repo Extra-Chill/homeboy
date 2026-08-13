@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use homeboy_extension_contract::agent_task_executor_declaration::parse_agent_task_executor_declaration;
+
 use homeboy_core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, runtime_materialization_plan, AgentRuntimeDiscoveryDiagnostic,
     AgentRuntimeManifest, AgentRuntimeSelectedIdentity, AGENT_RUNTIME_REVISION_PROBE_TIMED_OUT,
@@ -243,21 +245,17 @@ fn expected_agent_runtime_provider_refs(
     let mut expected = Vec::new();
     for runtime in &extension.agent_runtimes {
         for value in &runtime.agent_task_executors {
-            let provider: AgentTaskExecutorProvider = serde_json::from_value(value.clone()).map_err(|err| {
-                Error::validation_invalid_argument(
-                    "agent_runtimes.agent_task_executors",
-                    format!(
-                        "Extension '{}' declares an agent runtime provider that cannot be parsed: {}",
-                        extension.id, err
-                    ),
-                    Some(runtime.id.clone()),
-                    None,
-                )
-            })?;
+            // Parsed through the shared declaration contract rather than the
+            // resolved provider type, so extension install/replace enforces
+            // byte-identical validity without depending on this crate (#12206).
+            // Only `id` and `backend` are consumed here; the resolved provider
+            // is built later by the catalog parse.
+            let declaration =
+                parse_agent_task_executor_declaration(&extension.id, &runtime.id, value)?;
             expected.push(ExpectedAgentRuntimeProviderRef {
                 runtime_id: runtime.id.clone(),
-                provider_id: provider.id,
-                backend: provider.backend,
+                provider_id: declaration.id,
+                backend: declaration.backend,
             });
         }
     }

@@ -1077,7 +1077,10 @@ mod tests {
             .trim()
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
-        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+        assert!(
+            !homeboy_core::process::pid_is_running(descendant_pid as u32),
+            "initial identity persistence failure left descendant {descendant_pid} runnable"
+        );
     }
 
     #[cfg(unix)]

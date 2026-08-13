@@ -26,9 +26,9 @@ pub(crate) fn release_artifact_plan(
     if config.head {
         return local_release_artifact_plan("--head deploys the current checkout");
     }
-    if config.requested_ref_for(&component.id).is_some() {
-        return local_release_artifact_plan("--ref deploys an exact materialized commit");
-    }
+    // Checked before `--ref` so an explicit local tag build always wins, and so
+    // it stays the documented escape hatch when a release tag has no reusable
+    // asset (#12215).
     if config.tagged {
         return local_release_artifact_plan("--tagged forces a local tag build");
     }
@@ -46,8 +46,35 @@ pub(crate) fn release_artifact_plan(
             "component has no build_artifact filename for release asset lookup",
         );
     };
-    let Some(tag) = deploy_release_tag(component, config) else {
-        return local_release_artifact_plan("no version tag found for release asset lookup");
+    // An exact `--ref` addresses one specific commit, but generated release
+    // bytes are not necessarily reproducible from the tagged source alone, so
+    // exact Git identity does not imply exact package identity. When the ref
+    // names a release, the canonical asset for that release *is* the artifact;
+    // rebuilding it locally is what shipped bytes that then read back as
+    // `remote_modified` against the release package (#12215).
+    //
+    // The discrimination is the component's own tag namespace, so this stays a
+    // pure, network-free plan: a ref outside that namespace (branch, raw SHA,
+    // foreign tag) is not a release ref and still builds locally.
+    let tag = match config.requested_ref_for(&component.id) {
+        Some(requested_ref) => {
+            match release::component_release_tag_version(component, requested_ref) {
+                Ok(Some(_)) => requested_ref.to_string(),
+                _ => {
+                    return local_release_artifact_plan(format!(
+                        "--ref '{requested_ref}' is not a release tag for this component"
+                    ))
+                }
+            }
+        }
+        None => {
+            let Some(tag) = deploy_release_tag(component, config) else {
+                return local_release_artifact_plan(
+                    "no version tag found for release asset lookup",
+                );
+            };
+            tag
+        }
     };
 
     ReleaseArtifactPlan::Reuse {

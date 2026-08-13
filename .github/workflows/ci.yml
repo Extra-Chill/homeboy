@@ -84,6 +84,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .github/validate-required-gates.sh --report
+      # A reusable-workflow pin must be a COMMIT. Pinning an annotated tag's ref
+      # object kills every run at startup with zero jobs scheduled, which is how
+      # #12152 broke `main` until #12153 repinned the dereferenced commit.
+      - name: Validate reusable workflow pins resolve to commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/validate-action-pin.sh
 
   # Non-differential safety net for crate-topology changes. The `review test`
   # gate below is changed-file scoped, so a crate extraction that orphans a
@@ -222,13 +229,20 @@ jobs:
     name: homeboy
     needs: [pr-state, ci-capacity-admission]
     if: ${{ needs.pr-state.outputs.active == 'true' }}
-    # v2.11.21, dereferenced to its commit: `v2.11.21` is an annotated tag, so the
-    # tag ref's own object SHA (a6ff2f5d) is the tag object, which `uses:` cannot
-    # resolve — pin `git rev-parse v2.11.21^{commit}` instead.
-    # Includes the jq-portable exact shard partitioning fix from homeboy-action#372,
-    # and homeboy-action#376, which stops the `Test` reconciliation job from
-    # publishing a cancelled run as a red verdict (#10997).
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@82033fe633d680c696b27421755e56eae8b4af4b
+    # v2.11.26, DEREFERENCED to its commit. These tags are annotated, so the tag
+    # ref's own object SHA is a tag object, which `uses:` cannot resolve — pinning
+    # one fails the whole workflow at startup with zero jobs scheduled (#12153).
+    # Always pin `git rev-parse v<tag>^{commit}`.
+    #
+    # Carries homeboy-action#372 (jq-portable exact shard partitioning), #376 (a
+    # cancelled run no longer publishes a red `Test` verdict), #377 (the
+    # unreachable sharded baseline phase is removed, closing a latent
+    # no-enforcement green), #378 (test binaries built once into a nextest
+    # archive instead of recompiled in every shard), and #379 (a passing
+    # candidate no longer reruns its baseline), #380 (the differential audit is
+    # changed-scoped instead of scanning the whole repository) and #381 (shard
+    # partitioning coverage). Refs #10997 and #11751 W1-2, W1-7, W1-10.
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@3b20c22160bceb5c324fb2643ab7215e7cf73a53
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which

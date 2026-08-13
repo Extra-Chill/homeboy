@@ -398,6 +398,7 @@ mod tests {
                 workspace_fingerprint: "b".repeat(64),
                 test_count: 4,
                 inventory_fingerprint: "c".repeat(64),
+                fallback_reason: None,
             },
         );
 

@@ -17,12 +17,15 @@ use super::super::jobs::format_job_event;
 use super::super::status::{
     declared_executable_requirement_diagnostics, declared_run_followups,
     declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
-    lab_runner_homeboy_output, operator_summary, runner_artifact_feature_diagnostics,
-    runner_followups, runner_followups_with_admission, runner_status_operator_commands,
-    selected_admission_summary,
+    lab_runner_homeboy_output, operator_summary, reconcile_output, reconciliation_outcome,
+    runner_artifact_feature_diagnostics, runner_followups, runner_followups_with_admission,
+    runner_status_operator_commands, selected_admission_summary,
 };
 use super::super::types::RunnerConnectionOutput;
 use crate::cli_surface::Cli;
+use crate::commands::utils::response::{
+    cli_response_for_json_result_for_command, map_cmd_result_to_json,
+};
 
 fn runner_session_fixture() -> RunnerSession {
     RunnerSession {
@@ -48,6 +51,193 @@ fn runner_session_fixture() -> RunnerSession {
         last_seen_at: None,
         leaseless_recovery_evidence: None,
     }
+}
+
+fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
+    homeboy::runner::runners::RunnerAdmissionSummary {
+        runner_id: "homeboy-lab".to_string(),
+        connected: true,
+        daemon_fresh: true,
+        daemon_compatible: true,
+        accepting_jobs: false,
+        active_job_count: 0,
+        live_daemon_job_count: 0,
+        retained_durable_job_count: 0,
+        unresolved_retained_projection_count: 0,
+        admission_blocking_job_ids: Vec::new(),
+        unresolved_job_owners: Vec::new(),
+        unresolved_generation_ids: Vec::new(),
+        stale_job_count: 0,
+        daemon_build_identity: None,
+        blocking_generation: None,
+        draining_generation_count: 0,
+        safe_to_rotate: false,
+        next_action: None,
+    }
+}
+
+#[test]
+fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownership() {
+    let mut admission = admission_fixture();
+    admission.daemon_fresh = false;
+    admission.blocking_generation = Some("lease-retained".to_string());
+    admission.admission_blocking_job_ids = vec!["job-retained".to_string()];
+    admission.next_action =
+        Some("homeboy runner refresh-homeboy homeboy-lab --reconnect".to_string());
+
+    let mut report = connected_report();
+    report.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+        restartable: true,
+        lease_id: None,
+        pid: None,
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    let outcome = reconciliation_outcome(
+        "homeboy-lab",
+        vec!["lease-retired".to_string()],
+        &report,
+        &admission,
+    );
+
+    assert_eq!(outcome.status, "partial_progress");
+    assert_eq!(outcome.retired_generation_count, 1);
+    assert_eq!(outcome.retired_generation_ids, ["lease-retired"]);
+    assert_eq!(
+        outcome.remaining_blocker.as_deref(),
+        Some("daemon_version_mismatch")
+    );
+    assert_eq!(
+        outcome.next_action.as_deref(),
+        Some("homeboy runner refresh-homeboy homeboy-lab --reconnect")
+    );
+}
+
+#[test]
+fn reconcile_reports_unchanged_blocked_state_without_self_recommendation() {
+    let mut admission = admission_fixture();
+    admission.unresolved_retained_projection_count = 1;
+    admission.next_action = Some("homeboy runner reconcile homeboy-lab".to_string());
+
+    let outcome =
+        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
+
+    assert_eq!(outcome.status, "blocked");
+    assert_eq!(outcome.retired_generation_count, 0);
+    assert_eq!(
+        outcome.remaining_blocker.as_deref(),
+        Some("unresolved_generation_projection")
+    );
+    assert_eq!(
+        outcome.next_action.as_deref(),
+        Some("homeboy runner status homeboy-lab --full")
+    );
+}
+
+#[test]
+fn reconcile_reports_ready_admission_as_converged() {
+    let mut admission = admission_fixture();
+    admission.accepting_jobs = true;
+    admission.safe_to_rotate = true;
+
+    let outcome =
+        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
+
+    assert_eq!(outcome.status, "converged");
+    assert_eq!(outcome.retired_generation_count, 0);
+    assert_eq!(outcome.remaining_blocker, None);
+    assert_eq!(outcome.next_action, None);
+}
+
+#[test]
+fn reconcile_does_not_converge_when_admission_accepts_with_unresolved_projection() {
+    let mut admission = admission_fixture();
+    admission.accepting_jobs = true;
+    admission.unresolved_retained_projection_count = 1;
+    admission.unresolved_generation_ids = vec!["lease-old".to_string()];
+    admission.next_action = Some("homeboy runner reconcile homeboy-lab".to_string());
+
+    let outcome =
+        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
+
+    assert_eq!(outcome.status, "blocked");
+    assert_eq!(
+        outcome.remaining_blocker.as_deref(),
+        Some("unresolved_generation_projection")
+    );
+    assert_eq!(
+        outcome.next_action.as_deref(),
+        Some("homeboy runner status homeboy-lab --full")
+    );
+}
+
+#[test]
+fn reconcile_uses_authoritative_non_version_freshness_blocker() {
+    let mut report = connected_report();
+    report.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
+        restartable: false,
+        lease_id: None,
+        pid: None,
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    let mut admission = admission_fixture();
+    admission.daemon_fresh = false;
+
+    let outcome = reconciliation_outcome("homeboy-lab", Vec::new(), &report, &admission);
+
+    assert_eq!(
+        outcome.remaining_blocker.as_deref(),
+        Some("daemon_lease_missing")
+    );
+}
+
+#[test]
+fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
+    let mut report = connected_report();
+    let mut session = runner_session_fixture();
+    session.runner_id = "homeboy-lab".to_string();
+    report.session = Some(session);
+    report.active_job_state = RunnerActiveJobState::Unavailable;
+    let output = reconcile_output("homeboy-lab", report, Vec::new()).expect("reconcile output");
+
+    assert_eq!(output.1, 1);
+    let (json, exit_code) = map_cmd_result_to_json(Ok(output));
+    let envelope = cli_response_for_json_result_for_command(&json, exit_code, "runner", None);
+    let serialized = serde_json::to_value(envelope).expect("serialize reconcile envelope");
+    assert_eq!(serialized["success"], false);
+    assert_eq!(serialized["exit_code"], 1);
+    assert_eq!(serialized["status"], "failed");
+    assert_eq!(serialized["data"]["reconciliation"]["status"], "blocked");
+    assert_eq!(
+        serialized["data"]["reconciliation"]["remaining_blocker"],
+        "admission_unavailable"
+    );
+    assert!(serialized["data"]["operator_commands"]
+        .as_array()
+        .is_none_or(|commands| commands
+            .iter()
+            .all(|command| command["command"] != "homeboy runner reconcile homeboy-lab")));
 }
 
 #[test]
@@ -98,6 +288,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             ..runner_session_fixture()
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: vec![homeboy::core::api_jobs::ActiveRunnerJobSummary {
             runner_id: "homeboy-lab".to_string(),
@@ -230,6 +421,7 @@ fn direct_runner_status_exposes_the_explicit_generation_reconcile_command() {
             ..runner_session_fixture()
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
@@ -282,6 +474,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             ..runner_session_fixture()
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: Some(DaemonFreshnessReport {
             fresh: false,
             stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
@@ -818,6 +1011,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
             ..runner_session_fixture()
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
@@ -883,6 +1077,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
             ..runner_session_fixture()
         }),
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
@@ -967,6 +1162,7 @@ fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
                 true,
             ),
         ),
+        configured_job_binary_build_identity: None,
         daemon_freshness: Some(DaemonFreshnessReport {
             fresh: true,
             stale_reason_code: None,
@@ -1035,8 +1231,12 @@ fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
     );
     assert!(report.daemon_freshness.expect("live daemon").fresh);
     assert!(
-        !admission.daemon_fresh,
-        "compatibility skew blocks admission"
+        admission.daemon_fresh,
+        "daemon lease evidence remains fresh"
+    );
+    assert!(
+        !admission.daemon_compatible,
+        "compatibility skew is reported separately"
     );
     assert!(
         !admission.accepting_jobs,
@@ -1113,6 +1313,7 @@ fn connected_report() -> RunnerStatusReport {
         state: runner::RunnerSessionState::Connected,
         session: None,
         stale_daemon: None,
+        configured_job_binary_build_identity: None,
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),

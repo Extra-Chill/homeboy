@@ -29,6 +29,10 @@ pub struct RunnerExtra {
     pub managed_followups: Vec<LabFollowup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<RunnerConnectionOutput>,
+    /// Postcondition of a mutating generation reconciliation. This is distinct
+    /// from the command envelope: only `converged` restores runner admission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<RunnerReconciliationOutcome>,
     /// The compact authoritative "ready now / safe to rotate" answer. Leads the
     /// status output; the full generation inventory below is detail behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,6 +75,7 @@ impl Default for RunnerExtra {
             selected_lab_runner: None,
             managed_followups: Vec::new(),
             connection: None,
+            reconciliation: None,
             admission_summary: None,
             inspection: None,
             sessions: Vec::new(),
@@ -85,6 +90,21 @@ impl Default for RunnerExtra {
             peer_session_maintenance: None,
         }
     }
+}
+
+/// Bounded postcondition for `runner reconcile`.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RunnerReconciliationOutcome {
+    /// `converged`, `partial_progress`, or `blocked`.
+    pub status: &'static str,
+    pub retired_generation_count: usize,
+    /// IDs retired by this reconciliation operation under the generation lock.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retired_generation_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_blocker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
 }
 
 /// The bounded inspection state for a registry-wide status response.
@@ -354,6 +374,7 @@ pub enum RunnerCommandOutput {
     Preflight(Box<homeboy::runner::runners::PlacementReadiness>),
     Execution(Box<RunnerExecutionCommandOutput>),
     Env(Box<RunnerEnvOutput>),
+    RecipeRunProviders(Box<RecipeRunProvidersOutput>),
     Lifecycle(Box<lifecycle::RunnerLifecycleOutput>),
     JobList(Box<RunnerJobListOutput>),
     Job(Box<RunnerJobOutput>),
@@ -365,6 +386,13 @@ pub enum RunnerCommandOutput {
     Workspace(Box<workspace::RunnerWorkspaceOutput>),
     RefreshPlan(Box<refresh_plan::LabRefreshPlanOutput>),
     Broker(Box<RunnerBrokerOutput>),
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecipeRunProvidersOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
+    pub providers: Vec<homeboy_extension::RecipeRunProviderInventoryEntry>,
 }
 
 /// An authoritative job observation or a retained generation ownership record.

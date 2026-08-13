@@ -4,7 +4,8 @@ use crate::release::types::ReleaseState;
 
 use super::super::gh_cli::GhCommandOutput;
 use super::super::{
-    build_github_release_body, create_failed_result, fallback_release_notes, GitHubReleaseBody,
+    component_scoped_release_entries, create_failed_result, fallback_release_notes,
+    AssociatedPullRequest, AssociatedPullRequestAuthor, GitHubReleaseBody,
 };
 use super::{data_str, git_repo, test_body, test_repair, test_repo};
 
@@ -40,68 +41,127 @@ fn fallback_release_notes_falls_back_to_minimal_body_when_empty() {
 }
 
 #[test]
-fn component_scoped_release_body_uses_changelog_fallback() {
+fn component_scoped_blocks_engine_notes_attribute_prs_without_including_siblings() {
     let temp = git_repo();
     let root = temp.path();
-    let component_dir = temp.path().join("packages/wordpress");
+    let component_dir = temp.path().join("php-transformer");
     std::fs::create_dir_all(&component_dir).expect("create component dir");
     std::fs::write(root.join("README.md"), "initial").expect("write initial file");
     super::run_git(root, &["add", "README.md"]);
     super::run_git(root, &["commit", "-q", "-m", "chore: initial"]);
-    super::run_git(root, &["tag", "wordpress-v1.2.2"]);
-    std::fs::write(component_dir.join("release.md"), "release").expect("write release file");
-    super::run_git(root, &["add", "packages/wordpress/release.md"]);
-    super::run_git(
+    super::run_git(root, &["tag", "php-transformer-v0.4.15"]);
+    super::commit_file(
         root,
-        &[
-            "commit",
-            "-q",
-            "-m",
-            "fix: bound homeboy activity latency with a reconcile-free runner view (#9522)",
-        ],
+        "php-transformer/src/crop.php",
+        "crop",
+        "fix: generic crop recognition",
     );
-    std::fs::write(component_dir.join("workspace.md"), "workspace").expect("write workspace file");
-    super::run_git(root, &["add", "packages/wordpress/workspace.md"]);
-    super::run_git(
+    super::commit_file(
         root,
-        &[
-            "commit",
-            "-q",
-            "-m",
-            "fix: preserve the prepared workspace on retryable admission failure (#9469)",
-        ],
+        "php-transformer/src/crop-test.php",
+        "test",
+        "fix: crop coverage",
     );
-    super::run_git(root, &["tag", "wordpress-v1.2.3"]);
+    super::commit_file(
+        root,
+        "php-transformer/tools/visual-parity/figma.ts",
+        "figma",
+        "fix: sibling-only change",
+    );
+    super::commit_file(
+        root,
+        "php-transformer/src/direct.php",
+        "direct",
+        "fix: direct push fallback",
+    );
     let component = homeboy_core::component::Component {
-        id: "wordpress".to_string(),
+        id: "php-transformer".to_string(),
         local_path: component_dir.to_string_lossy().to_string(),
-        remote_url: Some("https://github.com/example-org/studio-web.git".to_string()),
+        scopes: Some(homeboy_core::component::ScopeConfig {
+            release: Some(homeboy_core::component::CommandScopeConfig {
+                include: vec![],
+                exclude: vec!["tools/visual-parity/**".to_string()],
+            }),
+            ..Default::default()
+        }),
         ..Default::default()
     };
-    let state = ReleaseState {
-        notes: Some("## wordpress-v1.2.3\n\n- Fix scoped release notes".to_string()),
-        ..Default::default()
-    };
-
-    let body = build_github_release_body(
+    let commits = homeboy_core::git::get_component_changes_since_tag(
         &component,
-        &test_repo(),
-        "wordpress-v1.2.3",
-        &state,
-        Some("https://github.com/example-org/studio-web/blob/wordpress-v1.2.3/packages/wordpress/CHANGELOG.md"),
-        Some("wordpress-v1.2.2"),
+        Some("php-transformer-v0.4.15"),
+    )
+    .expect("scoped commits");
+    assert_eq!(
+        commits.len(),
+        3,
+        "sibling-only commit remains outside the authority set"
     );
+    let first_pr = AssociatedPullRequest {
+        title: "Improve generic image crop recognition".to_string(),
+        html_url: "https://github.com/Automattic/blocks-engine/pull/848".to_string(),
+        merged_at: Some("2026-08-12T00:00:00Z".to_string()),
+        user: AssociatedPullRequestAuthor {
+            login: "chubes4".to_string(),
+        },
+    };
+    let entries = component_scoped_release_entries(commits, |hash| {
+        let subject = homeboy_core::git::execute_git_for_release(
+            &component.local_path,
+            &["show", "-s", "--format=%s", hash],
+        )
+        .expect("subject");
+        match String::from_utf8_lossy(&subject.stdout).trim() {
+            "fix: generic crop recognition" | "fix: crop coverage" => Some(vec![first_pr.clone()]),
+            "fix: direct push fallback" => Some(vec![]),
+            _ => None,
+        }
+    });
 
-    assert!(!body.generated_notes_ok);
-    assert_eq!(body.source_label(), "changelog-fallback");
-    assert!(body.body.contains(
-        "- bound homeboy activity latency with a reconcile-free runner view ([#9522](https://github.com/example-org/studio-web/pull/9522)) (by Homeboy Test)"
-    ));
-    assert!(body.body.contains(
-        "- preserve the prepared workspace on retryable admission failure ([#9469](https://github.com/example-org/studio-web/pull/9469)) (by Homeboy Test)"
-    ));
-    assert!(!body.body.contains("- Fix scoped release notes"));
-    assert!(body.body.contains("packages/wordpress/CHANGELOG.md"));
+    assert_eq!(
+        entries.len(),
+        2,
+        "two selected commits in one PR render once"
+    );
+    assert!(entries.contains(&"* Improve generic image crop recognition by @chubes4 in https://github.com/Automattic/blocks-engine/pull/848".to_string()));
+    assert!(entries.contains(&"* direct push fallback".to_string()));
+    assert!(entries.iter().all(|entry| !entry.contains("sibling-only")));
+}
+
+#[test]
+fn component_scoped_notes_leave_ambiguous_or_unavailable_pr_metadata_unattributed() {
+    let commits = vec![
+        homeboy_core::git::CommitInfo {
+            hash: "ambiguous".to_string(),
+            subject: "fix: ambiguous association".to_string(),
+            category: homeboy_core::git::CommitCategory::Fix,
+        },
+        homeboy_core::git::CommitInfo {
+            hash: "unavailable".to_string(),
+            subject: "fix: metadata unavailable".to_string(),
+            category: homeboy_core::git::CommitCategory::Fix,
+        },
+    ];
+    let pull_request = |number: u64, title: &str| AssociatedPullRequest {
+        title: title.to_string(),
+        html_url: format!("https://github.com/Automattic/blocks-engine/pull/{number}"),
+        merged_at: Some("2026-08-12T00:00:00Z".to_string()),
+        user: AssociatedPullRequestAuthor {
+            login: "chubes4".to_string(),
+        },
+    };
+
+    let entries = component_scoped_release_entries(commits, |hash| match hash {
+        "ambiguous" => Some(vec![
+            pull_request(848, "First PR"),
+            pull_request(849, "Second PR"),
+        ]),
+        _ => None,
+    });
+
+    assert_eq!(
+        entries,
+        vec!["* ambiguous association", "* metadata unavailable"]
+    );
 }
 
 // ---- Issue #3508: the exact GitHub Release body must be discoverable ----

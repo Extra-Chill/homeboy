@@ -4,6 +4,160 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.344.0] - 2026-08-13
+
+### Added
+- project bounded provider evidence
+
+### Fixed
+- skip empty evidence transfer
+- project fanout admission lifecycle
+- retain claimed fanout coordinator
+- persist fanout admission state
+
+## [0.343.0] - 2026-08-13
+
+### Added
+- add independent convergence
+
+### Changed
+- Select canonical Cook patch artifacts
+- stabilize convergence coverage
+
+### Fixed
+- Fix controller upgrade admission convergence
+- reconcile exact Cook records
+- retain producing model evidence
+- supervise local provider execution
+- bootstrap candidate admission
+
+## [0.342.3] - 2026-08-13
+
+### Changed
+- own the fixture warmth a digest count depends on
+- Refresh CLI command reference
+- Accept file-backed Cook verification gates
+- Recover recipe-only Cook lifecycles
+- Validate Cook gate command contracts
+
+### Fixed
+- prune stale observe fingerprint
+- render workspace owner repairs
+
+## [0.342.2] - 2026-08-13
+
+### Fixed
+- prove pin identity by digest instead of executing it
+
+## [0.342.1] - 2026-08-13
+
+### Changed
+- repin Test to homeboy-action v2.11.26
+- repin Test to homeboy-action v2.11.24
+
+## [0.342.0] - 2026-08-12
+
+### Added
+- expose recipe provider inventory
+
+### Fixed
+- trust provider-owned task workspace
+- scope reconcile progress to operation
+- report reconcile admission outcome
+- complete runner status test fixtures
+- reuse configured binary identity evidence
+- exclude shared asset roots
+
+## [0.341.3] - 2026-08-12
+
+### Changed
+- Preserve provider lifecycle for fanout worktrees
+- repin Test to homeboy-action v2.11.23
+
+### Fixed
+- retain recovery verification evidence
+- fail blocked recovery outcomes
+- reuse the canonical release asset for exact tag refs
+- report absent component checkouts in project-wide deploy --check
+
+## [0.341.2] - 2026-08-12
+
+### Changed
+- serialize Cargo fixture environment
+- retrigger candidate checks
+- format after main merge
+
+### Fixed
+- recognize zombie descendants as exited
+- reject malformed provider declarations without the agent-task layer
+- infer quiet Cargo selection
+- restore fixture Cargo home
+- evidence exact Cargo gate selection
+
+## [0.341.1] - 2026-08-12
+
+### Fixed
+- restore scoped GitHub attribution
+- preserve safe Rust cache symlinks
+- never suggest an unrunnable extension recovery command
+
+## [0.341.0] - 2026-08-12
+
+### Changed
+- refresh bounded output fixtures
+
+### Fixed
+- align durable reconnect probes
+- bound default evidence output
+- verify tunnel durability before connect
+
+## [0.340.0] - 2026-08-12
+
+### Added
+- extract OpenCode runtime progress
+
+### Changed
+- apply workspace rustfmt
+- give the snapshot-notes fixture a repo-local git identity
+- restore rustfmt compliance on main
+- format runtime evidence hydration
+- format cargo target evidence
+- format cook recovery tests
+- make the Test gate declaration real and verify action pins are commits
+- reuse managed Cargo target stores
+- reap cancelled route test processes
+- cover trace observe contract
+- materialize runner cleanup provenance
+- repin Test to homeboy-action v2.11.22
+
+### Fixed
+- reconcile source version drift
+- contain failed SSH forward groups
+- verify effective SSH forward transport
+- own persistent SSH forwards
+- reconcile runner tunnel rebase
+- resolve loopback transport ownership
+- admit loopback direct runners without tunnels
+- coordinate compatible auto-connect handoffs
+- connect runners in process for offload
+- verify tunnel ownership before admission
+- require complete daemon health evidence
+- verify daemon health before admission
+- probe jobs after auto-connect
+- preserve verified auto-connect admission
+- Fix runner tunnel ownership and auto-connect
+- repair completion CI contracts
+- deduplicate finalized executor artifacts
+- separate candidate and PR completion
+- preserve AI disclosure provenance
+- fork after checkpoint mismatch
+- preserve promotion I/O diagnostics
+- admit healthy local auto placement when Lab disconnects
+- persist attempt dispatcher recipes
+- plan absent worktrees in dry runs
+- declare attempt publication capability
+- classify merged CI cancellations as superseded
+
 ## [0.339.0] - 2026-08-12
 
 ### Added

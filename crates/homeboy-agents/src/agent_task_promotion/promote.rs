@@ -356,12 +356,18 @@ fn validate_resume_candidate(
             target_path.to_string_lossy().as_ref(),
         )?;
         if actual != expected {
-            return Err(Error::validation_invalid_argument(
+            let mut error = Error::validation_invalid_argument(
                 "promotion",
                 "promotion resume target differs from the exact checkpointed applied candidate",
                 Some(target_path.display().to_string()),
                 None,
-            ));
+            );
+            // Continuing would authenticate a different candidate. Tell the
+            // Cook recovery projection to preserve this checkpoint and fork.
+            error.details["recovery"] = serde_json::json!({
+                "action": "fork_replacement",
+            });
+            return Err(error);
         }
     }
     if let Some(recorded_base) = previous.get("verified_base") {

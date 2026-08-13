@@ -42,6 +42,15 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     )))
 }
 
+/// Cancel one literal durable record without resolving a Cook alias.
+///
+/// Grouped lifecycle recovery uses this boundary after it has explicitly
+/// selected every parent/attempt record to mutate. Alias-aware cancellation is
+/// intentionally broader because it follows an advancing Cook index.
+pub fn cancel_exact_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
+    cancel_resolved_run(&sanitize_run_id(run_id), reason)
+}
+
 fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
     // Cook IDs are stable aliases. Match status and logs by following an
     // materialized attempt once one exists; before then the handoff parent is

@@ -536,6 +536,8 @@ pub(super) enum RunnerCommand {
         #[arg(long = "run-id")]
         run_id: String,
     },
+    /// List installed extension-owned recipe-run providers.
+    RecipeProviders,
     /// Show the effective environment injected into runner jobs
     Env {
         /// Runner ID
@@ -843,5 +845,53 @@ mod tests {
             "homeboy", "runner", "job", "list", "lab", "--active", "--queued"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn recipe_run_preserves_required_execution_arguments_and_recipe_providers_is_a_sibling() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "runner",
+            "recipe-run",
+            "local",
+            "--provider",
+            "fixture.run",
+            "--sync-workspace",
+            "/workspace",
+            "--recipe",
+            "recipe.json",
+            "--artifacts",
+            "artifacts",
+            "--run-id",
+            "run-12157",
+        ])
+        .expect("existing recipe-run invocation parses");
+        assert!(matches!(
+            cli.command,
+            Commands::Runner(RunnerArgs {
+                command: RunnerCommand::RecipeRun {
+                    runner_id,
+                    provider,
+                    ..
+                }
+            }) if runner_id == "local" && provider == "fixture.run"
+        ));
+
+        let cli = Cli::try_parse_from(["homeboy", "runner", "recipe-providers"])
+            .expect("provider inventory parses");
+        assert!(matches!(
+            cli.command,
+            Commands::Runner(RunnerArgs {
+                command: RunnerCommand::RecipeProviders
+            })
+        ));
+
+        let error = match Cli::try_parse_from(["homeboy", "runner", "recipe-run", "local"]) {
+            Ok(_) => panic!("normal recipe-run remains required"),
+            Err(error) => error,
+        };
+        let rendered = error.to_string();
+        assert!(rendered.contains("--provider"));
+        assert!(!rendered.contains("--runner_id"));
     }
 }

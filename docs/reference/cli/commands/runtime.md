@@ -26,6 +26,7 @@ Inspect core-owned runtime helper assets
 | `homeboy runtime refresh` | Refresh a shared runtime package from a source repository or directory |
 | `homeboy runtime promotion-takeover` | Explicitly archive a proven dead or expired runtime-promotion lease |
 | `homeboy runtime controller-prune` | Plan or apply pruning for unreferenced immutable controller runtimes |
+| `homeboy runtime materialize-controller` | Build and pin an exact controller candidate, optionally continuing one command |
 
 ## `homeboy runtime helper`
 
@@ -93,3 +94,21 @@ Plan or apply pruning for unreferenced immutable controller runtimes
 | `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
 | `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--ignore-retention` | flag | Purge every unreferenced pin, ignoring the configured controller runtime retention window. Destructive: prefer the configured window |
+
+## `homeboy runtime materialize-controller`
+
+```sh
+homeboy runtime materialize-controller [OPTIONS] [INVOCATION]...
+```
+
+Build and pin an exact controller candidate, optionally continuing one command
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `[INVOCATION]...` | no | _no help text_ |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--source` | `<SOURCE>` | _no help text_ |
+| `--commit` | `<COMMIT>` | _no help text_ |
+| `--identity` | `<IDENTITY>` | _no help text_ |

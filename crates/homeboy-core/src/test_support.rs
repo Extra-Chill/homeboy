@@ -15,6 +15,10 @@ use tempfile::TempDir;
 use crate::api_jobs::{Job, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult};
 
 const TEST_DAEMON_NAMESPACE_ENV: &str = "HOMEBOY_TEST_DAEMON_NAMESPACE";
+/// Test-only contract between the hermetic context and the Cargo test runner.
+/// The runner owns and reaps this process group when the test binary is
+/// cancelled, so a daemon must not create a detached session that escapes it.
+pub const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
 
 static SHARED_EMPTY_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
@@ -145,6 +149,7 @@ impl HermeticTestContext {
             .env(crate::paths::HOMEBOY_DATA_DIR_ENV, self.data_dir())
             .env(crate::paths::DAEMON_STATE_DIR_ENV, self.daemon_dir())
             .env(TEST_DAEMON_NAMESPACE_ENV, self.daemon_dir())
+            .env(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV, "1")
             .env("HOMEBOY_ARTIFACT_ROOT", self.artifact_dir())
             .env("HOMEBOY_RUNTIME_TMPDIR", self.runtime_dir())
             .env("TMPDIR", self.temp_dir())
@@ -447,6 +452,7 @@ pub struct HomeGuard {
     prior_data_dir: Option<String>,
     prior_daemon_state_dir: Option<String>,
     prior_daemon_namespace: Option<String>,
+    prior_keep_daemon_in_process_group: Option<String>,
     prior_artifact_root: Option<String>,
     prior_runtime_tmpdir: Option<String>,
     prior_invocation_runtime: Option<String>,
@@ -557,6 +563,8 @@ impl HomeGuard {
         let prior_data_dir = std::env::var(crate::paths::HOMEBOY_DATA_DIR_ENV).ok();
         let prior_daemon_state_dir = std::env::var(crate::paths::DAEMON_STATE_DIR_ENV).ok();
         let prior_daemon_namespace = std::env::var(TEST_DAEMON_NAMESPACE_ENV).ok();
+        let prior_keep_daemon_in_process_group =
+            std::env::var(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV).ok();
         let prior_artifact_root = std::env::var("HOMEBOY_ARTIFACT_ROOT").ok();
         let prior_runtime_tmpdir = std::env::var("HOMEBOY_RUNTIME_TMPDIR").ok();
         let prior_invocation_runtime =
@@ -599,6 +607,7 @@ impl HomeGuard {
         std::env::remove_var(crate::paths::HOMEBOY_DATA_DIR_ENV);
         std::env::set_var(crate::paths::DAEMON_STATE_DIR_ENV, context.daemon_dir());
         std::env::set_var(TEST_DAEMON_NAMESPACE_ENV, context.daemon_dir());
+        std::env::set_var(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV, "1");
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
@@ -643,6 +652,7 @@ impl HomeGuard {
             prior_data_dir,
             prior_daemon_state_dir,
             prior_daemon_namespace,
+            prior_keep_daemon_in_process_group,
             prior_artifact_root,
             prior_runtime_tmpdir,
             prior_invocation_runtime,
@@ -1048,6 +1058,10 @@ impl Drop for HomeGuard {
         match &self.prior_daemon_namespace {
             Some(value) => std::env::set_var(TEST_DAEMON_NAMESPACE_ENV, value),
             None => std::env::remove_var(TEST_DAEMON_NAMESPACE_ENV),
+        }
+        match &self.prior_keep_daemon_in_process_group {
+            Some(value) => std::env::set_var(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV, value),
+            None => std::env::remove_var(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV),
         }
         match &self.prior_artifact_root {
             Some(value) => std::env::set_var("HOMEBOY_ARTIFACT_ROOT", value),
@@ -2141,6 +2155,194 @@ mod tests {
         command.get_envs().find_map(|(key, value)| {
             (key == std::ffi::OsStr::new(name)).then(|| value.map(std::ffi::OsStr::to_os_string))
         })
+    }
+
+    #[test]
+    fn hermetic_contexts_isolate_concurrent_fixture_roots() {
+        let contexts = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                let context = HermeticTestContext::new();
+                let command = context.command(TestBinary::CurrentTest);
+                (
+                    context.root().to_path_buf(),
+                    command_env(&command, "HOME").expect("HOME override"),
+                    command_env(&command, crate::paths::HOMEBOY_DATA_DIR_ENV)
+                        .expect("data override"),
+                    command_env(&command, crate::paths::DAEMON_STATE_DIR_ENV)
+                        .expect("daemon override"),
+                    command_env(
+                        &command,
+                        crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+                    )
+                    .expect("invocation runtime override"),
+                )
+            });
+            let second = scope.spawn(|| {
+                let context = HermeticTestContext::new();
+                let command = context.command(TestBinary::CurrentTest);
+                (
+                    context.root().to_path_buf(),
+                    command_env(&command, "HOME").expect("HOME override"),
+                    command_env(&command, crate::paths::HOMEBOY_DATA_DIR_ENV)
+                        .expect("data override"),
+                    command_env(&command, crate::paths::DAEMON_STATE_DIR_ENV)
+                        .expect("daemon override"),
+                    command_env(
+                        &command,
+                        crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+                    )
+                    .expect("invocation runtime override"),
+                )
+            });
+            (
+                first.join().expect("first context"),
+                second.join().expect("second context"),
+            )
+        });
+
+        let (first, second) = contexts;
+        assert_ne!(first.0, second.0);
+        assert_ne!(first.1, second.1, "HOME must be worktree-scoped");
+        assert_ne!(
+            first.2, second.2,
+            "data and artifact state must be worktree-scoped"
+        );
+        assert_ne!(first.3, second.3, "daemon state must be worktree-scoped");
+        assert_ne!(
+            first.4, second.4,
+            "socket-capable invocation runtime must be worktree-scoped"
+        );
+    }
+
+    #[cfg(unix)]
+    fn wait_for_pid_file(path: &Path) -> libc::pid_t {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fs::read_to_string(path)
+            .expect("descendant pid fixture")
+            .trim()
+            .parse()
+            .expect("numeric descendant pid")
+    }
+
+    #[cfg(unix)]
+    fn assert_pid_reaped(pid: libc::pid_t) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "hermetic cleanup left descendant {pid} alive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_timeout_reaps_term_resistant_descendants() {
+        let _lock = env_lock();
+        let _budget = EnvRestore::capture(&[HERMETIC_SUBPROCESS_BUDGET_ENV]);
+        std::env::set_var(HERMETIC_SUBPROCESS_BUDGET_ENV, "1");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let descendant = temp.path().join("descendant.pid");
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!(
+                "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; wait",
+                crate::engine::shell::quote_path(&descendant.display().to_string())
+            ),
+        ]);
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bounded_output(command)));
+        assert!(result.is_err(), "timeout must fail the owning test");
+        assert_pid_reaped(wait_for_pid_file(&descendant));
+    }
+
+    #[test]
+    fn hermetic_commands_keep_daemons_in_the_test_runner_process_group() {
+        let command = HermeticTestContext::new().command(TestBinary::CurrentTest);
+        assert_eq!(
+            command_env(&command, TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV),
+            Some(Some("1".into()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermetic_runner_clean_exits_do_not_pay_descendant_cleanup_grace_period() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let runner = workspace.join("scripts/nextest-hermetic-test-environment.sh");
+        let started = Instant::now();
+        for _ in 0..4 {
+            let status = Command::new("sh")
+                .arg(&runner)
+                .arg("true")
+                .status()
+                .expect("run hermetic test runner");
+            assert!(status.success());
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "clean test processes must not each pay the one-second descendant cleanup grace period"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermetic_runner_reaps_descendants_after_a_panicking_test_binary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let descendant = temp.path().join("descendant.pid");
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let runner = workspace.join("scripts/nextest-hermetic-test-environment.sh");
+        let mut command = Command::new("sh");
+        command
+            .arg(runner)
+            .args([
+                "sh",
+                "-c",
+                &format!(
+                    "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; exit 101",
+                    crate::engine::shell::quote_path(&descendant.display().to_string())
+                ),
+            ]);
+        let output = command.output().expect("run hermetic test runner");
+        assert_eq!(output.status.code(), Some(101));
+        assert_pid_reaped(wait_for_pid_file(&descendant));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermetic_runner_reaps_descendants_after_a_successful_test_binary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let descendant = temp.path().join("descendant.pid");
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let runner = workspace.join("scripts/nextest-hermetic-test-environment.sh");
+        let mut command = Command::new("sh");
+        command.arg(runner).args([
+            "sh",
+            "-c",
+            &format!(
+                "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; exit 0",
+                crate::engine::shell::quote_path(&descendant.display().to_string())
+            ),
+        ]);
+        let output = command.output().expect("run hermetic test runner");
+        assert!(output.status.success());
+        assert_pid_reaped(wait_for_pid_file(&descendant));
     }
 
     #[test]

@@ -12,8 +12,9 @@ use homeboy::agents::agent_tasks::promotion::{
     AgentTaskPromotionStatus,
 };
 use homeboy::agents::agent_tasks::provider::{
-    provider_credential_readiness, AgentTaskExecutorProvider, AgentTaskProviderCatalog,
-    AgentTaskProviderCredentialReadiness, ExtensionProviderAgentTaskExecutor,
+    provider_credential_readiness, resolve_provider_for_backend, AgentTaskExecutorProvider,
+    AgentTaskProviderCatalog, AgentTaskProviderCredentialReadiness,
+    ExtensionProviderAgentTaskExecutor, ProviderResolution,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
     homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
@@ -310,7 +311,6 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         }
         value["candidate_selection"] = selection;
     }
-    super::status::bound_full_reader_payload(&mut value);
     Ok((compact_review(value, args.full), 0))
 }
 
@@ -1117,7 +1117,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             0,
         ));
     }
-    if args.validate_readiness {
+    let validated_provider = if args.validate_readiness {
         // Fall back to the configured default backend the same way Cook selection
         // does, so readiness validation does not demand a flag that policy already
         // answers. `default_backend_for_component` resolves component, then
@@ -1143,7 +1143,13 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             &backend,
             args.selector.as_deref(),
         )?;
-    }
+        match resolve_provider_for_backend(&all_providers, &backend, args.selector.as_deref()) {
+            ProviderResolution::Resolved(provider) => Some((backend, provider.id.clone())),
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     // Default to the requested backend's slice. Dumping the whole multi-backend
     // catalog (every backend's providers, identity catalog, dispatch layers, and
@@ -1170,6 +1176,12 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
         .cloned()
         .collect::<Vec<_>>();
     let providers: &[AgentTaskExecutorProvider] = &filtered_providers;
+    let validated_provider_identity = validated_provider.as_ref();
+    let validated_provider = validated_provider_identity.and_then(|(_, provider_id)| {
+        all_providers
+            .iter()
+            .find(|provider| &provider.id == provider_id)
+    });
     let fallback_sources =
         homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
 
@@ -1237,11 +1249,10 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             // not dispatchable reports the credential it is missing here so the
             // remediation survives the `--full` serde presentation too (#11479).
             "credential_readiness": credential_readiness_report(&shown_providers),
-            "readiness_validation": {
-                "validated": args.validate_readiness,
-                "backend": args.backend,
-                "selector": args.selector,
-            },
+            "readiness_validation": readiness_validation_projection(
+                validated_provider_identity,
+                validated_provider,
+            ),
             "diagnostics": shown_diagnostics,
             "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
         }),
@@ -1315,6 +1326,28 @@ fn compact_provider(provider: &AgentTaskExecutorProvider) -> Value {
         "reason": readiness.reason().map(|value| bounded_text(&value, DEFAULT_TEXT_LIMIT)),
         "default_backend": provider.default_backend,
         "capabilities": provider.capabilities.iter().take(8).map(|value| bounded_text(value, 96)).collect::<Vec<_>>(),
+    })
+}
+
+fn live_dispatch_readiness(provider: Option<&AgentTaskExecutorProvider>) -> &'static str {
+    provider
+        .filter(|provider| provider.readiness_invocation.is_some())
+        .map(|_| "validated")
+        .unwrap_or("unverified")
+}
+
+fn readiness_validation_projection(
+    identity: Option<&(String, String)>,
+    provider: Option<&AgentTaskExecutorProvider>,
+) -> Value {
+    serde_json::json!({
+        "validated": identity.is_some(),
+        "effective_backend": identity.map(|(backend, _)| backend),
+        "effective_provider_id": identity.map(|(_, provider_id)| provider_id),
+        // Catalog discovery proves static configuration only. A live dispatch
+        // probe is opt-in because providers own its request.
+        "static_configuration": "declared",
+        "live_dispatch": live_dispatch_readiness(provider),
     })
 }
 
@@ -2060,6 +2093,45 @@ mod tests {
             assert_eq!(provider_status(&provider), "available");
             assert!(compact_provider(&provider)["reason"].is_null());
         });
+    }
+
+    #[test]
+    fn live_dispatch_readiness_uses_the_resolved_provider_only() {
+        let mut probed: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "probed", "backend": "test", "readiness_invocation": { "argv": ["true"] }
+        }))
+        .expect("probed provider");
+        let unprobed: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "unprobed", "backend": "test"
+        }))
+        .expect("unprobed provider");
+
+        assert_eq!(live_dispatch_readiness(Some(&probed)), "validated");
+        assert_eq!(live_dispatch_readiness(Some(&unprobed)), "unverified");
+        assert_eq!(live_dispatch_readiness(None), "unverified");
+        probed.readiness_invocation = None;
+        assert_eq!(live_dispatch_readiness(Some(&probed)), "unverified");
+    }
+
+    #[test]
+    fn readiness_validation_reports_effective_identity_not_raw_arguments() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "resolved.provider", "backend": "resolved-backend",
+            "readiness_invocation": { "argv": ["true"] }
+        }))
+        .expect("provider");
+        let identity = (
+            "resolved-backend".to_string(),
+            "resolved.provider".to_string(),
+        );
+
+        let projection = readiness_validation_projection(Some(&identity), Some(&provider));
+
+        assert_eq!(projection["effective_backend"], "resolved-backend");
+        assert_eq!(projection["effective_provider_id"], "resolved.provider");
+        assert_eq!(projection["live_dispatch"], "validated");
+        assert!(projection.get("backend").is_none());
+        assert!(projection.get("selector").is_none());
     }
 
     #[test]

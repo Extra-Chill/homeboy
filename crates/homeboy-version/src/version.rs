@@ -584,6 +584,61 @@ pub fn bump_component_version_with_changelog(
     })
 }
 
+/// Bring every declared version target from one verified version to an
+/// authoritative release baseline. This deliberately does not finalize a
+/// changelog or run hooks: callers use it as the first mutation in a larger,
+/// already-planned release transaction.
+pub fn reconcile_component_version_targets(
+    component: &Component,
+    source_version: &str,
+    authoritative_version: &str,
+) -> Result<Vec<VersionTargetInfo>> {
+    let source = semver::Version::parse(source_version).map_err(|_| {
+        Error::validation_invalid_argument(
+            "version",
+            format!("Invalid source version format: {source_version}"),
+            None,
+            None,
+        )
+    })?;
+    let authoritative = semver::Version::parse(authoritative_version).map_err(|_| {
+        Error::validation_invalid_argument(
+            "version",
+            format!("Invalid authoritative version format: {authoritative_version}"),
+            None,
+            None,
+        )
+    })?;
+    if authoritative <= source {
+        return Err(Error::validation_invalid_argument(
+            "version",
+            format!(
+                "Refusing to reconcile source version {source_version} to non-advancing authoritative version {authoritative_version}"
+            ),
+            None,
+            None,
+        ));
+    }
+
+    let targets = component_version::require_targets(component)?;
+    let target_infos = validate_version_targets(targets, &component.local_path, source_version)?;
+    for info in &target_infos {
+        let replaced_count = update_version_in_file(
+            &info.full_path,
+            &info.pattern,
+            source_version,
+            authoritative_version,
+        )?;
+        if replaced_count != info.match_count {
+            return Err(Error::internal_unexpected(format!(
+                "Unexpected replacement count in {}",
+                info.file
+            )));
+        }
+    }
+    Ok(target_infos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,6 +693,50 @@ mod tests {
         let canonical = canonical_version_target(&component).expect("canonical target");
         assert_eq!(canonical.file, "package.json");
         assert_eq!(canonical.artifact_path.as_deref(), Some("package.json"));
+    }
+
+    #[test]
+    fn reconciliation_updates_every_target_only_after_they_agree_on_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        fs::write(dir.join("VERSION"), "1.2.3\n").expect("write version");
+        fs::write(dir.join("package.json"), r#"{"version":"1.2.3"}"#).expect("write package");
+        let mut component = make_test_component(&temp);
+        component.version_targets = Some(vec![
+            VersionTarget {
+                file: "VERSION".to_string(),
+                pattern: Some(r"([0-9]+\.[0-9]+\.[0-9]+)".to_string()),
+                artifact_path: None,
+            },
+            VersionTarget {
+                file: "package.json".to_string(),
+                pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
+                artifact_path: None,
+            },
+        ]);
+
+        reconcile_component_version_targets(&component, "1.2.3", "1.2.4")
+            .expect("matching targets reconcile");
+        assert_eq!(
+            fs::read_to_string(dir.join("VERSION"))
+                .expect("read version")
+                .trim(),
+            "1.2.4"
+        );
+        assert!(fs::read_to_string(dir.join("package.json"))
+            .expect("read package")
+            .contains("1.2.4"));
+
+        fs::write(dir.join("VERSION"), "1.2.3\n").expect("restore version");
+        let error = reconcile_component_version_targets(&component, "1.2.3", "1.2.4")
+            .expect_err("conflicting targets fail before writes");
+        assert!(error.message.contains("Version mismatch"));
+        assert_eq!(
+            fs::read_to_string(dir.join("VERSION"))
+                .expect("read preserved version")
+                .trim(),
+            "1.2.3"
+        );
     }
 
     #[test]
