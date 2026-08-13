@@ -12,8 +12,9 @@ use homeboy::agents::agent_tasks::promotion::{
     AgentTaskPromotionStatus,
 };
 use homeboy::agents::agent_tasks::provider::{
-    provider_credential_readiness, resolve_provider_for_backend, AgentTaskExecutorProvider, AgentTaskProviderCatalog,
-    AgentTaskProviderCredentialReadiness, ExtensionProviderAgentTaskExecutor, ProviderResolution,
+    provider_credential_readiness, resolve_provider_for_backend, AgentTaskExecutorProvider,
+    AgentTaskProviderCatalog, AgentTaskProviderCredentialReadiness,
+    ExtensionProviderAgentTaskExecutor, ProviderResolution,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
     homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
@@ -2119,7 +2120,10 @@ mod tests {
             "readiness_invocation": { "argv": ["true"] }
         }))
         .expect("provider");
-        let identity = ("resolved-backend".to_string(), "resolved.provider".to_string());
+        let identity = (
+            "resolved-backend".to_string(),
+            "resolved.provider".to_string(),
+        );
 
         let projection = readiness_validation_projection(Some(&identity), Some(&provider));
 

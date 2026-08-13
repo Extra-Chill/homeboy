@@ -1161,22 +1161,17 @@ pub fn cook_completion(
     finalization_run_id: Option<&str>,
 ) -> Option<AgentTaskCookCompletion> {
     let candidate_produced = canonical_candidate_produced(selected_candidate);
-    let canonical_finalization = canonical_candidate_finalization(
-        selected_candidate,
-        finalization,
-        finalization_run_id,
-    );
+    let canonical_finalization =
+        canonical_candidate_finalization(selected_candidate, finalization, finalization_run_id);
     // A report can carry a receipt before the Cook index is available. Once a
     // canonical selection exists, however, only that selected attempt owns the
     // completion receipt; a newer non-substantive attempt cannot replace it.
-    let finalization = canonical_finalization
-        .as_ref()
-        .or_else(|| {
-            selected_candidate
-                .is_none_or(|candidate| candidate["cook_id"].as_str().is_none())
-                .then_some(finalization)
-                .flatten()
-        });
+    let finalization = canonical_finalization.as_ref().or_else(|| {
+        selected_candidate
+            .is_none_or(|candidate| candidate["cook_id"].as_str().is_none())
+            .then_some(finalization)
+            .flatten()
+    });
     let pr_finalized = finalization.is_some_and(cook_finalization_is_pr_receipt);
     let recovery_run_id = (!pr_finalized && finalization_requested)
         .then(|| canonical_finalization_recovery_run_id(selected_candidate))
@@ -1215,7 +1210,9 @@ fn canonical_candidate_produced(selected_candidate: Option<&Value>) -> bool {
         return false;
     };
     candidate["incomplete"] != true
-        && candidate["run_id"].as_str().is_some_and(|value| !value.is_empty())
+        && candidate["run_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
         && candidate["selected_task_id"]
             .as_str()
             .is_some_and(|value| !value.is_empty())
@@ -1250,11 +1247,14 @@ fn canonical_finalization_recovery_run_id(selected_candidate: Option<&Value>) ->
         .ok()
         .flatten()
         .is_some_and(|form| form.validate().is_ok()),
-    )
-        || promotion.source.run_id.as_deref() != Some(run_id)
+    ) || promotion.source.run_id.as_deref() != Some(run_id)
         || promotion.source.task_id != task_id
         || promotion.patch_artifact.id != artifact_id
-        || promotion.patch_artifact.sha256.as_deref().is_none_or(str::is_empty)
+        || promotion
+            .patch_artifact
+            .sha256
+            .as_deref()
+            .is_none_or(str::is_empty)
     {
         return None;
     }
@@ -1312,9 +1312,10 @@ pub(crate) fn canonical_candidate_finalization(
         {
             continue;
         }
-        let Some(promotion) = super::cook_promotion::persisted_promotion_for_attempt(&attempt.run_id)
-            .ok()
-            .flatten()
+        let Some(promotion) =
+            super::cook_promotion::persisted_promotion_for_attempt(&attempt.run_id)
+                .ok()
+                .flatten()
         else {
             continue;
         };
@@ -1904,10 +1905,7 @@ mod run_lifecycle_projection_tests {
             serialized["status"], "completed",
             "legacy status is preserved"
         );
-        assert_eq!(
-            serialized["completion"]["state"],
-            "candidate_produced"
-        );
+        assert_eq!(serialized["completion"]["state"], "candidate_produced");
         assert_eq!(serialized["completion"]["pr_finalized"], false);
         assert!(serialized["completion"].get("next_action").is_none());
 
@@ -2025,7 +2023,11 @@ mod run_lifecycle_projection_tests {
         let receipt = serde_json::json!({"status": "review_ready", "pr_number": 12291});
 
         assert_eq!(
-            canonical_candidate_finalization(Some(&candidate), Some(&receipt), Some("canonical-run")),
+            canonical_candidate_finalization(
+                Some(&candidate),
+                Some(&receipt),
+                Some("canonical-run")
+            ),
             Some(receipt)
         );
     }
