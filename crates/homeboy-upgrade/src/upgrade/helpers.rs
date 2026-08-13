@@ -776,9 +776,7 @@ fn no_installable_release_error(selection: &InstallableSelection, target: Option
 /// keep their durable audit trail and pinned runtime without blocking a binary
 /// replacement or being silently reconciled.
 fn ensure_controller_upgrade_admission() -> Result<()> {
-    let admission = super::with_controller_upgrade_admission(|provider| {
-        provider.controller_upgrade_admission()
-    })?;
+    let admission = super::ensure_controller_upgrade_admission()?;
     if admission.allows_controller_replacement() {
         let unhealthy_records = ["malformed", "legacy", "conflicting"]
             .into_iter()
@@ -795,29 +793,7 @@ fn ensure_controller_upgrade_admission() -> Result<()> {
         }
         return Ok(());
     }
-
-    let commands = admission
-        .blockers
-        .iter()
-        .map(|blocker| blocker.recovery_command.clone())
-        .collect::<Vec<_>>();
-    let mut error = Error::validation_invalid_argument(
-        "controller_upgrade",
-        format!(
-            "refusing to replace the controller binary while durable orchestration ownership is live or unverified: {}",
-            admission
-                .blockers
-                .iter()
-                .map(|blocker| blocker.run_id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        None,
-        Some(commands),
-    );
-    error.details["controller_upgrade_admission"] = serde_json::to_value(admission)
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    Err(error)
+    unreachable!("failed admission returns before this point")
 }
 
 /// Upgrade only explicitly selected runners without promoting the controller.

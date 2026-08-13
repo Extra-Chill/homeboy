@@ -2697,8 +2697,27 @@ pub fn status_with_options(
     run_id: &str,
     options: AgentTaskStatusOptions,
 ) -> Result<AgentTaskStatusOutcome> {
+    status_with_options_inner(run_id, options, false)
+}
+
+/// Reconcile one literal durable record without following a Cook alias. Scoped
+/// repair uses this when a logical Cook id has both a handoff parent and an
+/// attempt, because each record is independently authoritative evidence.
+pub fn exact_status(run_id: &str) -> Result<AgentTaskRunRecord> {
+    Ok(status_with_options_inner(run_id, AgentTaskStatusOptions::default(), true)?.record)
+}
+
+fn status_with_options_inner(
+    run_id: &str,
+    options: AgentTaskStatusOptions,
+    exact: bool,
+) -> Result<AgentTaskStatusOutcome> {
     let requested_run_id = sanitize_run_id(run_id);
-    let resolved_run_id = resolve_run_id(run_id)?;
+    let resolved_run_id = if exact {
+        requested_run_id.clone()
+    } else {
+        resolve_run_id(run_id)?
+    };
     let _ = reconcile_deferred_candidate(&resolved_run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
     if let Ok(admission) = homeboy_core::controller_runtime::admission_status(&record.run_id) {
@@ -2945,7 +2964,7 @@ pub fn status_with_options(
             }
         }
     }
-    if requested_run_id != record.run_id {
+    if !exact && requested_run_id != record.run_id {
         if let Ok(index) = store::read_cook_index(&requested_run_id) {
             project_cook_alias_adoption(&mut record, &index)?;
             let metadata = record.ensure_metadata_object();
@@ -4182,6 +4201,65 @@ fn substantive_candidate_in_aggregate(
 /// index entry. Recovery must inspect historical source attempts directly.
 pub fn exact_record(run_id: &str) -> Result<AgentTaskRunRecord> {
     store::read_record(&sanitize_run_id(run_id))
+}
+
+/// Return the exact durable records a reconciliation request owns. A Cook id
+/// with a materialized detached-handoff parent names both that parent and its
+/// current attempt; an exact attempt remains scoped to itself.
+pub fn reconcile_scope_run_ids(run_id: &str) -> Result<Vec<String>> {
+    let requested = sanitize_run_id(run_id);
+    let mut run_ids = vec![requested.clone()];
+
+    if let Ok(parent) = store::read_record(&requested) {
+        if let Some(attempt_run_id) = parent
+            .metadata
+            .pointer("/detached_cook_handoff/attempt_run_id")
+            .and_then(Value::as_str)
+        {
+            let attempt_run_id = sanitize_run_id(attempt_run_id);
+            let attempt = store::read_record(&attempt_run_id)?;
+            let attempt_cook_id = attempt.metadata.get("cook_id").and_then(Value::as_str);
+            if attempt_cook_id != Some(requested.as_str()) {
+                return Err(Error::validation_invalid_argument(
+                    "detached_cook_handoff.attempt_run_id",
+                    "detached Cook handoff attempt does not belong to its parent Cook",
+                    Some(attempt_run_id),
+                    None,
+                ));
+            }
+            let index = store::read_cook_index(&requested).map_err(|_| {
+                Error::validation_invalid_argument(
+                    "detached_cook_handoff.attempt_run_id",
+                    "detached Cook handoff attempt has no Cook index authority",
+                    Some(attempt.run_id.clone()),
+                    None,
+                )
+            })?;
+            if !index
+                .attempts
+                .iter()
+                .any(|entry| entry.run_id == attempt.run_id)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "detached_cook_handoff.attempt_run_id",
+                    "detached Cook handoff attempt is absent from its Cook index",
+                    Some(attempt.run_id),
+                    None,
+                ));
+            }
+            // The handoff binds this repair to its accepted child. A later
+            // index retry is a separate attempt and remains out of scope.
+            run_ids.push(attempt.run_id);
+        } else if let Ok(index) = store::read_cook_index(&requested) {
+            run_ids.push(index.latest_run_id);
+        }
+    } else if let Ok(index) = store::read_cook_index(&requested) {
+        run_ids[0] = index.latest_run_id;
+    }
+
+    run_ids.sort();
+    run_ids.dedup();
+    Ok(run_ids)
 }
 
 /// Resolve a caller-supplied identifier to the durable run it addresses.

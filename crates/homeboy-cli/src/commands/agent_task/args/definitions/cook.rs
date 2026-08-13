@@ -115,6 +115,10 @@ pub struct VerifyGateArgs {
     /// `COMMAND --version` in the final isolated gate environment. Repeatable.
     #[arg(long = "gate-toolchain", value_name = "COMMAND")]
     pub gate_toolchains: Vec<String>,
+    /// Exact toolchain probe contract as JSON. Use when a probe needs arguments
+    /// other than the `--version` default retained by `--gate-toolchain`.
+    #[arg(long = "gate-toolchain-spec", value_name = "JSON", value_parser = parse_gate_toolchain_requirement)]
+    pub gate_toolchain_specs: Vec<AgentTaskGateToolchainRequirement>,
     /// Caller-declared package resource readiness as a JSON object. The object
     /// defines its environment mapping, required paths or digests, and opaque
     /// remediation metadata. Repeat for multiple resources.
@@ -378,6 +382,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                     command,
                     probe_arguments: vec!["--version".to_string()],
                 })
+                .chain(args.gate_toolchain_specs)
                 .collect(),
             gate_package_artifacts: args.gate_package_artifacts,
             gate_diagnostic_sidecars: Vec::new(),
@@ -391,6 +396,13 @@ fn parse_gate_package_artifact(
 ) -> Result<AgentTaskGatePackageArtifactRequirement, String> {
     serde_json::from_str(value)
         .map_err(|error| format!("invalid gate package artifact declaration: {error}"))
+}
+
+fn parse_gate_toolchain_requirement(
+    value: &str,
+) -> Result<AgentTaskGateToolchainRequirement, String> {
+    serde_json::from_str(value)
+        .map_err(|error| format!("invalid gate toolchain requirement: {error}"))
 }
 
 fn parse_gate_extension_input(value: &str) -> Result<AgentTaskGateExtensionInput, String> {
@@ -621,6 +633,34 @@ mod tests {
             AgentTaskGateRevealPolicy::FullEvidence,
         )
         .expect_err("replacement must fail closed");
+    }
+
+    #[test]
+    fn gate_toolchain_spec_preserves_non_default_probe_arguments() {
+        let options: VerifyGateOptions = TestCli::try_parse_from([
+            "homeboy",
+            "--gate-toolchain",
+            "legacy-tool",
+            "--gate-toolchain-spec",
+            r#"{"command":"custom-tool","probe_arguments":["probe","--json"]}"#,
+        ])
+        .expect("parse legacy and structured toolchain declarations")
+        .gates
+        .into();
+
+        assert_eq!(
+            options.gate_toolchains,
+            vec![
+                AgentTaskGateToolchainRequirement {
+                    command: "legacy-tool".to_string(),
+                    probe_arguments: vec!["--version".to_string()],
+                },
+                AgentTaskGateToolchainRequirement {
+                    command: "custom-tool".to_string(),
+                    probe_arguments: vec!["probe".to_string(), "--json".to_string()],
+                },
+            ]
+        );
     }
 
     #[derive(Parser)]
