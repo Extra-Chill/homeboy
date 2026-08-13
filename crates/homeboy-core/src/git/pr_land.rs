@@ -319,8 +319,9 @@ fn land_prs_with_client(
                 ));
                 break;
             }
-            CheckWaitOutcome::Ready { pr, .. } => {
-                match readiness(&pr, options.refresh_helper.is_some()) {
+            CheckWaitOutcome::Ready { pr, report } => {
+                let checks = checks_verdict_with_waivers(&pr, &report);
+                match readiness(&pr, options.refresh_helper.is_some(), checks.as_deref()) {
                     PrReadiness::AlreadyMerged => {
                         summary.already_merged += 1;
                         items.push(item_from_pr(
@@ -345,20 +346,27 @@ fn land_prs_with_client(
                             }
                             summary.refreshed += 1;
                             let refreshed = client.view_pr(&options.repo, number)?;
-                            let pr = match wait_for_checks(&options, client, refreshed)? {
-                                CheckWaitOutcome::Ready { pr, .. } => pr,
-                                CheckWaitOutcome::Blocked { pr, reason, report } => {
-                                    summary.blocked += 1;
-                                    items.push(item_from_pr_with_check_wait(
-                                        &pr,
-                                        PrLandStatus::Refreshed,
-                                        &reason,
-                                        report,
-                                    ));
-                                    break;
-                                }
-                            };
-                            if !matches!(readiness(&pr, false), PrReadiness::Ready) {
+                            let (pr, refreshed_checks) =
+                                match wait_for_checks(&options, client, refreshed)? {
+                                    CheckWaitOutcome::Ready { pr, report } => {
+                                        let checks = checks_verdict_with_waivers(&pr, &report);
+                                        (pr, checks)
+                                    }
+                                    CheckWaitOutcome::Blocked { pr, reason, report } => {
+                                        summary.blocked += 1;
+                                        items.push(item_from_pr_with_check_wait(
+                                            &pr,
+                                            PrLandStatus::Refreshed,
+                                            &reason,
+                                            report,
+                                        ));
+                                        break;
+                                    }
+                                };
+                            if !matches!(
+                                readiness(&pr, false, refreshed_checks.as_deref()),
+                                PrReadiness::Ready
+                            ) {
                                 summary.blocked += 1;
                                 items.push(item_from_pr(&pr, PrLandStatus::Refreshed, &reason));
                                 break;
@@ -436,8 +444,12 @@ fn merge_ready_pr(
                 attempts += 1;
                 summary.merge_retries += 1;
                 pr = client.view_pr(&options.repo, pr.common.number)?;
+                let retry_checks;
                 pr = match wait_for_checks(options, client, pr)? {
-                    CheckWaitOutcome::Ready { pr, .. } => pr,
+                    CheckWaitOutcome::Ready { pr: ready, report } => {
+                        retry_checks = checks_verdict_with_waivers(&ready, &report);
+                        ready
+                    }
                     CheckWaitOutcome::Blocked { pr, reason, report } => {
                         summary.blocked += 1;
                         items.push(item_from_pr_with_check_wait(
@@ -449,7 +461,7 @@ fn merge_ready_pr(
                         return Ok(());
                     }
                 };
-                match readiness(&pr, false) {
+                match readiness(&pr, false, retry_checks.as_deref()) {
                     PrReadiness::Ready => continue,
                     PrReadiness::AlreadyMerged => {
                         summary.already_merged += 1;
@@ -472,7 +484,41 @@ fn merge_ready_pr(
     }
 }
 
-fn readiness(pr: &PrView, can_refresh: bool) -> PrReadiness {
+/// The rollup verdict with approved check waivers applied (#12373).
+///
+/// `pr.checks` is [`summarize_checks`], which collapses the rollup to
+/// `"FAILURE"` as soon as any check is blocking and has no concept of waivers.
+/// [`wait_for_checks`] had already decided the waiver-aware answer and
+/// [`readiness`] then re-derived a waiver-blind one from this string, so an
+/// approved waiver was applied and immediately discarded. Because a waiver only
+/// matters when something is failing, and anything failing forces `"FAILURE"`,
+/// no `--check-waiver` value could ever produce a merge.
+///
+/// Downgrading is deliberately narrow. Three properties the old `pr.checks`
+/// gate guaranteed are preserved here, and each is pinned by a test:
+///
+/// * **No checks reported at all stays blocked.** `None` is returned unchanged
+///   rather than treated as satisfied — an empty `blocking_checks` over an empty
+///   check set is an absence of evidence, not a pass.
+/// * **Only a terminal report may downgrade.** A still-settling rollup keeps its
+///   `"FAILURE"`.
+/// * **Only the report's own filter may clear a check.** `blocking_checks`
+///   drops a check solely when a waiver named it, matched the exact head, and
+///   the check declared `isRequired: false`. A required failure — or one whose
+///   `isRequired` is absent — can never be waived, so it never reaches here as
+///   an empty blocking set.
+fn checks_verdict_with_waivers(pr: &PrView, checks: &PrCheckWaitReport) -> Option<String> {
+    let reported = pr.checks.as_deref()?;
+    if reported != "FAILURE" {
+        return Some(reported.to_string());
+    }
+    if checks.terminal && checks.blocking_checks.is_empty() {
+        return Some("SUCCESS".to_string());
+    }
+    Some("FAILURE".to_string())
+}
+
+fn readiness(pr: &PrView, can_refresh: bool, checks: Option<&str>) -> PrReadiness {
     if pr.merged_at.is_some() || pr.state == "MERGED" {
         return PrReadiness::AlreadyMerged;
     }
@@ -482,10 +528,10 @@ fn readiness(pr: &PrView, can_refresh: bool) -> PrReadiness {
     if pr.draft {
         return PrReadiness::Blocked("PR is draft".to_string());
     }
-    if pr.checks.as_deref() == Some("FAILURE") {
+    if checks == Some("FAILURE") {
         return PrReadiness::Blocked("required checks are failing".to_string());
     }
-    if pr.checks.as_deref() != Some("SUCCESS") {
+    if checks != Some("SUCCESS") {
         return PrReadiness::Blocked("required checks are pending or not reported".to_string());
     }
     if pr.merge_state.as_deref() == Some("CLEAN") {
@@ -1054,13 +1100,107 @@ mod tests {
     #[test]
     fn clean_success_pr_is_ready() {
         assert_eq!(
-            readiness(&pr(1, Some("SUCCESS"), Some("CLEAN")), false),
+            readiness(
+                &pr(1, Some("SUCCESS"), Some("CLEAN")),
+                false,
+                Some("SUCCESS")
+            ),
             PrReadiness::Ready
         );
         assert!(matches!(
-            readiness(&pr(1, None, Some("CLEAN")), false),
+            readiness(&pr(1, None, Some("CLEAN")), false, None),
             PrReadiness::Blocked(_)
         ));
+    }
+
+    /// The waiver may only ever downgrade a `FAILURE`, and only from a terminal
+    /// report whose own filter cleared every blocking check (#12373).
+    #[test]
+    fn only_a_terminal_report_with_nothing_blocking_may_downgrade_a_failing_rollup() {
+        let waived = pr_with_rollup(1, vec![check("docs", "COMPLETED", "FAILURE", false)]);
+        assert_eq!(
+            waived.checks.as_deref(),
+            Some("FAILURE"),
+            "the fixture must actually be failing, or this proves nothing"
+        );
+
+        let report = |terminal: bool, blocking: Vec<PrCheckResult>| PrCheckWaitReport {
+            head_sha: "sha1".to_string(),
+            terminal,
+            timed_out: false,
+            checks: Vec::new(),
+            blocking_checks: blocking,
+            resume_command: String::new(),
+        };
+        let blocking_check = || PrCheckResult {
+            name: "docs".to_string(),
+            status: None,
+            conclusion: None,
+            required: Some(false),
+            classification: "failed".to_string(),
+            url: None,
+            waiver_approved_by: None,
+        };
+
+        // The only downgrade: terminal, and nothing left blocking.
+        assert_eq!(
+            checks_verdict_with_waivers(&waived, &report(true, Vec::new())).as_deref(),
+            Some("SUCCESS")
+        );
+        // Still settling: a waiver must not pre-empt checks that have not finished.
+        assert_eq!(
+            checks_verdict_with_waivers(&waived, &report(false, Vec::new())).as_deref(),
+            Some("FAILURE")
+        );
+        // Something is still blocking: the waiver did not cover it.
+        assert_eq!(
+            checks_verdict_with_waivers(&waived, &report(true, vec![blocking_check()])).as_deref(),
+            Some("FAILURE")
+        );
+
+        // No checks reported at all is an absence of evidence, never a pass --
+        // even though `blocking_checks` is trivially empty.
+        let unreported = pr(1, None, Some("CLEAN"));
+        assert_eq!(
+            checks_verdict_with_waivers(&unreported, &report(true, Vec::new())),
+            None
+        );
+        assert!(matches!(
+            readiness(&unreported, false, None),
+            PrReadiness::Blocked(_)
+        ));
+
+        // A passing rollup is passed through untouched.
+        let clean = pr(1, Some("SUCCESS"), Some("CLEAN"));
+        assert_eq!(
+            checks_verdict_with_waivers(&clean, &report(true, Vec::new())).as_deref(),
+            Some("SUCCESS")
+        );
+    }
+
+    /// A REQUIRED failing check can never be waived, so it can never reach the
+    /// downgrade with an empty blocking set.
+    #[test]
+    fn a_required_failing_check_is_never_waivable() {
+        let mut client = FakeClient::default();
+        client.push_view(pr_with_rollup(
+            1,
+            vec![check("test", "COMPLETED", "FAILURE", true)],
+        ));
+        let mut opts = options(vec!["1"]);
+        opts.check_waivers = vec![PrCheckWaiver {
+            head_sha: "sha1".to_string(),
+            name: "test".to_string(),
+            approved_by: "operator".to_string(),
+        }];
+
+        let output = land_prs_with_client(opts, &mut client).unwrap();
+
+        assert!(
+            client.merged.is_empty(),
+            "a waiver naming a REQUIRED check must not land it"
+        );
+        assert_eq!(output.summary.blocked, 1);
     }
 
     #[test]
