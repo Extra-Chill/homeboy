@@ -958,6 +958,170 @@ fn run_next_quarantines_an_older_ineligible_record_and_executes_the_next_record(
 }
 
 #[test]
+fn run_next_bounds_stale_global_admission_and_reports_progress() {
+    with_isolated_home(|_| {
+        for index in 0..agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS {
+            let run_id = format!("bounded-stale-{index:03}");
+            agent_task_lifecycle::submit_plan(&test_plan(), Some(&run_id))
+                .expect("stale submitted");
+            let plan_path = homeboy_core::paths::homeboy_data()
+                .expect("data path")
+                .join("agent-task-runs")
+                .join(&run_id)
+                .join("plan.json");
+            let mut plan: Value = serde_json::from_slice(&std::fs::read(&plan_path).expect("plan"))
+                .expect("plan JSON");
+            plan["options"]["execution_budget"]["version"] = serde_json::json!(999);
+            std::fs::write(&plan_path, serde_json::to_vec(&plan).expect("encode plan"))
+                .expect("persist stale plan");
+        }
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("bounded-ready"))
+            .expect("ready work submitted");
+
+        let first = run_next(SucceedingExecutor).expect("bounded claim returns");
+        assert!(first.value.is_none());
+        assert_eq!(
+            first.queue_admission.inspected,
+            agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
+        );
+        assert!(first.queue_admission.limit_reached);
+        assert_eq!(
+            first.skipped.len(),
+            agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
+        );
+
+        let second = run_next(SucceedingExecutor).expect("next claim progresses to ready work");
+        assert_eq!(
+            second.value.expect("ready aggregate").plan_id,
+            "service-plan"
+        );
+        assert_eq!(second.queue_admission.inspected, 1);
+        assert!(!second.queue_admission.limit_reached);
+        assert_eq!(
+            lifecycle_status("bounded-ready")
+                .expect("ready status")
+                .state,
+            AgentTaskRunState::Succeeded
+        );
+    });
+}
+
+#[test]
+fn run_next_bounds_malformed_continuation_admission_and_progresses_on_retry() {
+    with_isolated_home(|_| {
+        let queue = homeboy_core::paths::homeboy_data()
+            .expect("data path")
+            .join("agent-task-cook-continuations");
+        std::fs::create_dir_all(&queue).expect("continuation queue");
+        for index in 0..=agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS {
+            std::fs::write(queue.join(format!("{index:03}.pending")), "not JSON")
+                .expect("malformed continuation");
+        }
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("continuation-ready"))
+            .expect("ready work submitted");
+
+        let first = run_next(SucceedingExecutor).expect("bounded continuation scan returns");
+        assert!(first.value.is_none());
+        assert_eq!(
+            first.queue_admission.inspected,
+            agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
+        );
+        assert!(first.queue_admission.limit_reached);
+        assert_eq!(
+            std::fs::read_dir(&queue)
+                .expect("continuation queue")
+                .filter_map(std::result::Result::ok)
+                .filter(
+                    |entry| entry.path().extension().and_then(|value| value.to_str())
+                        == Some("failed")
+                )
+                .count(),
+            agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
+        );
+
+        let second = run_next(SucceedingExecutor).expect("later ready work progresses");
+        assert_eq!(
+            second.value.expect("ready aggregate").plan_id,
+            "service-plan"
+        );
+        assert_eq!(second.queue_admission.inspected, 2);
+        assert!(!second.queue_admission.limit_reached);
+    });
+}
+
+#[test]
+fn run_next_shares_admission_budget_between_continuations_and_queued_records() {
+    with_isolated_home(|_| {
+        let queue = homeboy_core::paths::homeboy_data()
+            .expect("data path")
+            .join("agent-task-cook-continuations");
+        std::fs::create_dir_all(&queue).expect("continuation queue");
+        for index in 0..agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS - 1 {
+            std::fs::write(queue.join(format!("{index:03}.pending")), "not JSON")
+                .expect("malformed continuation");
+        }
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("shared-stale"))
+            .expect("stale submitted");
+        let plan_path = homeboy_core::paths::homeboy_data()
+            .expect("data path")
+            .join("agent-task-runs/shared-stale/plan.json");
+        let mut stale: Value =
+            serde_json::from_slice(&std::fs::read(&plan_path).expect("plan")).expect("plan JSON");
+        stale["options"]["execution_budget"]["version"] = serde_json::json!(999);
+        std::fs::write(&plan_path, serde_json::to_vec(&stale).expect("encode plan"))
+            .expect("persist stale plan");
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("shared-ready"))
+            .expect("ready submitted");
+
+        let first = run_next(SucceedingExecutor).expect("shared budget returns");
+        assert!(first.value.is_none());
+        assert_eq!(
+            first.queue_admission.inspected,
+            agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
+        );
+        assert!(first.queue_admission.limit_reached);
+
+        let second = run_next(SucceedingExecutor).expect("ready work progresses next invocation");
+        assert_eq!(
+            second.value.expect("ready aggregate").plan_id,
+            "service-plan"
+        );
+        assert_eq!(second.queue_admission.inspected, 1);
+    });
+}
+
+#[test]
+fn run_next_quarantines_stale_cook_identity_and_runs_later_work() {
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("stale-identity"))
+            .expect("stale Cook record submitted");
+        agent_task_lifecycle::rewrite_record_for_test("stale-identity", |record| {
+            record.metadata["cook_id"] = serde_json::json!("missing-cook-recipe");
+        })
+        .expect("stale Cook identity persisted");
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("identity-ready"))
+            .expect("ready work submitted");
+
+        let result = run_next(SucceedingExecutor).expect("ready work runs");
+        let stale = agent_task_lifecycle::exact_record("stale-identity").expect("stale record");
+
+        assert_eq!(
+            result.value.expect("ready aggregate").plan_id,
+            "service-plan"
+        );
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].run_id, "stale-identity");
+        assert!(stale.metadata.get("queue_quarantine").is_some());
+        assert_eq!(
+            lifecycle_status("identity-ready")
+                .expect("ready status")
+                .state,
+            AgentTaskRunState::Succeeded
+        );
+    });
+}
+
+#[test]
 fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
     with_isolated_home(|_| {
         const LEAKS: [&str; 5] = [
@@ -1008,7 +1172,8 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
         let result = run_next_with_cook_dispatcher_and_queue_preflight(
             SucceedingExecutor,
             |_| Ok(None),
-            |plan| {
+            None,
+            |_, plan| {
                 if plan.tasks[0].executor.backend == "adversarial-readiness" {
                     crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
                         plan,

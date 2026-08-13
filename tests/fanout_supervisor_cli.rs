@@ -73,6 +73,10 @@ fn fanout_status_exposes_the_durable_supervisor_projection() {
             output["data"]["portfolio"]["children"][1]["blocker"]["code"],
             "blocked_by_dependency"
         );
+        assert_eq!(
+            output["data"]["commands"]["run_next"],
+            "homeboy agent-task run-next --fanout production-interface"
+        );
         assert!(
             !portfolio_exists("production-interface").expect("read portfolio path"),
             "status must remain a read-only projection"

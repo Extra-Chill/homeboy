@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Barrier;
 
 use crate::cli_surface::{Cli, Commands};
+use homeboy::agents::agent_tasks::batch::{persist_fanout_run_batch, FanoutRunBatchChild};
 
 use super::super::AgentTaskCommand;
 
@@ -3197,6 +3198,76 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
         assert_eq!(observed.state, AgentTaskRunState::Running);
         assert_eq!(first.state, AgentTaskRunState::Succeeded);
         assert_eq!(second.state, AgentTaskRunState::Queued);
+    });
+}
+
+#[test]
+fn run_next_fanout_claims_ready_children_without_inspecting_unrelated_stale_queue_records() {
+    with_temp_home(|| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("stale-global-cook"))
+            .expect("stale record submitted");
+        let stale_plan = homeboy_core::paths::homeboy_data()
+            .expect("data path")
+            .join("agent-task-runs/stale-global-cook/plan.json");
+        let mut stale: Value =
+            serde_json::from_slice(&std::fs::read(&stale_plan).expect("stale plan")).expect("JSON");
+        stale["options"]["execution_budget"]["version"] = json!(999);
+        std::fs::write(
+            &stale_plan,
+            serde_json::to_vec(&stale).expect("encode stale plan"),
+        )
+        .expect("persist stale plan");
+
+        let mut target_a = test_plan();
+        target_a.metadata["batch_id"] = json!("target-fanout");
+        agent_task_lifecycle::submit_plan(&target_a, Some("target-child-a"))
+            .expect("first target child submitted");
+        let mut target_b = test_plan();
+        target_b.metadata["batch_id"] = json!("target-fanout");
+        agent_task_lifecycle::submit_plan(&target_b, Some("target-child-b"))
+            .expect("second target child submitted");
+        persist_fanout_run_batch(
+            "target-fanout",
+            "target-fanout",
+            &[
+                FanoutRunBatchChild {
+                    task_id: "a".to_string(),
+                    run_id: "target-child-a".to_string(),
+                },
+                FanoutRunBatchChild {
+                    task_id: "b".to_string(),
+                    run_id: "target-child-b".to_string(),
+                },
+            ],
+            json!({}),
+        )
+        .expect("fanout persisted");
+
+        let (_value, exit_code) = run_next_with_executor_and_fanout(
+            InspectingExecutor::noop("target-child-a"),
+            Some("target-fanout".to_string()),
+        )
+        .expect("scoped queue claim succeeds");
+
+        assert_eq!(exit_code, 0);
+        let stale = agent_task_lifecycle::exact_record("stale-global-cook").expect("stale record");
+        assert_eq!(stale.state, AgentTaskRunState::Queued);
+        assert!(
+            stale.metadata.get("queue_quarantine").is_none(),
+            "scoped dispatch must not inspect or quarantine unrelated work"
+        );
+        assert_eq!(
+            lifecycle_status("target-child-a")
+                .expect("first target status")
+                .state,
+            AgentTaskRunState::Succeeded
+        );
+        assert_eq!(
+            lifecycle_status("target-child-b")
+                .expect("second target status")
+                .state,
+            AgentTaskRunState::Queued
+        );
     });
 }
 
