@@ -11,8 +11,8 @@ use homeboy_core::{Error, ErrorCode, Result};
 
 use super::{
     default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode,
-    RunnerActiveJobSource, RunnerAvailability, RunnerConnectReport, RunnerStatusReport,
-    RunnerTunnelMode,
+    RunnerActiveJobSource, RunnerAvailability, RunnerConnectReport, RunnerStaleDaemonWarning,
+    RunnerStatusReport, RunnerTunnelMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1113,7 +1113,7 @@ pub(super) fn lab_runner_availability_error(
 
     let stale_daemon_recovery = selected_status
         .and_then(|status| status.stale_daemon.as_ref())
-        .map(|warning| warning.refresh_command.clone());
+        .and_then(|warning| warning.safe_recovery_commands().into_iter().next());
     let mut tried = vec![
         "Wait for an active Lab runner job to finish, then retry.".to_string(),
         "Choose another available runner with --runner <runner-id>.".to_string(),
@@ -1138,11 +1138,20 @@ pub(super) fn lab_runner_availability_error(
                 "eligible": eligible,
                 "reasons": reasons,
             },
-            "runner_status": selected_status,
+            "runner_status": selected_status.map(sanitized_status_for_output),
             "stale_daemon_recovery_command": stale_daemon_recovery,
             "tried": tried,
         }),
     )
+}
+
+fn sanitized_status_for_output(status: &RunnerStatusReport) -> RunnerStatusReport {
+    let mut status = status.clone();
+    status.stale_daemon = status
+        .stale_daemon
+        .as_ref()
+        .map(RunnerStaleDaemonWarning::sanitized_for_output);
+    status
 }
 
 fn connect_runner_for_offload(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
@@ -1415,24 +1424,18 @@ fn daemon_repair_steps(runner_id: &str, status: &RunnerStatusReport) -> Vec<Daem
         return report.repair_plan.clone();
     }
     if let Some(warning) = status.stale_daemon.as_ref() {
-        // The warning renders its own text from argv, so a step keeps the
-        // action alongside the string instead of forcing a consumer to
-        // reconstruct one from the other. A recovery with no typed form (an
-        // older warning, or one whose command came from the runner rather than
-        // from a builder) degrades to text and is surfaced, not executed.
         let steps: Vec<_> = warning
-            .recovery_steps()
+            .safe_recovery_actions()
             .into_iter()
-            .map(|(command, action)| match action {
-                Some(action) => {
-                    daemon_repair::action_step(daemon_repair::STALE_DAEMON_RECOVERY, action)
-                }
-                None => daemon_repair::step(daemon_repair::STALE_DAEMON_RECOVERY, command),
-            })
+            .map(|action| daemon_repair::action_step(daemon_repair::STALE_DAEMON_RECOVERY, action))
             .collect();
         if !steps.is_empty() {
             return steps;
         }
+        return vec![daemon_repair::action_step(
+            daemon_repair::RUNNER_DIAGNOSE,
+            daemon_repair::diagnose_action(runner_id),
+        )];
     }
     daemon_repair::reconnect_plan(runner_id)
 }
@@ -1784,15 +1787,14 @@ mod daemon_repair_step_tests {
     }
 
     #[test]
-    fn stale_daemon_recovery_commands_become_typed_steps() {
+    fn stale_daemon_recovery_uses_only_an_exact_safe_typed_action() {
         let warning = RunnerStaleDaemonWarning::new(
             "homeboy-lab",
             "homeboy 0.218.0".to_string(),
             "homeboy 0.219.0".to_string(),
-            Some("homeboy 0.218.0+old".to_string()),
+            Some("homeboy 0.218.0+new".to_string()),
             Some("homeboy 0.219.0+new".to_string()),
         );
-        let expected = warning.recovery_commands.clone();
         let report = status_report("homeboy-lab", None, Some(warning));
 
         let steps = daemon_repair_steps("homeboy-lab", &report);
@@ -1802,11 +1804,34 @@ mod daemon_repair_step_tests {
                 .iter()
                 .map(|step| step.command.clone())
                 .collect::<Vec<_>>(),
-            expected
+            ["homeboy runner refresh-homeboy homeboy-lab --ref new --reconnect"]
         );
         assert!(steps
             .iter()
             .all(|step| step.code == daemon_repair::STALE_DAEMON_RECOVERY));
+        assert!(daemon_repair_action("homeboy-lab", &report).is_some());
+    }
+
+    #[test]
+    fn stale_daemon_with_unverified_ref_offers_only_read_only_inspection() {
+        let warning = RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "homeboy 0.218.0".to_string(),
+            "homeboy 0.219.0".to_string(),
+            Some("homeboy 0.218.0+old".to_string()),
+            Some("homeboy 0.219.0+new".to_string()),
+        );
+        let report = status_report("homeboy-lab", None, Some(warning));
+
+        let steps = daemon_repair_steps("homeboy-lab", &report);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].code, daemon_repair::RUNNER_DIAGNOSE);
+        assert_eq!(
+            steps[0].command,
+            "homeboy runner doctor homeboy-lab --scope lab-offload"
+        );
+        assert!(!daemon_repair_command("homeboy-lab", &report).contains("refresh-homeboy"));
+        assert!(daemon_repair_action("homeboy-lab", &report).is_none());
     }
 
     #[test]

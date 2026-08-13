@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::session::{RunnerSession, RunnerStatusReport};
+use super::session::{RunnerSession, RunnerStaleDaemonWarning, RunnerStatusReport};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerBinarySource {
@@ -89,7 +89,9 @@ impl RuntimeMaterializationStatus {
                 .and_then(|warning| warning.job_command_binary_build_identity.clone()),
             stale_daemon_severity: stale_daemon.map(|warning| warning.severity),
             stale_daemon_refresh_command: stale_daemon
-                .map(|warning| warning.refresh_command.clone()),
+                .map(RunnerStaleDaemonWarning::safe_recovery_commands)
+                .filter(|commands| !commands.is_empty())
+                .map(|commands| commands.join(" && ")),
             version_drift,
         }
     }

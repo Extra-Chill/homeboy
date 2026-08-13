@@ -37,13 +37,19 @@ const PROBE: &str = "controller_git_ancestry";
 /// an unbounded subprocess transcript.
 const MAX_DETAIL_CHARS: usize = 400;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommitAncestry {
+    Ancestor,
+    NotAncestor,
+    Unavailable,
+}
+
 /// Is `older` an ancestor of `newer` in the controller's ambient checkout?
 ///
-/// Returns `false` when the question cannot be answered, which is the same
-/// conservative answer as "no": the caller falls back to the controller's own
-/// refresh ref. When the probe could not run at all, the reason is recorded as
-/// a degradation rather than printed or discarded.
-pub(super) fn commits_are_ancestral(older: &str, newer: &str) -> bool {
+/// An unavailable probe remains distinct from a real "not an ancestor" answer:
+/// recovery guidance must not turn an unknown build relationship into a
+/// potentially downgrading controller refresh.
+pub(super) fn commits_are_ancestral(older: &str, newer: &str) -> CommitAncestry {
     // `output()` captures both child streams. `status()` would inherit them and
     // print git's `fatal:` line straight past the structured envelope.
     ancestry_from_probe(
@@ -56,9 +62,9 @@ pub(super) fn commits_are_ancestral(older: &str, newer: &str) -> bool {
 /// Classify a completed probe. Split from the spawn so the "answered false"
 /// versus "could not answer" distinction is deterministically testable without
 /// depending on the machine's git or working directory.
-fn ancestry_from_probe(probe: std::io::Result<std::process::Output>) -> bool {
+fn ancestry_from_probe(probe: std::io::Result<std::process::Output>) -> CommitAncestry {
     match probe {
-        Ok(output) if output.status.success() => true,
+        Ok(output) if output.status.success() => CommitAncestry::Ancestor,
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stderr = stderr.trim();
@@ -67,12 +73,14 @@ fn ancestry_from_probe(probe: std::io::Result<std::process::Output>) -> bool {
             // diagnostic on stderr means the probe itself could not run.
             if !stderr.is_empty() {
                 record_unavailable(stderr);
+                CommitAncestry::Unavailable
+            } else {
+                CommitAncestry::NotAncestor
             }
-            false
         }
         Err(error) => {
             record_unavailable(&format!("git could not be executed: {error}"));
-            false
+            CommitAncestry::Unavailable
         }
     }
 }
@@ -151,7 +159,7 @@ mod tests {
         ));
 
         assert!(
-            !answer,
+            answer == CommitAncestry::Unavailable,
             "an unanswerable ancestry probe must not claim ancestry"
         );
         let degradations = readonly_probe::take_degradations();
@@ -174,10 +182,13 @@ mod tests {
     fn a_plain_non_ancestor_answer_records_nothing() {
         readonly_probe::take_degradations();
 
-        assert!(!ancestry_from_probe(probe(1, "")));
+        assert_eq!(
+            ancestry_from_probe(probe(1, "")),
+            CommitAncestry::NotAncestor
+        );
         assert!(readonly_probe::take_degradations().is_empty());
 
-        assert!(ancestry_from_probe(probe(0, "")));
+        assert_eq!(ancestry_from_probe(probe(0, "")), CommitAncestry::Ancestor);
         assert!(readonly_probe::take_degradations().is_empty());
     }
 
@@ -185,10 +196,13 @@ mod tests {
     fn a_missing_git_binary_is_reported_rather_than_swallowed() {
         readonly_probe::take_degradations();
 
-        assert!(!ancestry_from_probe(Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no such file or directory",
-        ))));
+        assert_eq!(
+            ancestry_from_probe(Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such file or directory",
+            ))),
+            CommitAncestry::Unavailable
+        );
 
         let degradations = readonly_probe::take_degradations();
         assert_eq!(degradations.len(), 1);

@@ -14,7 +14,7 @@ use homeboy::runner::runners::{
 };
 
 use super::super::CmdResult;
-use super::controller_ancestry::commits_are_ancestral;
+use super::controller_ancestry::{commits_are_ancestral, CommitAncestry};
 use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
     RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
@@ -102,7 +102,9 @@ pub(super) fn status(
                 id: Some(id.to_string()),
                 extra: RunnerExtra {
                     admission_summary,
-                    connection: Some(RunnerConnectionOutput::Status(Box::new(report))),
+                    connection: Some(RunnerConnectionOutput::Status(Box::new(
+                        sanitized_status_for_output(report),
+                    ))),
                     generation_inventory,
                     preferred_lab_runner,
                     selected_lab_runner,
@@ -174,7 +176,10 @@ pub(super) fn status(
         RunnerOutput {
             command: "runner.status".to_string(),
             extra: RunnerExtra {
-                sessions,
+                sessions: sessions
+                    .into_iter()
+                    .map(sanitized_status_for_output)
+                    .collect(),
                 inspection: Some(inspection),
                 preferred_lab_runner,
                 selected_lab_runner,
@@ -224,7 +229,9 @@ pub(super) fn reconcile_output(
             extra: RunnerExtra {
                 admission_summary: Some(admission_summary),
                 reconciliation: Some(reconciliation),
-                connection: Some(RunnerConnectionOutput::Status(Box::new(report.clone()))),
+                connection: Some(RunnerConnectionOutput::Status(Box::new(
+                    sanitized_status_for_output(report.clone()),
+                ))),
                 generation_inventory,
                 operator_hints: runner_status_operator_hints(&report),
                 // Reconcile has already consumed the current evidence. A repeat
@@ -550,10 +557,10 @@ fn selected_lab_runner_status(
         return Ok(None);
     };
     let runner_config = runner::load(runner_id)?;
-    let status = match status {
+    let status = sanitized_status_for_output(match status {
         Some(status) => status,
         None => runner::status(runner_id)?,
-    };
+    });
     let configured_executable = runner_config
         .settings
         .homeboy_path
@@ -623,9 +630,28 @@ pub(super) fn lab_runner_homeboy_output(
     configured_executable: &str,
     status: &RunnerStatusReport,
 ) -> LabRunnerHomeboyOutput {
-    let materialization =
+    lab_runner_homeboy_output_with_recovery_guidance(
+        runner_id,
+        configured_executable,
+        status,
+        recovery_refresh_guidance(status),
+    )
+}
+
+fn lab_runner_homeboy_output_with_recovery_guidance(
+    runner_id: &str,
+    configured_executable: &str,
+    status: &RunnerStatusReport,
+    guidance: RecoveryRefreshGuidance,
+) -> LabRunnerHomeboyOutput {
+    let mut materialization =
         RuntimeMaterializationStatus::for_homeboy_runner(runner_id, configured_executable, status);
-    let stale_daemon = status.stale_daemon.as_ref();
+    let refresh_command = recovery_refresh_command(&shell_arg(runner_id), guidance);
+    materialization.stale_daemon_refresh_command = refresh_command.clone();
+    let stale_daemon = status
+        .stale_daemon
+        .as_ref()
+        .and_then(|warning| stale_daemon_output(warning, refresh_command));
     let binary_roles: Vec<_> = materialization
         .binary_sources
         .iter()
@@ -650,7 +676,7 @@ pub(super) fn lab_runner_homeboy_output(
         job_command_binary_build_identity: materialization.job_command_binary_build_identity,
         stale_daemon_severity: materialization.stale_daemon_severity.map(str::to_string),
         stale_daemon_refresh_command: materialization.stale_daemon_refresh_command,
-        stale_daemon: stale_daemon.and_then(|warning| serde_json::to_value(warning).ok()),
+        stale_daemon,
         version_drift: materialization.version_drift,
         command_availability_checks: lab_command_availability_checks(configured_executable),
         artifact_features: runner_artifact_feature_diagnostics(
@@ -1181,15 +1207,16 @@ fn lab_runner_homeboy_refresh_commands(
     status: &RunnerStatusReport,
 ) -> Vec<String> {
     let runner_arg = shell_arg(runner_id);
-    let refresh_ref = recovery_refresh_ref(status);
-    vec![
-        format!(
-            "homeboy runner refresh-homeboy {runner_arg} --ref {} --reconnect",
-            refresh_ref
-        ),
+    let mut commands = Vec::new();
+    if let Some(command) = recovery_refresh_command(&runner_arg, recovery_refresh_guidance(status))
+    {
+        commands.push(command);
+    }
+    commands.extend([
         format!("homeboy runner disconnect {runner_arg}"),
         format!("homeboy runner connect {runner_arg}"),
-    ]
+    ]);
+    commands
 }
 
 pub(super) fn runner_followups(
@@ -1201,19 +1228,26 @@ pub(super) fn runner_followups(
         return followups;
     };
     let runner_arg = shell_arg(runner_id);
+    if let Some(command) = recovery_refresh_command(
+        &runner_arg,
+        status.map(recovery_refresh_guidance).unwrap_or_else(|| {
+            RecoveryRefreshGuidance::IdentityDrift {
+                controller: homeboy_product_identity::build_identity().git_commit,
+                runner: "unavailable".to_string(),
+            }
+        }),
+    ) {
+        followups.push(LabFollowup {
+            label: "refresh_homeboy".to_string(),
+            command,
+            purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.".to_string(),
+        });
+    }
     followups.extend([
         LabFollowup {
             label: "doctor".to_string(),
             command: format!("homeboy runner doctor {runner_arg} --scope lab-offload"),
             purpose: "Probe runner tools, workspace writability, artifact storage, and Lab offload readiness.".to_string(),
-        },
-        LabFollowup {
-            label: "refresh_homeboy".to_string(),
-            command: format!(
-                "homeboy runner refresh-homeboy {runner_arg} --ref {} --reconnect",
-                status.map_or_else(controller_refresh_ref, recovery_refresh_ref)
-            ),
-            purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.".to_string(),
         },
         LabFollowup {
             label: "env".to_string(),
@@ -1296,27 +1330,16 @@ pub(crate) fn selected_admission_summary(
     selected_status.map(|report| report.admission_summary(0))
 }
 
-fn controller_refresh_ref() -> String {
-    homeboy_product_identity::build_identity()
-        .git_commit
-        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
-}
-
-/// Preserve a verified runner descendant rather than using an older controller
-/// revision to regenerate its recovery command.
-fn recovery_refresh_ref(status: &RunnerStatusReport) -> String {
+/// Select only a refresh whose exact immutable commit is proven monotonic.
+fn recovery_refresh_guidance(status: &RunnerStatusReport) -> RecoveryRefreshGuidance {
     let controller = homeboy_product_identity::build_identity();
-    let Some(controller_commit) = controller.git_commit.as_deref() else {
-        return controller_refresh_ref();
-    };
     let runner_commit = status
         .session
         .as_ref()
         .and_then(|session| session.homeboy_build_identity.as_deref())
         .and_then(build_identity_commit);
-    recovery_refresh_ref_with(
-        &controller_refresh_ref(),
-        controller_commit,
+    recovery_refresh_guidance_with(
+        controller.git_commit.as_deref(),
         runner_commit,
         commits_are_ancestral,
     )
@@ -1329,20 +1352,83 @@ fn build_identity_commit(identity: &str) -> Option<&str> {
         .then_some(commit)
 }
 
-fn recovery_refresh_ref_with(
-    controller_ref: &str,
-    controller_commit: &str,
+#[derive(Debug, PartialEq, Eq)]
+enum RecoveryRefreshGuidance {
+    Refresh(String),
+    IdentityDrift {
+        controller: Option<String>,
+        runner: String,
+    },
+}
+
+fn recovery_refresh_command(runner_arg: &str, guidance: RecoveryRefreshGuidance) -> Option<String> {
+    match guidance {
+        RecoveryRefreshGuidance::Refresh(refresh_ref) => Some(format!(
+            "homeboy runner refresh-homeboy {runner_arg} --ref {refresh_ref} --reconnect"
+        )),
+        RecoveryRefreshGuidance::IdentityDrift { .. } => None,
+    }
+}
+
+fn sanitized_status_for_output(mut report: RunnerStatusReport) -> RunnerStatusReport {
+    report.stale_daemon = report
+        .stale_daemon
+        .as_ref()
+        .map(homeboy::runner::runners::RunnerStaleDaemonWarning::sanitized_for_output);
+    report
+}
+
+fn stale_daemon_output(
+    warning: &homeboy::runner::runners::RunnerStaleDaemonWarning,
+    refresh_command: Option<String>,
+) -> Option<serde_json::Value> {
+    let mut warning = serde_json::to_value(warning.sanitized_for_output()).ok()?;
+    let fields = warning.as_object_mut()?;
+    if let Some(refresh_command) = refresh_command {
+        fields.insert("refresh_command".to_string(), refresh_command.into());
+    } else {
+        fields.remove("refresh_command");
+    }
+    Some(warning)
+}
+
+fn recovery_refresh_guidance_with(
+    controller_commit: Option<&str>,
     runner_commit: Option<&str>,
-    mut is_ancestor: impl FnMut(&str, &str) -> bool,
-) -> String {
-    match runner_commit {
-        Some(runner_commit)
-            if runner_commit != controller_commit
-                && is_ancestor(controller_commit, runner_commit) =>
-        {
-            runner_commit.to_string()
-        }
-        _ => controller_ref.to_string(),
+    mut ancestry: impl FnMut(&str, &str) -> CommitAncestry,
+) -> RecoveryRefreshGuidance {
+    let Some(runner_commit) = runner_commit else {
+        return RecoveryRefreshGuidance::IdentityDrift {
+            controller: controller_commit.map(str::to_string),
+            runner: "unavailable".to_string(),
+        };
+    };
+    let Some(controller_commit) = controller_commit else {
+        return RecoveryRefreshGuidance::IdentityDrift {
+            controller: None,
+            runner: runner_commit.to_string(),
+        };
+    };
+    if runner_commit == controller_commit {
+        return RecoveryRefreshGuidance::Refresh(controller_commit.to_string());
+    }
+    match ancestry(controller_commit, runner_commit) {
+        CommitAncestry::Ancestor => RecoveryRefreshGuidance::Refresh(runner_commit.to_string()),
+        CommitAncestry::NotAncestor => match ancestry(runner_commit, controller_commit) {
+            CommitAncestry::Ancestor => {
+                RecoveryRefreshGuidance::Refresh(controller_commit.to_string())
+            }
+            CommitAncestry::NotAncestor | CommitAncestry::Unavailable => {
+                RecoveryRefreshGuidance::IdentityDrift {
+                    controller: Some(controller_commit.to_string()),
+                    runner: runner_commit.to_string(),
+                }
+            }
+        },
+        CommitAncestry::Unavailable => RecoveryRefreshGuidance::IdentityDrift {
+            controller: Some(controller_commit.to_string()),
+            runner: runner_commit.to_string(),
+        },
     }
 }
 
@@ -1503,11 +1589,20 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
     if report.stale_daemon.is_some() {
         let mut materialization =
             RuntimeMaterializationStatus::for_homeboy_runner(&report.runner_id, "homeboy", report);
-        materialization.stale_daemon_refresh_command =
-            lab_runner_homeboy_refresh_commands(&report.runner_id, report)
-                .into_iter()
-                .next();
+        materialization.stale_daemon_refresh_command = recovery_refresh_command(
+            &shell_arg(&report.runner_id),
+            recovery_refresh_guidance(report),
+        );
         hints.extend(materialization.stale_daemon_hint());
+    }
+    if let RecoveryRefreshGuidance::IdentityDrift { controller, runner } =
+        recovery_refresh_guidance(report)
+    {
+        hints.push(format!(
+            "Runner `{}` reports exact Homeboy build drift: controller={} runner={runner}. Recovery will not recommend refresh-homeboy until ancestry is verified; use `--allow-downgrade` only for an intentional rollback.",
+            report.runner_id,
+            controller.as_deref().unwrap_or("unavailable"),
+        ));
     }
     match session.mode {
         RunnerTunnelMode::DirectSsh => {
@@ -1549,6 +1644,16 @@ fn reverse_runner_status_hints(
 
 pub(super) fn runner_status_operator_commands(
     report: &RunnerStatusReport,
+) -> Vec<RunnerOperatorCommand> {
+    runner_status_operator_commands_with_recovery_guidance(
+        report,
+        recovery_refresh_guidance(report),
+    )
+}
+
+fn runner_status_operator_commands_with_recovery_guidance(
+    report: &RunnerStatusReport,
+    guidance: RecoveryRefreshGuidance,
 ) -> Vec<RunnerOperatorCommand> {
     let Some(session) = report.session.as_ref() else {
         return Vec::new();
@@ -1683,18 +1788,18 @@ pub(super) fn runner_status_operator_commands(
         });
     }
 
-    if let Some(warning) = report.stale_daemon.as_ref() {
-        let refresh_command = lab_runner_homeboy_refresh_commands(&report.runner_id, report)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| warning.refresh_command.clone());
-        commands.push(RunnerOperatorCommand {
+    if report.stale_daemon.is_some() {
+        if let Some(refresh_command) =
+            recovery_refresh_command(&shell_arg(&report.runner_id), guidance)
+        {
+            commands.push(RunnerOperatorCommand {
             scope: "daemon_refresh",
             runner_id: report.runner_id.clone(),
             job_id: None,
             command: refresh_command,
             description: "Restart the active runner daemon so the control plane uses the configured job command binary.".to_string(),
         });
+        }
     }
 
     if let Some(freshness) = report.daemon_freshness.as_ref().filter(|freshness| {
@@ -1752,14 +1857,19 @@ mod tests {
             .expect("stale daemon hint");
         assert!(hint.contains("severity=warning"));
         assert!(hint.contains("active daemon control plane"));
-        assert!(hint.contains("homeboy 0.259.0+daemon"));
+        assert!(hint.contains(&format!(
+            "homeboy 0.259.0+{}",
+            homeboy_product_identity::build_identity()
+                .git_commit
+                .expect("test build has an immutable controller commit")
+        )));
         assert!(hint.contains("job command binary"));
         assert!(hint.contains("homeboy 0.262.0+binary"));
         let job_binary_refresh = format!(
             "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
             homeboy_product_identity::build_identity()
                 .git_commit
-                .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
+                .expect("test build has an immutable controller commit")
         );
         assert!(hint.contains(&job_binary_refresh));
 
@@ -1774,8 +1884,10 @@ mod tests {
     }
 
     #[test]
-    fn active_refresh_guidance_uses_the_controller_commit_when_known() {
-        let expected = controller_refresh_ref();
+    fn active_refresh_guidance_uses_an_immutable_controller_commit_when_known() {
+        let expected = homeboy_product_identity::build_identity()
+            .git_commit
+            .expect("test build has an immutable controller commit");
         let report = stale_daemon_report();
         let commands = lab_runner_homeboy_refresh_commands("homeboy-lab", &report);
         let followups = runner_followups(Some("homeboy-lab"), Some(&report));
@@ -1818,28 +1930,186 @@ mod tests {
         let newer_runner = "c7367571a217";
         let runner_identity = "homeboy 0.320.0+c7367571a217";
 
-        let refresh_ref = recovery_refresh_ref_with(
-            post_tag_controller,
-            post_tag_controller,
+        let guidance = recovery_refresh_guidance_with(
+            Some(post_tag_controller),
             build_identity_commit(runner_identity),
-            |older, newer| older == post_tag_controller && newer == newer_runner,
+            |older, newer| {
+                (older == post_tag_controller && newer == newer_runner)
+                    .then_some(CommitAncestry::Ancestor)
+                    .unwrap_or(CommitAncestry::NotAncestor)
+            },
         );
 
-        assert_eq!(refresh_ref, newer_runner);
+        assert_eq!(
+            guidance,
+            RecoveryRefreshGuidance::Refresh(newer_runner.to_string())
+        );
     }
 
     #[test]
-    fn recovery_guidance_does_not_select_an_unverified_runner_build() {
+    fn recovery_guidance_surfaces_same_semver_drift_without_a_refresh_command() {
         let controller = "99ec629c04ca";
         let runner = "c7367571a217";
 
+        let guidance = recovery_refresh_guidance_with(Some(controller), Some(runner), |_, _| {
+            CommitAncestry::Unavailable
+        });
         assert_eq!(
-            recovery_refresh_ref_with(controller, controller, Some(runner), |_, _| false),
-            controller
+            guidance,
+            RecoveryRefreshGuidance::IdentityDrift {
+                controller: Some(controller.to_string()),
+                runner: runner.to_string(),
+            }
+        );
+        assert!(recovery_refresh_command("homeboy-lab", guidance).is_none());
+    }
+
+    #[test]
+    fn recovery_guidance_uses_the_controller_exact_commit_only_when_it_is_newer() {
+        let controller = "7e29bde24e00";
+        let runner = "93bc3e103459";
+
+        assert_eq!(
+            recovery_refresh_guidance_with(Some(controller), Some(runner), |older, newer| {
+                (older == runner && newer == controller)
+                    .then_some(CommitAncestry::Ancestor)
+                    .unwrap_or(CommitAncestry::NotAncestor)
+            }),
+            RecoveryRefreshGuidance::Refresh(controller.to_string())
+        );
+    }
+
+    #[test]
+    fn recovery_guidance_withholds_refresh_when_the_controller_commit_is_absent() {
+        assert_eq!(
+            recovery_refresh_guidance_with(None, Some("7e29bde24e00"), |_, _| {
+                CommitAncestry::Ancestor
+            }),
+            RecoveryRefreshGuidance::IdentityDrift {
+                controller: None,
+                runner: "7e29bde24e00".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn recovery_guidance_withholds_mutable_version_tags_without_a_runner_commit() {
+        let guidance = recovery_refresh_guidance_with(Some("93bc3e103459"), None, |_, _| {
+            CommitAncestry::Ancestor
+        });
+
+        assert_eq!(
+            guidance,
+            RecoveryRefreshGuidance::IdentityDrift {
+                controller: Some("93bc3e103459".to_string()),
+                runner: "unavailable".to_string(),
+            }
+        );
+        assert!(recovery_refresh_command("homeboy-lab", guidance).is_none());
+    }
+
+    #[test]
+    fn identity_drift_never_leaks_the_legacy_daemon_refresh_command() {
+        let mut report = stale_daemon_report();
+        report
+            .session
+            .as_mut()
+            .expect("session")
+            .homeboy_build_identity = Some("homeboy 0.342.0+7e29bde24e00".to_string());
+        report
+            .stale_daemon
+            .as_mut()
+            .expect("stale daemon")
+            .refresh_command =
+            "homeboy runner refresh-homeboy homeboy-lab --ref 93bc3e103459 --reconnect".to_string();
+        let guidance = RecoveryRefreshGuidance::IdentityDrift {
+            controller: Some("93bc3e103459".to_string()),
+            runner: "7e29bde24e00".to_string(),
+        };
+
+        let commands = runner_status_operator_commands_with_recovery_guidance(&report, guidance);
+        assert!(commands
+            .iter()
+            .all(|command| command.scope != "daemon_refresh"));
+
+        let output = lab_runner_homeboy_output_with_recovery_guidance(
+            "homeboy-lab",
+            "/opt/homeboy",
+            &report,
+            RecoveryRefreshGuidance::IdentityDrift {
+                controller: Some("93bc3e103459".to_string()),
+                runner: "7e29bde24e00".to_string(),
+            },
+        );
+        let serialized = serde_json::to_value(output).expect("serialize output");
+        assert!(serialized.get("stale_daemon_refresh_command").is_none());
+        assert!(serialized["stale_daemon"].get("refresh_command").is_none());
+        assert!(serialized["stale_daemon"]
+            .get("recovery_commands")
+            .is_none());
+        assert!(!serialized
+            .to_string()
+            .contains("--ref 93bc3e103459 --reconnect"));
+
+        let report = sanitized_status_for_output(report);
+        let serialized = serde_json::to_value(report).expect("serialize full status");
+        assert!(serialized["stale_daemon"].get("refresh_command").is_none());
+        assert!(!serialized
+            .to_string()
+            .contains("--ref 93bc3e103459 --reconnect"));
+
+        let nested = serde_json::json!({ "selected_lab_runner": { "status": serialized } });
+        assert!(nested["selected_lab_runner"]["status"]["stale_daemon"]
+            .get("refresh_command")
+            .is_none());
+        assert!(!nested
+            .to_string()
+            .contains("--ref 93bc3e103459 --reconnect"));
+    }
+
+    #[test]
+    fn verified_recovery_keeps_the_safe_daemon_refresh_command() {
+        let mut report = stale_daemon_report();
+        report
+            .session
+            .as_mut()
+            .expect("session")
+            .homeboy_build_identity = Some("homeboy 0.259.0+7e29bde24e00".to_string());
+        report.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "homeboy 0.259.0".to_string(),
+            "homeboy 0.262.0".to_string(),
+            Some("homeboy 0.259.0+7e29bde24e00".to_string()),
+            Some("homeboy 0.262.0+7e29bde24e00".to_string()),
+        ));
+        let refresh = "homeboy runner refresh-homeboy homeboy-lab --ref 7e29bde24e00 --reconnect";
+        let commands = runner_status_operator_commands_with_recovery_guidance(
+            &report,
+            RecoveryRefreshGuidance::Refresh("7e29bde24e00".to_string()),
+        );
+        assert!(commands
+            .iter()
+            .any(|command| { command.scope == "daemon_refresh" && command.command == refresh }));
+
+        let output = lab_runner_homeboy_output_with_recovery_guidance(
+            "homeboy-lab",
+            "/opt/homeboy",
+            &report,
+            RecoveryRefreshGuidance::Refresh("7e29bde24e00".to_string()),
+        );
+        let serialized = serde_json::to_value(output).expect("serialize output");
+        assert_eq!(serialized["stale_daemon_refresh_command"], refresh);
+        assert_eq!(serialized["stale_daemon"]["refresh_command"], refresh);
+        assert_eq!(
+            serialized["stale_daemon"]["recovery_commands"],
+            serde_json::json!([refresh])
         );
     }
 
     fn stale_daemon_report() -> RunnerStatusReport {
+        let controller_commit = homeboy_product_identity::build_identity()
+            .git_commit
+            .expect("test build has an immutable controller commit");
         RunnerStatusReport {
             runner_id: "homeboy-lab".to_string(),
             connected: true,
@@ -1860,7 +2130,7 @@ mod tests {
                 remote_daemon_pid: Some(23456),
                 remote_daemon_lease_id: Some("lease-23456".to_string()),
                 homeboy_version: "homeboy 0.259.0".to_string(),
-                homeboy_build_identity: Some("homeboy 0.259.0+daemon".to_string()),
+                homeboy_build_identity: Some(format!("homeboy 0.259.0+{controller_commit}")),
                 connected_at: "2026-06-26T00:00:00Z".to_string(),
                 worker_identity: None,
                 worker_pid: None,
@@ -1871,7 +2141,7 @@ mod tests {
                 "homeboy-lab",
                 "homeboy 0.259.0".to_string(),
                 "homeboy 0.262.0".to_string(),
-                Some("homeboy 0.259.0+daemon".to_string()),
+                Some(format!("homeboy 0.259.0+{controller_commit}")),
                 Some("homeboy 0.262.0+binary".to_string()),
             )),
             configured_job_binary_build_identity: None,

@@ -7,10 +7,67 @@ use homeboy_core::build_identity;
 use homeboy_upgrade::upgrade::current_version;
 use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
 use homeboy_upgrade::upgrade::InstallMethod;
+use homeboy_upgrade::upgrade::RunnerDaemonDriftEntry;
 use std::cell::RefCell;
 use std::path::Path;
 thread_local! {
     static LOCAL_VERSION_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+#[test]
+fn upgrade_reporting_and_reconciliation_omit_unverified_persisted_refresh_refs() {
+    let warning = RunnerStaleDaemonWarning::new(
+        "lab",
+        "0.264.0".to_string(),
+        "0.265.0".to_string(),
+        Some("homeboy 0.264.0+aaaaaaaa".to_string()),
+        Some("homeboy 0.265.0+bbbbbbbb".to_string()),
+    );
+
+    let report = runner_stale_daemon(&ssh_runner("lab", None), &|_| {
+        let mut status = runner_status("lab")?;
+        status.stale_daemon = Some(warning.clone());
+        Ok(status)
+    })
+    .expect("stale daemon report");
+    let reconciled = runner_daemon_drift_entry(warning);
+
+    assert!(report.recovery_commands.is_empty());
+    assert!(reconciled.recovery_commands.is_empty());
+    let detail = runner_upgrade_final_detail(
+        "lab",
+        "upgrade result".to_string(),
+        "homeboy",
+        None,
+        None,
+        None,
+        Some(&RunnerDaemonDriftEntry {
+            session_homeboy_version: "0.264.0".to_string(),
+            current_homeboy_version: "0.265.0".to_string(),
+            recovery_commands: report.recovery_commands,
+        }),
+        &[],
+        &[],
+    );
+    assert!(detail.contains("inspect exact daemon and runner build identities"));
+    assert!(!detail.contains("--ref bbbbbbbb"));
+}
+
+#[test]
+fn upgrade_reporting_preserves_an_exact_safe_refresh_ref() {
+    let warning = RunnerStaleDaemonWarning::new(
+        "lab",
+        "0.264.0".to_string(),
+        "0.265.0".to_string(),
+        Some("homeboy 0.264.0+aaaaaaaa".to_string()),
+        Some("homeboy 0.265.0+aaaaaaaa".to_string()),
+    );
+
+    let report = runner_daemon_drift_entry(warning);
+    assert_eq!(
+        report.recovery_commands,
+        ["homeboy runner refresh-homeboy lab --ref aaaaaaaa --reconnect"]
+    );
 }
 
 #[test]

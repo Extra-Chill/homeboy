@@ -382,10 +382,14 @@ fn lab_homeboy_provenance_from_parts(
         purpose: "configured runner executable used for runner jobs and daemon refresh operations",
     };
 
-    let controller_refresh_ref = controller_identity
-        .git_commit
-        .clone()
-        .unwrap_or_else(|| format!("v{}", controller_identity.version));
+    let inspect_runner = shell_join(&[
+        "homeboy",
+        "runner",
+        "doctor",
+        runner_id,
+        "--scope",
+        "lab-offload",
+    ]);
     let mut diagnostics = Vec::new();
     if controller_identity.git_dirty == Some(true) {
         diagnostics.push(LabHomeboyProvenanceDiagnostic {
@@ -414,24 +418,7 @@ fn lab_homeboy_provenance_from_parts(
                         .unwrap_or("unknown")
                 ),
                 action: format!(
-                    "run `{}`; if active jobs are still running, wait for them or inspect with `{}` before reconnecting",
-                    shell_join(&[
-                        "homeboy",
-                        "runner",
-                        "refresh-homeboy",
-                        runner_id,
-                        "--ref",
-                        &controller_refresh_ref,
-                        "--reconnect"
-                    ]),
-                    shell_join(&[
-                        "homeboy",
-                        "runner",
-                        "doctor",
-                        runner_id,
-                        "--scope",
-                        "lab-offload"
-                    ])
+                    "inspect exact controller and active-daemon build identities with `{inspect_runner}` before selecting a refresh target; use --allow-downgrade only for an intentional rollback"
                 ),
             });
         } else if active_daemon
@@ -451,16 +438,7 @@ fn lab_homeboy_provenance_from_parts(
                         .unwrap_or("unknown")
                 ),
                 action: format!(
-                    "run `{}`; same-version build drift can be intentional for origin/main-style runner builds, but Lab proof should use matching controller and runner identities",
-                    shell_join(&[
-                        "homeboy",
-                        "runner",
-                        "refresh-homeboy",
-                        runner_id,
-                        "--ref",
-                        &controller_refresh_ref,
-                        "--reconnect"
-                    ])
+                    "inspect exact controller and active-daemon build identities with `{inspect_runner}`; same-version drift has no safe refresh target until ancestry is verified"
                 ),
             });
         }
@@ -497,7 +475,15 @@ fn lab_homeboy_provenance_from_parts(
                 "runner_stale_daemon"
             },
             message: stale_daemon.message.clone(),
-            action: stale_daemon.refresh_command.clone(),
+            action: stale_daemon
+                .safe_recovery_commands()
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| {
+                    format!(
+                        "inspect exact runner build identities with `{inspect_runner}` before selecting a refresh target"
+                    )
+                }),
         });
     }
 
@@ -1174,7 +1160,8 @@ mod tests {
             .contains("executes the runner job"));
         assert!(provenance.diagnostics[1]
             .action
-            .contains("homeboy runner refresh-homeboy lab-runner --ref controller123 --reconnect"));
+            .contains("inspect exact controller and active-daemon build identities"));
+        assert!(!provenance.diagnostics[1].action.contains("refresh-homeboy"));
         assert!(provenance.diagnostics[1]
             .action
             .contains("homeboy runner doctor lab-runner --scope lab-offload"));
@@ -1214,10 +1201,11 @@ mod tests {
         );
         assert!(provenance.diagnostics[0]
             .action
-            .contains("origin/main-style runner builds"));
+            .contains("same-version drift has no safe refresh target"));
         assert!(provenance.diagnostics[0]
             .action
-            .contains("homeboy runner refresh-homeboy lab-runner --ref controller123 --reconnect"));
+            .contains("homeboy runner doctor lab-runner --scope lab-offload"));
+        assert!(!provenance.diagnostics[0].action.contains("refresh-homeboy"));
     }
 
     #[test]
@@ -1240,6 +1228,44 @@ mod tests {
         assert!(provenance.diagnostics[0]
             .action
             .contains("homeboy runner doctor lab-runner --scope lab-offload"));
+    }
+
+    #[test]
+    fn homeboy_provenance_suppresses_an_unverified_persisted_refresh_command() {
+        let warning = RunnerStaleDaemonWarning::new(
+            "lab-runner",
+            "0.265.0".to_string(),
+            "0.265.0".to_string(),
+            Some("homeboy 0.265.0+aaaaaaaa".to_string()),
+            Some("homeboy 0.265.0+bbbbbbbb".to_string()),
+        );
+        let provenance = lab_homeboy_provenance_from_parts(
+            "lab-runner",
+            clean_controller_identity(),
+            Some("/controller/homeboy".to_string()),
+            Some("/runner/homeboy".to_string()),
+            Some(LabHomeboyBinaryIdentity {
+                role: "active_daemon",
+                owner: "runner",
+                path: None,
+                version: Some("0.265.0".to_string()),
+                build_identity: Some("homeboy 0.265.0+aaaaaaaa".to_string()),
+                dirty: None,
+                purpose: "test daemon",
+            }),
+            Some(&warning),
+            None,
+        );
+
+        let diagnostic = provenance
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "runner_stale_daemon")
+            .expect("stale daemon diagnostic");
+        assert!(diagnostic
+            .action
+            .contains("inspect exact runner build identities"));
+        assert!(!diagnostic.action.contains("--ref bbbbbbbb"));
     }
 
     #[test]
