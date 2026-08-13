@@ -71,11 +71,12 @@ pub(crate) fn latest_executor_evidence(
         request.component_contracts.clone()
     };
 
+    let (backend, selector, model) = terminal_executor_identity(outcome, request);
     Some(AgentTaskLatestExecutorEvidence {
         task_id: task_id.clone(),
-        backend: request.executor.backend.clone(),
-        selector: request.executor.selector.clone(),
-        model: request.executor.model.clone(),
+        backend,
+        selector,
+        model,
         input_ref: AgentTaskEvidenceRef {
             kind: "executor-input".to_string(),
             uri: format!("{base}/plan#task={task_id}"),
@@ -103,6 +104,40 @@ pub(crate) fn latest_executor_evidence(
         typed_artifact_expectations: typed_artifact_expectations(request),
         component_contracts,
     })
+}
+
+fn terminal_executor_identity(
+    outcome: &AgentTaskOutcome,
+    request: &AgentTaskRequest,
+) -> (String, Option<String>, Option<String>) {
+    let rotated = outcome
+        .metadata
+        .pointer("/provider_rotation/attempts")
+        .and_then(|attempts| {
+            serde_json::from_value::<
+                Vec<crate::agent_task_scheduler::AgentTaskProviderRotationAttempt>,
+            >(attempts.clone())
+            .ok()
+        })
+        .and_then(|attempts| attempts.into_iter().last());
+    match rotated {
+        Some(attempt) => (
+            attempt.backend,
+            attempt.selector,
+            attempt
+                .candidate_producing_model
+                .or(attempt.attempted_model)
+                .or(attempt.model),
+        ),
+        None => (
+            request.executor.backend.clone(),
+            request.executor.selector.clone(),
+            outcome
+                .selected_model()
+                .map(str::to_string)
+                .or_else(|| request.executor.model.clone()),
+        ),
+    }
 }
 
 pub(crate) fn runtime_component_paths(request: &AgentTaskRequest) -> Vec<String> {
@@ -192,8 +227,15 @@ pub(crate) fn tasks_for_aggregate(
             } else if let Some(outcome) = outcome {
                 task.state = task_state_for_outcome_status(outcome.status);
             }
-            if let Some(model) = outcome.and_then(|outcome| outcome.selected_model()) {
-                task.model = Some(model.to_string());
+            if let Some(outcome) = outcome {
+                let (backend, selector, model) = terminal_executor_identity(outcome, request);
+                task.backend = backend;
+                task.selector = selector;
+                task.model = model;
+                task.provider_ref = task
+                    .selector
+                    .as_ref()
+                    .map(|selector| format!("{}:{selector}", task.backend));
             }
             task
         })

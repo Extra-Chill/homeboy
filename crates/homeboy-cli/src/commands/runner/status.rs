@@ -266,6 +266,8 @@ pub(super) fn reconciliation_outcome(
         "runner_disconnected".to_string()
     } else if !admission.daemon_fresh {
         daemon_freshness_blocker(report)
+    } else if !admission.daemon_compatible {
+        "daemon_compatibility".to_string()
     } else if admission.blocking_generation.is_some() {
         "retained_generation_ownership".to_string()
     } else {

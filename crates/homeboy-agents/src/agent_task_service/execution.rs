@@ -574,20 +574,24 @@ pub fn retry(
             // Recipe and index are one Cook-owned binding boundary. Serialize
             // concurrent claim observers so neither can overwrite the other's
             // append-only recipe revision between its read and write.
-            config::with_config_lock(|| {
+            let registration = config::with_config_lock(|| {
+                // The retry reservation starts from the source plan. Persist
+                // Cook-authored remediation inputs before binding either record
+                // so a restarted executor loads the same plan as the recipe.
+                agent_task_lifecycle::persist_controller_plan(&retry_run_id, &cook_retry.plan)?;
                 super::record_recipe_attempt(
                     &cook_retry.cook_id,
                     cook_retry.attempt,
                     &retry_run_id,
                     &cook_retry.plan,
                 )?;
-                agent_task_lifecycle::record_cook_attempt(
+                agent_task_lifecycle::record_cook_attempt_locked(
                     &cook_retry.cook_id,
                     cook_retry.attempt,
                     &retry_run_id,
-                )?;
-                Ok(())
+                )
             })?;
+            registration.project_terminal_after_unlock()?;
             let record = agent_task_lifecycle::status(&retry_run_id)?;
             if record.state.is_terminal() {
                 return Ok(AgentTaskRetryServiceResult { record, run: false });
@@ -716,6 +720,13 @@ fn retryable_cook_attempt(
     };
     let retryable_pre_execution_failure =
         source.metadata["pre_execution_failure"]["retryable"] == serde_json::Value::Bool(true);
+    let acceptance_repair = source.acceptance.as_ref().is_some_and(|acceptance| {
+        acceptance.verdict == agent_task_lifecycle::AgentTaskAcceptanceVerdict::Rejected
+            && acceptance.repair_attempts == 1
+            && source.metadata["acceptance_repair"]["feedback"]
+                .as_str()
+                .is_some_and(|feedback| !feedback.is_empty())
+    });
     let failed_provider_without_candidate = matches!(
         source.state,
         agent_task_lifecycle::AgentTaskRunState::Failed
@@ -726,7 +737,8 @@ fn retryable_cook_attempt(
             .is_some_and(|selection| {
                 selection.run_id == source.run_id && selection.selected_artifact_id.is_none()
             });
-    if !retryable_pre_execution_failure && !failed_provider_without_candidate {
+    if !retryable_pre_execution_failure && !failed_provider_without_candidate && !acceptance_repair
+    {
         return Ok(None);
     }
     let mut pending_attempt = None;
@@ -832,11 +844,27 @@ fn retryable_cook_attempt(
             None,
         ));
     }
+    let mut plan = source_recipe_attempt.plan.clone();
+    if acceptance_repair {
+        let feedback = source.metadata["acceptance_repair"]["feedback"]
+            .as_str()
+            .expect("acceptance repair feedback was checked above");
+        for task in &mut plan.tasks {
+            task.instructions.push_str(&format!(
+                "\n\nAddress this reviewer remediation feedback, then preserve the Cook's normal verification and review-form contract:\n{feedback}"
+            ));
+            task.inputs["cook_loop"]["reviewer_remediation"] = serde_json::json!({
+                "source_run_id": source.run_id,
+                "feedback": feedback,
+                "max_attempts": 1,
+            });
+        }
+    }
     Ok(Some(CookRetryAttempt {
         cook_id: cook_id.to_string(),
         attempt: next_attempt,
         pending_run_id: None,
-        plan: source_recipe_attempt.plan.clone(),
+        plan,
     }))
 }
 

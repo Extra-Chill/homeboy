@@ -37,8 +37,23 @@ pub fn materialize_recovered_patch_artifact(
                 .as_deref()
                 .is_some_and(|expected| expected != artifact.id)
                 || !is_patch_artifact_kind(&artifact.kind)
-                || !is_recovered_artifact(artifact, record.runner_id().zip(record.runner_job_id()))
             {
+                continue;
+            }
+            // A historical aggregate can retain a deleted producer path even
+            // after terminal reconciliation copied verified bytes. Hydrate the
+            // durable controller projection before considering runner recovery.
+            if let Some(path) = verified_controller_artifact_projection_path(
+                &record.run_id,
+                &outcome.task_id,
+                artifact,
+            )? {
+                artifact.path = Some(path.display().to_string());
+                set_materialization_metadata(artifact, "controller_retained_bytes", None);
+                changed = true;
+                continue;
+            }
+            if !is_recovered_artifact(artifact, record.runner_id().zip(record.runner_job_id())) {
                 continue;
             }
             changed |= materialize_artifact(

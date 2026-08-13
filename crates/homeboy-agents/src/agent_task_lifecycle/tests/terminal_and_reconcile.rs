@@ -13,7 +13,7 @@ use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
-use crate::agent_task_service::reconcile_stale_active_runs;
+use crate::agent_task_service::{reconcile_run, reconcile_stale_active_runs};
 use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
@@ -1032,7 +1032,7 @@ fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once(
 }
 
 #[test]
-fn stale_reconcile_imports_terminal_runner_aggregate_before_cancelling_controller_projection() {
+fn scoped_reconcile_repairs_authoritative_terminal_runner_projection_idempotently() {
     with_isolated_home(|_| {
         let run_id = "cook-9773-attempt-1-caller-loss";
         let plan = test_plan();
@@ -1068,7 +1068,7 @@ fn stale_reconcile_imports_terminal_runner_aggregate_before_cancelling_controlle
         .expect("persist stale local controller projection");
         assert!(store::read_aggregate(run_id).is_err());
 
-        let report = reconcile_stale_active_runs(false).expect("reconcile stale projection");
+        let report = reconcile_run(run_id, false).expect("reconcile stale projection");
         assert_eq!(report.considered, 0);
         assert_eq!(report.reconciled, 0);
 
@@ -1086,7 +1086,7 @@ fn stale_reconcile_imports_terminal_runner_aggregate_before_cancelling_controlle
             .iter()
             .any(|evidence| evidence.kind == "executor-input"));
 
-        let repeated = reconcile_stale_active_runs(false).expect("idempotent terminal reconcile");
+        let repeated = reconcile_run(run_id, false).expect("idempotent terminal reconcile");
         assert_eq!(repeated.considered, 0);
         assert_eq!(
             status(run_id).expect("terminal state retained").state,
@@ -2064,11 +2064,12 @@ fn rejection_allows_one_repair_and_restart_revalidates_before_finalization() {
         .expect("green promotion recorded");
         let _verifier = AcceptanceVerifierTestGuard::install(Box::new(FixtureAcceptanceVerifier));
 
-        let rejected = record_acceptance_verdict(
+        let rejected = record_acceptance_verdict_with_feedback(
             run_id,
             AgentTaskAcceptanceVerdict::Rejected,
             vec!["review://fixture/rejection".to_string()],
             "fixture-token".to_string(),
+            Some("Handle the reviewer concern.".to_string()),
         )
         .expect("rejection recorded");
         assert_eq!(
@@ -2082,6 +2083,18 @@ fn rejection_allows_one_repair_and_restart_revalidates_before_finalization() {
 
         let repair = retry(run_id, None).expect("one rejection repair is available");
         assert_eq!(repair.metadata["acceptance_repair_lineage"]["count"], 1);
+        let persisted_repair_plan = load_plan(&repair.run_id).expect("restart loads repair plan");
+        assert!(persisted_repair_plan.tasks[0]
+            .instructions
+            .contains("Handle the reviewer concern."));
+        assert_eq!(
+            persisted_repair_plan.tasks[0].inputs["cook_loop"]["reviewer_remediation"]["feedback"],
+            "Handle the reviewer concern."
+        );
+        assert_eq!(
+            rejected.metadata["acceptance_repair"]["feedback"], "Handle the reviewer concern.",
+            "reviewer feedback remains durable for the Cook repair planner"
+        );
         let error = retry(&repair.run_id, None).expect_err("repair is bounded to one attempt");
         assert!(error.message.contains("repair budget is exhausted"));
 
