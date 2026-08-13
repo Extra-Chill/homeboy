@@ -648,19 +648,19 @@ impl CliRuntime {
                 )
         ) && notification_route.is_none()
         {
-            notification_route =
-                match crate::core::notification_route_resolver::resolve_installed() {
-                    Ok(route) => route,
-                    Err(err) => {
-                        output_runtime::emit_json_result_for_identity(
-                            Err(err),
-                            output_file.as_deref(),
-                            2,
-                            &command_identity,
-                        );
-                        return std::process::ExitCode::from(2);
-                    }
-                };
+            notification_route = match crate::core::notification_route_resolver::resolve_installed()
+            {
+                Ok(route) => route,
+                Err(err) => {
+                    output_runtime::emit_json_result_for_identity(
+                        Err(err),
+                        output_file.as_deref(),
+                        2,
+                        &command_identity,
+                    );
+                    return std::process::ExitCode::from(2);
+                }
+            };
             if let Some(route) = &notification_route {
                 cli.notification_transport = Some(route.transport.clone());
                 cli.notification_route = Some(route.route.clone());
@@ -2348,10 +2348,12 @@ mod tests {
             let sentinel = home.path().join("resolver-invoked");
             write_notification_resolver(home.path(), &sentinel);
 
-            let status = CliRuntime::new()
-                .run_from_args(argv(&["homeboy", "status"]));
+            let status = CliRuntime::new().run_from_args(argv(&["homeboy", "status"]));
             assert_eq!(status, std::process::ExitCode::SUCCESS);
-            assert!(!sentinel.exists(), "non-Cook commands must not invoke resolvers");
+            assert!(
+                !sentinel.exists(),
+                "non-Cook commands must not invoke resolvers"
+            );
 
             let cook = CliRuntime::new().run_from_args(argv(&[
                 "homeboy",

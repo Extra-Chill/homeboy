@@ -206,10 +206,7 @@ fn invoke(
     }
 }
 
-fn terminate(
-    child: &mut std::process::Child,
-    reader: Option<thread::JoinHandle<(Vec<u8>, bool)>>,
-) {
+fn terminate(child: &mut std::process::Child, reader: Option<thread::JoinHandle<(Vec<u8>, bool)>>) {
     kill_process_group(child);
     let _ = child.wait();
     if let Some(reader) = reader {
