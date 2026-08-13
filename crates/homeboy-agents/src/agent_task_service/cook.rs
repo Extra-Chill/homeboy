@@ -1478,7 +1478,12 @@ pub struct AgentTaskCookBatchReport {
 /// from, so this parses instead of keeping a second copy of that list.
 /// Anything unparseable stays `Unknown` rather than being guessed.
 fn batch_lifecycle_status(status: &str) -> RunLifecycleStatus {
-    serde_json::from_value(Value::String(status.to_string())).unwrap_or(RunLifecycleStatus::Unknown)
+    match status {
+        "planning" => RunLifecycleStatus::Queued,
+        "admitting" => RunLifecycleStatus::Running,
+        _ => serde_json::from_value(Value::String(status.to_string()))
+            .unwrap_or(RunLifecycleStatus::Unknown),
+    }
 }
 
 impl AgentTaskCookBatchReport {
@@ -1667,6 +1672,8 @@ mod run_lifecycle_projection_tests {
         use crate::agent_task_batch::AgentTaskBatchState;
 
         for state in [
+            AgentTaskBatchState::Planning,
+            AgentTaskBatchState::Admitting,
             AgentTaskBatchState::Queued,
             AgentTaskBatchState::Running,
             AgentTaskBatchState::Succeeded,
@@ -1676,6 +1683,8 @@ mod run_lifecycle_projection_tests {
             AgentTaskBatchState::TimedOut,
         ] {
             let expected = match state {
+                AgentTaskBatchState::Planning => RunLifecycleStatus::Queued,
+                AgentTaskBatchState::Admitting => RunLifecycleStatus::Running,
                 AgentTaskBatchState::Queued => RunLifecycleStatus::Queued,
                 AgentTaskBatchState::Running => RunLifecycleStatus::Running,
                 AgentTaskBatchState::Succeeded => RunLifecycleStatus::Succeeded,
