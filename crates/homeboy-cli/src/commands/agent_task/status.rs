@@ -99,6 +99,9 @@ pub(super) fn resolve_cook_reader_target(
 }
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
+    if let Some(recipe_only) = recipe_only_status(&args.run_id, args.exact)? {
+        return Ok((recipe_only, 0));
+    }
     let target = resolve_cook_reader_target(&args.run_id, args.exact)?;
     if args.bridge {
         // `--bridge` routes through `agent_task_lifecycle::status()`, which is a
@@ -222,6 +225,51 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     preserve_controller_owner_placement(&mut summary, run_id);
     let exit_code = subject_exit_code(&summary, args.strict_subject_exit);
     Ok((summary, exit_code))
+}
+
+/// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
+/// its exact attempt id, but only `cook-continue` may materialize that attempt.
+fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Result<Option<Value>> {
+    let recipe = match agent_task_service_direct::load_recipe(run_or_cook_id) {
+        Ok(recipe) => recipe,
+        Err(_) => match agent_task_service_direct::load_recipe_for_attempt(run_or_cook_id)? {
+            Some(recipe) => recipe,
+            None => return Ok(None),
+        },
+    };
+    let attempt = if recipe.cook_id == run_or_cook_id && !exact {
+        recipe
+            .attempts
+            .last()
+            .expect("validated recipe has an attempt")
+    } else {
+        let Some(attempt) = recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == run_or_cook_id)
+        else {
+            return Ok(None);
+        };
+        attempt
+    };
+    if agent_task_lifecycle::run_record_exists_readonly(&attempt.run_id)? {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "schema": "homeboy/agent-task-cook/v1",
+        "cook_id": recipe.cook_id,
+        "run_id": attempt.run_id,
+        "latest_run_id": attempt.run_id,
+        "status": "recipe_only_recovery_required",
+        "lifecycle_state": "recipe_persisted_without_lifecycle_record",
+        "provider_budget_consumed": false,
+        "provider_executions_consumed": 0,
+        "guidance": {
+            "action": "materialize_recipe_attempt",
+            "command": format!("homeboy agent-task cook-continue {}", attempt.run_id),
+            "message": "The immutable Cook recipe is durable but its lifecycle record is absent. Continue the exact attempt to materialize the controller lifecycle before provider work."
+        }
+    })))
 }
 
 /// Record whether this read reconciled — i.e. whether producing this answer

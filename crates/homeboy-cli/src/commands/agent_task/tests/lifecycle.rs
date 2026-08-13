@@ -8,6 +8,7 @@ use homeboy::agents::agent_task_service::{
 use homeboy::core::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Barrier;
 
@@ -27,6 +28,33 @@ struct CountingCookDispatcher {
 }
 
 static RETRY_RUN_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
+
+fn filesystem_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn collect(root: &Path, path: &Path, entries: &mut Vec<(String, Vec<u8>)>) {
+        for entry in std::fs::read_dir(path).expect("read snapshot directory") {
+            let entry = entry.expect("snapshot entry");
+            let path = entry.path();
+            if path.is_dir() {
+                collect(root, &path, entries);
+            } else {
+                entries.push((
+                    path.strip_prefix(root)
+                        .expect("snapshot path under root")
+                        .display()
+                        .to_string(),
+                    std::fs::read(path).expect("snapshot file bytes"),
+                ));
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    if root.exists() {
+        collect(root, root, &mut entries);
+    }
+    entries.sort();
+    entries
+}
 
 #[derive(Debug)]
 struct RetryRunDispatcher;
@@ -458,6 +486,94 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
         assert!(error
             .message
             .contains("durable cook recipe already exists with different execution inputs"));
+    });
+}
+
+#[test]
+fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_work() {
+    with_temp_home(|| {
+        let cook_id = "cook-cli-recipe-only";
+        let run_id = "cook-cli-recipe-only-attempt-1";
+        let plan = AgentTaskPlan::new(
+            "cook-cli-recipe-only-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture", "model": "fixture-model" },
+                "instructions": "recover the durable Cook lifecycle only"
+            }))
+            .expect("provider task")],
+        );
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: plan,
+            to_worktree: "fixture@recipe-only".to_string(),
+            source_worktree_path: None,
+            provider_command: None,
+            provider_invocation: None,
+            gates: Default::default(),
+            max_attempts: 1,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Recipe-only Cook".to_string(),
+            commit_message: "Recipe-only Cook".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: Some("fixture-model".to_string()),
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: None,
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist recipe without lifecycle record");
+        let data_root = homeboy::core::paths::homeboy_data().expect("data root");
+        let before_status = filesystem_snapshot(&data_root);
+
+        let (status_value, status_exit) = status(StatusArgs {
+            run_id: cook_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+        })
+        .expect("status reports recipe-only Cook without mutation");
+        assert_eq!(status_exit, 0);
+        assert_eq!(status_value["run_id"], run_id);
+        assert_eq!(status_value["status"], "recipe_only_recovery_required");
+        assert_eq!(
+            status_value["guidance"]["command"],
+            format!("homeboy agent-task cook-continue {run_id}")
+        );
+        assert!(!agent_task_lifecycle::run_record_exists_readonly(run_id)
+            .expect("status did not admit"));
+        assert!(!agent_task_lifecycle::cook_index_exists(cook_id).expect("status did not index"));
+        assert_eq!(filesystem_snapshot(&data_root), before_status);
+
+        let executor = CountingCookExecutor::default();
+        let continued = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: false,
+                rearm: false,
+                full: true,
+            },
+            executor.clone(),
+            |_| Ok(None),
+        )
+        .expect("cook-continue observes repaired queued attempt");
+        assert_eq!(continued.0["status"], "accepted_unscheduled");
+        assert_eq!(continued.0["latest_run_id"], run_id);
+        assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
+        let index = agent_task_lifecycle::cook_index(cook_id).expect("single repaired index entry");
+        assert_eq!(index.attempts.len(), 1);
+        assert_eq!(index.latest_run_id, run_id);
     });
 }
 

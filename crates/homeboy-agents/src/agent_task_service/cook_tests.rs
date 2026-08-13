@@ -37,9 +37,25 @@ use serde::Deserialize;
 use sha2::Digest;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Condvar};
+use std::sync::{Arc, Barrier, Condvar, LazyLock, Mutex};
 
 const DURABLE_COOK_FIXTURE_SCHEMA: &str = "homeboy/durable-cook-fixture/v1";
+static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+fn with_strict_config_lock(test: impl FnOnce()) {
+    let _guard = CONFIG_LOCK_STRICT_TEST
+        .lock()
+        .expect("strict lock test guard");
+    std::env::set_var(homeboy_core::config::CONFIG_LOCK_STRICT_ENV, "1");
+    struct StrictLockEnv;
+    impl Drop for StrictLockEnv {
+        fn drop(&mut self) {
+            std::env::remove_var(homeboy_core::config::CONFIG_LOCK_STRICT_ENV);
+        }
+    }
+    let _env = StrictLockEnv;
+    test();
+}
 
 #[test]
 fn deepest_typed_error_selects_the_deepest_explicit_cause() {
@@ -4848,6 +4864,295 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
                 .count(),
             1
         );
+    });
+}
+
+#[test]
+fn recipe_only_initial_attempt_recovers_once_without_provider_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-recipe-only-initial";
+        let run_id = "cook-recipe-only-initial-attempt-1";
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            }),
+        );
+        options.initial_run_id = run_id.to_string();
+        persist_initial_recipe(&options).expect("persist recipe before injected lifecycle failure");
+
+        agent_task_lifecycle::fail_next_record_write_for_test();
+        assert!(super::super::cook_pre_execution::recover_recipe_attempt(cook_id).is_err());
+        assert!(!agent_task_lifecycle::run_record_exists(run_id).expect("record remains absent"));
+
+        let recovered = super::super::cook_pre_execution::recover_recipe_attempt(cook_id)
+            .expect("recover recipe-only initial attempt")
+            .expect("recipe resolves one record");
+        let repeated = super::super::cook_pre_execution::recover_recipe_attempt(cook_id)
+            .expect("repeated recovery is idempotent")
+            .expect("recipe still resolves one record");
+        assert_eq!(recovered.run_id, run_id);
+        assert_eq!(repeated.run_id, run_id);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        let index = agent_task_lifecycle::cook_index(cook_id).expect("repaired Cook index");
+        assert_eq!(index.attempts.len(), 1);
+        assert_eq!(index.latest_run_id, run_id);
+    });
+}
+
+#[test]
+fn recipe_recovery_rejects_foreign_lifecycle_record_before_indexing() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-recipe-foreign-record";
+        let run_id = "cook-recipe-foreign-record-attempt-1";
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        options.initial_run_id = run_id.to_string();
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+            .expect("persist foreign lifecycle record");
+        agent_task_lifecycle::record_cook_attempt("other-cook", 1, run_id)
+            .expect("bind foreign Cook ownership");
+
+        let error = super::super::cook_pre_execution::recover_recipe_attempt(cook_id)
+            .expect_err("foreign lifecycle record is rejected");
+        assert!(error.message.contains("belongs to a different Cook"));
+        assert!(!agent_task_lifecycle::cook_index_exists(cook_id).expect("no local index written"));
+        assert_eq!(
+            agent_task_lifecycle::exact_record(run_id)
+                .expect("foreign record remains")
+                .metadata["cook_id"],
+            "other-cook"
+        );
+    });
+}
+
+#[test]
+fn concurrent_cook_registration_preserves_every_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        with_strict_config_lock(|| {
+            let cook_id = "cook-concurrent-index";
+            let first = "cook-concurrent-index-attempt-1";
+            let second = "cook-concurrent-index-attempt-2";
+            let plan = batch_cook_options(
+                cook_id,
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::new(AtomicUsize::new(0)),
+                }),
+            )
+            .initial_plan;
+            agent_task_lifecycle::submit_plan(&plan, Some(first)).expect("submit first");
+            agent_task_lifecycle::submit_plan(&plan, Some(second)).expect("submit second");
+            let barrier = Arc::new(Barrier::new(2));
+            let left = {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    agent_task_lifecycle::record_cook_attempt(cook_id, 1, first)
+                })
+            };
+            let right = {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    agent_task_lifecycle::record_cook_attempt(cook_id, 2, second)
+                })
+            };
+            left.join()
+                .expect("first registration thread")
+                .expect("register first");
+            right
+                .join()
+                .expect("second registration thread")
+                .expect("register second");
+            let index = agent_task_lifecycle::cook_index(cook_id).expect("concurrent index");
+            assert_eq!(index.attempts.len(), 2);
+            assert!(index.attempts.iter().any(|attempt| attempt.run_id == first));
+            assert!(index
+                .attempts
+                .iter()
+                .any(|attempt| attempt.run_id == second));
+            assert_eq!(index.latest_run_id, second);
+        });
+    });
+}
+
+#[test]
+fn conflicting_cook_index_rejection_leaves_lifecycle_and_index_unchanged() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        with_strict_config_lock(|| {
+            let cook_id = "cook-index-conflict";
+            let run_id = "cook-index-conflict-attempt";
+            let plan = batch_cook_options(
+                cook_id,
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::new(AtomicUsize::new(0)),
+                }),
+            )
+            .initial_plan;
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id))
+                .expect("submit lifecycle record");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 2, run_id)
+                .expect("seed conflicting durable index");
+            let before_record =
+                agent_task_lifecycle::exact_record(run_id).expect("record before retry");
+            let before_index =
+                agent_task_lifecycle::cook_index(cook_id).expect("index before retry");
+
+            let error = agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id)
+                .expect_err("conflicting index attempt must reject before metadata write");
+            assert!(error
+                .message
+                .contains("maps this run to a different attempt"));
+            assert_eq!(
+                agent_task_lifecycle::exact_record(run_id).expect("record after rejection"),
+                before_record
+            );
+            assert_eq!(
+                agent_task_lifecycle::cook_index(cook_id).expect("index after rejection"),
+                before_index
+            );
+        });
+    });
+}
+
+#[test]
+fn strict_locked_retry_registration_uses_the_outer_transaction() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        with_strict_config_lock(|| {
+            let cook_id = "cook-strict-locked-retry";
+            let run_id = "cook-strict-locked-retry-attempt-2";
+            let plan = batch_cook_options(
+                cook_id,
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::new(AtomicUsize::new(0)),
+                }),
+            )
+            .initial_plan;
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("reserve retry run");
+            homeboy_core::config::with_config_lock(|| {
+                agent_task_lifecycle::record_cook_attempt_locked(cook_id, 2, run_id)
+                    .expect("register retry through outer transaction");
+                Ok(())
+            })
+            .expect("strict lock accepts one owner");
+            assert_eq!(
+                agent_task_lifecycle::cook_index(cook_id)
+                    .expect("retry index")
+                    .latest_run_id,
+                run_id
+            );
+        });
+    });
+}
+
+#[test]
+fn strict_cross_cook_run_ownership_rejection_leaves_state_unchanged() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        with_strict_config_lock(|| {
+            let run_id = "cook-cross-owner-attempt";
+            let plan = batch_cook_options(
+                "cook-cross-owner-a",
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::new(AtomicUsize::new(0)),
+                }),
+            )
+            .initial_plan;
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit shared run");
+            agent_task_lifecycle::record_cook_attempt("cook-cross-owner-a", 1, run_id)
+                .expect("bind first owner");
+            let before_record = agent_task_lifecycle::exact_record(run_id).expect("record before");
+            let before_index =
+                agent_task_lifecycle::cook_index("cook-cross-owner-a").expect("first index before");
+
+            let error = agent_task_lifecycle::record_cook_attempt("cook-cross-owner-b", 1, run_id)
+                .expect_err("second Cook cannot claim the same run");
+            assert!(error
+                .message
+                .contains("already owned by a different Cook attempt"));
+            assert_eq!(
+                agent_task_lifecycle::exact_record(run_id).expect("record after"),
+                before_record
+            );
+            assert_eq!(
+                agent_task_lifecycle::cook_index("cook-cross-owner-a").expect("first index after"),
+                before_index
+            );
+            assert!(
+                !agent_task_lifecycle::cook_index_exists("cook-cross-owner-b")
+                    .expect("second index remains absent")
+            );
+        });
+    });
+}
+
+#[test]
+fn strict_terminal_lab_cook_registration_projects_authority_after_unlock_idempotently() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        with_strict_config_lock(|| {
+            let cook_id = "cook-strict-terminal-lab";
+            let run_id = "cook-strict-terminal-lab-attempt";
+            let plan = batch_cook_options(
+                cook_id,
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::new(AtomicUsize::new(0)),
+                }),
+            )
+            .initial_plan;
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit Lab attempt");
+            agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: "strict-terminal-lab",
+                    runner_job_id: "strict-terminal-job",
+                    remote_workspace: "/runner/strict-terminal-workspace",
+                    remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+                },
+            )
+            .expect("accept Lab handoff");
+            let aggregate = crate::agent_task_scheduler::AgentTaskAggregate {
+                schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
+                totals: Default::default(),
+                outcomes: Vec::new(),
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            };
+            agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
+                .expect("terminalize Lab attempt");
+
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id)
+                .expect("register terminal Cook without lock reentry");
+            let receipt = agent_task_lifecycle::resolve_workspace_terminal_authority(
+                run_id,
+                "strict-terminal-lab",
+                "/runner/strict-terminal-workspace",
+                Some("strict-terminal-job"),
+            )
+            .expect("read terminal authority")
+            .expect("authority projected after unlock");
+            assert_eq!(receipt.run_id, run_id);
+
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id)
+                .expect("replayed registration retains idempotent authority");
+            assert!(agent_task_lifecycle::resolve_workspace_terminal_authority(
+                run_id,
+                "strict-terminal-lab",
+                "/runner/strict-terminal-workspace",
+                Some("strict-terminal-job"),
+            )
+            .expect("re-read terminal authority")
+            .is_some());
+        });
     });
 }
 

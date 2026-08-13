@@ -3130,6 +3130,11 @@ pub fn run_record_exists(run_id: &str) -> Result<bool> {
     store::record_exists(&sanitize_run_id(run_id))
 }
 
+/// Non-initializing durable existence check for read-only diagnostics.
+pub fn run_record_exists_readonly(run_id: &str) -> Result<bool> {
+    store::record_exists_readonly(&sanitize_run_id(run_id))
+}
+
 /// Whether a durable run record exists for `run_id` after the same resolution
 /// `retry` applies (a cook id resolves to its latest run). The plain
 /// `run_record_exists` is an exact-match check, so a resolvable id (e.g. a cook
@@ -3660,23 +3665,73 @@ pub fn record_cook_attempt(
     attempt: u32,
     run_id: &str,
 ) -> Result<AgentTaskCookIndex> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let registration = homeboy_core::config::with_config_lock(|| {
+        record_cook_attempt_locked(cook_id, attempt, run_id)
+    })?;
+    let index = registration.project_terminal_after_unlock()?;
+    complete_detached_cook_handoff_parent(cook_id, run_id)?;
+    Ok(index)
+}
+
+/// Register a Cook attempt while the caller owns the config lock.
+pub(crate) fn record_cook_attempt_locked(
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+) -> Result<CookAttemptRegistration> {
+    let cook_id = sanitize_run_id(cook_id);
+    let run_id = sanitize_run_id(run_id);
+    // Validate both durable ownership projections before changing either one.
+    store::validate_cook_index_attempt(&cook_id, attempt, &run_id)?;
+    let mut record = store::read_record(&run_id)?;
+    let recorded_cook_id = record.metadata.get("cook_id").and_then(Value::as_str);
+    let recorded_attempt = record.metadata.get("cook_attempt").and_then(Value::as_u64);
+    if recorded_cook_id.is_some_and(|value| value != cook_id)
+        || recorded_attempt.is_some_and(|value| value != u64::from(attempt))
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "durable lifecycle run is already owned by a different Cook attempt",
+            Some(run_id),
+            None,
+        ));
+    }
     let recorded_at = now_timestamp();
     let metadata = record.ensure_metadata_object();
-    metadata.insert("cook_id".to_string(), json!(sanitize_run_id(cook_id)));
+    metadata.insert("cook_id".to_string(), json!(&cook_id));
     metadata.insert("cook_attempt".to_string(), json!(attempt));
-    store::write_record(&record)?;
+    let committed = store::write_record_locked_without_terminal_projection(&record)?;
     // Completion can precede Cook registration during handoff recovery. Re-read
     // its persisted aggregate after the Cook identity is durable, then commit the
     // attempt and substantive pointer in the same index write.
-    let candidate = store::read_aggregate(&record.run_id)
+    let candidate = store::read_aggregate(&committed.run_id)
         .ok()
         .and_then(|aggregate| {
-            substantive_candidate_from_aggregate(&record.run_id, attempt, &aggregate, None)
+            substantive_candidate_from_aggregate(&committed.run_id, attempt, &aggregate, None)
         });
-    let index = store::write_cook_index_attempt(cook_id, attempt, run_id, recorded_at, candidate)?;
-    complete_detached_cook_handoff_parent(cook_id, run_id)?;
-    Ok(index)
+    let index = store::write_cook_index_attempt_locked(
+        &cook_id,
+        attempt,
+        &committed.run_id,
+        recorded_at,
+        candidate,
+    )?;
+    Ok(CookAttemptRegistration {
+        index,
+        run_id: committed.run_id,
+    })
+}
+
+pub(crate) struct CookAttemptRegistration {
+    index: AgentTaskCookIndex,
+    run_id: String,
+}
+
+impl CookAttemptRegistration {
+    pub(crate) fn project_terminal_after_unlock(self) -> Result<AgentTaskCookIndex> {
+        store::project_terminal_record_after_unlock(&self.run_id)?;
+        Ok(self.index)
+    }
 }
 
 /// Record the controller-owned boundary that a resumed Cook must advance.
