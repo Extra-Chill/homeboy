@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.345.2] - 2026-08-13
+
+### Changed
+- bind recipe mutations to stores
+- bind continuation claims to stores
+
+### Fixed
+- open a shell for interactive project SSH instead of exiting after cd
+- fail closed instead of silently destroying a remote file on write
+
 ## [0.345.1] - 2026-08-13
 
 ### Changed
