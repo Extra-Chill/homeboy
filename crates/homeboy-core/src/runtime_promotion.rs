@@ -1597,14 +1597,15 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let lease = acquire("parent", "lab").expect("parent acquires lease");
             let executable = std::env::current_exe().expect("resolve test executable");
+            let child_test = crate::test_support::harness_test_name(
+                module_path!(),
+                "authorized_child_process_acquires_lease",
+            );
             let mut child = Command::new(executable);
-            child.args([
-                "--ignored",
-                "--exact",
-                "core::runtime_promotion::tests::authorized_child_process_acquires_lease",
-            ]);
+            child.args(["--ignored", "--exact", &child_test]);
             lease.authorize_subprocess(&mut child);
-            assert!(child.status().expect("run authorized child").success());
+            let output = crate::test_support::run_child_test(&mut child, &child_test);
+            assert!(output.status.success());
         });
     }
 
@@ -1655,16 +1656,16 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let _lease = acquire("parent", "lab").expect("parent acquires lease");
             let executable = std::env::current_exe().expect("resolve test executable");
-            let status = Command::new(executable)
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "core::runtime_promotion::tests::unrelated_child_process_is_denied",
-                ])
-                .env_remove(SUBPROCESS_LEASE_ENV)
-                .status()
-                .expect("run unrelated child");
-            assert!(status.success());
+            let child_test = crate::test_support::harness_test_name(
+                module_path!(),
+                "unrelated_child_process_is_denied",
+            );
+            let mut child = Command::new(executable);
+            child
+                .args(["--ignored", "--exact", &child_test])
+                .env_remove(SUBPROCESS_LEASE_ENV);
+            let output = crate::test_support::run_child_test(&mut child, &child_test);
+            assert!(output.status.success());
         });
     }
 
