@@ -1794,8 +1794,12 @@ mod tests {
                 record_health: serde_json::Value::Null,
                 blockers: vec![homeboy_upgrade::upgrade::ControllerUpgradeBlocker {
                     run_id: "blocked-controller".to_string(),
+                    owner: "fixture".to_string(),
+                    scope: "fixture controller ownership".to_string(),
+                    postcondition: "fixture controller admission is allowed".to_string(),
                     liveness: "live",
                     reason: "fixture controller ownership".to_string(),
+                    action: "fixture recover".to_string(),
                     recovery_command: "fixture recover".to_string(),
                 }],
             })

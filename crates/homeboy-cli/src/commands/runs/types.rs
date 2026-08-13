@@ -86,7 +86,10 @@ pub(super) enum RunsCommand {
     FuzzCompare(RunsFuzzCompareArgs),
     /// Aggregate hotspot rankings across persisted fuzz run artifacts
     Hotspots(RunsHotspotsArgs),
-    /// Mark orphaned running observation records stale
+    /// Reconcile running observation records. `--dry-run` previews the bounded
+    /// observation-record scope; without it, only reported orphaned records are
+    /// marked stale. Runner generations and durable agent-task records have
+    /// their own reconcilers.
     Reconcile(RunsReconcileArgs),
     /// Block and stream a run's status until it reaches a terminal state,
     /// exiting with a code that reflects pass/fail. Works for attached and

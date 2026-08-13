@@ -100,6 +100,12 @@ pub struct RunnerReconciliationOutcome {
     /// What this invocation changed. `unchanged` means no generation could be
     /// retired from the observed state.
     pub changed_state: String,
+    /// State plane that owns direct-runner generation reconciliation.
+    pub owner: &'static str,
+    /// The one runner and its persisted daemon generations inspected here.
+    pub scope: String,
+    /// State guaranteed only when `status` is `converged`.
+    pub postcondition: &'static str,
     /// `converged`, `partial_progress`, or `blocked`.
     pub status: RunnerReconciliationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]

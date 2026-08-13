@@ -1376,6 +1376,25 @@ mod tests {
         assert!(help.contains("--runner"));
     }
 
+    #[test]
+    fn reconciliation_help_names_each_state_plane_and_mutation_boundary() {
+        let runs = scoped_help(&["runs", "reconcile"]);
+        assert!(runs.contains("observation records"));
+        assert!(runs.contains("Runner generations and durable agent-task records have"));
+
+        let runner = scoped_help(&["runner", "reconcile"]);
+        assert!(runner.contains("persisted daemon generations"));
+        assert!(runner.contains("accepts jobs with no unresolved generation projection"));
+
+        let agent_task = scoped_help(&["agent-task", "reconcile"]);
+        assert!(agent_task.contains("preview by default"));
+        assert!(agent_task.contains("--apply"));
+        assert!(agent_task.contains("authoritative provider state"));
+
+        let self_help = scoped_help(&["self"]);
+        assert!(!self_help.contains("upgrade-admission"));
+    }
+
     fn scoped_help(path: &[&str]) -> String {
         let mut command = Cli::command_with_scoped_lab_args();
         for segment in path {

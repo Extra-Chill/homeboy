@@ -26,8 +26,13 @@ pub enum SelfCommand {
     /// Report the active binary build identity without external probes
     #[command(alias = "inspect")]
     Identity(SelfIdentityArgs),
-    /// Verify whether this candidate controller may replace the installed controller
-    #[command(hide = true)]
+    /// Internal installer admission probe for a candidate controller. This is
+    /// intentionally hidden from normal operator help; installers invoke it
+    /// before replacement and use its structured blocker routing.
+    #[command(
+        hide = true,
+        long_about = "Internal installer admission probe for a candidate controller. It reports upgrade blockers with one owning reconciler/action and is not an operator recovery workflow."
+    )]
     UpgradeAdmission(UpgradeAdmissionArgs),
     /// Report one authoritative binary/runtime view across the controller and
     /// every configured runner, including version drift signals and host

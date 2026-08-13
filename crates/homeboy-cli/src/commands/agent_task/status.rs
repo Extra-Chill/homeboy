@@ -1021,7 +1021,23 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
 pub(super) fn reconcile_run(run_id: &str, dry_run: bool) -> CmdResult<Value> {
     let report = agent_task_service_direct::reconcile_run(run_id, dry_run)?;
     let exit = if report.failed > 0 { 1 } else { 0 };
-    Ok((serde_json::to_value(report).unwrap_or(Value::Null), exit))
+    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
+    if let Value::Object(object) = &mut value {
+        object.insert("owner".to_string(), json!("durable_agent_tasks"));
+        object.insert(
+            "scope".to_string(),
+            json!(format!("durable run or Cook group `{run_id}`")),
+        );
+        object.insert(
+            "postcondition".to_string(),
+            json!(if dry_run {
+                "reports the selected durable records against authoritative provider state without persisted mutation"
+            } else {
+                "every selected durable record is reconciled to authoritative provider state"
+            }),
+        );
+    }
+    Ok((value, exit))
 }
 
 pub(super) fn reconcile_records(dry_run: bool) -> CmdResult<Value> {
