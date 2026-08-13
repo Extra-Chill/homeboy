@@ -28,7 +28,7 @@ Run generic agent task plans
 | `homeboy agent-task loop` | Operate durable defined multi-agent loops: define, inspect, resume, and stop |
 | `homeboy agent-task run-plan` | Run an `AgentTaskPlan` through extension-declared executor providers |
 | `homeboy agent-task run` | Execute a previously submitted durable run |
-| `homeboy agent-task run-next` | Claim and execute the oldest queued durable run |
+| `homeboy agent-task run-next` | Claim and execute the oldest queued durable run, optionally within one fanout |
 | `homeboy agent-task submit` | Persist an agent-task plan and return a durable run id without executing it |
 | `homeboy agent-task status` | Read durable run status |
 | `homeboy agent-task watch` | Poll a run until it reaches a terminal state |
@@ -304,10 +304,14 @@ Execute a previously submitted durable run
 ## `homeboy agent-task run-next`
 
 ```sh
-homeboy agent-task run-next
+homeboy agent-task run-next [OPTIONS]
 ```
 
-Claim and execute the oldest queued durable run
+Claim and execute the oldest queued durable run, optionally within one fanout
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--fanout` | `<ID>` | Claim only queued child runs belonging to this durable fanout |
 
 ## `homeboy agent-task submit`
 

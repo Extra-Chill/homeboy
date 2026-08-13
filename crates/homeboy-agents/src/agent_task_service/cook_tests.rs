@@ -10042,6 +10042,7 @@ fn cook_finalization_adopts_validated_review_form_used_for_when_option_is_empty(
         );
         options.initial_run_id = run_id.to_string();
         options.ai_used_for.clear();
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
         let plan = options.initial_plan.clone();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
         persist_initial_recipe(&options).unwrap();
