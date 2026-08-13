@@ -642,6 +642,28 @@ pub fn fanout_ready_child_run_ids(batch_id: &str) -> Result<Option<HashSet<Strin
     ))
 }
 
+/// Resolve the durable child runs owned by a fanout. The mutable batch roster is
+/// only an index: each listed run must independently prove its persisted plan
+/// was created for this batch before it can be dispatched.
+pub fn owned_child_run_ids(batch_id: &str) -> Result<HashSet<String>> {
+    let batch = read_batch(batch_id)?;
+    let mut owned = HashSet::new();
+    for child in batch.child_runs {
+        let plan = agent_task_lifecycle::load_controller_plan(&child.run_id)?;
+        let plan_batch_id = plan.metadata.get("batch_id").and_then(Value::as_str);
+        if plan_batch_id != Some(batch.batch_id.as_str()) {
+            return Err(Error::validation_invalid_argument(
+                "fanout",
+                "fanout child roster entry does not match the durable child plan batch lineage",
+                Some(child.run_id),
+                None,
+            ));
+        }
+        owned.insert(child.run_id);
+    }
+    Ok(owned)
+}
+
 /// A child is resumable when its provider attempt reached a terminal, recoverable
 /// state (it produced a candidate patch) but the cook never recorded a
 /// finalization — i.e. promotion/gates/PR were owned by a coordinator that
@@ -887,7 +909,7 @@ fn commands(batch_id: &str) -> AgentTaskBatchCommands {
     AgentTaskBatchCommands {
         status: format!("homeboy agent-task fanout status {batch_id}"),
         artifacts: format!("homeboy agent-task fanout artifacts {batch_id}"),
-        run_next: "homeboy agent-task run-next".to_string(),
+        run_next: format!("homeboy agent-task run-next --fanout {batch_id}"),
         resume: format!("homeboy agent-task fanout resume {batch_id}"),
     }
 }
@@ -1134,7 +1156,36 @@ mod tests {
 
         let status = status("batch/audit").expect("batch status");
         assert_eq!(status.totals.queued, 2);
-        assert_eq!(status.commands.run_next, "homeboy agent-task run-next");
+        assert_eq!(
+            status.commands.run_next,
+            "homeboy agent-task run-next --fanout batch_audit"
+        );
+    }
+
+    #[test]
+    fn owned_child_runs_reject_a_tampered_batch_roster() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let plan = AgentTaskPlan::new("fanout/ownership", vec![request("a")]);
+        let batch = submit_plan_batch(&plan, Some("batch-ownership")).expect("batch submitted");
+        let child_run_id = &batch.child_runs[0].run_id;
+
+        let plan_path = paths::homeboy_data()
+            .expect("data path")
+            .join("agent-task-runs")
+            .join(child_run_id)
+            .join("plan.json");
+        let mut child_plan: Value =
+            serde_json::from_slice(&fs::read(&plan_path).expect("child plan")).expect("plan JSON");
+        child_plan["metadata"]["batch_id"] = json!("other-batch");
+        fs::write(
+            &plan_path,
+            serde_json::to_vec(&child_plan).expect("encode plan"),
+        )
+        .expect("tamper child plan");
+
+        let error = owned_child_run_ids("batch-ownership").expect_err("lineage mismatch rejected");
+        assert_eq!(error.details["field"], "fanout");
+        assert!(error.message.contains("batch lineage"));
     }
 
     #[test]

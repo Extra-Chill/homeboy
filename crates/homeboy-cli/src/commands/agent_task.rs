@@ -243,7 +243,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Loop(loop_args) => controller::loop_command(loop_args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),
-        AgentTaskCommand::RunNext => run::run_next(),
+        AgentTaskCommand::RunNext(args) => run::run_next(args),
         AgentTaskCommand::Submit(submit_args) => run::submit(submit_args),
         AgentTaskCommand::Status(status_args) => status::status(status_args),
         // Alias, not a second watch loop: route straight into `activity watch`,
