@@ -325,6 +325,9 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("Cook status is bounded");
         let (review_value, _) = review::review(ReviewArgs {
@@ -392,6 +395,9 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("Cook bridge status selects the candidate");
         assert_eq!(bridge_value["schema"], "homeboy/agent-task-run-status/v1");
@@ -409,6 +415,9 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("exact attempt remains directly addressable");
         assert_eq!(attempt_status["run_id"], retry_run_id);
@@ -445,6 +454,9 @@ fn exact_status_inspects_initial_cook_record_after_alias_advances() {
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("default status resolves Cook alias");
         assert_eq!(default_status["run_id"], retry_run_id);
@@ -463,6 +475,9 @@ fn exact_status_inspects_initial_cook_record_after_alias_advances() {
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("exact status reads initial Cook record");
         assert_eq!(exact_status["run_id"], cook_id);

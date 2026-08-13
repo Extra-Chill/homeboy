@@ -53,7 +53,7 @@ pub struct LifecycleReadArgs {
     pub no_runner_probe: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct StatusArgs {
     pub run_id: String,
     #[arg(long, conflicts_with = "bridge")]
@@ -73,6 +73,15 @@ pub struct StatusArgs {
     pub strict_subject_exit: bool,
     #[arg(long = "no-runner-probe", conflicts_with = "bridge")]
     pub no_runner_probe: bool,
+    /// Follow this durable status until it reaches a terminal state or the timeout expires.
+    #[arg(long)]
+    pub watch: bool,
+    /// Delay between status reads while following. Accepts ms, s, m, h, or d.
+    #[arg(long, default_value = "5s", value_name = "DURATION", requires = "watch")]
+    pub interval: String,
+    /// Total time to follow before returning the latest partial status. Accepts ms, s, m, h, or d.
+    #[arg(long, default_value = "30m", value_name = "DURATION", requires = "watch")]
+    pub timeout: String,
 }
 
 impl From<StatusArgs> for LifecycleReadArgs {
@@ -262,6 +271,32 @@ mod tests {
                 "{command} must reject the status-only compatibility flag"
             );
         }
+    }
+
+    #[test]
+    fn status_watch_uses_bounded_duration_flags() {
+        let cli = Cli::try_parse_from([
+            "homeboy", "agent-task", "status", "run-a", "--watch", "--interval", "250ms",
+            "--timeout", "2m",
+        ])
+        .expect("watch status parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::Status(args) = agent_task.command else {
+            panic!("expected status command");
+        };
+        assert!(args.watch);
+        assert_eq!(args.interval, "250ms");
+        assert_eq!(args.timeout, "2m");
+        assert!(Cli::try_parse_from([
+            "homeboy", "agent-task", "status", "run-a", "--interval", "1s",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "homeboy", "agent-task", "status", "run-a", "--timeout", "1m",
+        ])
+        .is_err());
     }
 
     #[test]
