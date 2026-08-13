@@ -17,7 +17,6 @@
 
 pub use crate::daemon_repair_codes;
 pub use crate::peer_session_maintenance;
-pub use crate::runner_capability_inventory;
 pub use crate::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
     broker_submit_token_for_runner, broker_token_from_env, close_reconnected_job_log_owner,
@@ -82,6 +81,7 @@ pub use crate::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
     RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput, RuntimeMaterializationStatus,
 };
+pub use crate::{observe_runner_capabilities, runner_capability_inventory};
 
 // Registry CRUD entry points.
 pub use crate::{

@@ -74,6 +74,10 @@ pub fn run_with_options(
         repair::apply(&target, &options, &mut report);
     }
 
+    // Doctor probes the runner directly. Its observation supersedes any
+    // process-local capability answer, so the next execution preflight probes
+    // the exact command environment rather than replaying stale remediation.
+    runner::observe_runner_capabilities(runner_id);
     report.status = checks::overall_status(&report.checks);
     let exit_code = report.status.operational_exit_code();
     Ok((report, exit_code))
