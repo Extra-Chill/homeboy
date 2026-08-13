@@ -323,7 +323,7 @@ try {
   expectPreflightFailure({
     database_type: 'mysql',
     wp_codebox_database_service: { provider: 'external', allowed_hosts: ['database.internal.example'], secret_env: { host: 'MISSING_PROVIDER_HOST', username: 'PROVIDER_ADMIN_USER', password: 'PROVIDER_ADMIN_PASSWORD' } },
-  }, /secret environment variable is unavailable: MISSING_PROVIDER_HOST/, secretValues);
+  }, /secret environment variable is unavailable: MISSING_PROVIDER_HOST.*homeboy init.*homeboy extension show wordpress.*readlink/, secretValues);
   expectPreflightFailure({
     database_type: 'mysql',
     wp_codebox_database_service: { provider: 'external', allowed_hosts: ['database.internal.example'], secret_env: ['PROVIDER_ADMIN_HOST'] },
