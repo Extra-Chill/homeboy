@@ -75,6 +75,7 @@ pub use lifecycle_candidate_adoption::*;
 pub use lifecycle_ops::*;
 pub use lifecycle_record_ops::cook_attempt_run_id;
 pub use lifecycle_runner_projection::*;
+pub use lifecycle_store::AgentTaskLifecycleStore;
 pub use lifecycle_transport_proxy::*;
 pub use logs_projection::*;
 pub use operation_claims::*;

@@ -19,6 +19,128 @@ use homeboy_core::engine::local_files::{
 use homeboy_core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 
+/// Durable agent-task lifecycle storage bound to immutable filesystem roots.
+///
+/// Record writes are intentionally outside this first boundary: renewing the
+/// workspace owner, persisting terminal workspace authority, and updating the
+/// observation row must move together in a later atomic migration.
+#[derive(Clone, Debug)]
+pub struct AgentTaskLifecycleStore {
+    roots: paths::PathRoots,
+}
+
+impl AgentTaskLifecycleStore {
+    pub fn new(roots: paths::PathRoots) -> Self {
+        Self { roots }
+    }
+
+    /// Construct an explicitly self-contained store from a data root.
+    ///
+    /// The companion roots live below the supplied root so this constructor
+    /// never consults ambient configuration.
+    pub fn from_data_root(data_root: PathBuf) -> Self {
+        Self::new(paths::PathRoots::new(
+            data_root.join("config"),
+            data_root.clone(),
+            data_root.join("artifacts"),
+        ))
+    }
+
+    pub fn from_environment() -> Result<Self> {
+        Ok(Self::new(paths::PathRoots::from_environment()?))
+    }
+
+    pub fn from_current_environment() -> Result<Self> {
+        Self::from_environment()
+    }
+
+    pub fn run_dir(&self, run_id: &str) -> PathBuf {
+        self.roots
+            .data()
+            .join("agent-task-runs")
+            .join(sanitize_run_id(run_id))
+    }
+
+    pub fn controller_plan_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("plan.json")
+    }
+
+    pub fn aggregate_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("aggregate.json")
+    }
+
+    pub fn cook_index_path(&self, cook_id: &str) -> PathBuf {
+        self.roots
+            .data()
+            .join("agent-task-cooks")
+            .join(sanitize_run_id(cook_id))
+            .join("index.json")
+    }
+
+    pub fn observation_db_path(&self) -> PathBuf {
+        self.roots.data().join("homeboy.sqlite")
+    }
+
+    pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
+        ObservationStore::open_initialized_at(self.observation_db_path())
+    }
+
+    pub fn open_observation_readonly(&self) -> Result<ObservationStore> {
+        ObservationStore::open_readonly_at(self.observation_db_path())
+    }
+
+    pub fn with_config_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        homeboy_core::config::with_config_lock_at(self.roots.config(), operation)
+    }
+
+    pub fn write_controller_plan(&self, run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
+        write_plan_in_store(self, run_id, plan)
+    }
+
+    pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {
+        read_controller_plan_in_store(self, run_id)
+    }
+
+    pub fn read_controller_plan_for_execution(&self, run_id: &str) -> Result<AgentTaskPlan> {
+        read_controller_plan_for_execution_in_store(self, run_id)
+    }
+
+    pub fn write_aggregate(&self, run_id: &str, aggregate: &AgentTaskAggregate) -> Result<PathBuf> {
+        write_aggregate_in_store(self, run_id, aggregate)
+    }
+
+    pub fn read_aggregate(&self, run_id: &str) -> Result<AgentTaskAggregate> {
+        read_aggregate_in_store(self, run_id)
+    }
+
+    pub fn read_aggregate_bounded(&self, run_id: &str) -> Result<AgentTaskAggregate> {
+        read_aggregate_bounded_in_store(self, run_id)
+    }
+
+    pub fn write_cook_index_attempt(
+        &self,
+        cook_id: &str,
+        attempt: u32,
+        run_id: &str,
+        recorded_at: String,
+        candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
+    ) -> Result<AgentTaskCookIndex> {
+        write_cook_index_attempt_in_store(self, cook_id, attempt, run_id, recorded_at, candidate)
+    }
+
+    pub fn read_cook_index(&self, cook_id: &str) -> Result<AgentTaskCookIndex> {
+        read_cook_index_in_store(self, cook_id)
+    }
+
+    pub fn cook_index_exists(&self, cook_id: &str) -> bool {
+        self.cook_index_path(cook_id).exists()
+    }
+}
+
+fn default_store() -> Result<AgentTaskLifecycleStore> {
+    AgentTaskLifecycleStore::from_current_environment()
+}
+
 #[cfg(test)]
 static FAIL_NEXT_RECORD_WRITE: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
@@ -29,11 +151,19 @@ static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
 const COOK_NOTIFICATION_CLAIM_LEASE: Duration = Duration::from_secs(5 * 60);
 
 pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
-    homeboy_core::config::with_config_lock(|| {
+    write_plan_in_store(&default_store()?, run_id, plan)
+}
+
+fn write_plan_in_store(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+) -> Result<PathBuf> {
+    store.with_config_lock(|| {
         let mut plan = plan.clone();
         migrate_execution_budget(&mut plan)?;
         validate_managed_services(&plan)?;
-        let path = run_dir(run_id)?.join("plan.json");
+        let path = store.controller_plan_path(run_id);
         write_private_json(&path, &plan)?;
         Ok(path)
     })
@@ -47,7 +177,14 @@ pub(super) fn read_plan_path(path: &str) -> Result<AgentTaskPlan> {
 }
 
 pub(super) fn read_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    let path = controller_plan_path(run_id)?;
+    read_controller_plan_in_store(&default_store()?, run_id)
+}
+
+fn read_controller_plan_in_store(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskPlan> {
+    let path = store.controller_plan_path(run_id);
     let plan = read_json(&path).map_err(|error| {
         Error::internal_io(
             format!(
@@ -64,16 +201,23 @@ pub(super) fn read_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
 }
 
 pub(super) fn controller_plan_path(run_id: &str) -> Result<PathBuf> {
-    Ok(run_dir(run_id)?.join("plan.json"))
+    Ok(default_store()?.controller_plan_path(run_id))
 }
 
 /// Controller lifecycle operations resolve the plan from their durable run
 /// identity. `AgentTaskRunRecord::plan_path` can be runner-local transport
 /// evidence after a Lab projection and is never controller execution authority.
 pub(super) fn read_controller_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
-    homeboy_core::config::with_config_lock(|| {
-        let path = controller_plan_path(run_id)?;
-        let mut plan = read_controller_plan(run_id)?;
+    read_controller_plan_for_execution_in_store(&default_store()?, run_id)
+}
+
+fn read_controller_plan_for_execution_in_store(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskPlan> {
+    store.with_config_lock(|| {
+        let path = store.controller_plan_path(run_id);
+        let mut plan = read_controller_plan_in_store(store, run_id)?;
         if migrate_execution_budget(&mut plan)? {
             write_private_json(&path, &plan)?;
         }
@@ -117,15 +261,30 @@ fn migrate_execution_budget(plan: &mut AgentTaskPlan) -> Result<bool> {
 }
 
 pub(super) fn write_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> Result<PathBuf> {
-    let path = run_dir(run_id)?.join("aggregate.json");
+    write_aggregate_in_store(&default_store()?, run_id, aggregate)
+}
+
+fn write_aggregate_in_store(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    aggregate: &AgentTaskAggregate,
+) -> Result<PathBuf> {
+    let path = store.aggregate_path(run_id);
     write_json(&path, aggregate)?;
     Ok(path)
 }
 
 pub(super) fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
-    match read_mirrored_aggregate(run_id)? {
+    read_aggregate_in_store(&default_store()?, run_id)
+}
+
+fn read_aggregate_in_store(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskAggregate> {
+    match read_mirrored_aggregate_in_store(store, run_id)? {
         Some(aggregate) => Ok(aggregate),
-        None => read_json(&aggregate_path(run_id)?),
+        None => read_json(&store.aggregate_path(run_id)),
     }
 }
 
@@ -141,7 +300,14 @@ pub(super) const DURABLE_AGGREGATE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// observation row. The reader checks metadata before allocating and takes one
 /// extra byte while reading to defend against a file changing after `metadata`.
 pub(super) fn read_aggregate_bounded(run_id: &str) -> Result<AgentTaskAggregate> {
-    let path = aggregate_path(run_id)?;
+    read_aggregate_bounded_in_store(&default_store()?, run_id)
+}
+
+fn read_aggregate_bounded_in_store(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskAggregate> {
+    let path = store.aggregate_path(run_id);
     let metadata = fs::metadata(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     if metadata.len() > DURABLE_AGGREGATE_MAX_BYTES {
@@ -179,7 +345,7 @@ pub(super) fn read_aggregate_bounded(run_id: &str) -> Result<AgentTaskAggregate>
 }
 
 pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
-    Ok(run_dir(run_id)?.join("aggregate.json"))
+    Ok(default_store()?.aggregate_path(run_id))
 }
 
 pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
@@ -382,8 +548,33 @@ pub(super) fn write_cook_index_attempt(
     recorded_at: String,
     candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
 ) -> Result<AgentTaskCookIndex> {
-    homeboy_core::config::with_config_lock(|| {
-        write_cook_index_attempt_locked(cook_id, attempt, run_id, recorded_at, candidate)
+    write_cook_index_attempt_in_store(
+        &default_store()?,
+        cook_id,
+        attempt,
+        run_id,
+        recorded_at,
+        candidate,
+    )
+}
+
+fn write_cook_index_attempt_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    recorded_at: String,
+    candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
+) -> Result<AgentTaskCookIndex> {
+    store.with_config_lock(|| {
+        write_cook_index_attempt_locked_in_store(
+            store,
+            cook_id,
+            attempt,
+            run_id,
+            recorded_at,
+            candidate,
+        )
     })
 }
 
@@ -395,10 +586,28 @@ pub(super) fn write_cook_index_attempt_locked(
     recorded_at: String,
     candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
 ) -> Result<AgentTaskCookIndex> {
+    write_cook_index_attempt_locked_in_store(
+        &default_store()?,
+        cook_id,
+        attempt,
+        run_id,
+        recorded_at,
+        candidate,
+    )
+}
+
+fn write_cook_index_attempt_locked_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    recorded_at: String,
+    candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
+) -> Result<AgentTaskCookIndex> {
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
     validate_cook_index_attempt(&cook_id, attempt, &run_id)?;
-    let path = cook_index_path(&cook_id)?;
+    let path = store.cook_index_path(&cook_id);
     let mut index = if path.exists() {
         read_json(&path)?
     } else {
@@ -446,11 +655,18 @@ pub(super) fn write_cook_index_for_test(index: &AgentTaskCookIndex) -> Result<()
 }
 
 pub(super) fn read_cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
-    read_json(&cook_index_path(cook_id)?)
+    read_cook_index_in_store(&default_store()?, cook_id)
+}
+
+fn read_cook_index_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<AgentTaskCookIndex> {
+    read_json(&store.cook_index_path(cook_id))
 }
 
 pub(super) fn cook_index_exists(cook_id: &str) -> Result<bool> {
-    Ok(cook_index_path(cook_id)?.exists())
+    Ok(default_store()?.cook_index_path(cook_id).exists())
 }
 
 /// Claim the one terminal notification a Cook is allowed to deliver.
@@ -811,7 +1027,14 @@ fn record_from_run_with_schema_policy(
 }
 
 fn read_mirrored_aggregate(run_id: &str) -> Result<Option<AgentTaskAggregate>> {
-    let store = ObservationStore::open_initialized()?;
+    read_mirrored_aggregate_in_store(&default_store()?, run_id)
+}
+
+fn read_mirrored_aggregate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<AgentTaskAggregate>> {
+    let store = lifecycle_store.open_observation_initialized()?;
     let Some(run) = store.get_run(run_id)? else {
         return Ok(None);
     };
@@ -876,14 +1099,9 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {
 }
 
 pub(super) fn run_dir(run_id: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
-        .join("agent-task-runs")
-        .join(sanitize_run_id(run_id)))
+    Ok(default_store()?.run_dir(run_id))
 }
 
 fn cook_index_path(cook_id: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
-        .join("agent-task-cooks")
-        .join(sanitize_run_id(cook_id))
-        .join("index.json"))
+    Ok(default_store()?.cook_index_path(cook_id))
 }
