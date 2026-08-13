@@ -444,6 +444,43 @@ fn targeted_lookup_skips_invalid_project_attachment_for_later_attachment() {
 }
 
 #[test]
+fn targeted_lookup_skips_project_attachment_with_a_mismatched_portable_id() {
+    let dir = temp_home_dir();
+    let mismatched_repo = dir.path().join("mismatched-repo");
+    let valid_repo = dir.path().join("valid-repo");
+    fs::create_dir_all(&mismatched_repo).unwrap();
+    fs::create_dir_all(&valid_repo).unwrap();
+    for (repo, id) in [(&mismatched_repo, "other"), (&valid_repo, "fixture")] {
+        fs::write(
+            repo.join("homeboy.json"),
+            serde_json::json!({ "id": id }).to_string(),
+        )
+        .unwrap();
+    }
+    let _home = with_home_override(dir.path());
+    for (project_id, local_path) in [
+        ("mismatched", &mismatched_repo),
+        ("valid", &valid_repo),
+    ] {
+        crate::project::save(&Project {
+            id: project_id.to_string(),
+            components: vec![ProjectComponentAttachment {
+                id: "fixture".to_string(),
+                local_path: local_path.to_string_lossy().to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    let component = registered_by_id("fixture")
+        .unwrap()
+        .expect("later matching attachment");
+    assert_eq!(component.local_path, valid_repo.to_string_lossy());
+}
+
+#[test]
 fn targeted_lookup_rejects_traversal_component_id() {
     let dir = temp_home_dir();
     let _home = with_home_override(dir.path());

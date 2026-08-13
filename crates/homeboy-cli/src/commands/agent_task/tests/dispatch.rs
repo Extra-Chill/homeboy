@@ -152,13 +152,12 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
         let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&git, permissions).expect("make fake git executable");
-        let previous_path = std::env::var_os("PATH");
-        std::env::set_var(
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
             "PATH",
             format!(
                 "{}:{}",
                 bin.path().display(),
-                previous_path
+                std::env::var_os("PATH")
                     .as_deref()
                     .unwrap_or_default()
                     .to_string_lossy()
@@ -177,10 +176,6 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
             "--no-finalize".to_string(),
         ]))
         .expect("explicit repo must not inspect unrelated registrations");
-        match previous_path {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
 
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),

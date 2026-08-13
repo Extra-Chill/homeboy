@@ -896,6 +896,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn remote_detection_times_out_with_typed_evidence() {
+        let _environment = crate::test_support::env_lock();
         let repo = tempfile::tempdir().expect("repo directory");
         let bin = tempfile::tempdir().expect("fake git bin");
         let git = bin.path().join("git");
@@ -903,13 +904,12 @@ mod tests {
         let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&git, permissions).expect("make fake git executable");
-        let previous_path = std::env::var_os("PATH");
-        std::env::set_var(
+        let _path = crate::test_support::EnvVarGuard::set(
             "PATH",
             format!(
                 "{}:{}",
                 bin.path().display(),
-                previous_path
+                std::env::var_os("PATH")
                     .as_deref()
                     .unwrap_or_default()
                     .to_string_lossy()
@@ -918,11 +918,6 @@ mod tests {
 
         let started = std::time::Instant::now();
         let result = detect_remote_url_within(repo.path(), std::time::Duration::from_millis(200));
-        match previous_path {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
-
         assert_eq!(result, crate::git::BoundedGitRead::TimedOut);
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }

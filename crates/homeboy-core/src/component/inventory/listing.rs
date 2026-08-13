@@ -99,7 +99,9 @@ pub fn registered_by_id(id: &str) -> Result<Option<Component>> {
                 id,
                 Some(&standalone_snapshot),
             ) {
-                return Ok(Some(component));
+                if component.id == id {
+                    return Ok(Some(component));
+                }
             }
         }
     }
