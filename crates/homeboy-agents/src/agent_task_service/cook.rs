@@ -3136,7 +3136,7 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
     {
-        crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)?;
+        preflight_initial_cook_workspace_provider(options)?;
     }
     if cook_attempt_needs_execution(&options.initial_run_id)
         && !cook_workspace_lookup_pending(&options.initial_plan)
@@ -3464,7 +3464,7 @@ where
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
     {
-        crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)?;
+        preflight_initial_cook_workspace_provider(&options)?;
     }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
@@ -5143,7 +5143,7 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
                 ));
             }
         }
-        source.to_path_buf()
+        trusted_initial_cook_workspace(options, source)?.unwrap_or_else(|| source.to_path_buf())
     } else if std::path::Path::new(&options.to_worktree).is_dir() {
         std::path::Path::new(&options.to_worktree).to_path_buf()
     } else if let Some(record) =
@@ -5236,6 +5236,139 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// Admit a locally committed, unpushed provider checkout only when Cook can
+/// bind the exception to the exact clean, issue-owned linked worktree and the
+/// task's immutable base. The provider resolver consumes the existing
+/// path+HEAD capability; no broader unpushed exception is introduced here.
+fn trusted_initial_cook_workspace(
+    options: &AgentTaskCookServiceOptions,
+    source: &Path,
+) -> Result<Option<PathBuf>> {
+    let task_url = options
+        .initial_plan
+        .tasks
+        .first()
+        .and_then(|task| task.workspace.task_url.as_deref())
+        .filter(|task_url| !task_url.trim().is_empty());
+    let Some(task_base_sha) = options.task_base_sha.as_deref() else {
+        return Ok(None);
+    };
+    if task_url.is_none() {
+        return Ok(None);
+    }
+    let source = std::fs::canonicalize(source).map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!("cannot resolve explicitly targeted Cook checkout: {error}"),
+            Some(options.to_worktree.clone()),
+            None,
+        )
+    })?;
+    let head = homeboy_core::git::run_git(
+        &source,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        "resolve explicitly targeted Cook checkout HEAD",
+    )?
+    .trim()
+    .to_string();
+    let clean = homeboy_core::git::run_git(
+        &source,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+        "verify explicitly targeted Cook checkout cleanliness",
+    )?
+    .trim()
+    .is_empty();
+    let safe_ancestry =
+        homeboy_core::git::is_ancestor(&source.display().to_string(), task_base_sha, &head)
+            .unwrap_or(false);
+    let config = homeboy_core::defaults::load_config();
+    match homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+        &options.to_worktree,
+        &config,
+        None,
+        None,
+    ) {
+        Ok(resolution) => return Ok(Some(PathBuf::from(resolution.worktree.path))),
+        Err(error)
+            if error.details.pointer("/workspace/classification")
+                != Some(&Value::String("workspace.untrusted_unpushed".to_string())) =>
+        {
+            return Err(error);
+        }
+        Err(_) => {}
+    }
+    if !clean || task_url.is_none() || !safe_ancestry {
+        let mut error = Error::validation_invalid_argument(
+            "to_worktree",
+            "clean unpushed provider checkout cannot be trusted for initial Cook adoption",
+            Some(options.to_worktree.clone()),
+            Some(vec![format!(
+                "Adopt or continue this exact Cook with: homeboy agent-task cook-continue {}",
+                options.cook_id
+            )]),
+        );
+        if !clean {
+            error.details["workspace"] = serde_json::json!({
+                "classification": "workspace.resolved_but_dirty",
+                "reason": "unattributed_drift",
+                "owning_layer": "cook",
+                "path": source,
+            });
+        }
+        return Err(error);
+    }
+    homeboy_core::worktree_providers::validate_task_worktree_root(&source, &options.to_worktree)?;
+    let trust = homeboy_core::worktree_providers::TrustedUnpushedWorktree {
+        path: source.clone(),
+        head,
+    };
+    let resolution = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+        &options.to_worktree,
+        &config,
+        None,
+        Some(&trust),
+    )?;
+    if resolution.worktree.task_url.as_deref() != task_url {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "explicitly targeted provider worktree is not owned by this Cook task",
+            Some(options.to_worktree.clone()),
+            Some(vec![format!(
+                "Continue the owning Cook with: homeboy agent-task cook-continue {}",
+                options.cook_id
+            )]),
+        ));
+    }
+    let resolved = std::fs::canonicalize(&resolution.worktree.path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!("provider returned an unresolved targeted Cook checkout: {error}"),
+            Some(options.to_worktree.clone()),
+            None,
+        )
+    })?;
+    if resolved != source {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "provider resolved a different checkout than the explicitly targeted Cook checkout",
+            Some(options.to_worktree.clone()),
+            Some(vec![format!(
+                "Continue the owning Cook with: homeboy agent-task cook-continue {}",
+                options.cook_id
+            )]),
+        ));
+    }
+    Ok(Some(source))
+}
+
+fn preflight_initial_cook_workspace_provider(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    if let Some(source) = options.source_worktree_path.as_deref() {
+        trusted_initial_cook_workspace(options, source)?;
+        return Ok(());
+    }
+    crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)
 }
 
 fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
