@@ -1588,11 +1588,31 @@ fn preflight_hot_command(
 ) -> Option<i32> {
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
         if let Ok((resources, _)) = crate::commands::resources::run_preflight() {
-            let lab_readiness = if hot_command.lab_offload_supported {
+            let mut lab_readiness = if hot_command.lab_offload_supported {
                 crate::runner::lab_runner_readiness().ok()
             } else {
                 None
             };
+            // A cached/projection-based inventory is enough for normal routing,
+            // but not for refusing portable work on a hot controller. Refresh
+            // the bounded, read-only admission facts once before rejection so
+            // an idle connected runner is not hidden behind stale inventory.
+            if hot_command.lab_offload_supported
+                && cli.runner.is_none()
+                && !matches!(cli.placement, crate::cli_surface::Placement::Local)
+                && resource_policy::evaluate_with_runner_hint(
+                    hot_command,
+                    &resources,
+                    lab_readiness.as_ref(),
+                )
+                .is_some()
+                && lab_readiness.as_ref().is_some_and(|readiness| {
+                    readiness.state
+                        != crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+                })
+            {
+                lab_readiness = crate::runner::refresh_lab_runner_readiness_for_admission().ok();
+            }
             // An explicit runner is a routing decision, not a default-runner
             // fallback. Let Lab offload report any runner-specific readiness or
             // capability failure rather than blocking it at controller preflight.
@@ -1723,7 +1743,15 @@ fn preflight_hot_command(
                         hot_command,
                         &std::env::args().collect::<Vec<_>>(),
                         selected_lab_runner,
-                    ),
+                    )
+                    .or_else(|| {
+                        // No ready runner means there is no placement rewrite,
+                        // but the original request remains the deterministic
+                        // resume input after the targeted recovery action.
+                        Some(crate::core::engine::shell::quote_args(
+                            &std::env::args().collect::<Vec<_>>(),
+                        ))
+                    }),
                     runner_admits_offload || auto_local_capacity_fallback,
                 ) {
                     if review_test_deferred_workload_eligible(cli, warning, runner_admits_offload) {
