@@ -2702,6 +2702,124 @@ fn batch_cook_options(
 
 #[cfg(unix)]
 #[test]
+fn initial_cook_adopts_only_clean_issue_owned_unpushed_provider_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let primary = tempfile::tempdir().expect("primary repository");
+        let target = home.path().join("issue-worktree");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?} failed", args);
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(primary.path(), &["init", "--initial-branch=main"]);
+        git(
+            primary.path(),
+            &["config", "user.email", "agent@example.test"],
+        );
+        git(primary.path(), &["config", "user.name", "Agent"]);
+        std::fs::write(primary.path().join("tracked"), "base\n").unwrap();
+        git(primary.path(), &["add", "tracked"]);
+        git(primary.path(), &["commit", "-m", "base"]);
+        let base = git(primary.path(), &["rev-parse", "HEAD"]);
+        git(
+            primary.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "issue-11091",
+                target.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(target.join("candidate"), "committed\n").unwrap();
+        git(&target, &["add", "candidate"]);
+        git(&target, &["commit", "-m", "candidate"]);
+
+        let provider = home.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                serde_json::json!({"worktrees": [{
+                    "handle": "fixture@issue-11091", "path": target, "branch": "issue-11091",
+                    "task_url": "https://example.test/issues/11091",
+                    "safety": {"dirty": false, "unpushed": true, "primary": false}
+                }]})
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).unwrap();
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy_core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: Some("$.task_url".to_string()),
+                    },
+                ),
+            },
+        );
+        homeboy_core::defaults::save_config(&config).unwrap();
+
+        let mut options =
+            batch_cook_options("issue-11091", Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.to_worktree = "fixture@issue-11091".to_string();
+        options.source_worktree_path = Some(target.clone());
+        options.task_base_sha = Some(base);
+        options.initial_plan.tasks[0].workspace.task_url =
+            Some("https://example.test/issues/11091".to_string());
+        validate_cook_workspace(&options)
+            .expect("clean issue-owned committed checkout is adoptable");
+
+        std::fs::write(target.join("dirty"), "drift\n").unwrap();
+        let error = validate_cook_workspace(&options).expect_err("dirty checkout remains blocked");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
+        std::fs::remove_file(target.join("dirty")).unwrap();
+
+        options.initial_plan.tasks[0].workspace.task_url =
+            Some("https://example.test/issues/other".to_string());
+        let error =
+            validate_cook_workspace(&options).expect_err("wrong task ownership remains blocked");
+        assert!(error.message.contains("not owned by this Cook task"));
+
+        options.initial_plan.tasks[0].workspace.task_url =
+            Some("https://example.test/issues/11091".to_string());
+        options.task_base_sha = Some("0000000000000000000000000000000000000000".to_string());
+        let error = validate_cook_workspace(&options).expect_err("unsafe ancestry remains blocked");
+        assert!(error.message.contains("cannot be trusted"));
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn explicit_cook_workspace_bypasses_a_timed_out_provider_lookup() {
     use std::os::unix::fs::PermissionsExt;
 
