@@ -809,6 +809,12 @@ generations that have been verified as drained. Use the remediation command
 reported by `homeboy runner status` after it has established that no active work
 still belongs to the generation.
 
+The command succeeds only when its postcondition has converged: the runner is
+accepting jobs and has no unresolved generation projection. A non-converged
+result exits non-zero and reports `changed_state`, the remaining blocker, one
+different executable action, and the concrete predicate that must become true
+before another reconcile can make progress.
+
 ### `disconnect`
 
 ```sh

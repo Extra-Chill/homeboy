@@ -19,10 +19,10 @@ use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
     RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
     RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOperatorSummary, RunnerOutput,
-    RunnerReconciliationOutcome, RunnerRuntimeDiagnostics, RunnerRuntimePackageDiagnostics,
-    RunnerStatusInspection, RunnerStatusUnavailable, RunnerToolDiagnostics, RunnerTruncation,
-    RunnerWorkflowBinaryGuidance, RuntimeDiagnostic, RuntimePackageOutput, RuntimeProbeValue,
-    SelectedRuntimeOutput,
+    RunnerReconciliationOutcome, RunnerReconciliationStatus, RunnerRuntimeDiagnostics,
+    RunnerRuntimePackageDiagnostics, RunnerStatusInspection, RunnerStatusUnavailable,
+    RunnerToolDiagnostics, RunnerTruncation, RunnerWorkflowBinaryGuidance, RuntimeDiagnostic,
+    RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
 };
 
 const DEFAULT_STATUS_SESSION_LIMIT: usize = 20;
@@ -211,7 +211,7 @@ pub(super) fn reconcile_output(
     );
     let reconciliation =
         reconciliation_outcome(id, retired_generation_ids, &report, &admission_summary);
-    let exit_code = if reconciliation.status == "converged" {
+    let exit_code = if reconciliation.status == RunnerReconciliationStatus::Converged {
         0
     } else {
         1
@@ -252,51 +252,109 @@ pub(super) fn reconciliation_outcome(
         || !admission.unresolved_generation_ids.is_empty();
     if admission.accepting_jobs && !unresolved_projection {
         return RunnerReconciliationOutcome {
-            status: "converged",
-            retired_generation_count,
-            retired_generation_ids,
+            changed_state: reconciliation_changed_state(retired_generation_count),
+            status: RunnerReconciliationStatus::Converged,
             remaining_blocker: None,
             next_action: None,
+            retry_predicate: None,
+            retired_generation_count,
+            retired_generation_ids,
         };
     }
 
-    let remaining_blocker = if unresolved_projection {
-        "unresolved_generation_projection".to_string()
-    } else if !admission.connected {
-        "runner_disconnected".to_string()
-    } else if !admission.daemon_fresh {
-        daemon_freshness_blocker(report)
-    } else if !admission.daemon_compatible {
-        "daemon_compatibility".to_string()
-    } else if admission.blocking_generation.is_some() {
-        "retained_generation_ownership".to_string()
-    } else {
-        "admission_unavailable".to_string()
-    };
     let reconcile_command = format!("homeboy runner reconcile {}", shell_arg(runner_id));
-    let next_action = admission
-        .next_action
-        .as_ref()
-        .filter(|action| *action != &reconcile_command)
-        .cloned()
-        .or_else(|| {
-            Some(format!(
-                "homeboy runner status {} --full",
-                shell_arg(runner_id)
-            ))
-        });
+    let (remaining_blocker, next_action, retry_predicate) = if unresolved_projection {
+        (
+            "unresolved_generation_projection".to_string(),
+            format!("homeboy runner status {} --full", shell_arg(runner_id)),
+            "a fresh authoritative generation projection resolves every retained count".to_string(),
+        )
+    } else if !admission.connected {
+        (
+            "runner_disconnected".to_string(),
+            reconciliation_remediation(&reconcile_command, admission, report)
+                .unwrap_or_else(|| format!("homeboy runner connect {}", shell_arg(runner_id))),
+            "the runner reconnects and publishes a current daemon session".to_string(),
+        )
+    } else if !admission.daemon_fresh {
+        (
+            daemon_freshness_blocker(report),
+            reconciliation_remediation(&reconcile_command, admission, report).unwrap_or_else(
+                || {
+                    format!(
+                        "homeboy runner doctor {} --scope lab-offload",
+                        shell_arg(runner_id)
+                    )
+                },
+            ),
+            "daemon_fresh=true after the selected daemon repair completes".to_string(),
+        )
+    } else if !admission.daemon_compatible {
+        (
+            "daemon_compatibility".to_string(),
+            reconciliation_remediation(&reconcile_command, admission, report).unwrap_or_else(
+                || {
+                    format!(
+                        "homeboy runner doctor {} --scope lab-offload",
+                        shell_arg(runner_id)
+                    )
+                },
+            ),
+            "daemon_compatible=true after the selected daemon identity is repaired".to_string(),
+        )
+    } else if admission.blocking_generation.is_some() {
+        (
+            "retained_generation_ownership".to_string(),
+            format!("homeboy runner job list {} --active", shell_arg(runner_id)),
+            "the retained generation has no authoritative active job owners".to_string(),
+        )
+    } else {
+        (
+            "admission_unavailable".to_string(),
+            format!("homeboy runner status {} --full", shell_arg(runner_id)),
+            "an authoritative active-job view is available".to_string(),
+        )
+    };
 
     RunnerReconciliationOutcome {
+        changed_state: reconciliation_changed_state(retired_generation_count),
         status: if retired_generation_count > 0 {
-            "partial_progress"
+            RunnerReconciliationStatus::PartialProgress
         } else {
-            "blocked"
+            RunnerReconciliationStatus::Blocked
         },
+        remaining_blocker: Some(remaining_blocker),
+        next_action: Some(next_action),
+        retry_predicate: Some(retry_predicate),
         retired_generation_count,
         retired_generation_ids,
-        remaining_blocker: Some(remaining_blocker),
-        next_action,
     }
+}
+
+fn reconciliation_changed_state(retired_generation_count: usize) -> String {
+    if retired_generation_count == 0 {
+        "unchanged".to_string()
+    } else {
+        format!("retired_generations:{retired_generation_count}")
+    }
+}
+
+fn reconciliation_remediation(
+    reconcile_command: &str,
+    admission: &homeboy::runner::runners::RunnerAdmissionSummary,
+    report: &homeboy::runner::runners::RunnerStatusReport,
+) -> Option<String> {
+    admission
+        .next_action
+        .as_ref()
+        .filter(|action| action.as_str() != reconcile_command)
+        .cloned()
+        .or_else(|| {
+            report
+                .admission_action()
+                .map(|action| action.render_command())
+                .filter(|action| action != reconcile_command)
+        })
 }
 
 fn daemon_freshness_blocker(report: &homeboy::runner::runners::RunnerStatusReport) -> String {

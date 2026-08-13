@@ -21,6 +21,12 @@ use crate::commands::utils::response::CommandActionableMetadata;
 #[derive(Debug, Serialize)]
 pub struct RunnerExtra {
     pub variant: &'static str,
+    /// Postcondition of a mutating generation reconciliation. This is distinct
+    /// from the command envelope: only `converged` restores runner admission.
+    /// It intentionally precedes status detail so compact output leads with the
+    /// operation's changed state, remaining blocker, and next action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<RunnerReconciliationOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_lab_runner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,10 +35,6 @@ pub struct RunnerExtra {
     pub managed_followups: Vec<LabFollowup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<RunnerConnectionOutput>,
-    /// Postcondition of a mutating generation reconciliation. This is distinct
-    /// from the command envelope: only `converged` restores runner admission.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reconciliation: Option<RunnerReconciliationOutcome>,
     /// The compact authoritative "ready now / safe to rotate" answer. Leads the
     /// status output; the full generation inventory below is detail behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,16 +97,32 @@ impl Default for RunnerExtra {
 /// Bounded postcondition for `runner reconcile`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RunnerReconciliationOutcome {
+    /// What this invocation changed. `unchanged` means no generation could be
+    /// retired from the observed state.
+    pub changed_state: String,
     /// `converged`, `partial_progress`, or `blocked`.
-    pub status: &'static str,
-    pub retired_generation_count: usize,
-    /// IDs retired by this reconciliation operation under the generation lock.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub retired_generation_ids: Vec<String>,
+    pub status: RunnerReconciliationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_blocker: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
+    /// The observation that must change before retrying this same operation can
+    /// make additional progress. This prevents an unbounded self-recommendation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_predicate: Option<String>,
+    pub retired_generation_count: usize,
+    /// IDs retired by this reconciliation operation under the generation lock.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retired_generation_ids: Vec<String>,
+}
+
+/// Terminality of a `runner reconcile` result.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerReconciliationStatus {
+    Converged,
+    PartialProgress,
+    Blocked,
 }
 
 /// The bounded inspection state for a registry-wide status response.

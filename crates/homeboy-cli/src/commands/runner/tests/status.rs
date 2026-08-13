@@ -21,7 +21,7 @@ use super::super::status::{
     runner_artifact_feature_diagnostics, runner_followups, runner_followups_with_admission,
     runner_status_operator_commands, selected_admission_summary,
 };
-use super::super::types::RunnerConnectionOutput;
+use super::super::types::{RunnerConnectionOutput, RunnerReconciliationStatus};
 use crate::cli_surface::Cli;
 use crate::commands::utils::response::{
     cli_response_for_json_result_for_command, map_cmd_result_to_json,
@@ -110,9 +110,10 @@ fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownersh
         &admission,
     );
 
-    assert_eq!(outcome.status, "partial_progress");
+    assert_eq!(outcome.status, RunnerReconciliationStatus::PartialProgress);
     assert_eq!(outcome.retired_generation_count, 1);
     assert_eq!(outcome.retired_generation_ids, ["lease-retired"]);
+    assert_eq!(outcome.changed_state, "retired_generations:1");
     assert_eq!(
         outcome.remaining_blocker.as_deref(),
         Some("daemon_version_mismatch")
@@ -120,6 +121,10 @@ fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownersh
     assert_eq!(
         outcome.next_action.as_deref(),
         Some("homeboy runner refresh-homeboy homeboy-lab --reconnect")
+    );
+    assert_eq!(
+        outcome.retry_predicate.as_deref(),
+        Some("daemon_fresh=true after the selected daemon repair completes")
     );
 }
 
@@ -132,8 +137,9 @@ fn reconcile_reports_unchanged_blocked_state_without_self_recommendation() {
     let outcome =
         reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
 
-    assert_eq!(outcome.status, "blocked");
+    assert_eq!(outcome.status, RunnerReconciliationStatus::Blocked);
     assert_eq!(outcome.retired_generation_count, 0);
+    assert_eq!(outcome.changed_state, "unchanged");
     assert_eq!(
         outcome.remaining_blocker.as_deref(),
         Some("unresolved_generation_projection")
@@ -141,6 +147,10 @@ fn reconcile_reports_unchanged_blocked_state_without_self_recommendation() {
     assert_eq!(
         outcome.next_action.as_deref(),
         Some("homeboy runner status homeboy-lab --full")
+    );
+    assert_eq!(
+        outcome.retry_predicate.as_deref(),
+        Some("a fresh authoritative generation projection resolves every retained count")
     );
 }
 
@@ -153,10 +163,38 @@ fn reconcile_reports_ready_admission_as_converged() {
     let outcome =
         reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
 
-    assert_eq!(outcome.status, "converged");
+    assert_eq!(outcome.status, RunnerReconciliationStatus::Converged);
     assert_eq!(outcome.retired_generation_count, 0);
+    assert_eq!(outcome.changed_state, "unchanged");
     assert_eq!(outcome.remaining_blocker, None);
     assert_eq!(outcome.next_action, None);
+    assert_eq!(outcome.retry_predicate, None);
+}
+
+#[test]
+fn reconcile_retained_owner_requires_owner_settlement_before_retry() {
+    let mut admission = admission_fixture();
+    admission.blocking_generation = Some("lease-retained".to_string());
+    admission.admission_blocking_job_ids = vec!["job-retained".to_string()];
+    admission.next_action = Some("homeboy runner reconcile homeboy-lab".to_string());
+
+    let outcome =
+        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
+
+    assert_eq!(outcome.status, RunnerReconciliationStatus::Blocked);
+    assert_eq!(outcome.changed_state, "unchanged");
+    assert_eq!(
+        outcome.remaining_blocker.as_deref(),
+        Some("retained_generation_ownership")
+    );
+    assert_eq!(
+        outcome.next_action.as_deref(),
+        Some("homeboy runner job list homeboy-lab --active")
+    );
+    assert_eq!(
+        outcome.retry_predicate.as_deref(),
+        Some("the retained generation has no authoritative active job owners")
+    );
 }
 
 #[test]
@@ -170,7 +208,7 @@ fn reconcile_does_not_converge_when_admission_accepts_with_unresolved_projection
     let outcome =
         reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
 
-    assert_eq!(outcome.status, "blocked");
+    assert_eq!(outcome.status, RunnerReconciliationStatus::Blocked);
     assert_eq!(
         outcome.remaining_blocker.as_deref(),
         Some("unresolved_generation_projection")
@@ -230,6 +268,10 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
     assert_eq!(serialized["status"], "failed");
     assert_eq!(serialized["data"]["reconciliation"]["status"], "blocked");
     assert_eq!(
+        serialized["data"]["reconciliation"]["changed_state"],
+        "unchanged"
+    );
+    assert_eq!(
         serialized["data"]["reconciliation"]["remaining_blocker"],
         "admission_unavailable"
     );
@@ -238,6 +280,14 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
         .is_none_or(|commands| commands
             .iter()
             .all(|command| command["command"] != "homeboy runner reconcile homeboy-lab")));
+    assert_eq!(
+        serialized["data"]["reconciliation"]["next_action"],
+        "homeboy runner status homeboy-lab --full"
+    );
+    assert_eq!(
+        serialized["data"]["reconciliation"]["retry_predicate"],
+        "an authoritative active-job view is available"
+    );
 }
 
 #[test]
