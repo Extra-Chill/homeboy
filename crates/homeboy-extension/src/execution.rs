@@ -1114,25 +1114,71 @@ mod tests {
         });
     }
 
+    /// The toolchain PATH is forwarded from the rig provider, never fabricated.
+    ///
+    /// This used to assert only `PATH.is_some()`. That was true while this code
+    /// reached into rig directly, but `0f2193b78` put a provider registry
+    /// between them, and this crate does not depend on `homeboy-rig` and so can
+    /// never register one. The assertion became unsatisfiable in its own test
+    /// binary: it could only pass by borrowing a provider some other test had
+    /// registered into the process-global slot, which is the leak, not the
+    /// contract.
+    ///
+    /// The contract at this layer is conditional forwarding, so both directions
+    /// are asserted against a stub.
     #[test]
-    fn build_exec_env_includes_toolchain_path() {
-        let env = build_exec_env(
-            "fixture-extension",
-            None,
-            None,
-            "{}",
-            Some("/tmp/ext"),
-            None,
-            None,
-            None,
+    fn build_exec_env_forwards_the_rig_toolchain_path_only_when_a_provider_supplies_one() {
+        use homeboy_core::rig_toolchain_provider::{
+            register_rig_toolchain_provider, RigToolchainProvider,
+        };
+        use std::ffi::OsString;
+
+        struct StubToolchain(Option<OsString>);
+        impl RigToolchainProvider for StubToolchain {
+            fn command_step_path(&self, _rig_id: Option<&str>) -> Option<OsString> {
+                self.0.clone()
+            }
+        }
+
+        fn exec_env_path() -> Option<String> {
+            build_exec_env(
+                "fixture-extension",
+                None,
+                None,
+                "{}",
+                Some("/tmp/ext"),
+                None,
+                None,
+                None,
+            )
+            .into_iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value)
+        }
+
+        // The provider slot is process-global, so this must not race another
+        // test reading PATH out of the same slot.
+        let _lock = homeboy_core::test_support::env_lock();
+
+        register_rig_toolchain_provider(Box::new(StubToolchain(Some(OsString::from(
+            "/rig/toolchain/bin",
+        )))));
+        assert_eq!(
+            exec_env_path().as_deref(),
+            Some("/rig/toolchain/bin"),
+            "a registered rig toolchain must reach the extension environment verbatim"
         );
 
-        let path = env
-            .iter()
-            .find(|(k, _)| k == "PATH")
-            .map(|(_, v)| v.clone());
-
-        assert!(path.is_some(), "expected extension env to include PATH");
+        // Restored to the no-provider behaviour on the way out: a provider that
+        // supplies nothing is indistinguishable from the default no-op, so this
+        // leaves the slot semantically where it found it.
+        register_rig_toolchain_provider(Box::new(StubToolchain(None)));
+        assert_eq!(
+            exec_env_path(),
+            None,
+            "with no toolchain to forward, PATH must be left to the OS rather than \
+             invented -- an empty or fabricated PATH would hide the host's own"
+        );
     }
 
     #[test]
