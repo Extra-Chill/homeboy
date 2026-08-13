@@ -182,6 +182,15 @@ impl SshClient {
     }
 
     pub(crate) fn build_ssh_args(&self, command: Option<&str>, interactive: bool) -> Vec<String> {
+        self.build_ssh_args_with_multiplexing(command, interactive, false)
+    }
+
+    fn build_ssh_args_with_multiplexing(
+        &self,
+        command: Option<&str>,
+        interactive: bool,
+        disable_multiplexing: bool,
+    ) -> Vec<String> {
         client_ssh_args(
             self,
             SshArgOptions {
@@ -189,6 +198,7 @@ impl SshClient {
                 batch_mode: true,
                 connect_timeout: true,
                 keepalive: true,
+                disable_multiplexing,
                 port_flag: Some(SshPortFlag::Lowercase),
                 command,
                 ..SshArgOptions::default()
@@ -552,7 +562,21 @@ impl SshClient {
         timeout: Duration,
     ) -> CommandOutput {
         let remote_command = wrap_timed_remote_command(command);
-        let args = self.build_ssh_args(Some(&remote_command), false);
+        self.execute_ssh_with_timeout_and_multiplexing(&remote_command, stdin, timeout, false)
+    }
+
+    fn execute_ssh_with_timeout_and_multiplexing(
+        &self,
+        remote_command: &str,
+        stdin: Option<&[u8]>,
+        timeout: Duration,
+        disable_multiplexing: bool,
+    ) -> CommandOutput {
+        let args = self.build_ssh_args_with_multiplexing(
+            Some(remote_command),
+            false,
+            disable_multiplexing,
+        );
         let mut cmd = Command::new("ssh");
         cmd.args(&args)
             .stdout(Stdio::piped())
@@ -720,7 +744,24 @@ impl ProbeLimits {
                 child_resource: None,
             };
         }
-        let output = client.execute_with_timeout(command, timeout);
+        let started = Instant::now();
+        let mut output = client.execute_with_timeout(command, timeout);
+        if is_ssh_mux_message_too_long(&output) {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if !remaining.is_zero() {
+                output = client.execute_ssh_with_timeout_and_multiplexing(
+                    &wrap_timed_remote_command(&client.prepend_env(command)),
+                    None,
+                    remaining,
+                    true,
+                );
+                if output.success {
+                    output.stderr.push_str(
+                        "Homeboy diagnostic probe bypassed the SSH control socket after mux overflow.\n",
+                    );
+                }
+            }
+        }
         if output.timed_out {
             self.record_timeout(command, reason_code);
         }
@@ -742,6 +783,20 @@ impl ProbeLimits {
             });
         }
     }
+}
+
+pub fn is_ssh_mux_message_too_long(output: &CommandOutput) -> bool {
+    !output.success
+        && output
+            .stderr
+            .to_ascii_lowercase()
+            .contains("mm_send_fd: sendmsg(0): message too long")
+}
+
+pub fn used_clean_ssh_session(output: &CommandOutput) -> bool {
+    output
+        .stderr
+        .contains("Homeboy diagnostic probe bypassed the SSH control socket after mux overflow.")
 }
 
 pub(super) fn execute_command_with_stdin_timeout(
@@ -911,6 +966,37 @@ mod bounded_probe_tests {
         let output = client.execute("printf unreachable");
 
         assert!(!output.success);
+    }
+
+    #[test]
+    fn mux_message_too_long_is_classified_for_clean_session_retry() {
+        let output = CommandOutput {
+            stdout: String::new(),
+            stderr: "mux_client_request_session: read from master failed: Broken pipe\nmm_send_fd: sendmsg(0): Message too long".to_string(),
+            success: false,
+            exit_code: 255,
+            timed_out: false,
+            child_resource: None,
+        };
+
+        assert!(is_ssh_mux_message_too_long(&output));
+    }
+
+    #[test]
+    fn clean_session_fallback_does_not_reuse_the_control_socket() {
+        let mut client = localhost_client();
+        client.is_local = false;
+        client.auth = Some(ManagedSshSession {
+            control_path: "/tmp/homeboy-control".to_string(),
+            persist: "1h".to_string(),
+            persist_source: crate::server::ManagedSshSessionPersistSource::Configured,
+        });
+
+        let args = client.build_ssh_args_with_multiplexing(Some("printf ok"), false, true);
+
+        assert!(args.contains(&"ControlMaster=no".to_string()));
+        assert!(args.contains(&"ControlPath=none".to_string()));
+        assert!(!args.iter().any(|arg| arg.contains("/tmp/homeboy-control")));
     }
 }
 

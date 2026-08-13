@@ -8,11 +8,21 @@ pub fn report(
     client: &SshClient,
     options: &RunnerDoctorOptions,
 ) -> RunnerDoctorOutput {
-    let _probe_limits = client.scoped_probe_limits(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_secs(60),
-        "runner doctor",
-    );
+    let scoped = options.scope == RunnerDoctorScope::LabOffload;
+    let (per_probe, overall) = probe_limits(options.scope);
+    let _probe_limits = client.scoped_probe_limits(per_probe, overall, "runner doctor");
+    let ssh_execution = client.execute("printf ok");
+    if !ssh_execution.success || ssh_execution.stdout.trim() != "ok" {
+        return unreachable_report(runner_id, runner, server, ssh_execution);
+    }
+    let mut ssh_details = common::detail_map(&[]);
+    if homeboy::core::server::client::used_clean_ssh_session(&ssh_execution) {
+        ssh_details.insert(
+            "transport".to_string(),
+            "clean_session_fallback".to_string(),
+        );
+    }
+
     // Lab admission uses the live status projection, including the daemon's
     // typed freshness report. Doctor repair must make its decision from that
     // same observation rather than treating a reachable endpoint as ready.
@@ -42,23 +52,19 @@ pub fn report(
         .workspace_root
         .clone()
         .unwrap_or_else(|| ".".to_string());
-    let artifact_root = default_artifact_root(client);
+    let artifact_root = if scoped {
+        "~/.local/share/homeboy/artifacts".to_string()
+    } else {
+        default_artifact_root(client)
+    };
     let mut checks = Vec::new();
     let mut tools = BTreeMap::new();
 
-    checks.push(match client.execute("printf ok") {
-        output if output.success && output.stdout.trim() == "ok" => checks::ok(
-            "ssh.execution",
-            format!("SSH runner {} is reachable", runner_id),
-            None,
-        ),
-        output => checks::error(
-            "ssh.execution",
-            format!("SSH runner {} is not reachable", runner_id),
-            Some("Run `homeboy server status <server-id>` and verify host, user, port, identity_file, and network access".to_string()),
-            common::detail_map(&[("stderr", output.stderr.trim()), ("stdout", output.stdout.trim())]),
-        ),
-    });
+    checks.push(checks::ok_with_details(
+        "ssh.execution",
+        format!("SSH runner {} is reachable", runner_id),
+        ssh_details,
+    ));
 
     let homeboy_command = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let local_homeboy_identity = homeboy_product_identity::build_identity();
@@ -101,63 +107,87 @@ pub fn report(
         )
     });
 
-    let system = SystemProbe {
-        os: common::remote_line(client, "uname -s").unwrap_or_else(|| "unknown".to_string()),
-        arch: common::remote_line(client, "uname -m").unwrap_or_else(|| "unknown".to_string()),
-        kernel: common::remote_line(client, "uname -r"),
+    let system = if scoped {
+        SystemProbe::default()
+    } else {
+        SystemProbe {
+            os: common::remote_line(client, "uname -s").unwrap_or_else(|| "unknown".to_string()),
+            arch: common::remote_line(client, "uname -m").unwrap_or_else(|| "unknown".to_string()),
+            kernel: common::remote_line(client, "uname -r"),
+        }
     };
-    checks.push(checks::ok(
-        "system",
-        format!("{} {} runner detected", system.os, system.arch),
-        None,
-    ));
+    if !scoped {
+        checks.push(checks::ok(
+            "system",
+            format!("{} {} runner detected", system.os, system.arch),
+            None,
+        ));
+    }
 
-    let cpu = CpuProbe {
+    let cpu = if scoped {
+        CpuProbe::default()
+    } else {
+        CpuProbe {
         count: common::remote_line(client, "getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null")
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(1),
+    }
     };
-    checks.push(checks::ok(
-        "cpu",
-        format!("{} CPU cores detected", cpu.count),
-        None,
-    ));
-
-    let memory = probes::remote_memory_probe(client);
-    checks.push(match &memory {
-        Some(memory) => checks::ok(
-            "memory",
-            format!("{} MB RAM detected", memory.total_mb),
+    if !scoped {
+        checks.push(checks::ok(
+            "cpu",
+            format!("{} CPU cores detected", cpu.count),
             None,
-        ),
-        None => checks::warning(
-            "memory",
-            "RAM totals could not be detected".to_string(),
-            Some("Ensure /proc/meminfo or sysctl is available on the remote runner".to_string()),
-        ),
-    });
+        ));
+    }
 
-    let disk = probes::remote_disk_probe(client, &workspace_root);
-    checks.push(match &disk {
-        Some(disk) => checks::ok(
-            "disk.workspace_root",
-            format!("{} MB available at workspace root", disk.available_mb),
-            None,
-        ),
-        None => checks::warning(
-            "disk.workspace_root",
-            "Workspace disk capacity could not be detected".to_string(),
-            Some("Ensure df is available on the remote runner".to_string()),
-        ),
-    });
+    let memory = (!scoped)
+        .then(|| probes::remote_memory_probe(client))
+        .flatten();
+    if !scoped {
+        checks.push(match &memory {
+            Some(memory) => checks::ok(
+                "memory",
+                format!("{} MB RAM detected", memory.total_mb),
+                None,
+            ),
+            None => checks::warning(
+                "memory",
+                "RAM totals could not be detected".to_string(),
+                Some(
+                    "Ensure /proc/meminfo or sysctl is available on the remote runner".to_string(),
+                ),
+            ),
+        });
+    }
 
-    for spec in probes::tool_specs(runner) {
-        if spec.id == "homeboy" {
-            continue;
+    let disk = (!scoped)
+        .then(|| probes::remote_disk_probe(client, &workspace_root))
+        .flatten();
+    if !scoped {
+        checks.push(match &disk {
+            Some(disk) => checks::ok(
+                "disk.workspace_root",
+                format!("{} MB available at workspace root", disk.available_mb),
+                None,
+            ),
+            None => checks::warning(
+                "disk.workspace_root",
+                "Workspace disk capacity could not be detected".to_string(),
+                Some("Ensure df is available on the remote runner".to_string()),
+            ),
+        });
+    }
+
+    if !scoped {
+        for spec in probes::tool_specs(runner) {
+            if spec.id == "homeboy" {
+                continue;
+            }
+            let probe = probes::remote_tool_probe(client, &spec.command, &spec.version_args);
+            checks.push(checks::tool_check(spec.clone(), &probe));
+            tools.insert(spec.id.to_string(), probe);
         }
-        let probe = probes::remote_tool_probe(client, &spec.command, &spec.version_args);
-        checks.push(checks::tool_check(spec.clone(), &probe));
-        tools.insert(spec.id.to_string(), probe);
     }
 
     for command in normalized_required_tools(&options.required_tools) {
@@ -168,43 +198,61 @@ pub fn report(
     }
 
     let mut declared_tools = BTreeMap::new();
-    for (source, specs) in probes::declared_tool_specs_by_source() {
-        let mut source_tools = BTreeMap::new();
-        for spec in specs {
-            let probe = probes::remote_tool_probe(client, &spec.command, &spec.version_args);
-            source_tools.insert(spec.id.clone(), probe.clone());
-            tools.entry(spec.id.clone()).or_insert(probe);
+    if !scoped {
+        for (source, specs) in probes::declared_tool_specs_by_source() {
+            let mut source_tools = BTreeMap::new();
+            for spec in specs {
+                let probe = probes::remote_tool_probe(client, &spec.command, &spec.version_args);
+                source_tools.insert(spec.id.clone(), probe.clone());
+                tools.entry(spec.id.clone()).or_insert(probe);
+            }
+            declared_tools.insert(source, source_tools);
         }
-        declared_tools.insert(source, source_tools);
     }
 
     let playwright = probes::tool_available(&tools, "playwright");
-    let browser_ready = probes::remote_browser_ready(client);
-    let display_ready = probes::remote_display_ready(client);
-    let xvfb_ready = probes::remote_xvfb_ready(client);
+    let browser_ready = (!scoped)
+        .then(|| probes::remote_browser_ready(client))
+        .unwrap_or(false);
+    let display_ready = (!scoped)
+        .then(|| probes::remote_display_ready(client))
+        .unwrap_or(false);
+    let xvfb_ready = (!scoped)
+        .then(|| probes::remote_xvfb_ready(client))
+        .unwrap_or(false);
     let headed_browser_ready = probes::headed_browser_ready(display_ready, xvfb_ready);
-    checks.push(checks::playwright_check(playwright, browser_ready));
-    checks.push(checks::headed_browser_check(
-        headed_browser_ready,
-        display_ready,
-        xvfb_ready,
-    ));
+    if !scoped {
+        checks.push(checks::playwright_check(playwright, browser_ready));
+        checks.push(checks::headed_browser_check(
+            headed_browser_ready,
+            display_ready,
+            xvfb_ready,
+        ));
+    }
 
-    let workspace_writable = probes::remote_path_writable(client, &workspace_root);
-    checks.push(checks::path_writable_check(
-        "workspace.writable",
-        workspace_writable,
-        Path::new(&workspace_root),
-        "Make the remote workspace root writable by the runner user",
-    ));
+    let workspace_writable = (!scoped)
+        .then(|| probes::remote_path_writable(client, &workspace_root))
+        .unwrap_or(false);
+    if !scoped {
+        checks.push(checks::path_writable_check(
+            "workspace.writable",
+            workspace_writable,
+            Path::new(&workspace_root),
+            "Make the remote workspace root writable by the runner user",
+        ));
+    }
 
-    let artifact_store_available = probes::remote_artifact_store_available(client, &artifact_root);
-    checks.push(checks::path_writable_check(
-        "artifact_store.available",
-        artifact_store_available,
-        Path::new(&artifact_root),
-        "Create the artifact root or configure HOMEBOY_ARTIFACT_ROOT to a writable directory",
-    ));
+    let artifact_store_available = (!scoped)
+        .then(|| probes::remote_artifact_store_available(client, &artifact_root))
+        .unwrap_or(false);
+    if !scoped {
+        checks.push(checks::path_writable_check(
+            "artifact_store.available",
+            artifact_store_available,
+            Path::new(&artifact_root),
+            "Create the artifact root or configure HOMEBOY_ARTIFACT_ROOT to a writable directory",
+        ));
+    }
 
     if options.scope == RunnerDoctorScope::LabOffload {
         checks.extend(probes::lab_homeboy_path_checks(
@@ -332,6 +380,34 @@ pub fn report(
             .and_then(|status| status.daemon_freshness.clone()),
         admission_summary: persisted_status.as_ref().and_then(admission_summary),
         repairs: Vec::new(),
+    }
+}
+
+pub(super) fn probe_limits(scope: RunnerDoctorScope) -> (std::time::Duration, std::time::Duration) {
+    match scope {
+        RunnerDoctorScope::LabOffload => (
+            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(20),
+        ),
+        RunnerDoctorScope::General | RunnerDoctorScope::SecretEnv => (
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(60),
+        ),
+    }
+}
+
+pub(super) fn unreachable_report(
+    runner_id: &str,
+    runner: &Runner,
+    server: &Server,
+    output: homeboy::core::server::CommandOutput,
+) -> RunnerDoctorOutput {
+    RunnerDoctorOutput {
+        variant: "doctor", command: "runner.doctor", runner_id: runner_id.to_string(),
+        runner: runner_summary("ssh", Some(runner), Some(server)), status: RunnerDoctorStatus::Error,
+        capabilities: RunnerCapabilities::default(), resources: RunnerResources::default(),
+        checks: vec![checks::error("ssh.execution", format!("SSH runner {} is not reachable", runner_id), Some("Run `homeboy server status <server-id>` and verify host, user, port, identity_file, and network access".to_string()), common::detail_map(&[("stderr", output.stderr.trim()), ("stdout", output.stdout.trim())]))],
+        secret_env_migration: None, diagnostics: Some(types::RunnerDoctorDiagnostics { status: "partial", completed_checks: 1, timed_out_probes: Vec::new() }), daemon_recovery: None, admission_summary: None, repairs: Vec::new(),
     }
 }
 
