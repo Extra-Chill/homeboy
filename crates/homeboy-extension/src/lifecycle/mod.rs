@@ -335,7 +335,7 @@ pub use homeboy_core::extension_update_check::{read_source_revision, read_source
 use update::is_extension_update_workdir_clean;
 pub(crate) use update::write_requested_source_ref;
 pub(crate) use update::write_source_metadata;
-pub use update::{extension_update_dirty_paths, update};
+pub use update::{extension_update_dirty_paths, update, update_linked_group};
 
 /// Uninstall a extension. Automatically detects symlinks vs cloned directories.
 /// - Symlinked extensions: removes symlink only (source preserved)

@@ -587,9 +587,6 @@ fn controller_runtime_set_error(
 }
 
 fn controller_runtime_identity_error(runner_id: &str, controller: &str, requested: &str) -> Error {
-    // The controller is already a distinct immutable build, so upgrading it
-    // cannot restore the pinned recipe. Reissue the preserved invocation to
-    // construct a new recipe for the current controller runtime.
     let recovery = preserved_invocation();
     let mut error = Error::validation_invalid_argument(
         "runtime_set",

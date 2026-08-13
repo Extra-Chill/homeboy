@@ -64,6 +64,10 @@ pub struct VerifyGateOptions {
     /// gated from follow-up agents.
     #[serde(default)]
     pub private_verify: Vec<String>,
+    /// Provenance for each gate input captured by the controller before Cook
+    /// becomes durable. Commands remain the execution contract for compatibility.
+    #[serde(default)]
+    pub input_sources: Vec<AgentTaskGateInputSource>,
     /// Feedback policy for failed private gates.
     #[serde(default = "default_private_gate_reveal")]
     pub private_gate_reveal: AgentTaskGateRevealPolicy,
@@ -110,6 +114,19 @@ pub struct VerifyGateOptions {
     /// checkout before deterministic verification.
     #[serde(default = "default_hydrate_dependencies")]
     pub hydrate_dependencies: bool,
+}
+
+/// Controller-captured provenance for an inline or file-backed gate program.
+/// Private sources intentionally retain only path-independent metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateInputSource {
+    pub visibility: AgentTaskGateVisibility,
+    pub source_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub redaction_policy: AgentTaskGateRevealPolicy,
 }
 
 fn default_hydrate_dependencies() -> bool {
@@ -343,6 +360,7 @@ impl Default for VerifyGateOptions {
         Self {
             verify: Vec::new(),
             private_verify: Vec::new(),
+            input_sources: Vec::new(),
             private_gate_reveal: default_private_gate_reveal(),
             execution_policy: AgentTaskGateExecutionPolicy::OrderedFailFast,
             gate_timeout_seconds: default_gate_timeout_seconds(),

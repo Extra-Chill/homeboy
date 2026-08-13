@@ -725,7 +725,9 @@ fn current_executable() -> Result<PathBuf> {
     })
 }
 
-fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
+/// Seal a verified executable for a command-scoped controller continuation.
+/// The returned pin is content-addressed, executable, and self-identifying.
+pub fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
     let digest = controller_executable_digest(executable)?;
     let pinned_path = pinned_path(identity, &digest)?;
     publish_pin(executable, &pinned_path, &digest)?;
@@ -733,6 +735,73 @@ fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
     let runtime = runtime_pin(identity, executable, &pinned_path, &digest);
     validate_pin(&runtime)?;
     Ok(runtime)
+}
+
+/// Build and seal a controller executable from the exact source revision the
+/// runner already verified. This is intentionally explicit: runner refreshes
+/// must not depend on controller network or build availability.
+pub fn materialize_source_commit(source: &str, commit: &str, identity: &str) -> Result<Value> {
+    let workspace = tempfile::tempdir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create controller candidate workspace".to_string()),
+        )
+    })?;
+    let checkout = workspace.path().join("source");
+    run_command(
+        "git",
+        ["clone", "--quiet", source, &checkout.display().to_string()],
+    )?;
+    run_command(
+        "git",
+        [
+            "-C",
+            &checkout.display().to_string(),
+            "checkout",
+            "--quiet",
+            "--detach",
+            commit,
+        ],
+    )?;
+    let resolved = Command::new("git")
+        .args(["-C", &checkout.display().to_string(), "rev-parse", "HEAD"])
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("verify controller candidate source commit".to_string()),
+            )
+        })?;
+    if !resolved.status.success() || String::from_utf8_lossy(&resolved.stdout).trim() != commit {
+        return Err(Error::validation_invalid_argument(
+            "commit",
+            "controller candidate source did not resolve the requested exact commit",
+            Some(commit.to_string()),
+            None,
+        ));
+    }
+    let target =
+        crate::cleanup::acquire_shared_cargo_target(&format!("controller-runtime:{commit}"))?;
+    let build = Command::new("cargo")
+        .args(["build", "--release", "--bin", "homeboy"])
+        .env("CARGO_TARGET_DIR", target.target_dir())
+        .current_dir(&checkout)
+        .status()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("build controller candidate source".to_string()),
+            )
+        })?;
+    if !build.success() {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            format!("controller candidate build failed with status {build}"),
+            Some(source.to_string()),
+            None,
+        ));
+    }
+    pin_executable(&target.target_dir().join("release/homeboy"), identity)
 }
 
 fn runtime_pin(identity: &str, executable: &Path, pinned_path: &Path, digest: &str) -> Value {
@@ -2184,6 +2253,20 @@ fn executable_identity(path: &Path, verified_digest: Option<&str>) -> Result<Str
     if let Some(identity) = test_controller_identity(path, verified_digest) {
         return identity;
     }
+    // Never spawn our own bytes to ask who we are. A candidate whose contents
+    // are identical to the running executable *is* the running executable, so
+    // its identity is the one compiled into this process — proven by digest
+    // rather than self-reported, which is strictly stronger than asking it.
+    //
+    // This also removes a hazard: the candidate is not always a controller.
+    // Under `cargo test` the running executable is a libtest binary, and a pin
+    // taken from it is a byte-identical copy. Executing that copy makes libtest
+    // parse `self identity` as two test *name filters* rather than a
+    // subcommand, run every test matching them, and return their output as the
+    // "identity" (#12226).
+    if is_current_executable_content(path, verified_digest) {
+        return Ok(crate::build_identity::current().display);
+    }
     let output = Command::new(path)
         .args(["self", "identity"])
         .output()
@@ -2208,13 +2291,97 @@ fn executable_identity(path: &Path, verified_digest: Option<&str>) -> Result<Str
         return Err(Error::validation_invalid_argument(
             "controller_runtime",
             format!(
-                "pinned controller executable identity check returned invalid output: {stdout}"
+                "pinned controller executable identity check returned invalid output: {}",
+                bounded_identity_output(&stdout)
             ),
             Some(path.display().to_string()),
             None,
         ));
     }
     Ok(actual.expect("identity was checked above"))
+}
+
+/// Whether `path` is the executable this process is running from.
+///
+/// Compared by canonical path so a pin reached through a symlink still resolves
+/// to the same file. An unresolvable path is treated as "not us", which keeps
+/// the probe fail-closed: the worst case is the pre-existing spawn.
+fn is_current_executable(path: &Path) -> bool {
+    let Ok(current) = std::env::current_exe() else {
+        return false;
+    };
+    match (path.canonicalize(), current.canonicalize()) {
+        (Ok(candidate), Ok(current)) => candidate == current,
+        _ => false,
+    }
+}
+
+/// SHA-256 of the executable this process is running from, hashed at most once.
+///
+/// Pins are content-addressed copies, so identity questions about them reduce
+/// to "are these our bytes?".
+///
+/// Deliberately hashed outside [`executable_digest`]'s memo. That memo is keyed
+/// by observed file identity precisely so it *expires* when a pin is replaced
+/// underneath it — that expiry is the reason pins are validated at all. Our own
+/// executable is a different question: it cannot change under this process, so
+/// it is cached for the process lifetime and kept out of a cache whose whole
+/// job is to notice change.
+fn current_executable_digest() -> Option<&'static str> {
+    static CURRENT_EXECUTABLE_DIGEST: OnceLock<Option<String>> = OnceLock::new();
+    CURRENT_EXECUTABLE_DIGEST
+        .get_or_init(|| {
+            let current = std::env::current_exe().ok()?;
+            content_hash::sha256_file(&current).ok()
+        })
+        .as_deref()
+}
+
+/// Whether `path` holds the same bytes as the running executable.
+///
+/// Path equality is only the fast path: a controller-runtime pin is a *copy*
+/// living under a content-addressed directory, so it is never the same path as
+/// the executable it was taken from. Any failure to establish this answers
+/// "no", leaving the pre-existing spawn as the fallback.
+fn is_current_executable_content(path: &Path, verified_digest: Option<&str>) -> bool {
+    if is_current_executable(path) {
+        return true;
+    }
+    let Some(current_digest) = current_executable_digest() else {
+        return false;
+    };
+    // Reuse the digest the caller already computed and checked when it has one;
+    // pin verification hashes the candidate immediately before asking for its
+    // identity, so the common path adds no work at all.
+    //
+    // Without one, hash directly rather than through `executable_digest`: this
+    // is an identity question about a candidate, not a pin whose memo must
+    // expire when it is replaced underneath us.
+    match verified_digest {
+        Some(digest) => digest == current_digest,
+        None => content_hash::sha256_file(path).is_ok_and(|digest| digest == current_digest),
+    }
+}
+
+/// Cap untrusted probe output before it becomes an error message.
+///
+/// This output is whatever an arbitrary executable wrote, and the error
+/// carrying it is serialized into durable run records. An unbounded copy turned
+/// one failed probe into a ~40 KB diagnostic that buried its own cause.
+fn bounded_identity_output(stdout: &str) -> String {
+    const LIMIT: usize = 512;
+    if stdout.len() <= LIMIT {
+        return stdout.to_string();
+    }
+    let mut end = LIMIT;
+    while end > 0 && !stdout.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}... [truncated, {} bytes total]",
+        &stdout[..end],
+        stdout.len()
+    )
 }
 
 /// Test-support uses a copied libtest executable as its fixture. The contract
@@ -2599,6 +2766,27 @@ fn register_test_fixture_candidate(source: &Path, candidate: &Path, expected_dig
 #[cfg(not(all(unix, any(test, feature = "test-support"))))]
 fn register_test_fixture_candidate(_source: &Path, _candidate: &Path, _expected_digest: &str) {}
 
+/// Resolve the test-support controller fixture's digest once, up front.
+///
+/// Pin validation consults that fixture, and its digest cache is process-wide
+/// and deliberately not cleared between tests. A test that measures digest
+/// computations therefore has to decide whether the fixture is warm rather than
+/// inherit the answer from whichever tests ran before it — otherwise it passes
+/// under `cargo test` and fails under nextest, which gives every test its own
+/// process (#12226).
+///
+/// Best effort: with no fixture configured there is nothing to warm, and the
+/// caller's measurement is unaffected.
+#[cfg(all(unix, test))]
+fn warm_test_controller_fixture_digest() {
+    let Some(source) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) else {
+        return;
+    };
+    let source = PathBuf::from(source);
+    crate::test_support::ensure_test_controller_fixture(&source);
+    let _ = test_controller_fixture_digest(&source);
+}
+
 fn required_runtime_string<'a>(runtime: &'a Value, pointer: &str, label: &str) -> Result<&'a str> {
     runtime
         .pointer(pointer)
@@ -2639,6 +2827,103 @@ fn run_command<const N: usize>(program: &str, args: [&str; N]) -> Result<()> {
             None,
             None,
         ))
+    }
+}
+
+#[cfg(test)]
+mod identity_probe_tests {
+    use super::*;
+
+    /// The running executable under `cargo test` is a libtest binary, which
+    /// would treat `self identity` as test-name filters and re-run the suite.
+    /// Resolving our own identity must never depend on spawning anything.
+    #[test]
+    fn the_current_executable_reports_its_compiled_identity_without_spawning() {
+        let current = std::env::current_exe().expect("current test executable");
+
+        assert!(is_current_executable(&current));
+        assert_eq!(
+            executable_identity(&current, None).expect("self identity"),
+            build_identity::current().display
+        );
+    }
+
+    /// A controller-runtime pin is a *copy* under a content-addressed
+    /// directory, so it is never the same path as the executable it came from.
+    /// Identity must still resolve without executing it.
+    #[cfg(unix)]
+    #[test]
+    fn a_byte_identical_copy_resolves_without_spawning() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = std::env::current_exe().expect("current test executable");
+        let copy = temp.path().join("homeboy");
+        fs::copy(&current, &copy).expect("copy the running executable");
+
+        assert!(!is_current_executable(&copy), "the copy is a distinct path");
+        assert!(is_current_executable_content(&copy, None));
+        assert_eq!(
+            executable_identity(&copy, None).expect("copy identity"),
+            build_identity::current().display
+        );
+    }
+
+    /// The digest the caller already verified is authoritative: a candidate
+    /// carrying some other binary's digest must not be mistaken for us.
+    #[test]
+    fn a_foreign_verified_digest_is_not_treated_as_self() {
+        let current = std::env::current_exe().expect("current test executable");
+
+        assert!(!is_current_executable_content(
+            Path::new("/definitely/missing/homeboy"),
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        ));
+        // ...while our own digest still identifies us through that same seam.
+        let digest = executable_digest(&current).expect("digest the running executable");
+        assert!(is_current_executable_content(
+            Path::new("/definitely/missing/homeboy"),
+            Some(&digest)
+        ));
+    }
+
+    #[test]
+    fn a_path_that_is_not_the_running_executable_is_not_treated_as_self() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let other = temp.path().join("not-the-current-exe");
+        fs::write(&other, b"not an executable").expect("write candidate");
+
+        assert!(!is_current_executable(&other));
+        // A path that cannot be resolved at all must also not claim to be us.
+        assert!(!is_current_executable(Path::new(
+            "/definitely/missing/homeboy"
+        )));
+    }
+
+    #[test]
+    fn probe_output_within_the_cap_is_carried_verbatim() {
+        assert_eq!(bounded_identity_output("boom"), "boom");
+    }
+
+    #[test]
+    fn oversized_probe_output_is_truncated_and_reports_its_true_size() {
+        let noisy = "x".repeat(4096);
+        let bounded = bounded_identity_output(&noisy);
+
+        assert!(bounded.len() < noisy.len());
+        assert!(bounded.starts_with("xxxx"));
+        assert!(
+            bounded.contains("[truncated, 4096 bytes total]"),
+            "{bounded}"
+        );
+    }
+
+    /// Truncation slices bytes, so it must not split a multi-byte character.
+    #[test]
+    fn truncation_never_splits_a_multibyte_character() {
+        let noisy = "é".repeat(4096);
+        let bounded = bounded_identity_output(&noisy);
+
+        assert!(bounded.contains("[truncated,"), "{bounded}");
+        assert!(bounded.starts_with('é'));
     }
 }
 
@@ -3865,6 +4150,16 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         crate::test_support::with_isolated_home(|_| {
+            // `pin_executable` validates the pin it publishes, and validation
+            // resolves the test-support controller fixture's digest. That
+            // fixture cache is process-wide state this test does not own, so
+            // warm it deliberately: the count below is meant to measure
+            // publication, not whether a neighbouring test happened to warm the
+            // fixture first. Leaving it to chance is why this passed under
+            // `cargo test` and failed under nextest, which runs every test in
+            // its own process (#12226).
+            warm_test_controller_fixture_digest();
+
             EXECUTABLE_DIGESTS
                 .get_or_init(|| Mutex::new(BTreeMap::new()))
                 .lock()

@@ -51,35 +51,67 @@ use crate::core::io::output_file::write_output_file;
 
 const HANDOFF_SCHEMA: &str = "homeboy/agent-task-cook-local-detach-handoff/v1";
 
-/// Bound on how long the launcher waits for the detached cook to publish its
-/// durable identity before reporting the handoff as still pending.
+/// Bound on how long the launcher waits for the detached cook to materialize
+/// its first executable attempt before reporting the handoff as pending.
 ///
-/// This wait is no longer load-bearing. The daemon submit returns a job id
-/// synchronously, and `record_detached_cook_handoff_parent` makes the cook id
-/// resolvable before a child even exists, so both handles in the envelope are
-/// addressable the moment it is printed. What the wait still buys is the
-/// *attempt* id, which genuinely does not exist until the cook materializes its
-/// first attempt and which no design can conjure synchronously.
-///
-/// It is kept at its historical default so no existing caller that reads
-/// `run_id` regresses, and it is now safe to set to `0`: a zero-wait envelope
-/// still names an addressable cook and an inspectable controller job, which was
-/// not true before the daemon owned the lifecycle.
+/// The placeholder and controller job make the Cook addressable before this
+/// boundary, but they do not prove the child has durable execution ownership.
+/// `accepted` is reserved for that later proof. A zero wait consequently emits
+/// a pending handoff, never an unproven acceptance.
 const DEFAULT_HANDOFF_TIMEOUT_MS: u64 = 30_000;
 const HANDOFF_POLL: Duration = Duration::from_millis(100);
 
 /// Test and operator override for the bounded handoff wait.
 const HANDOFF_TIMEOUT_ENV: &str = "HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS";
+const LOCAL_COOK_LAUNCH_TOKEN_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN";
+const LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_PATH";
 
-/// Whether this invocation is a Cook asking its controller to detach.
-fn is_detached_cook(cli: &Cli) -> bool {
-    cli.detach_after_handoff
-        && matches!(
-            cli.command,
-            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-                command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
-            })
-        )
+/// Whether this is an unsupervised local Cook controller invocation.
+///
+/// Every accepted local Cook is re-executed under the durable controller job.
+/// The one-use launch token prevents only that exact child from handing itself
+/// off again; ambient environment variables cannot bypass supervision.
+fn is_unsupervised_local_cook(cli: &Cli) -> bool {
+    matches!(
+        cli.command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+        })
+    ) && !consume_local_cook_launch_token()
+}
+
+fn consume_local_cook_launch_token() -> bool {
+    let (Some(token), Some(path)) = (
+        std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_ENV),
+        std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV),
+    ) else {
+        return false;
+    };
+    consume_local_cook_launch_token_at(&token, &PathBuf::from(path))
+}
+
+fn consume_local_cook_launch_token_at(token: &std::ffi::OsStr, path: &Path) -> bool {
+    let valid = std::fs::read_to_string(path)
+        .ok()
+        .is_some_and(|stored| stored.trim_end() == token);
+    if valid {
+        let _ = std::fs::remove_file(path);
+    }
+    valid
+}
+
+/// Durable local supervision needs both a separate child session and an exact
+/// process identity for safe cancellation. Platforms without both retain the
+/// normal foreground Cook path rather than making an ownership promise they
+/// cannot enforce.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_cook_supervision_supported() -> bool {
+    true
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn local_cook_supervision_supported() -> bool {
+    false
 }
 
 /// Serve `--detach-after-handoff` by re-executing this exact controller-owned
@@ -98,11 +130,29 @@ pub(super) fn intercept_local_detached_cook(
     provider_placement: Option<&str>,
     provider_runner_id: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
-    if !is_detached_cook(cli) {
+    if !is_unsupervised_local_cook(cli)
+        || (!cli.detach_after_handoff && provider_placement != Some("local"))
+    {
         return Ok(None);
     }
+    if !local_cook_supervision_supported() {
+        return if cli.detach_after_handoff {
+            Err(Error::validation_invalid_argument(
+                "detach-after-handoff",
+                "local Cook detachment requires a platform with session detachment and exact process start identity support",
+                None,
+                None,
+            ))
+        } else {
+            Ok(None)
+        };
+    }
     if runner_side {
-        return Err(runner_side_detach_error());
+        return if cli.detach_after_handoff {
+            Err(runner_side_detach_error())
+        } else {
+            Ok(None)
+        };
     }
 
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
@@ -116,8 +166,12 @@ pub(super) fn intercept_local_detached_cook(
     let cook_id = requested_cook_id
         .clone()
         .unwrap_or_else(|| format!("cook-detached-{}", uuid::Uuid::new_v4()));
-    let mut child_args =
-        detached_cook_child_args(normalized_args, &cook_id, requested_cook_id.is_some());
+    let mut child_args = detached_cook_child_args(
+        normalized_args,
+        &cook_id,
+        requested_cook_id.is_some(),
+        cli.detach_after_handoff,
+    );
     let session_root = detached_session_root(&cook_id)?;
     // A detached child cannot answer a `--prompt -`: its stdin is closed and the
     // bytes live only in the launcher's pipe. Capture them here so the exact
@@ -134,7 +188,9 @@ pub(super) fn intercept_local_detached_cook(
     // nothing has been spawned and no detached work can leak.
     agent_task_lifecycle::record_detached_cook_handoff_parent(&cook_id)?;
     let route = detached_route(cli);
-    let mut child = match spawn_detached_cook(&child_args, &log_path, route.as_ref()) {
+    let launch_token = create_local_cook_launch_token(&session_root)?;
+    let mut child = match spawn_detached_cook(&child_args, &log_path, route.as_ref(), &launch_token)
+    {
         Ok(child) => child,
         Err(error) => {
             let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
@@ -196,41 +252,67 @@ pub(super) fn intercept_local_detached_cook(
                 return Err(error);
             }
         };
-    // The parent record and admitted controller job are the authoritative durable
-    // transition. Do not wait for a slow provider to materialize its first attempt.
-    let handoff = DetachedCookHandoff {
-        state: DetachedHandoffState::Accepted,
-        run_id: Some(cook_id.clone()),
-        waited_ms: 0,
-    };
-    crate::commands::agent_task::run::announce_durable_cook_identity(Some(&cook_id), &cook_id);
-    let envelope = handoff_envelope(
-        &cook_id,
-        pid,
-        &log_path,
-        &handoff,
-        &controller_job,
-        cli.placement,
-        provider_placement.unwrap_or("local"),
-        provider_runner_id,
-    );
-    let stdout = match finalize_handoff_envelope(&envelope, output_file) {
-        Ok(stdout) => stdout,
-        Err(error) => {
-            terminate_and_reap_detached_child(&mut child);
-            let _ = controller_client.cancel(
+    project_supervisor_or_compensate(
+        agent_task_lifecycle::record_detached_cook_supervisor(&cook_id, controller_job.job_id()),
+        || {
+            compensate_supervisor_projection_failure(
+                &controller_client,
                 controller_job.job_id(),
-                "detached Cook handoff output could not be written",
-            );
-            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                &mut child,
                 &cook_id,
-                "detached Cook handoff output could not be written",
-            );
-            return Err(error);
+            )
+        },
+    )?;
+    if cli.detach_after_handoff {
+        // Controller supervision makes the placeholder addressable, but
+        // acceptance requires the child to durably materialize its first
+        // executable attempt. Until then, callers receive an explicitly pending
+        // handoff instead of a success that could be followed by a zero-task
+        // terminal placeholder. Attached callers stream immediately; they do
+        // not receive a handoff acknowledgement to classify.
+        let handoff = await_durable_handoff(&cook_id, &mut child, handoff_timeout())?;
+        if handoff.state == DetachedHandoffState::ExitedBeforeHandoff {
+            return Err(Error::validation_invalid_argument(
+                "detach-after-handoff",
+                "detached Cook exited before materializing its first attempt",
+                Some(cook_id),
+                None,
+            ));
         }
-    };
-    println!("{stdout}");
-    Ok(Some(0))
+        crate::commands::agent_task::run::announce_durable_cook_identity(Some(&cook_id), &cook_id);
+        let envelope = handoff_envelope(
+            &cook_id,
+            pid,
+            &log_path,
+            &handoff,
+            &controller_job,
+            cli.placement,
+            provider_placement.unwrap_or("local"),
+            provider_runner_id,
+        );
+        let stdout = match finalize_handoff_envelope(&envelope, output_file) {
+            Ok(stdout) => stdout,
+            Err(error) => {
+                terminate_and_reap_detached_child(&mut child);
+                let _ = controller_client.cancel(
+                    controller_job.job_id(),
+                    "detached Cook handoff output could not be written",
+                );
+                let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                    &cook_id,
+                    "detached Cook handoff output could not be written",
+                );
+                return Err(error);
+            }
+        };
+        println!("{stdout}");
+        return Ok(Some(0));
+    }
+
+    // Attachment is observation only. The controller job and detached child have
+    // already accepted ownership, so losing this client cannot cancel provider work.
+    let status = stream_attached_cook_log(&mut child, &log_path)?;
+    Ok(Some(status.code().unwrap_or(1)))
 }
 
 /// Serialize once, then write that exact acknowledgement wherever the caller
@@ -326,6 +408,7 @@ fn detached_cook_child_args(
     normalized_args: &[String],
     cook_id: &str,
     has_explicit_cook_id: bool,
+    consume_output: bool,
 ) -> Vec<String> {
     let mut args = Vec::new();
     let mut values = normalized_args.iter().skip(1);
@@ -335,11 +418,11 @@ fn detached_cook_child_args(
         }
         // The launcher writes the handoff envelope to both destinations. The
         // child must not overwrite that durable acknowledgement at completion.
-        if arg == "--output" || arg == "-o" {
+        if consume_output && (arg == "--output" || arg == "-o") {
             let _ = values.next();
             continue;
         }
-        if arg.starts_with("--output=") {
+        if consume_output && arg.starts_with("--output=") {
             continue;
         }
         args.push(arg.clone());
@@ -349,6 +432,30 @@ fn detached_cook_child_args(
         args.push(cook_id.to_string());
     }
     args
+}
+
+fn stream_attached_cook_log(
+    child: &mut std::process::Child,
+    log_path: &Path,
+) -> homeboy::core::Result<std::process::ExitStatus> {
+    let mut offset = 0;
+    loop {
+        if let Ok(log) = std::fs::read_to_string(log_path) {
+            if log.len() > offset {
+                print!("{}", &log[offset..]);
+                offset = log.len();
+            }
+        }
+        if let Some(status) = child.try_wait().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("observe supervised local Cook".to_string()),
+            )
+        })? {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// The destination the detached cook's notifications belong to.
@@ -442,10 +549,26 @@ fn detached_session_root(cook_id: &str) -> homeboy::core::Result<PathBuf> {
 /// that came from argv or from the launcher's own environment. Setting both
 /// variables together also normalizes a half-set pair inherited from the
 /// launcher, which the child would otherwise reject as a validation error.
+fn create_local_cook_launch_token(session_root: &Path) -> homeboy::core::Result<(String, PathBuf)> {
+    let token = uuid::Uuid::new_v4().to_string();
+    let path = session_root.join("launch-token");
+    std::fs::write(&path, &token)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| Error::internal_io(error.to_string(), Some(path.display().to_string())),
+        )?;
+    }
+    Ok((token, path))
+}
+
 fn spawn_detached_cook(
     args: &[String],
     log_path: &Path,
     route: Option<&homeboy::core::notification_route::NotificationRoute>,
+    launch_token: &(String, PathBuf),
 ) -> homeboy::core::Result<std::process::Child> {
     let exe = std::env::current_exe().map_err(|error| {
         Error::internal_io(
@@ -463,6 +586,8 @@ fn spawn_detached_cook(
     let mut command = Command::new(exe);
     command
         .args(args)
+        .env(LOCAL_COOK_LAUNCH_TOKEN_ENV, &launch_token.0)
+        .env(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV, &launch_token.1)
         .envs(homeboy::core::notification_route::child_env(route))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
@@ -474,6 +599,33 @@ fn spawn_detached_cook(
             Some("spawn detached local cook".to_string()),
         )
     })
+}
+
+fn compensate_supervisor_projection_failure(
+    client: &homeboy::core::daemon::LocalControllerJobClient,
+    job_id: &str,
+    child: &mut std::process::Child,
+    cook_id: &str,
+) {
+    let _ = client.cancel(
+        job_id,
+        "local Cook supervisor projection could not be persisted",
+    );
+    terminate_and_reap_detached_child(child);
+    let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+        cook_id,
+        "local Cook supervisor projection could not be persisted",
+    );
+}
+
+fn project_supervisor_or_compensate(
+    projection: homeboy::core::Result<()>,
+    compensate: impl FnOnce(),
+) -> homeboy::core::Result<()> {
+    if projection.is_err() {
+        compensate();
+    }
+    projection
 }
 
 fn terminate_and_reap_detached_child(child: &mut std::process::Child) {
@@ -538,9 +690,9 @@ fn handoff_timeout() -> Duration {
     Duration::from_millis(millis)
 }
 
-/// Poll durable state until the detached cook is addressable, it dies, or the
-/// bound elapses. A launcher that returned before the record existed would hand
-/// back an id that `agent-task status` cannot yet resolve.
+/// Poll durable state until the detached cook materializes an executable
+/// attempt, it dies, or the bound elapses. The placeholder is addressable while
+/// pending; an index whose named attempt can be read proves durable ownership.
 ///
 /// Liveness is read from the child handle rather than from the pid. The
 /// detached cook is still this process's direct child until this process exits,
@@ -551,35 +703,77 @@ fn await_durable_handoff(
     cook_id: &str,
     child: &mut std::process::Child,
     timeout: Duration,
-) -> DetachedCookHandoff {
+) -> homeboy::core::Result<DetachedCookHandoff> {
     let started = Instant::now();
     loop {
-        if agent_task_lifecycle::cook_index_exists(cook_id).unwrap_or(false) {
-            let run_id = agent_task_lifecycle::cook_index(cook_id)
-                .ok()
-                .map(|index| index.latest_run_id);
-            return DetachedCookHandoff {
+        if let Some(run_id) = durable_attempt_id(cook_id) {
+            return Ok(DetachedCookHandoff {
                 state: DetachedHandoffState::Accepted,
-                run_id,
+                run_id: Some(run_id),
                 waited_ms: started.elapsed().as_millis() as u64,
-            };
+            });
         }
-        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-            return DetachedCookHandoff {
-                state: DetachedHandoffState::ExitedBeforeHandoff,
-                run_id: None,
-                waited_ms: started.elapsed().as_millis() as u64,
-            };
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                // Process exit and index publication can cross. Re-read the
+                // durable ownership proof before failing, and let lifecycle
+                // reject a stale failure mutation if materialization wins this
+                // race afterward.
+                if let Some(run_id) = durable_attempt_id(cook_id) {
+                    return Ok(DetachedCookHandoff {
+                        state: DetachedHandoffState::Accepted,
+                        run_id: Some(run_id),
+                        waited_ms: started.elapsed().as_millis() as u64,
+                    });
+                }
+                agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                    cook_id,
+                    "detached Cook exited before materializing its first attempt",
+                )?;
+                if let Some(run_id) = durable_attempt_id(cook_id) {
+                    return Ok(DetachedCookHandoff {
+                        state: DetachedHandoffState::Accepted,
+                        run_id: Some(run_id),
+                        waited_ms: started.elapsed().as_millis() as u64,
+                    });
+                }
+                return Ok(DetachedCookHandoff {
+                    state: DetachedHandoffState::ExitedBeforeHandoff,
+                    run_id: None,
+                    waited_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            // An observation error is not proof that the child died. Preserve
+            // the pending contract and let durable supervision continue.
+            Err(_) => {
+                return Ok(DetachedCookHandoff {
+                    state: DetachedHandoffState::Pending,
+                    run_id: None,
+                    waited_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            Ok(None) => {}
         }
         if started.elapsed() >= timeout {
-            return DetachedCookHandoff {
+            return Ok(DetachedCookHandoff {
                 state: DetachedHandoffState::Pending,
                 run_id: None,
                 waited_ms: started.elapsed().as_millis() as u64,
-            };
+            });
         }
         std::thread::sleep(HANDOFF_POLL);
     }
+}
+
+/// Read the exact durable attempt an accepted handoff names. An index file on
+/// its own is not sufficient: a caller must be able to resolve the attempt it
+/// receives immediately.
+fn durable_attempt_id(cook_id: &str) -> Option<String> {
+    let run_id = agent_task_lifecycle::cook_index(cook_id)
+        .ok()?
+        .latest_run_id;
+    (!run_id.trim().is_empty() && agent_task_lifecycle::exact_record(&run_id).is_ok())
+        .then_some(run_id)
 }
 
 /// The launcher's only output: a bounded, machine-readable handoff naming the
@@ -730,29 +924,28 @@ mod tests {
         );
     }
 
-    /// Nothing but a detach-requesting Cook may be intercepted:
-    /// every other invocation has to fall through to normal routing untouched.
+    /// Every unsupervised local Cook is intercepted; non-local and non-Cook
+    /// invocations continue through normal routing untouched.
     /// These cases must not spawn anything.
     #[test]
-    fn only_a_detaching_cook_is_intercepted() {
-        for extra in [vec!["--placement", "local"], vec![]] {
-            let (cli, normalized) = cook_cli(&extra);
+    fn only_a_local_cook_is_intercepted() {
+        let (local, _) = cook_cli(&[]);
+        assert!(is_unsupervised_local_cook(&local));
 
-            assert!(!is_detached_cook(&cli), "{extra:?}");
-            assert_eq!(
-                intercept_local_detached_cook(&cli, &normalized, None, false, Some("local"), None,)
-                    .expect("no interception"),
-                None,
-                "{extra:?}"
-            );
-        }
+        let (auto, normalized) = cook_cli(&["--placement", "auto"]);
+        assert!(is_unsupervised_local_cook(&auto));
+        assert_eq!(
+            intercept_local_detached_cook(&auto, &normalized, None, false, Some("lab"), None,)
+                .expect("non-local route falls through"),
+            None,
+        );
     }
 
     #[test]
     fn detachment_owns_the_controller_for_auto_lab_and_local_placement() {
         for placement in ["auto", "lab", "local", "lab-or-local"] {
             let (cli, _) = cook_cli(&["--placement", placement, "--detach-after-handoff"]);
-            assert!(is_detached_cook(&cli), "{placement}");
+            assert!(is_unsupervised_local_cook(&cli), "{placement}");
         }
     }
 
@@ -761,7 +954,40 @@ mod tests {
         let cli = Cli::try_parse_from(["homeboy", "--placement", "local", "status"])
             .expect("parse status invocation");
 
-        assert!(!is_detached_cook(&cli));
+        assert!(!is_unsupervised_local_cook(&cli));
+    }
+
+    #[test]
+    fn ambient_launch_token_values_do_not_bypass_supervision() {
+        let (cli, _) = cook_cli(&["--placement", "local"]);
+
+        assert!(is_unsupervised_local_cook(&cli));
+        assert!(!consume_local_cook_launch_token_at(
+            std::ffi::OsStr::new("forged-token"),
+            Path::new("/tmp/does-not-exist"),
+        ));
+    }
+
+    #[test]
+    fn launch_token_is_single_use() {
+        let directory = tempfile::tempdir().expect("temporary token directory");
+        let (token, path) = create_local_cook_launch_token(directory.path()).expect("launch token");
+        assert!(consume_local_cook_launch_token_at(token.as_ref(), &path));
+        assert!(!consume_local_cook_launch_token_at(token.as_ref(), &path));
+    }
+
+    #[test]
+    fn supervisor_projection_failure_compensates_before_returning_error() {
+        let compensated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&compensated);
+        let error = Error::internal_unexpected("injected supervisor projection write failure");
+
+        let result = project_supervisor_or_compensate(Err(error), move || {
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        assert!(result.is_err());
+        assert!(compensated.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -777,7 +1003,7 @@ mod tests {
             "fix it",
         ]);
 
-        let child = detached_cook_child_args(&normalized, "cook-generated", false);
+        let child = detached_cook_child_args(&normalized, "cook-generated", false, true);
 
         assert_eq!(
             child,
@@ -809,7 +1035,7 @@ mod tests {
             "fix it",
         ]);
 
-        let child = detached_cook_child_args(&normalized, "cook-explicit", true);
+        let child = detached_cook_child_args(&normalized, "cook-explicit", true, true);
 
         assert_eq!(
             child.iter().filter(|arg| *arg == "--run-id").count(),
@@ -850,11 +1076,34 @@ mod tests {
             ]),
             "cook-output",
             false,
+            true,
         );
 
         assert!(!child
             .iter()
             .any(|arg| arg == "--output" || arg == "/tmp/handoff.json"));
+    }
+
+    #[test]
+    fn attached_child_preserves_output_for_its_terminal_report() {
+        let child = detached_cook_child_args(
+            &args(&[
+                "homeboy",
+                "--output",
+                "/tmp/cook.json",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "fix it",
+            ]),
+            "cook-output",
+            false,
+            false,
+        );
+
+        assert!(child
+            .windows(2)
+            .any(|args| args == ["--output", "/tmp/cook.json"]));
     }
 
     /// The re-executed cook must be the requested cook. Anything the launcher
@@ -878,7 +1127,7 @@ mod tests {
             "--no-finalize",
         ]);
 
-        let child = detached_cook_child_args(&normalized, "cook-generated", false);
+        let child = detached_cook_child_args(&normalized, "cook-generated", false, true);
 
         for expected in [
             "--allow-dirty-lab-workspace",
@@ -1242,7 +1491,11 @@ mod tests {
                 .expect("persist parent before spawn");
             let directory = tempfile::tempdir().expect("log directory");
 
-            assert!(spawn_detached_cook(&[], directory.path(), None).is_err());
+            let token = (
+                "test-token".to_string(),
+                directory.path().join("launch-token"),
+            );
+            assert!(spawn_detached_cook(&[], directory.path(), None, &token).is_err());
             agent_task_lifecycle::fail_detached_cook_handoff_parent(
                 cook_id,
                 "detached Cook could not be spawned",
@@ -1326,7 +1579,8 @@ mod tests {
                 .spawn()
                 .expect("spawn slow preparation fixture");
 
-            let handoff = await_durable_handoff(cook_id, &mut child, Duration::from_millis(5));
+            let handoff = await_durable_handoff(cook_id, &mut child, Duration::from_millis(5))
+                .expect("observe bounded pending handoff");
 
             assert_eq!(handoff.state, DetachedHandoffState::Pending);
             assert_eq!(
@@ -1353,6 +1607,179 @@ mod tests {
     }
 
     #[test]
+    fn a_materialized_attempt_is_the_boundary_for_accepted_handoff() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-materialized-acceptance";
+            let attempt_id = "cook-materialized-acceptance-attempt-1";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "materialized-acceptance-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
+                .expect("persist executable attempt");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
+                .expect("publish durable Cook attempt ownership");
+            let mut child = Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn live detached child");
+
+            let handoff = await_durable_handoff(cook_id, &mut child, Duration::from_millis(0))
+                .expect("observe materialized handoff");
+
+            assert_eq!(handoff.state, DetachedHandoffState::Accepted);
+            assert_eq!(handoff.run_id.as_deref(), Some(attempt_id));
+            terminate_and_reap_detached_child(&mut child);
+        });
+    }
+
+    #[test]
+    fn materialization_lock_first_makes_exit_failure_a_non_panicking_no_op() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-materialized-parent-preserved";
+            let attempt_id = "cook-materialized-parent-preserved-attempt-1";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "materialized-parent-preserved-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
+                .expect("persist executable attempt");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
+                .expect("publish durable Cook attempt ownership");
+
+            agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                cook_id,
+                "stale detached child exit observation",
+            )
+            .expect("protected materialized parent makes exit failure a no-op");
+
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("read materialized handoff parent");
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["state"],
+                "redirected"
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["attempt_run_id"],
+                attempt_id
+            );
+            assert_ne!(
+                parent.metadata["detached_cook_handoff"]["reason"],
+                "stale detached child exit observation"
+            );
+        });
+    }
+
+    #[test]
+    fn exit_lock_first_blocks_later_attempt_materialization() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-exit-before-materialization";
+            let attempt_id = "cook-exit-before-materialization-attempt-1";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "exit-before-materialization-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
+                .expect("persist attempt before ownership arbitration");
+
+            agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                cook_id,
+                "detached Cook exited before materializing its first attempt",
+            )
+            .expect("exit wins the handoff arbitration");
+
+            assert!(
+                agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id).is_err(),
+                "a terminal exit winner must prevent later index publication"
+            );
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("read exit-winning handoff parent");
+            assert_eq!(parent.state, agent_task_lifecycle::AgentTaskRunState::Failed);
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["state"],
+                "exited_before_handoff"
+            );
+            assert!(
+                !agent_task_lifecycle::cook_index_exists(cook_id)
+                    .expect("exit winner left no Cook index"),
+                "a failed placeholder cannot coexist with an accepted Cook alias"
+            );
+        });
+    }
+
+    #[test]
+    fn cancellation_lock_first_blocks_later_attempt_materialization() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-cancel-before-materialization";
+            let attempt_id = "cook-cancel-before-materialization-attempt-1";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "cancel-before-materialization-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
+                .expect("persist attempt before ownership arbitration");
+
+            let cancelled = agent_task_lifecycle::cancel_run(cook_id, None)
+                .expect("cancellation wins the handoff arbitration");
+            assert_eq!(cancelled.state, agent_task_lifecycle::AgentTaskRunState::Cancelled);
+
+            assert!(
+                agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id).is_err(),
+                "a cancelled parent must prevent attempt and index publication"
+            );
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("read cancellation-winning handoff parent");
+            assert_eq!(parent.state, agent_task_lifecycle::AgentTaskRunState::Cancelled);
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
+                "cancelled"
+            );
+            assert!(
+                !agent_task_lifecycle::cook_index_exists(cook_id)
+                    .expect("cancel winner left no Cook index"),
+                "a cancelled placeholder cannot resurrect a Cook alias"
+            );
+        });
+    }
+
+    #[test]
+    fn materialization_lock_first_remains_cancel_resolvable() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-materialized-before-cancel";
+            let attempt_id = "cook-materialized-before-cancel-attempt-1";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "materialized-before-cancel-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
+                .expect("persist executable attempt");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
+                .expect("materialization wins the handoff arbitration");
+
+            let cancelled = agent_task_lifecycle::cancel_run(cook_id, None)
+                .expect("Cook alias resolves to its materialized attempt");
+            assert_eq!(cancelled.run_id, attempt_id);
+            assert_eq!(cancelled.state, agent_task_lifecycle::AgentTaskRunState::Cancelled);
+            assert_eq!(
+                agent_task_lifecycle::exact_record(attempt_id)
+                    .expect("read materialized cancelled attempt")
+                    .state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+        });
+    }
+
+    #[test]
     fn a_dead_detached_process_is_never_reported_as_an_accepted_handoff() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-never-submitted";
@@ -1363,21 +1790,25 @@ mod tests {
                 .spawn()
                 .expect("spawn a child that exits immediately");
 
-            let handoff =
-                await_durable_handoff(cook_id, &mut child, std::time::Duration::from_millis(5_000));
+            let handoff = await_durable_handoff(
+                cook_id,
+                &mut child,
+                std::time::Duration::from_millis(5_000),
+            )
+            .expect("observe exited handoff");
 
             assert_eq!(handoff.state, DetachedHandoffState::ExitedBeforeHandoff);
             assert_eq!(handoff.run_id, None);
-            agent_task_lifecycle::fail_detached_cook_handoff_parent(
-                cook_id,
-                "detached Cook exited before materializing its first attempt",
-            )
-            .expect("terminalize exited handoff");
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("the observer terminalizes the exited handoff parent");
+            assert_eq!(parent.state, agent_task_lifecycle::AgentTaskRunState::Failed);
             assert_eq!(
-                agent_task_lifecycle::exact_record(cook_id)
-                    .expect("read exited handoff parent")
-                    .state,
-                agent_task_lifecycle::AgentTaskRunState::Failed
+                parent.metadata["detached_cook_handoff"]["state"],
+                "exited_before_handoff"
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["reason"],
+                "detached Cook exited before materializing its first attempt"
             );
         });
     }

@@ -325,6 +325,9 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("Cook status is bounded");
         let (review_value, _) = review::review(ReviewArgs {
@@ -392,6 +395,9 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("Cook bridge status selects the candidate");
         assert_eq!(bridge_value["schema"], "homeboy/agent-task-run-status/v1");
@@ -409,6 +415,9 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("exact attempt remains directly addressable");
         assert_eq!(attempt_status["run_id"], retry_run_id);
@@ -445,6 +454,9 @@ fn exact_status_inspects_initial_cook_record_after_alias_advances() {
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("default status resolves Cook alias");
         assert_eq!(default_status["run_id"], retry_run_id);
@@ -463,6 +475,9 @@ fn exact_status_inspects_initial_cook_record_after_alias_advances() {
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("exact status reads initial Cook record");
         assert_eq!(exact_status["run_id"], cook_id);
@@ -511,6 +526,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
         assert!(status.success());
         let (value, exit_code) = run_cook_with_executor(
             AgentTaskCookArgs {
+                provider_evidence_inputs: Vec::new(),
                 dispatch: DispatchArgs {
                     prompt: None,
                     tasks: Vec::new(),
@@ -563,7 +579,10 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                     gate_package_artifacts: Vec::new(),
                     gate_extension_inputs: Vec::new(),
                     verify: vec!["cargo test --lib".to_string()],
+                    verify_file: Vec::new(),
                     private_verify: Vec::new(),
+                    private_verify_file: Vec::new(),
+                    input_sources: Vec::new(),
                     private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
                     gate_execution_policy: "ordered-fail-fast".to_string(),
                     gate_timeout_seconds: 30 * 60,
@@ -574,6 +593,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                     gate_environment: Vec::new(),
                     gate_environment_preserve: Vec::new(),
                     gate_toolchains: Vec::new(),
+                    gate_toolchain_specs: Vec::new(),
                     isolate_gate_home: true,
                     isolate_gate_xdg: true,
                     gate_shared_cargo_target: false,
@@ -911,6 +931,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (value, exit_code) = run_cook_with_executor_and_dispatcher(
             AgentTaskCookArgs {
+                provider_evidence_inputs: Vec::new(),
                 dispatch: DispatchArgs {
                     prompt: Some("commit a change".to_string()),
                     tasks: Vec::new(),
@@ -954,7 +975,10 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                     gate_package_artifacts: Vec::new(),
                     gate_extension_inputs: Vec::new(),
                     verify: vec!["true".to_string()],
+                    verify_file: Vec::new(),
                     private_verify: Vec::new(),
+                    private_verify_file: Vec::new(),
+                    input_sources: Vec::new(),
                     private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                     gate_execution_policy: "ordered-fail-fast".to_string(),
                     gate_timeout_seconds: 30 * 60,
@@ -965,6 +989,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                     gate_environment: Vec::new(),
                     gate_environment_preserve: Vec::new(),
                     gate_toolchains: Vec::new(),
+                    gate_toolchain_specs: Vec::new(),
                     isolate_gate_home: true,
                     isolate_gate_xdg: true,
                     gate_shared_cargo_target: false,
