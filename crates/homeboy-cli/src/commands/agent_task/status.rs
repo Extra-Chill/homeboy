@@ -969,6 +969,15 @@ pub(super) fn list_runs(
     Ok((value, 0))
 }
 
+pub(super) fn list_filtered_latest_runs(
+    options: agent_task_service_direct::AgentTaskDiscoveryOptions,
+) -> CmdResult<Value> {
+    let report = agent_task_service_direct::discover_filtered_latest_run(options)?;
+    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
+    attach_agent_task_discovery_actionable(&mut value, None);
+    Ok((value, 0))
+}
+
 /// `agent-task active`: list queued + running runs, but SEPARATE them into
 /// active / stale / suspect / unreconciled buckets so a stale or orphaned
 /// `running` record (especially a Lab/offloaded run whose runner process died)

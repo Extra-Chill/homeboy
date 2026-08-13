@@ -3175,6 +3175,22 @@ pub fn read_records_with_health_bounded(
     limit: usize,
 ) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
     let (mut records, health) = store::read_records_with_health_bounded(limit)?;
+    sort_records_newest_first(&mut records);
+    Ok((records, health))
+}
+
+/// Read every durable registry record without runner reconciliation.
+///
+/// Exact-match discovery uses this path so filtering happens before a result is
+/// selected rather than against the ordinary bounded display snapshot.
+pub fn read_all_records_with_health(
+) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
+    let (mut records, health) = store::read_all_records_with_health()?;
+    sort_records_newest_first(&mut records);
+    Ok((records, health))
+}
+
+fn sort_records_newest_first(records: &mut [AgentTaskRunRecord]) {
     records.sort_by(|left, right| {
         right
             .updated_at
@@ -3184,7 +3200,6 @@ pub fn read_records_with_health_bounded(
             .then_with(|| right.submitted_at.cmp(&left.submitted_at))
             .then_with(|| right.run_id.cmp(&left.run_id))
     });
-    Ok((records, health))
 }
 
 /// Resolve an aggregate artifact back to its controller-owned durable run.

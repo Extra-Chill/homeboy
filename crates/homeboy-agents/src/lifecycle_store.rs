@@ -663,9 +663,24 @@ pub(super) fn read_records_with_health(
 pub(super) fn read_records_with_health_bounded(
     limit: usize,
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+    records_with_health(observation_runs_bounded(limit)?)
+}
+
+pub(super) fn read_all_records_with_health(
+) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+    let store = ObservationStore::open_readonly()?;
+    records_with_health(store.list_runs_all(RunListFilter {
+        kind: Some("agent-task".to_string()),
+        ..Default::default()
+    })?)
+}
+
+fn records_with_health(
+    observation_runs: Vec<RunRecord>,
+) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
     let mut health = super::AgentTaskRecordHealthSummary::healthy();
     let mut records = Vec::new();
-    for run in observation_runs_bounded(limit)? {
+    for run in observation_runs {
         match super::health::diagnose_run(&run) {
             Ok(record) => {
                 health.healthy += 1;
