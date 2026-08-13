@@ -427,15 +427,20 @@ pub fn record_detached_cook_supervisor(cook_id: &str, job_id: &str) -> Result<()
     Ok(())
 }
 
-/// Terminalize a handoff parent once no child can materialize its first
-/// attempt. A previously requested cancellation remains authoritative.
+/// Terminalize a still-pending handoff parent once no child can materialize its
+/// first attempt. A redirected or terminal parent is authoritative evidence
+/// from a concurrent materialization or cancellation and is never rewritten.
 pub fn fail_detached_cook_handoff_parent(
     cook_id: &str,
     reason: &str,
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
     let record = store::mutate_record(&cook_id, |record| {
-        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
+            || record.state.is_terminal()
+            || record.metadata["detached_cook_handoff"]["state"] != "pending"
+            || store::read_cook_index(&cook_id).is_ok()
+        {
             return false;
         }
         let cancelled = record.state == AgentTaskRunState::Cancelled;
@@ -452,7 +457,9 @@ pub fn fail_detached_cook_handoff_parent(
         record.updated_at = Some(now_timestamp());
         true
     })?;
-    Ok(record.expect("detached handoff parent exists"))
+    // A protected parent is a successful no-op: it is the authoritative result
+    // of materialization or a prior terminal transition, not a missing parent.
+    Ok(record.unwrap_or(store::read_record(&cook_id)?))
 }
 
 fn complete_detached_cook_handoff_parent(cook_id: &str, attempt_run_id: &str) -> Result<()> {
@@ -461,16 +468,17 @@ fn complete_detached_cook_handoff_parent(cook_id: &str, attempt_run_id: &str) ->
     if store::read_record(&cook_id).is_err() {
         return Ok(());
     }
-    let _ = store::mutate_record(&cook_id, |record| {
-        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+    let _ = store::mutate_record_locked_without_terminal_projection(&cook_id, |record| {
+        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
+            || record.state.is_terminal()
+            || record.metadata["detached_cook_handoff"]["state"] != "pending"
+        {
             return false;
         }
         let metadata = record.ensure_metadata_object();
         metadata["detached_cook_handoff"]["state"] = json!("redirected");
         metadata["detached_cook_handoff"]["attempt_run_id"] = json!(attempt_run_id);
-        if !record.state.is_terminal() {
-            set_run_state(record, AgentTaskRunState::Succeeded);
-        }
+        set_run_state(record, AgentTaskRunState::Succeeded);
         record.updated_at = Some(now_timestamp());
         true
     })?;
@@ -3719,10 +3727,14 @@ pub fn record_cook_attempt(
     run_id: &str,
 ) -> Result<AgentTaskCookIndex> {
     let registration = homeboy_core::config::with_config_lock(|| {
-        record_cook_attempt_locked(cook_id, attempt, run_id)
+        let registration = record_cook_attempt_locked(cook_id, attempt, run_id)?;
+        // The index is the handoff's ownership proof. Redirect its placeholder
+        // while the index writer lock is held so an exit observer cannot fail
+        // the parent between index publication and this transition.
+        complete_detached_cook_handoff_parent(cook_id, run_id)?;
+        Ok(registration)
     })?;
     let index = registration.project_terminal_after_unlock()?;
-    complete_detached_cook_handoff_parent(cook_id, run_id)?;
     Ok(index)
 }
 
@@ -3734,6 +3746,21 @@ pub(crate) fn record_cook_attempt_locked(
 ) -> Result<CookAttemptRegistration> {
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
+    if let Ok(parent) = store::read_record(&cook_id) {
+        let handoff = &parent.metadata["detached_cook_handoff"];
+        if handoff["cook_id"] == cook_id
+            && (parent.state.is_terminal()
+                || handoff["cancellation_fence"]["state"] == "cancelled"
+                || (handoff["state"] != "pending" && handoff["state"] != "redirected"))
+        {
+            return Err(Error::validation_invalid_argument(
+                "cook_id",
+                "detached Cook handoff was cancelled or terminal before its attempt could materialize",
+                Some(cook_id),
+                None,
+            ));
+        }
+    }
     // Validate both durable ownership projections before changing either one.
     store::validate_cook_index_attempt(&cook_id, attempt, &run_id)?;
     let mut record = store::read_record(&run_id)?;
