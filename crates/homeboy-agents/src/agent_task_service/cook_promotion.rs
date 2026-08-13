@@ -9,12 +9,13 @@
 //! terminal provider result and publish controller-owned state; grouping them
 //! keeps the promote → finalize boundary in one place.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
 use homeboy_engine_primitives::content_hash;
+use homeboy_engine_primitives::shell::quote_args;
 
 use crate::agent_task_finalization::{
     finalize_pr_with_backend, preflight_pr_with_backend, validate_publication_intent,
@@ -24,8 +25,9 @@ use crate::agent_task_finalization::{
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
-    candidate_fingerprint, promote_with_checkpoint, resume_promoted_patch,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    candidate_fingerprint, canonical_recoverable_patch_artifacts, promote_with_checkpoint,
+    resume_promoted_patch, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+    AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -79,6 +81,7 @@ pub(crate) fn promote_attempt(
 ) -> Result<AgentTaskPromotionReport> {
     let (source, source_path) = promotion_source(run_id)?;
     let selected_task_id = selected_candidate_task_id(run_id)?;
+    let artifact_id = canonical_cook_patch_artifact_id(options, run_id)?;
     promote_with_checkpoint(
         AgentTaskPromotionOptions {
             source,
@@ -90,7 +93,7 @@ pub(crate) fn promote_attempt(
             candidate_ref: None,
             to_worktree: options.to_worktree.clone(),
             task_id: selected_task_id,
-            artifact_id: None,
+            artifact_id,
             dry_run: false,
             gates: options.gates.clone(),
             provider_command: options.provider_command.clone(),
@@ -109,6 +112,209 @@ pub(crate) fn promote_attempt(
             Ok(())
         },
     )
+}
+
+/// Cook owns selection across provider rotations. Collapse equivalent artifact
+/// aliases before promotion, but require an explicit operator choice for patches
+/// that remain distinct after normalized content and provenance comparison.
+pub(crate) fn canonical_cook_patch_artifact_id(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let (source, source_path) = promotion_source(run_id)?;
+    let task_id = selected_candidate_task_id(run_id)?;
+    let aggregate = agent_task_lifecycle::read_attempt_aggregate(run_id)?;
+    let Some(outcome) = aggregate
+        .outcomes
+        .iter()
+        .find(|outcome| task_id.as_deref().is_none_or(|id| outcome.task_id == id))
+    else {
+        return Ok(None);
+    };
+    let promotion_options = AgentTaskPromotionOptions {
+        source,
+        source_run_id: Some(run_id.to_string()),
+        source_path,
+        source_worktree_path: options.source_worktree_path.clone(),
+        base_ref: Some(options.base.clone()),
+        task_base_sha: options.task_base_sha.clone(),
+        candidate_ref: None,
+        to_worktree: options.to_worktree.clone(),
+        task_id,
+        artifact_id: None,
+        dry_run: false,
+        gates: options.gates.clone(),
+        provider_command: options.provider_command.clone(),
+        provider_invocation: options.provider_invocation.clone(),
+    };
+    let canonical = canonical_recoverable_patch_artifacts(outcome, &promotion_options)?;
+    match canonical.artifacts.as_slice() {
+        [] => Ok(None),
+        [artifact] => Ok(Some(artifact.id.clone())),
+        artifacts => {
+            let choices = artifacts
+                .iter()
+                .map(|artifact| {
+                    json!({
+                        "artifact_id": artifact.id,
+                        "sha256": artifact.sha256,
+                        "command": cook_promotion_command(options, run_id, &outcome.task_id, &artifact.id),
+                    })
+                })
+                .collect::<Vec<_>>();
+            Err(Error::new(
+                homeboy_core::ErrorCode::ValidationInvalidArgument,
+                "Cook found distinct canonical patch candidates; select one before promotion",
+                json!({
+                    "field": "artifact_id",
+                    "state": "selection_required",
+                    "selection_required": true,
+                    "choices": choices,
+                }),
+            ))
+        }
+    }
+}
+
+/// Render an explicit promotion command from Cook's durable execution contract.
+/// Every gate and provider field is included so a manual choice cannot silently
+/// fall back to CLI defaults that differ from the original Cook.
+pub(crate) fn cook_promotion_command(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+    task_id: &str,
+    artifact_id: &str,
+) -> String {
+    quote_args(&cook_promotion_argv(options, run_id, task_id, artifact_id))
+}
+
+/// The exact CLI argv required to reproduce Cook's promotion contract.
+pub(crate) fn cook_promotion_argv(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+    task_id: &str,
+    artifact_id: &str,
+) -> Vec<String> {
+    let mut command = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "promote".to_string(),
+        run_id.to_string(),
+        "--to-worktree".to_string(),
+        options.to_worktree.clone(),
+        "--base".to_string(),
+        options.base.clone(),
+        "--task-id".to_string(),
+        task_id.to_string(),
+        "--artifact-id".to_string(),
+        artifact_id.to_string(),
+    ];
+    for (flag, values) in [
+        ("--verify", &options.gates.verify),
+        ("--private-verify", &options.gates.private_verify),
+    ] {
+        for value in values {
+            command.extend([flag.to_string(), value.clone()]);
+        }
+    }
+    let gates = serde_json::to_value(&options.gates).unwrap_or(Value::Null);
+    for (key, flag) in [
+        ("private_gate_reveal", "--private-gate-reveal"),
+        ("execution_policy", "--gate-execution-policy"),
+        ("gate_timeout_seconds", "--gate-timeout-seconds"),
+        (
+            "gate_heartbeat_interval_seconds",
+            "--gate-heartbeat-interval-seconds",
+        ),
+        (
+            "gate_no_progress_timeout_seconds",
+            "--gate-no-progress-timeout-seconds",
+        ),
+    ] {
+        if let Some(value) = gates.get(key) {
+            let value = value
+                .as_str()
+                .map(|value| value.replace('_', "-"))
+                .or_else(|| value.as_u64().map(|value| value.to_string()));
+            if let Some(value) = value {
+                command.extend([flag.to_string(), value]);
+            }
+        }
+    }
+    for (key, flag) in [
+        ("rerun_completed_gates", "--rerun-completed-gates"),
+        ("accept_inherited_failures", "--accept-inherited-failures"),
+    ] {
+        if gates.get(key).and_then(Value::as_bool) == Some(true) {
+            command.push(flag.to_string());
+        }
+    }
+    if let Some(environment) = gates.get("gate_environment") {
+        if let Some(mode) = environment.get("mode").and_then(Value::as_str) {
+            command.extend([
+                "--gate-environment-mode".to_string(),
+                mode.replace('_', "-"),
+            ]);
+        }
+        for (key, flag) in [("variables", "--gate-env"), ("preserve", "--gate-env-from")] {
+            if let Some(values) = environment.get(key).and_then(Value::as_object) {
+                for (name, value) in values {
+                    if let Some(value) = value.as_str() {
+                        command.extend([flag.to_string(), format!("{name}={value}")]);
+                    }
+                }
+            }
+        }
+        for (key, flag) in [
+            ("isolate_home", "--isolate-gate-home"),
+            ("isolate_xdg", "--isolate-gate-xdg"),
+        ] {
+            if let Some(value) = environment.get(key).and_then(Value::as_bool) {
+                command.push(format!("{flag}={value}"));
+            }
+        }
+        if let Some(value) = environment
+            .get("shared_cargo_target")
+            .and_then(Value::as_bool)
+        {
+            command.push(if value {
+                "--gate-shared-cargo-target".to_string()
+            } else {
+                "--no-gate-shared-cargo-target".to_string()
+            });
+        }
+        if let Some(inputs) = environment
+            .get("extension_inputs")
+            .and_then(Value::as_array)
+        {
+            for input in inputs {
+                if let Ok(input) = serde_json::to_string(input) {
+                    command.extend(["--gate-extension-input".to_string(), input]);
+                }
+            }
+        }
+    }
+    for toolchain in &options.gates.gate_toolchains {
+        if toolchain.probe_arguments == ["--version"] {
+            command.extend(["--gate-toolchain".to_string(), toolchain.command.clone()]);
+        } else if let Ok(toolchain) = serde_json::to_string(toolchain) {
+            command.extend(["--gate-toolchain-spec".to_string(), toolchain]);
+        }
+    }
+    for artifact in &options.gates.gate_package_artifacts {
+        if let Ok(artifact) = serde_json::to_string(artifact) {
+            command.extend(["--gate-package-artifact".to_string(), artifact]);
+        }
+    }
+    if let Some(provider) = &options.provider_command {
+        command.extend(["--provider-command".to_string(), provider.clone()]);
+    }
+    if let Some(invocation) = &options.provider_invocation {
+        for argument in &invocation.argv {
+            command.push(format!("--provider-argv={argument}"));
+        }
+    }
+    command
 }
 
 /// Cook only promotes the candidate selected by the scheduler. A single-task
@@ -163,7 +369,9 @@ pub(crate) fn promote_or_load_attempt(
                     // A resumed verification must retain the scheduler-selected
                     // candidate rather than falling back to aggregate outcome order.
                     task_id: selected_candidate_task_id(run_id)?,
-                    artifact_id: None,
+                    // The checkpoint already authenticated this exact artifact;
+                    // retain its identity rather than selecting an equivalent alias.
+                    artifact_id: Some(promotion.patch_artifact.id.clone()),
                     dry_run: false,
                     gates: options.gates.clone(),
                     provider_command: options.provider_command.clone(),
@@ -745,7 +953,8 @@ pub(crate) fn recover_moving_base_cook_candidate(
             candidate_ref: None,
             to_worktree: options.to_worktree.clone(),
             task_id: selected_candidate_task_id(&recovery.run_id)?,
-            artifact_id: None,
+            // Moving-base recovery re-verifies the original promoted candidate.
+            artifact_id: Some(recovery.promotion.patch_artifact.id.clone()),
             dry_run: false,
             gates: options.gates.clone(),
             provider_command: options.provider_command.clone(),

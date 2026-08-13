@@ -152,6 +152,9 @@ impl From<&CookStatus> for RunLifecycleStatus {
             }
             // Policy refused. It refuses again on the same inputs.
             CookStatus::PolicyFailure => Self::PartialFailure,
+            // The candidate set needs an explicit operator decision before any
+            // promotion can run; automatic retry cannot resolve that choice.
+            CookStatus::SelectionRequired => Self::PartialFailure,
 
             // --- terminal, unsuccessful, retry is a legal next action ---
             // A gate verdict is against the candidate, not against running
@@ -262,6 +265,7 @@ mod tests {
             CookStatus::RetriesExhausted,
             CookStatus::ExecutionBudgetExhausted,
             CookStatus::PolicyFailure,
+            CookStatus::SelectionRequired,
             CookStatus::ProviderFailure,
             CookStatus::DurableFailure,
             CookStatus::PreExecutionFailure,
@@ -293,6 +297,7 @@ mod tests {
                 CookStatus::RetriesExhausted => RunLifecycleStatus::PartialFailure,
                 CookStatus::ExecutionBudgetExhausted => RunLifecycleStatus::PartialFailure,
                 CookStatus::PolicyFailure => RunLifecycleStatus::PartialFailure,
+                CookStatus::SelectionRequired => RunLifecycleStatus::PartialFailure,
                 CookStatus::ProviderFailure => RunLifecycleStatus::Failed,
                 CookStatus::DurableFailure => RunLifecycleStatus::Failed,
                 CookStatus::PreExecutionFailure => RunLifecycleStatus::Failed,

@@ -829,8 +829,9 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), exit))
 }
 
-/// `agent-task reconcile <run-id>` always addresses exactly one durable run.
-/// It previews by default; `--apply` is the explicit operator authorization.
+/// `agent-task reconcile <run-id>` addresses one exact record or the explicit
+/// parent/attempt group named by a logical Cook ID. It previews by default;
+/// `--apply` is the explicit operator authorization.
 pub(super) fn reconcile_run(run_id: &str, dry_run: bool) -> CmdResult<Value> {
     let report = agent_task_service_direct::reconcile_run(run_id, dry_run)?;
     let exit = if report.failed > 0 { 1 } else { 0 };
