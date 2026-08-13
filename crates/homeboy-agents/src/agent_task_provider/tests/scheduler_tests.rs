@@ -1324,16 +1324,30 @@ fn repeated_immediate_adapter_classified_failure_opens_circuit_with_actionable_e
     let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(fs::read_to_string(&state_path).expect("attempt count"), "2");
-    assert_eq!(outcome.failure_classification, Some(AgentTaskFailureClassification::Provider));
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Provider)
+    );
     let diagnostic = outcome
         .diagnostics
         .iter()
-        .find(|diagnostic| diagnostic.class == "agent_task.provider_immediate_failure_retry_suppressed")
+        .find(|diagnostic| {
+            diagnostic.class == "agent_task.provider_immediate_failure_retry_suppressed"
+        })
         .expect("circuit diagnostic");
-    assert_eq!(diagnostic.data["provider_error_refs"], json!(["err_test123"]));
+    assert_eq!(
+        diagnostic.data["provider_error_refs"],
+        json!(["err_test123"])
+    );
     assert_eq!(diagnostic.data["retryable"], json!(false));
-    assert_eq!(diagnostic.data["log_lookup"], "providerctl logs --error-ref <provider-error-ref>");
-    assert_eq!(diagnostic.data["fallback_action"], "Select another configured provider.");
+    assert_eq!(
+        diagnostic.data["log_lookup"],
+        "providerctl logs --error-ref <provider-error-ref>"
+    );
+    assert_eq!(
+        diagnostic.data["fallback_action"],
+        "Select another configured provider."
+    );
     let _ = fs::remove_file(&state_path);
 }
 
@@ -1349,14 +1363,24 @@ fn immediate_failure_suppression_is_scoped_to_one_task_provider_retry_sequence()
             "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));let p='{state}';let n=0;try{{n=parseInt(fs.readFileSync(p,'utf8'))||0}}catch(e){{}}fs.writeFileSync(p,String(n+1));process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'provider_error',summary:'server unavailable',failure_classification:'provider'}}));"
         ))));
         provider.immediate_failure_patterns = vec![AgentTaskProviderImmediateFailurePattern {
-            id: "server".to_string(), error_contains_any: vec!["server unavailable".to_string()], retryable: true,
-            error_ref_pattern: None, log_lookup: None, fallback_action: None,
+            id: "server".to_string(),
+            error_contains_any: vec!["server unavailable".to_string()],
+            retryable: true,
+            error_ref_pattern: None,
+            log_lookup: None,
+            fallback_action: None,
         }];
         let outcome = run_provider_command(&request, &provider, None);
-        assert!(outcome.diagnostics.iter().any(|d| d.class == "agent_task.provider_immediate_failure_retry_suppressed"));
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|d| d.class == "agent_task.provider_immediate_failure_retry_suppressed"));
     }
     assert_eq!(fs::read_to_string(&first_state).expect("first count"), "2");
-    assert_eq!(fs::read_to_string(&second_state).expect("second count"), "2");
+    assert_eq!(
+        fs::read_to_string(&second_state).expect("second count"),
+        "2"
+    );
     let _ = fs::remove_file(&first_state);
     let _ = fs::remove_file(&second_state);
 }
@@ -1365,8 +1389,12 @@ fn immediate_failure_suppression_is_scoped_to_one_task_provider_retry_sequence()
 fn invalid_immediate_failure_regex_is_rejected_before_dispatch() {
     let (_, mut provider) = request("invalid-pattern", "node provider.js".to_string());
     provider.immediate_failure_patterns = vec![AgentTaskProviderImmediateFailurePattern {
-        id: "bad".to_string(), error_contains_any: vec!["server".to_string()], retryable: true,
-        error_ref_pattern: Some("[".to_string()), log_lookup: None, fallback_action: None,
+        id: "bad".to_string(),
+        error_contains_any: vec!["server".to_string()],
+        retryable: true,
+        error_ref_pattern: Some("[".to_string()),
+        log_lookup: None,
+        fallback_action: None,
     }];
     let error = validate_provider_immediate_failure_patterns(&provider).expect_err("invalid regex");
     assert!(error.contains("invalid error_ref_pattern"));
@@ -1376,10 +1404,15 @@ fn invalid_immediate_failure_regex_is_rejected_before_dispatch() {
 fn empty_matching_immediate_failure_regex_is_rejected_before_dispatch() {
     let (_, mut provider) = request("empty-pattern", "node provider.js".to_string());
     provider.immediate_failure_patterns = vec![AgentTaskProviderImmediateFailurePattern {
-        id: "empty".to_string(), error_contains_any: vec!["server".to_string()], retryable: true,
-        error_ref_pattern: Some(".*".to_string()), log_lookup: None, fallback_action: None,
+        id: "empty".to_string(),
+        error_contains_any: vec!["server".to_string()],
+        retryable: true,
+        error_ref_pattern: Some(".*".to_string()),
+        log_lookup: None,
+        fallback_action: None,
     }];
-    let error = validate_provider_immediate_failure_patterns(&provider).expect_err("empty match regex");
+    let error =
+        validate_provider_immediate_failure_patterns(&provider).expect_err("empty match regex");
     assert!(error.contains("must not match an empty string"));
 }
 
@@ -1387,8 +1420,12 @@ fn empty_matching_immediate_failure_regex_is_rejected_before_dispatch() {
 fn immediate_failure_patterns_preserve_terminal_failure_classifications() {
     let (_, mut provider) = request("terminal-pattern", "node provider.js".to_string());
     provider.immediate_failure_patterns = vec![AgentTaskProviderImmediateFailurePattern {
-        id: "server".to_string(), error_contains_any: vec!["server error".to_string()], retryable: true,
-        error_ref_pattern: None, log_lookup: None, fallback_action: None,
+        id: "server".to_string(),
+        error_contains_any: vec!["server error".to_string()],
+        retryable: true,
+        error_ref_pattern: None,
+        log_lookup: None,
+        fallback_action: None,
     }];
     for classification in [
         AgentTaskFailureClassification::PolicyDenied,
@@ -1423,11 +1460,22 @@ fn opencode_manifest_shaped_declaration_classifies_the_observed_server_failure()
             "log_lookup": "opencode logs --error <provider-error-ref>",
             "fallback_action": "Select another configured provider."
         }]
-    })).expect("manifest-shaped provider");
-    let outcome = AgentTaskOutcome { status: AgentTaskOutcomeStatus::ProviderError, summary: Some("Unexpected server error. Check server logs for details. err_3a6d31e2".to_string()), ..Default::default() };
-    let failure = immediate_provider_failure(&provider, &outcome, Duration::from_secs(1)).expect("classified failure");
+    }))
+    .expect("manifest-shaped provider");
+    let outcome = AgentTaskOutcome {
+        status: AgentTaskOutcomeStatus::ProviderError,
+        summary: Some(
+            "Unexpected server error. Check server logs for details. err_3a6d31e2".to_string(),
+        ),
+        ..Default::default()
+    };
+    let failure = immediate_provider_failure(&provider, &outcome, Duration::from_secs(1))
+        .expect("classified failure");
     assert_eq!(failure.error_refs, vec!["err_3a6d31e2"]);
-    assert_eq!(failure.log_lookup, "opencode logs --error <provider-error-ref>");
+    assert_eq!(
+        failure.log_lookup,
+        "opencode logs --error <provider-error-ref>"
+    );
 }
 
 fn selected_component_contract(
