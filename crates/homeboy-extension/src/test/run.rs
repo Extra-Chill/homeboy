@@ -77,6 +77,7 @@ const TEST_INVENTORY_PUBLIC_FILE: &str = "homeboy-test-inventory.json";
 #[cfg(unix)]
 const MAX_TEST_INVENTORY_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 25 * 60;
+const MAX_CHANGED_TEST_FILES_ENV: &str = "HOMEBOY_MAX_CHANGED_TEST_FILES";
 
 pub(crate) fn test_timeout() -> Duration {
     std::env::var("HOMEBOY_TEST_TIMEOUT_SECONDS")
@@ -85,6 +86,20 @@ pub(crate) fn test_timeout() -> Duration {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(DEFAULT_TEST_TIMEOUT_SECONDS))
+}
+
+/// Resolve the optional changed-scope selection cap.
+///
+/// Mirrors `test_timeout()`: the value is read from the process environment
+/// (what a workflow step `env:` block sets and the CLI process inherits),
+/// must parse as a positive integer, and unset, unparseable, or zero values
+/// disable the guard entirely. Every existing consumer is therefore
+/// byte-for-byte unaffected when the cap is not configured (#12365).
+fn max_changed_test_files() -> Option<usize> {
+    std::env::var(MAX_CHANGED_TEST_FILES_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|cap| *cap > 0)
 }
 
 #[derive(Deserialize)]
@@ -915,6 +930,81 @@ fn run_main_test_workflow_inner(
                 extension_phase_timings: Vec::new(),
                 cargo_target: None,
             });
+        }
+    }
+
+    // A bounded, opt-in cap on the changed-scope selection, enforced before the
+    // extension is invoked. Drift detection can map a small raw diff onto a
+    // very large test-file selection (Data Machine PR #3173: 3 changed files,
+    // 161 selected test files), and handing all of it to the extension as one
+    // invocation blows the HOMEBOY_TEST_TIMEOUT_SECONDS budget before a single
+    // test count is reported. When the cap is exceeded the run dies in seconds
+    // with a named finding instead of consuming the whole budget (#12365). The
+    // full selection is still carried on `test_scope` so `runs.json` and
+    // `metadata_json.test_scope.selected_files` show exactly what was selected.
+    if let Some(ref scope) = changed_scope {
+        if let Some(cap) = max_changed_test_files() {
+            let selected = scope.selected_files.len();
+            if selected > cap && !inventory_mode {
+                let preview = scope
+                    .selected_files
+                    .iter()
+                    .take(10)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let more = selected.saturating_sub(10);
+                let selected_summary = if more > 0 {
+                    format!("{preview}, and {more} more")
+                } else {
+                    preview
+                };
+
+                let message = format!(
+                    "Changed-scope test gate selected {selected} test file(s), exceeding the HOMEBOY_MAX_CHANGED_TEST_FILES cap of {cap}: {selected_summary}. A single extension invocation of this size would exceed the test-phase budget before reporting any test counts.",
+                );
+                let findings = Some(vec![HomeboyFinding::builder("test", message.clone())
+                    .rule("changed_scope_selection_exceeds_cap")
+                    .category("test-scope")
+                    .severity("error")
+                    .build()]);
+                let hints = Some(vec![
+                    format!(
+                        "Narrow the drift/changed-test mapping for this component so the change selects fewer test files, or run the full suite explicitly: homeboy review test {}",
+                        args.component_id
+                    ),
+                    format!(
+                        "Raise the cap if the selection is legitimately large: set HOMEBOY_MAX_CHANGED_TEST_FILES to at least {selected} (unset or <= 0 disables the guard)"
+                    ),
+                    "Split the selection across shards, or raise HOMEBOY_TEST_TIMEOUT_SECONDS so the phase fits in its budget.".to_string(),
+                ]);
+
+                return Ok(TestRunWorkflowResult {
+                    status: "failed".to_string(),
+                    component: args.component_label,
+                    exit_code: 1,
+                    runner_exit_code: None,
+                    test_counts: None,
+                    test_inventory: None,
+                    test_durations: None,
+                    findings,
+                    failure_analysis_input: None,
+                    coverage: None,
+                    baseline_comparison: None,
+                    analysis: None,
+                    autofix: None,
+                    hints,
+                    test_scope: Some(scope.clone()),
+                    summary: if args.json_summary {
+                        Some(build_test_summary(None, None, 0))
+                    } else {
+                        None
+                    },
+                    raw_output: None,
+                    extension_phase_timings: Vec::new(),
+                    cargo_target: None,
+                });
+            }
         }
     }
 
@@ -3154,6 +3244,341 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
             assert!(
                 !marker.exists(),
                 "normal zero scope must not invoke the runner"
+            );
+        });
+    }
+
+    /// Cap tests mutate the process-global HOMEBOY_MAX_CHANGED_TEST_FILES env
+    /// var, so they serialize against each other (#12365).
+    static CHANGED_SCOPE_CAP_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn changed_scope_cap_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        CHANGED_SCOPE_CAP_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("changed scope cap env lock")
+    }
+
+    /// A fixture extension whose runner touches a marker in the component path
+    /// so tests can assert whether the extension was invoked at all.
+    #[cfg(unix)]
+    fn changed_scope_cap_component(home: &Path, source: &Path) -> Component {
+        use std::os::unix::fs::PermissionsExt;
+
+        let extension_dir = home.join(".config/homeboy/extensions/changed-scope-cap-fixture");
+        std::fs::create_dir_all(&extension_dir).expect("extension directory");
+        std::fs::write(
+            extension_dir.join("changed-scope-cap-fixture.json"),
+            r#"{"name":"Changed scope cap fixture","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
+        )
+        .expect("extension manifest");
+        let script = extension_dir.join("test.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ntouch \"$HOMEBOY_COMPONENT_PATH/runner-ran\"\n",
+        )
+        .expect("runner script");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).expect("executable script");
+
+        Component {
+            id: "changed-scope-cap".to_string(),
+            local_path: source.to_string_lossy().to_string(),
+            extensions: Some(HashMap::from([(
+                "changed-scope-cap-fixture".to_string(),
+                ScopedExtensionConfig::default(),
+            )])),
+            ..Default::default()
+        }
+    }
+
+    fn changed_scope_cap_args(
+        component: &Component,
+        changed_files: &[String],
+    ) -> TestRunWorkflowArgs {
+        let mut args = fixture_workflow_args(component);
+        args.changed_since = Some("base".to_string());
+        args.precomputed_changed_files = Some(changed_files.to_vec());
+        args
+    }
+
+    /// A changed-scope selection larger than HOMEBOY_MAX_CHANGED_TEST_FILES
+    /// fails fast with a named finding, preserves the full selection, and must
+    /// not invoke the extension runner (#12365).
+    #[cfg(unix)]
+    #[test]
+    fn changed_scope_selection_exceeding_the_cap_fails_before_the_runner_spawns() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = changed_scope_cap_env_guard();
+            let source = tempfile::tempdir().expect("source workspace");
+            let component = changed_scope_cap_component(home.path(), source.path());
+            let changed_files = (0..5)
+                .map(|index| format!("tests/component_{index}.php"))
+                .collect::<Vec<_>>();
+
+            std::env::set_var(MAX_CHANGED_TEST_FILES_ENV, "3");
+            let result = run_main_test_workflow(
+                &component,
+                source.path(),
+                changed_scope_cap_args(&component, &changed_files),
+                &RunDir::create().expect("run directory"),
+            )
+            .expect("cap failure is a test result");
+            std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
+
+            assert_eq!(result.status, "failed");
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(
+                result.runner_exit_code, None,
+                "the guard must not invoke the runner"
+            );
+            assert!(
+                !source.path().join("runner-ran").exists(),
+                "the guard must not invoke the extension"
+            );
+            let findings = result.findings.expect("cap finding");
+            assert_eq!(findings.len(), 1);
+            assert_eq!(
+                findings[0].rule.as_deref(),
+                Some("changed_scope_selection_exceeds_cap")
+            );
+            assert_eq!(findings[0].category.as_deref(), Some("test-scope"));
+            assert_eq!(findings[0].severity.as_deref(), Some("error"));
+            assert!(
+                findings[0].message.contains("5"),
+                "message names the selected count: {}",
+                findings[0].message
+            );
+            assert!(
+                findings[0].message.contains("3"),
+                "message names the cap: {}",
+                findings[0].message
+            );
+            let scope = result.test_scope.expect("full selection preserved");
+            assert_eq!(scope.selected_files, changed_files);
+            assert_eq!(scope.selected_count, 5);
+        });
+    }
+
+    /// A selection at or below the cap must take the normal execution path:
+    /// the extension runner runs and no cap finding is emitted (#12365).
+    #[cfg(unix)]
+    #[test]
+    fn changed_scope_selection_at_or_below_the_cap_runs_normally() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = changed_scope_cap_env_guard();
+            let source = tempfile::tempdir().expect("source workspace");
+            let component = changed_scope_cap_component(home.path(), source.path());
+            let changed_files = vec![
+                "tests/component_a.php".to_string(),
+                "tests/component_b.php".to_string(),
+            ];
+
+            std::env::set_var(MAX_CHANGED_TEST_FILES_ENV, "2");
+            let result = run_main_test_workflow(
+                &component,
+                source.path(),
+                changed_scope_cap_args(&component, &changed_files),
+                &RunDir::create().expect("run directory"),
+            )
+            .expect("at-cap run executes");
+            std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
+
+            assert_eq!(result.runner_exit_code, Some(0));
+            assert!(
+                source.path().join("runner-ran").exists(),
+                "a selection that fits the cap must invoke the runner"
+            );
+            assert!(
+                result.findings.as_ref().is_none_or(|findings| {
+                    !findings.iter().any(|finding| {
+                        finding.rule.as_deref() == Some("changed_scope_selection_exceeds_cap")
+                    })
+                }),
+                "an at-cap selection must not emit the cap finding"
+            );
+            let scope = result.test_scope.expect("scope retained");
+            assert_eq!(scope.selected_files, changed_files);
+        });
+    }
+
+    /// An unset cap must leave the unchanged selection behaviour byte-for-byte
+    /// identical: a large selection still runs the extension (#12365).
+    #[cfg(unix)]
+    #[test]
+    fn unset_changed_scope_cap_leaves_selection_behaviour_unchanged() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = changed_scope_cap_env_guard();
+            let source = tempfile::tempdir().expect("source workspace");
+            let component = changed_scope_cap_component(home.path(), source.path());
+            let changed_files = (0..5)
+                .map(|index| format!("tests/component_{index}.php"))
+                .collect::<Vec<_>>();
+
+            std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
+            let result = run_main_test_workflow(
+                &component,
+                source.path(),
+                changed_scope_cap_args(&component, &changed_files),
+                &RunDir::create().expect("run directory"),
+            )
+            .expect("unset cap runs the runner");
+
+            assert_eq!(result.runner_exit_code, Some(0));
+            assert!(
+                source.path().join("runner-ran").exists(),
+                "an unset cap must not intercept a large selection"
+            );
+            assert!(
+                result.findings.as_ref().is_none_or(|findings| {
+                    !findings.iter().any(|finding| {
+                        finding.rule.as_deref() == Some("changed_scope_selection_exceeds_cap")
+                    })
+                }),
+                "an unset cap must not emit the cap finding"
+            );
+        });
+    }
+
+    /// A malformed or non-positive cap value disables the guard rather than
+    /// failing the run, mirroring HOMEBOY_TEST_TIMEOUT_SECONDS parsing (#12365).
+    #[cfg(unix)]
+    #[test]
+    fn malformed_or_non_positive_changed_scope_cap_values_are_ignored() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = changed_scope_cap_env_guard();
+            let source = tempfile::tempdir().expect("source workspace");
+            let component = changed_scope_cap_component(home.path(), source.path());
+            let changed_files = (0..5)
+                .map(|index| format!("tests/component_{index}.php"))
+                .collect::<Vec<_>>();
+            let marker = source.path().join("runner-ran");
+
+            for value in ["not-a-number", "0", "-5", ""] {
+                std::fs::remove_file(&marker).ok();
+                std::env::set_var(MAX_CHANGED_TEST_FILES_ENV, value);
+                let result = run_main_test_workflow(
+                    &component,
+                    source.path(),
+                    changed_scope_cap_args(&component, &changed_files),
+                    &RunDir::create().expect("run directory"),
+                )
+                .expect("ignored cap value still runs the runner");
+                std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
+
+                assert_eq!(
+                    result.runner_exit_code,
+                    Some(0),
+                    "cap value {value:?} must be ignored"
+                );
+                assert!(
+                    marker.exists(),
+                    "cap value {value:?} must not block execution"
+                );
+                assert!(
+                    result.findings.as_ref().is_none_or(|findings| {
+                        !findings.iter().any(|finding| {
+                            finding.rule.as_deref() == Some("changed_scope_selection_exceeds_cap")
+                        })
+                    }),
+                    "cap value {value:?} must not emit the cap finding"
+                );
+            }
+        });
+    }
+
+    /// Inventory mode is a producer operation, not a changed-test execution, so
+    /// the changed-scope cap must not fire there even for an oversized selection
+    /// (#12365).
+    #[cfg(unix)]
+    #[test]
+    fn inventory_mode_ignores_the_changed_scope_cap() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            use std::os::unix::fs::PermissionsExt;
+
+            let source = tempfile::tempdir().expect("source workspace");
+            std::fs::write(
+                source.path().join("Cargo.toml"),
+                "[package]\nname = \"inventory-cap-ignored\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .expect("workspace manifest");
+            std::fs::create_dir(source.path().join("src")).expect("source directory");
+            std::fs::write(source.path().join("src/lib.rs"), "pub fn fixture() {}\n")
+                .expect("source file");
+            let marker = source.path().join("inventory-producer-ran");
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/inventory-cap-ignored-fixture");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("inventory-cap-ignored-fixture.json"),
+                r#"{"name":"Inventory cap ignored fixture","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
+            )
+            .expect("extension manifest");
+            let script = extension_dir.join("test.sh");
+            std::fs::write(
+                &script,
+                "#!/bin/sh\nset -e\n[ \"$HOMEBOY_TEST_INVENTORY_ONLY\" = 1 ]\n[ -z \"${HOMEBOY_CHANGED_TEST_FILES+x}\" ]\ntouch \"$HOMEBOY_COMPONENT_PATH/inventory-producer-ran\"\n",
+            )
+            .expect("producer script");
+            let mut permissions = std::fs::metadata(&script)
+                .expect("script metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).expect("executable script");
+
+            let component = Component {
+                id: "inventory-cap-ignored".to_string(),
+                local_path: source.path().to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([(
+                    "inventory-cap-ignored-fixture".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+            let mut args = fixture_workflow_args(&component);
+            args.changed_since = Some("base".to_string());
+            args.precomputed_changed_files = Some(vec![
+                "tests/alpha.php".to_string(),
+                "tests/beta.php".to_string(),
+                "tests/gamma.php".to_string(),
+            ]);
+            args.ci_env = vec![
+                (TEST_INVENTORY_ONLY_ENV.to_string(), "1".to_string()),
+                (
+                    TEST_INVENTORY_FILE_ENV.to_string(),
+                    TEST_INVENTORY_PUBLIC_FILE.to_string(),
+                ),
+            ];
+
+            let _guard = changed_scope_cap_env_guard();
+            std::env::set_var(MAX_CHANGED_TEST_FILES_ENV, "1");
+            let result = run_main_test_workflow(
+                &component,
+                source.path(),
+                args,
+                &RunDir::create().expect("run directory"),
+            )
+            .expect("inventory producer runs");
+            std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
+
+            assert!(
+                marker.exists(),
+                "the inventory producer must run despite a selection larger than the cap"
+            );
+            assert_eq!(result.status, "failed", "no valid inventory evidence");
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(result.runner_exit_code, Some(0));
+            assert!(
+                result.findings.as_ref().is_none_or(|findings| {
+                    !findings.iter().any(|finding| {
+                        finding.rule.as_deref() == Some("changed_scope_selection_exceeds_cap")
+                    })
+                }),
+                "the cap must not fire in inventory mode"
             );
         });
     }

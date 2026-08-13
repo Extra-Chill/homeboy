@@ -445,6 +445,37 @@ Core handles baseline comparison, coverage threshold enforcement,
 test-drift detection, and analysis mode — extensions don't implement
 those features themselves.
 
+#### Changed-scope selection cap (`HOMEBOY_MAX_CHANGED_TEST_FILES`)
+
+`homeboy review test --changed-since` can map a small raw diff onto a
+very large test-file selection: drift detection widened a 3-file PR into
+161 selected test files, and handing all of it to the extension as a
+single invocation blew the test-phase budget
+([#12365](https://github.com/Extra-Chill/homeboy/issues/12365)). To keep
+that failure fast and named, core enforces a bounded, opt-in cap on the
+changed-scope selection *before* the extension is invoked:
+
+- Set `HOMEBOY_MAX_CHANGED_TEST_FILES` to a positive integer in the
+  workflow step's `env:` block. It is read from the process environment,
+  exactly like `HOMEBOY_TEST_TIMEOUT_SECONDS`.
+- When the selection exceeds the cap, the phase fails immediately with a
+  `changed_scope_selection_exceeds_cap` finding (`test-scope` / `error`)
+  instead of running the extension, which would consume the whole budget
+  before reporting a single test count. The full selection is still
+  carried on `test_scope` so `runs.json` and
+  `metadata_json.test_scope.selected_files` show exactly what was
+  selected.
+- Unset, unparseable, or non-positive values disable the guard entirely;
+  the behaviour of every existing consumer is unchanged when the cap is
+  not configured.
+- Inventory mode (`HOMEBOY_TEST_INVENTORY_ONLY=1`) is a producer
+  operation, not a changed-test execution, so the cap never fires there.
+
+The companion knobs are `HOMEBOY_TEST_TIMEOUT_SECONDS` (per-invocation
+budget for the extension) and sharding the selection across jobs. The
+cap guards *selection size*; the timeout guards *run time*; sharding
+addresses both by splitting the selection.
+
 ### `homeboy review lint`
 
 Invokes `lint.extension_script` directly. Supports step filtering
