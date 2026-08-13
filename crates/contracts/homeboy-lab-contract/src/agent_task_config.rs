@@ -711,6 +711,18 @@ pub struct AgentTaskProviderRotationAttempt {
     pub selector: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The model supplied by the operator before policy resolution. It remains
+    /// stable across rotation attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    /// The model selected for this dispatched attempt. `model` remains its
+    /// compatibility projection for existing evidence readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempted_model: Option<String>,
+    /// The concrete model reported by the provider that produced this
+    /// attempt's candidate or outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_producing_model: Option<String>,
     pub status: AgentTaskOutcomeStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_classification: Option<AgentTaskFailureClassification>,
