@@ -8,7 +8,7 @@ use crate::output::{
 use crate::paths;
 use crate::Result;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -46,7 +46,7 @@ pub const CONFIG_LOCK_STRICT_ENV: &str = "HOMEBOY_CONFIG_LOCK_STRICT";
 const DEFAULT_CONFIG_LOCK_TIMEOUT_SECS: u64 = 600;
 
 thread_local! {
-    /// Depth of nested `with_config_lock` sections on the current thread.
+    /// Config lock paths held by the current thread, in acquisition order.
     ///
     /// `flock(2)` locks are owned by the *open file description*, not by the
     /// process or the thread: "If a process uses open(2) ... to obtain more
@@ -58,29 +58,40 @@ thread_local! {
     /// Every `with_config_lock` call opens the lock file afresh, so a nested
     /// acquisition on one thread asks for a lock that same thread already
     /// holds through a different description, and `LOCK_EX` blocks in the
-    /// kernel forever. Tracking depth per thread makes the enclosing section
-    /// visible so re-entry can pass through instead of self-deadlocking.
-    static CONFIG_LOCK_DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// kernel forever. Tracking held paths per thread makes same-lock re-entry
+    /// visible without conflating independent rooted lock domains.
+    static CONFIG_LOCK_PATHS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Nesting depth of config-lock sections held by the current thread.
 pub fn config_lock_depth() -> u32 {
-    CONFIG_LOCK_DEPTH.with(Cell::get)
+    CONFIG_LOCK_PATHS.with(|paths| paths.borrow().len().try_into().unwrap_or(u32::MAX))
 }
 
-struct ConfigLockDepthGuard;
+struct ConfigLockPathGuard {
+    lock_path: PathBuf,
+}
 
-impl ConfigLockDepthGuard {
-    fn enter() -> Self {
-        CONFIG_LOCK_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
-        Self
+impl ConfigLockPathGuard {
+    fn enter(lock_path: &Path) -> Self {
+        CONFIG_LOCK_PATHS.with(|paths| paths.borrow_mut().push(lock_path.to_path_buf()));
+        Self {
+            lock_path: lock_path.to_path_buf(),
+        }
     }
 }
 
-impl Drop for ConfigLockDepthGuard {
+impl Drop for ConfigLockPathGuard {
     fn drop(&mut self) {
-        CONFIG_LOCK_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        CONFIG_LOCK_PATHS.with(|paths| {
+            let popped = paths.borrow_mut().pop();
+            debug_assert_eq!(popped.as_deref(), Some(self.lock_path.as_path()));
+        });
     }
+}
+
+fn config_lock_is_held(lock_path: &Path) -> bool {
+    CONFIG_LOCK_PATHS.with(|paths| paths.borrow().iter().any(|path| path == lock_path))
 }
 
 #[cfg(unix)]
@@ -110,13 +121,32 @@ pub fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     with_config_lock_for("config mutation", operation)
 }
 
+/// Run `operation` while holding the exclusive config lock under `config_root`.
+pub fn with_config_lock_at<T>(
+    config_root: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_config_lock_for_at(config_root, "config mutation", operation)
+}
+
 /// Run `operation` while holding the exclusive Homeboy config lock, identifying
 /// the mutation in contention diagnostics.
 pub fn with_config_lock_for<T>(
     operation_name: &str,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    if config_lock_depth() > 0 {
+    with_config_lock_for_at(&paths::homeboy()?, operation_name, operation)
+}
+
+/// Run `operation` while holding the exclusive config lock under `config_root`,
+/// identifying the mutation in contention diagnostics.
+pub fn with_config_lock_for_at<T>(
+    config_root: &Path,
+    operation_name: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let lock_path = config_root.join("config.lock");
+    if config_lock_is_held(&lock_path) {
         if config_lock_strict() {
             return Err(Error::internal_io(
                 format!(
@@ -128,11 +158,10 @@ pub fn with_config_lock_for<T>(
                 Some("lock config".to_string()),
             ));
         }
-        let _depth = ConfigLockDepthGuard::enter();
+        let _depth = ConfigLockPathGuard::enter(&lock_path);
         return operation();
     }
 
-    let lock_path = paths::homeboy()?.join("config.lock");
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(
@@ -154,7 +183,7 @@ pub fn with_config_lock_for<T>(
         })?;
 
     let _guard = ConfigLockGuard::lock(lock_file, &lock_path, operation_name)?;
-    let _depth = ConfigLockDepthGuard::enter();
+    let _depth = ConfigLockPathGuard::enter(&lock_path);
     operation()
 }
 
@@ -1302,6 +1331,54 @@ mod tests {
                 (0, 1, 2, 1, 0),
                 "re-entry must nest and unwind, not re-acquire"
             );
+        });
+    }
+
+    #[test]
+    fn rooted_config_locks_allow_independent_parallel_critical_sections() {
+        let left = tempfile::tempdir().expect("left config root");
+        let right = tempfile::tempdir().expect("right config root");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let run = |root: PathBuf, barrier: std::sync::Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                with_config_lock_at(&root, || {
+                    barrier.wait();
+                    Ok(root.join("config.lock"))
+                })
+            })
+        };
+        let left_thread = run(left.path().to_path_buf(), barrier.clone());
+        let right_thread = run(right.path().to_path_buf(), barrier);
+
+        let left_lock = left_thread.join().expect("left thread").expect("left lock");
+        let right_lock = right_thread
+            .join()
+            .expect("right thread")
+            .expect("right lock");
+        assert!(left_lock.exists());
+        assert!(right_lock.exists());
+        assert_ne!(left_lock, right_lock);
+    }
+
+    #[test]
+    fn strict_mode_allows_nested_independent_rooted_locks() {
+        crate::test_support::with_isolated_home(|_| {
+            let left = tempfile::tempdir().expect("left config root");
+            let right = tempfile::tempdir().expect("right config root");
+            let left = left.path().to_path_buf();
+            let right = right.path().to_path_buf();
+
+            std::env::set_var(CONFIG_LOCK_STRICT_ENV, "1");
+            let depths = with_config_lock_at(&left, || {
+                let outer = config_lock_depth();
+                let inner = with_config_lock_at(&right, || Ok(config_lock_depth()))?;
+                Ok((outer, inner, config_lock_depth()))
+            });
+            std::env::remove_var(CONFIG_LOCK_STRICT_ENV);
+
+            assert_eq!(depths.expect("independent rooted locks"), (1, 2, 1));
+            assert_eq!(config_lock_depth(), 0);
         });
     }
 
