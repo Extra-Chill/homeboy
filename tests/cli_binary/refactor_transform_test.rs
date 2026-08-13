@@ -5,6 +5,7 @@ use std::process::Command;
 use homeboy::refactor;
 
 #[allow(dead_code)]
+#[path = "../support/mod.rs"]
 mod support;
 
 #[test]

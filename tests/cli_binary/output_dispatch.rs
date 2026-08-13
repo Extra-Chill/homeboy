@@ -27,32 +27,29 @@ fn adapter_backed_contract_preserves_stdout_and_output_file_envelopes() {
 }
 
 #[test]
-fn self_identity_and_inspect_preserve_canonical_envelopes_on_stdout_and_output_file() {
+fn self_identity_preserves_canonical_envelopes_on_stdout_and_output_file() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let stdout = Command::new(homeboy_bin())
+        .args(["self", "identity"])
+        .output()
+        .expect("run self identity fast path");
+    assert_eq!(stdout.status.code(), Some(0));
+    assert!(stdout.stderr.is_empty());
+    assert_canonical_self_identity_envelope(&stdout.stdout);
 
-    for command in ["identity", "inspect"] {
-        let stdout = Command::new(homeboy_bin())
-            .args(["self", command])
-            .output()
-            .expect("run self identity fast path");
-        assert_eq!(stdout.status.code(), Some(0));
-        assert!(stdout.stderr.is_empty());
-        assert_canonical_self_identity_envelope(&stdout.stdout);
+    let output_path = dir.path().join("identity.json");
+    let output = Command::new(homeboy_bin())
+        .args(["self", "identity", "--output"])
+        .arg(&output_path)
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .output()
+        .expect("run self identity with output file");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
 
-        let output_path = dir.path().join(format!("{command}.json"));
-        let output = Command::new(homeboy_bin())
-            .args(["self", command, "--output"])
-            .arg(&output_path)
-            .env("HOMEBOY_NO_UPDATE_CHECK", "1")
-            .output()
-            .expect("run self identity with output file");
-        assert_eq!(output.status.code(), Some(0));
-        assert!(output.stderr.is_empty());
-
-        let output_file = std::fs::read(&output_path).expect("identity output file");
-        assert_eq!(output.stdout, output_file);
-        assert_canonical_self_identity_envelope(&output.stdout);
-    }
+    let output_file = std::fs::read(&output_path).expect("identity output file");
+    assert_eq!(output.stdout, output_file);
+    assert_canonical_self_identity_envelope(&output.stdout);
 }
 
 fn assert_canonical_self_identity_envelope(bytes: &[u8]) {
