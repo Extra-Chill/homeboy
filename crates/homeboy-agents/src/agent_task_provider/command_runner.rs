@@ -175,7 +175,7 @@ fn immediate_provider_failure(
                 .as_deref()
                 .and_then(|expression| regex::Regex::new(expression).ok())
                 .map(|expression| expression.replace_all(&text, "[provider-error-ref]").into_owned())
-                .unwrap_or(text);
+                .unwrap_or_else(|| text.clone());
             let normalized = bounded_text(&normalized, IMMEDIATE_FAILURE_SIGNATURE_TEXT_LIMIT);
             ImmediateProviderFailure {
                 pattern_id: pattern.id.clone(),

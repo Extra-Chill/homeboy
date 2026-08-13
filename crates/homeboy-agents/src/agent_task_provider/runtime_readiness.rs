@@ -6,7 +6,10 @@ use serde_json::{json, Value};
 use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{Error, Result};
 
-use super::command_runner::{run_provider_readiness_invocation, ProviderReadinessInvocationResult};
+use super::command_runner::{
+    run_provider_readiness_invocation, validate_provider_immediate_failure_patterns,
+    ProviderReadinessInvocationResult,
+};
 use super::resolution::select_provider;
 use super::AgentTaskExecutorProvider;
 
