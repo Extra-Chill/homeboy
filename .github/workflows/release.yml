@@ -903,6 +903,7 @@ jobs:
             DIST_ALLOW_DIRTY=""
           fi
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} ${DIST_ALLOW_DIRTY} > dist-manifest.json
+          bash .github/canonicalize-checksum-sidecars.sh target/distrib
           echo "dist ran successfully"
 
       - id: cargo-dist
@@ -1005,6 +1006,7 @@ jobs:
             DIST_ALLOW_DIRTY=""
           fi
           dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" ${DIST_ALLOW_DIRTY} > dist-manifest.json
+          bash .github/canonicalize-checksum-sidecars.sh target/distrib
           cp bootstrap-source/scripts/homeboy-installer.sh target/distrib/homeboy-installer.sh
           chmod 0755 target/distrib/homeboy-installer.sh
           echo "dist ran successfully"

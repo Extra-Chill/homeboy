@@ -917,7 +917,8 @@ fn release_recovery_propagates_dist_opt_in_and_dirty_allowance_through_all_dist_
             .find("grep -Fqx '[package.metadata.dist]' Cargo.toml")
             .unwrap_or_else(|| panic!("{job} must use fixed-string exact-line matching"));
         let dist = section
-            .find("\n          dist ")
+            .find("dist build ")
+            .or_else(|| section.find("dist host "))
             .unwrap_or_else(|| panic!("{job} must execute cargo-dist"));
 
         assert!(
@@ -1926,6 +1927,18 @@ fn release_check_skips_a_superseded_push_but_still_fails_an_unmeasured_one() {
 
 fn release_integrity_workflow() -> &'static str {
     include_str!("../.github/workflows/release-integrity.yml")
+}
+
+#[test]
+fn release_builds_canonicalize_cargo_dist_checksum_sidecars_before_upload() {
+    let workflow = release_workflow();
+    assert_eq!(
+        workflow
+            .matches("bash .github/canonicalize-checksum-sidecars.sh target/distrib")
+            .count(),
+        2,
+        "local and global cargo-dist builds must normalize the sidecars they upload"
+    );
 }
 
 /// The exact published inventory of `v0.332.0` — the last healthy release.
