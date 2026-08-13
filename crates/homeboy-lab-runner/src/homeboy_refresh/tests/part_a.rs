@@ -847,12 +847,18 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
     // workspace root. After lab-runner was extracted into `crates/homeboy-lab-runner`,
     // CARGO_MANIFEST_DIR points at this crate (which has no build.rs), so resolve
     // the real generator from the workspace root instead.
-    let build_identity_script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let build_identity_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("crates/homeboy-product-identity/build.rs");
+        .join("crates/homeboy-product-identity");
+    let build_identity_script = build_identity_dir.join("build.rs");
     std::fs::copy(&build_identity_script, core.join("build.rs"))
         .expect("copy core build identity script");
+    std::fs::copy(
+        build_identity_dir.join("src/git_watch_paths.rs"),
+        core.join("src/git_watch_paths.rs"),
+    )
+    .expect("copy core build identity script dependency");
     // The generator emits HOMEBOY_PRODUCT_GIT_* (renamed from HOMEBOY_BUILD_GIT_*),
     // so the fixture's core crate consumes the current variable names.
     std::fs::write(
@@ -938,7 +944,7 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
         .iter()
         .enumerate()
     {
-        let target_dir = fixture.path().join(format!("build-{index}"));
+        let target_dir = fixture.path().join(format!("case-{index}/build"));
         let binary_path = target_dir.join("target/release/homeboy");
         let script = materialize_script(
             source.to_str().expect("source path"),
