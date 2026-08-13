@@ -30,7 +30,8 @@ const RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 24 * 60;
 
 #[derive(Args, Clone, Default)]
 pub struct RunsReconcileArgs {
-    /// Preview orphaned running records without mutating them
+    /// Preview orphaned running observation records without mutation. Omit this
+    /// flag to mark only the reported orphaned records stale.
     #[arg(long)]
     pub dry_run: bool,
     /// Maximum running records to inspect
@@ -41,6 +42,12 @@ pub struct RunsReconcileArgs {
 #[derive(Serialize)]
 pub struct RunsReconcileOutput {
     pub command: &'static str,
+    /// State plane that owns this reconciliation.
+    pub owner: &'static str,
+    /// Bounded records considered by this invocation.
+    pub scope: String,
+    /// State guaranteed when this command completes successfully.
+    pub postcondition: &'static str,
     pub dry_run: bool,
     pub inspected: usize,
     pub reconciled: Vec<ReconciledRunSummary>,
@@ -75,6 +82,16 @@ pub fn reconcile_runs(args: RunsReconcileArgs) -> CmdResult<RunsOutput> {
     Ok((
         RunsOutput::Reconcile(RunsReconcileOutput {
             command: "runs.reconcile",
+            owner: "observation_runs",
+            scope: format!(
+                "up to {} running observation records",
+                args.limit.clamp(1, 1000)
+            ),
+            postcondition: if args.dry_run {
+                "reports orphaned observation records without persisted mutation"
+            } else {
+                "every reported orphaned observation record is stale"
+            },
             dry_run: args.dry_run,
             inspected,
             reconciled,

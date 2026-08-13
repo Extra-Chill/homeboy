@@ -111,6 +111,11 @@ fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownersh
     );
 
     assert_eq!(outcome.status, "partial_progress");
+    assert_eq!(outcome.owner, "runner_generations");
+    assert_eq!(
+        outcome.postcondition,
+        "the runner accepts jobs with no unresolved generation projection"
+    );
     assert_eq!(outcome.retired_generation_count, 1);
     assert_eq!(outcome.retired_generation_ids, ["lease-retired"]);
     assert_eq!(
@@ -229,6 +234,10 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
     assert_eq!(serialized["exit_code"], 1);
     assert_eq!(serialized["status"], "failed");
     assert_eq!(serialized["data"]["reconciliation"]["status"], "blocked");
+    assert_eq!(
+        serialized["data"]["reconciliation"]["owner"],
+        "runner_generations"
+    );
     assert_eq!(
         serialized["data"]["reconciliation"]["remaining_blocker"],
         "admission_unavailable"

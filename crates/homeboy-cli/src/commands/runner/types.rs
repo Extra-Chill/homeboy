@@ -95,6 +95,12 @@ impl Default for RunnerExtra {
 /// Bounded postcondition for `runner reconcile`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RunnerReconciliationOutcome {
+    /// State plane that owns direct-runner generation reconciliation.
+    pub owner: &'static str,
+    /// The one runner and its persisted daemon generations inspected here.
+    pub scope: String,
+    /// State guaranteed only when `status` is `converged`.
+    pub postcondition: &'static str,
     /// `converged`, `partial_progress`, or `blocked`.
     pub status: &'static str,
     pub retired_generation_count: usize,

@@ -117,7 +117,10 @@ pub enum AgentTaskCommand {
     /// `--reconcile` turns this into an explicit fleet operation: it previews
     /// every candidate by default and requires `--apply` to mutate the set.
     Active(ActiveArgs),
-    /// Preview or apply reconciliation for one durable run.
+    /// Reconcile one durable agent-task run or explicit Cook group. This is a
+    /// preview by default; use `--apply` only after reviewing the authoritative
+    /// provider state. Success leaves every selected durable record reconciled
+    /// to that state.
     Reconcile(ReconcileArgs),
     /// Reconcile stored durable run records against authoritative provider state.
     ReconcileRecords(ReconcileRecordsArgs),
@@ -306,8 +309,11 @@ pub struct ActiveArgs {
 #[derive(Args, Debug)]
 pub struct ReconcileArgs {
     pub run_id: String,
+    /// Preview the selected durable run/group without persisted mutation. This
+    /// is the default when `--apply` is omitted.
     #[arg(long = "dry-run", conflicts_with = "apply")]
     pub dry_run: bool,
+    /// Apply the reviewed reconciliation to the selected durable run/group.
     #[arg(long = "apply", conflicts_with = "dry_run")]
     pub apply: bool,
 }

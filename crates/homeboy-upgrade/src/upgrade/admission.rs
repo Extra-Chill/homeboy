@@ -18,8 +18,17 @@ pub struct ControllerUpgradeAdmission {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ControllerUpgradeBlocker {
     pub run_id: String,
+    /// State plane that exclusively owns remediation for this blocker.
+    pub owner: String,
+    /// Bounded state affected by the owning reconciler.
+    pub scope: String,
+    /// State the owning action establishes when it succeeds.
+    pub postcondition: String,
     pub liveness: &'static str,
     pub reason: String,
+    /// The single executable action selected for this blocker.
+    pub action: String,
+    /// Compatibility alias for installer error remediation lists.
     pub recovery_command: String,
 }
 

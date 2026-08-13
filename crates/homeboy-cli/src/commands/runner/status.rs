@@ -252,6 +252,9 @@ pub(super) fn reconciliation_outcome(
         || !admission.unresolved_generation_ids.is_empty();
     if admission.accepting_jobs && !unresolved_projection {
         return RunnerReconciliationOutcome {
+            owner: "runner_generations",
+            scope: format!("runner `{runner_id}` and its persisted daemon generations"),
+            postcondition: "the runner accepts jobs with no unresolved generation projection",
             status: "converged",
             retired_generation_count,
             retired_generation_ids,
@@ -287,6 +290,9 @@ pub(super) fn reconciliation_outcome(
         });
 
     RunnerReconciliationOutcome {
+        owner: "runner_generations",
+        scope: format!("runner `{runner_id}` and its persisted daemon generations"),
+        postcondition: "the runner accepts jobs with no unresolved generation projection",
         status: if retired_generation_count > 0 {
             "partial_progress"
         } else {
