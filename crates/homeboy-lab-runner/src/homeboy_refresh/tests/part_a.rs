@@ -877,6 +877,14 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
         .join("crates/homeboy-product-identity/build.rs");
     std::fs::copy(&build_identity_script, core.join("build.rs"))
         .expect("copy core build identity script");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("crates/homeboy-product-identity/src/git_watch_paths.rs"),
+        core.join("src/git_watch_paths.rs"),
+    )
+    .expect("copy core build identity git watch paths");
     // The generator emits HOMEBOY_PRODUCT_GIT_* (renamed from HOMEBOY_BUILD_GIT_*),
     // so the fixture's core crate consumes the current variable names.
     std::fs::write(

@@ -582,7 +582,11 @@ pub fn refresh_homeboy_binary(
                     },
                 )?;
                 Ok((
-                    promote_verified_runner_binary(&plan.runner_id, homeboy_path)?,
+                    promote_verified_runner_binary(
+                        &promotion_lease,
+                        &plan.runner_id,
+                        homeboy_path,
+                    )?,
                     rollback,
                 ))
             },
@@ -630,8 +634,11 @@ pub fn refresh_homeboy_binary(
                     }
                 },
             )?;
-            let updated_fields =
-                promote_verified_runner_binary(&plan.runner_id, &selected_binary_path)?;
+            let updated_fields = promote_verified_runner_binary(
+                &promotion_lease,
+                &plan.runner_id,
+                &selected_binary_path,
+            )?;
             Ok(SshBootstrapPromotion {
                 identity,
                 source_sha: source_sha_from_output(&exec_output.stdout),
@@ -2367,9 +2374,14 @@ fn refreshed_runner_patch(runner_id: &str, homeboy_path: &str) -> Result<Value> 
 /// Persist a verified selection in the controller-owned runner registry.
 /// Runner commands may execute remotely, but registry mutation must remain on
 /// the controller so subsequent jobs use the selected binary.
-fn promote_verified_runner_binary(runner_id: &str, homeboy_path: &str) -> Result<Vec<String>> {
+fn promote_verified_runner_binary(
+    promotion_lease: &homeboy_core::runtime_promotion::RuntimePromotionLease,
+    runner_id: &str,
+    homeboy_path: &str,
+) -> Result<Vec<String>> {
     homeboy_core::config::with_config_lock(|| {
         promote_verified_runner_binary_with(
+            || promotion_lease.assert_generation(),
             runner_id,
             homeboy_path,
             |runner_id, homeboy_path| {
@@ -2388,23 +2400,27 @@ fn promote_verified_runner_binary(runner_id: &str, homeboy_path: &str) -> Result
 /// stored through two registry shapes, and reconnect independently re-reads
 /// the configured executable. Repair a stale write while the promotion lease
 /// still owns this candidate, rather than leaving reconnect to discover it.
-fn promote_verified_runner_binary_with<Promote, Read>(
+fn promote_verified_runner_binary_with<AssertLease, Promote, Read>(
+    mut assert_lease: AssertLease,
     runner_id: &str,
     homeboy_path: &str,
     mut promote: Promote,
     mut read_configured_path: Read,
 ) -> Result<Vec<String>>
 where
+    AssertLease: FnMut() -> Result<()>,
     Promote: FnMut(&str, &str) -> Result<Vec<String>>,
     Read: FnMut(&str) -> Result<Option<String>>,
 {
+    assert_lease()?;
     let updated_fields = promote(runner_id, homeboy_path)?;
     if read_configured_path(runner_id)?.as_deref() == Some(homeboy_path) {
         return Ok(updated_fields);
     }
 
-    // The first write was acknowledged but is not observable from the runner
-    // registry. Reapply the exact selected executable before reconnecting.
+    // Repair only while the original promotion remains authoritative. A newer
+    // generation must never be overwritten by this stale observation.
+    assert_lease()?;
     let repaired_fields = promote(runner_id, homeboy_path)?;
     if read_configured_path(runner_id)?.as_deref() == Some(homeboy_path) {
         return Ok(updated_fields.into_iter().chain(repaired_fields).collect());

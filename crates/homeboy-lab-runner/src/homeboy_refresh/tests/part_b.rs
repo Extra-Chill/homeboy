@@ -88,9 +88,18 @@ fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
         );
         assert_eq!(env.get("HOMEBOY_DAEMON_STATE_DIR"), None);
 
-        promote_verified_runner_binary(
+        promote_verified_runner_binary_with(
+            || Ok(()),
             "lab-local",
             "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy",
+            |runner_id, homeboy_path| {
+                let patch = refreshed_runner_patch(runner_id, homeboy_path)?;
+                match merge(Some(runner_id), &patch.to_string(), &[])? {
+                    MergeOutput::Single(result) => Ok(result.updated_fields),
+                    MergeOutput::Bulk(_) => Ok(Vec::new()),
+                }
+            },
+            |runner_id| Ok(crate::load(runner_id)?.settings.homeboy_path),
         )
         .expect("promote refreshed binary");
         let offload_env = crate::effective_env("lab-local").expect("effective offload env");
@@ -476,7 +485,9 @@ fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
             &plan,
             || Ok(verified_bootstrap_output("abc123")),
             |path, _| {
-                promote_verified_runner_binary("lab-local", path).map(|fields| (fields, None))
+                let lease = acquire_runner_binary_promotion("lab-local", "abc123")?;
+                promote_verified_runner_binary(&lease, "lab-local", path)
+                    .map(|fields| (fields, None))
             },
         )
         .expect("verified bootstrap promotes");
@@ -503,12 +514,20 @@ fn controller_binary_selection_is_idempotent() {
         .expect("runner");
 
         assert_eq!(
-            promote_verified_runner_binary("lab-local", "/verified/homeboy")
-                .expect("persist controller selection"),
+            {
+                let lease = acquire_runner_binary_promotion("lab-local", "verified")
+                    .expect("promotion lease");
+                promote_verified_runner_binary(&lease, "lab-local", "/verified/homeboy")
+            }
+            .expect("persist controller selection"),
             ["env", "homeboy_path"]
         );
         assert_eq!(
-            promote_verified_runner_binary("lab-local", "/verified/homeboy")
+            {
+                let lease = acquire_runner_binary_promotion("lab-local", "verified")
+                    .expect("promotion lease");
+                promote_verified_runner_binary(&lease, "lab-local", "/verified/homeboy")
+            }
                 .expect("repeat controller selection"),
             ["env", "homeboy_path"],
             "promotion always declares the control-plane environment and selected executable it normalizes"
@@ -530,6 +549,7 @@ fn promotion_repairs_an_acknowledged_but_stale_configured_executable() {
     let writes = std::cell::RefCell::new(0);
 
     let updated_fields = promote_verified_runner_binary_with(
+        || Ok(()),
         "lab",
         "/selected/homeboy",
         |_, selected| {
@@ -554,8 +574,45 @@ fn promotion_repairs_an_acknowledged_but_stale_configured_executable() {
 }
 
 #[test]
+fn promotion_repair_does_not_write_after_its_lease_loses_authority() {
+    let configured_path = std::cell::RefCell::new(Some("/old/homeboy".to_string()));
+    let writes = std::cell::RefCell::new(0);
+
+    let error = promote_verified_runner_binary_with(
+        || {
+            if *writes.borrow() == 1 {
+                return Err(Error::validation_invalid_argument(
+                    "runtime_generation",
+                    "promotion lease no longer owns the selected generation",
+                    Some("new-generation".to_string()),
+                    None,
+                ));
+            }
+            Ok(())
+        },
+        "lab",
+        "/old-selection/homeboy",
+        |_, _| {
+            *writes.borrow_mut() += 1;
+            Ok(vec!["homeboy_path".to_string()])
+        },
+        |_| Ok(configured_path.borrow().clone()),
+    )
+    .expect_err("a stale promotion must not repair after losing its lease");
+
+    assert_eq!(error.details["field"], "runtime_generation");
+    assert_eq!(*writes.borrow(), 1, "only the acknowledged write occurred");
+    assert_eq!(
+        configured_path.borrow().as_deref(),
+        Some("/old/homeboy"),
+        "the stale request did not regain selection"
+    );
+}
+
+#[test]
 fn promotion_failure_names_the_exact_selected_executable_mutation() {
     let error = promote_verified_runner_binary_with(
+        || Ok(()),
         "lab",
         "/selected/homeboy",
         |_, _| Ok(vec!["homeboy_path".to_string()]),
@@ -606,7 +663,7 @@ fn equivalent_refresh_waiter_reloads_the_owner_selection_after_promotion_handoff
         assert_eq!(event.target, "lab");
         assert_eq!(event.owner_operation, "runner binary promotion");
         assert_eq!(event.owner_pid, std::process::id());
-        promote_verified_runner_binary("lab", selected.to_str().expect("selected path"))
+        promote_verified_runner_binary(&owner, "lab", selected.to_str().expect("selected path"))
             .expect("owner selects candidate");
         drop(owner);
 
