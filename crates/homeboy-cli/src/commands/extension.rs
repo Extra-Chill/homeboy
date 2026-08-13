@@ -1616,17 +1616,24 @@ mod tests {
                 &root,
                 &["init", "--bare", "--quiet", remote.to_str().unwrap()]
             ));
+            assert!(git(&root, &["init", "--quiet", seed.to_str().unwrap()]));
+            assert!(git(&seed, &["checkout", "--quiet", "-b", "main"]));
+            write_convergence_manifest(&seed, ">=0.0.0");
+            assert!(git(
+                &seed,
+                &["remote", "add", "origin", remote.to_str().unwrap()]
+            ));
+            commit_and_push(&seed, "initial");
             assert!(git(
                 &root,
                 &[
-                    "clone",
-                    "--quiet",
+                    "--git-dir",
                     remote.to_str().unwrap(),
-                    seed.to_str().unwrap()
+                    "symbolic-ref",
+                    "HEAD",
+                    "refs/heads/main"
                 ]
             ));
-            write_convergence_manifest(&seed, ">=0.0.0");
-            commit_and_push(&seed, "initial");
             assert!(git(
                 &root,
                 &[
