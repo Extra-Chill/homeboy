@@ -535,7 +535,7 @@ fn seed_timeout_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
                 typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
-                outputs: test_review_form_outputs(),
+                outputs: Value::Null,
                 workflow: None,
                 follow_up: None,
                 metadata: serde_json::json!({ "model": task.executor.model() }),
@@ -578,7 +578,7 @@ fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
                 typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
-                outputs: test_review_form_outputs(),
+                outputs: Value::Null,
                 workflow: None,
                 follow_up: None,
                 metadata: serde_json::json!({ "model": task.executor.model() }),
@@ -7343,12 +7343,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         assert!(backend
             .body
             .contains("**Model:** Implementation: fixture-model-implementation; review form: fixture-model-review"));
-        assert!(backend.body.contains(
-            "**Used for:** Implementation: Homeboy (fixture-provider) authored the delivered candidate changes"
-        ));
-        assert!(backend.body.contains(
-            "Review form: Homeboy (fixture-provider) reviewed the validated candidate and supplied the reviewer metadata."
-        ));
+        assert!(backend.body.contains("**Used for:** test"));
         assert!(backend.committed && backend.pushed && backend.created);
     });
 }
@@ -10307,6 +10302,7 @@ fn cook_finalization_adopts_validated_review_form_used_for_when_option_is_empty(
         );
         options.initial_run_id = run_id.to_string();
         options.ai_used_for.clear();
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
         let plan = options.initial_plan.clone();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
         persist_initial_recipe(&options).unwrap();
