@@ -4,6 +4,57 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.344.0] - 2026-08-13
+
+### Added
+- project bounded provider evidence
+
+### Fixed
+- skip empty evidence transfer
+- project fanout admission lifecycle
+- retain claimed fanout coordinator
+- persist fanout admission state
+
+## [0.343.0] - 2026-08-13
+
+### Added
+- add independent convergence
+
+### Changed
+- Select canonical Cook patch artifacts
+- stabilize convergence coverage
+
+### Fixed
+- Fix controller upgrade admission convergence
+- reconcile exact Cook records
+- retain producing model evidence
+- supervise local provider execution
+- bootstrap candidate admission
+
+## [0.342.3] - 2026-08-13
+
+### Changed
+- own the fixture warmth a digest count depends on
+- Refresh CLI command reference
+- Accept file-backed Cook verification gates
+- Recover recipe-only Cook lifecycles
+- Validate Cook gate command contracts
+
+### Fixed
+- prune stale observe fingerprint
+- render workspace owner repairs
+
+## [0.342.2] - 2026-08-13
+
+### Fixed
+- prove pin identity by digest instead of executing it
+
+## [0.342.1] - 2026-08-13
+
+### Changed
+- repin Test to homeboy-action v2.11.26
+- repin Test to homeboy-action v2.11.24
+
 ## [0.342.0] - 2026-08-12
 
 ### Added

@@ -263,7 +263,8 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
             &mut provider,
         )
         .expect("promote recovered controller projection");
-        assert_eq!(report.patch_artifact.path, patch.path);
+        assert_ne!(report.patch_artifact.path, patch.path);
+        assert!(Path::new(&report.patch_artifact.path).is_file());
         assert_eq!(
             provider.applied_patch_contents,
             vec![VALID_PATCH.to_string()]

@@ -905,7 +905,11 @@ pub fn reconcile_recipe_attempt_for_continuation(
     recipe: &AgentTaskCookRecipe,
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = super::cook_pre_execution::recover_recipe_attempt(run_id)?.ok_or_else(|| {
+        Error::internal_unexpected(
+            "Cook recipe unexpectedly disappeared during continuation recovery",
+        )
+    })?;
     validate_recipe_attempt_record(recipe, run_id, &record)?;
     // Promotion has copied and verified the selected artifact into the
     // controller-owned destination. Once its gates are green, finalization no

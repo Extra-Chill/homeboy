@@ -148,8 +148,8 @@ fn the_stranded_v0_321_1_draft_matches_the_expected_inventory_exactly() {
     );
     assert_eq!(
         jq("length", &expected),
-        "13",
-        "cargo-dist publishes 12 planned artifacts plus dist-manifest.json"
+        "14",
+        "the release adds the bootstrap installer to cargo-dist's 12 planned artifacts and dist manifest"
     );
 }
 

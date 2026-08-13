@@ -433,7 +433,7 @@ fn extension_overlay_lifecycle_uses_ttl_cleanup_policy() {
 }
 
 #[test]
-fn refresh_patch_only_owns_homeboy_path() {
+fn refresh_patch_updates_homeboy_path_and_control_plane_env() {
     test_support::with_isolated_home(|_| {
         crate::create(
             r#"{
@@ -454,10 +454,8 @@ fn refresh_patch_only_owns_homeboy_path() {
             refreshed_runner_patch("lab-local", "/runner/ws/homeboy").expect("build refresh patch");
 
         assert_eq!(patch["homeboy_path"], "/runner/ws/homeboy");
-        assert_eq!(
-            patch,
-            serde_json::json!({ "homeboy_path": "/runner/ws/homeboy" })
-        );
+        assert_eq!(patch["env"]["HOMEBOY_COMMAND"], "/runner/ws/homeboy");
+        assert!(patch["env"]["HOMEBOY_DAEMON_STATE_DIR"].is_null());
     });
 }
 
@@ -492,7 +490,7 @@ fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
 }
 
 #[test]
-fn controller_binary_selection_is_idempotent() {
+fn controller_binary_selection_reports_fresh_main_control_plane_fields() {
     test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
@@ -503,12 +501,12 @@ fn controller_binary_selection_is_idempotent() {
         assert_eq!(
             promote_verified_runner_binary("lab-local", "/verified/homeboy")
                 .expect("persist controller selection"),
-            ["homeboy_path"]
+            ["env", "homeboy_path"]
         );
-        assert!(
+        assert_eq!(
             promote_verified_runner_binary("lab-local", "/verified/homeboy")
-                .expect("repeat controller selection")
-                .is_empty()
+                .expect("repeat controller selection"),
+            ["env", "homeboy_path"]
         );
         assert_eq!(
             crate::load("lab-local")
@@ -680,10 +678,11 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
 
         let (selected, exit_code) = refresh_homeboy_binary(options.clone()).expect("selection");
         assert_eq!(exit_code, 0);
-        assert_eq!(selected.updated_fields, ["homeboy_path"]);
+        assert_eq!(selected.updated_fields, ["env", "homeboy_path"]);
         assert_eq!(selected.selected_binary_path, binary.display().to_string());
         assert!(!selected.daemon_refreshed);
         assert!(selected.reconnect_required);
+        assert!(selected.next_actions.is_empty());
         assert_eq!(
             crate::load("lab-local")
                 .expect("reload controller registry")
@@ -695,10 +694,61 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
 
         let (repeated, exit_code) = refresh_homeboy_binary(options).expect("repeat selection");
         assert_eq!(exit_code, 0);
-        assert!(repeated.updated_fields.is_empty());
+        assert_eq!(repeated.updated_fields, ["env", "homeboy_path"]);
         assert!(!repeated.daemon_refreshed);
         assert!(repeated.reconnect_required);
+        assert!(repeated.next_actions.is_empty());
     });
+}
+
+#[test]
+fn verified_materialized_refresh_defers_controller_materialization_to_exact_continuation() {
+    let identity = serde_json::json!({
+        "data": {
+            "display": "homeboy 1.2.3+exact-remote-sha",
+            "git_commit": "exact-remote-sha"
+        }
+    });
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "materialize".to_string(),
+        source: Some("https://example.test/Extra-Chill/homeboy.git".to_string()),
+        git_ref: Some("candidate".to_string()),
+        target_dir: Some("/runner/homeboy".to_string()),
+        binary_path: "/runner/homeboy".to_string(),
+        script: "runner-only materialization".to_string(),
+        reconnect: true,
+        followup_commands: Vec::new(),
+    };
+
+    let actions = controller_continuation_actions(&plan, &identity).expect("continuation");
+    assert_eq!(actions.len(), 1);
+    let action = &actions[0];
+    assert_eq!(action.commit, "exact-remote-sha");
+    assert_eq!(
+        action.source,
+        "https://example.test/Extra-Chill/homeboy.git"
+    );
+    assert_eq!(
+        action.command[0..3],
+        ["homeboy", "runtime", "materialize-controller"]
+    );
+    assert!(action.command.iter().any(|arg| arg == "exact-remote-sha"));
+    assert!(!action.command.iter().any(|arg| arg == "refresh-homeboy"));
+    assert!(action.invocation.is_empty());
+    assert!(!action
+        .invocation
+        .iter()
+        .any(|arg| arg.contains("refresh-homeboy")));
+
+    let select = HomeboyBinaryRefreshPlan {
+        mode: "select".to_string(),
+        source: None,
+        ..plan
+    };
+    assert!(controller_continuation_actions(&select, &identity)
+        .expect("select continuation")
+        .is_empty());
 }
 
 #[test]
@@ -743,7 +793,7 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
         .expect("blocked connect is a structured refresh result");
 
         assert_eq!(exit_code, 1);
-        assert_eq!(output.updated_fields, ["homeboy_path"]);
+        assert_eq!(output.updated_fields, ["env", "homeboy_path"]);
         assert_eq!(output.selected_binary_path, binary.display().to_string());
         assert_eq!(output.plan.mode, "select");
         assert_eq!(output.plan.source, None);
@@ -880,7 +930,7 @@ fn connected_refresh_blocker_preserves_the_newly_selected_binary() {
         let (output, exit_code) = refresh(&second_binary).expect("connected refresh result");
 
         assert_eq!(exit_code, 1);
-        assert_eq!(output.updated_fields, ["homeboy_path"]);
+        assert_eq!(output.updated_fields, ["env", "homeboy_path"]);
         assert_eq!(
             output.selected_binary_path,
             second_binary.display().to_string()
@@ -1304,6 +1354,6 @@ fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
         );
         assert_eq!(runner.env.get("NEW").map(String::as_str), Some("2"));
         assert_eq!(runner.resources["dev_sync"]["new"], true);
-        assert_eq!(result.updated_fields, vec!["homeboy_path"]);
+        assert_eq!(result.updated_fields, vec!["env", "homeboy_path"]);
     });
 }
