@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.342.3] - 2026-08-13
+
+### Changed
+- own the fixture warmth a digest count depends on
+- Refresh CLI command reference
+- Accept file-backed Cook verification gates
+- Recover recipe-only Cook lifecycles
+- Validate Cook gate command contracts
+
+### Fixed
+- prune stale observe fingerprint
+- render workspace owner repairs
+
 ## [0.342.2] - 2026-08-13
 
 ### Fixed

@@ -20,6 +20,34 @@ mod provider_rotation_tests {
         patch: String,
     }
 
+    struct ProviderReportedRotationExecutor {
+        calls: AtomicUsize,
+    }
+
+    impl AgentTaskExecutorAdapter for ProviderReportedRotationExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut result = outcome(
+                request.task_id,
+                if call == 0 {
+                    AgentTaskOutcomeStatus::ProviderError
+                } else {
+                    AgentTaskOutcomeStatus::Succeeded
+                },
+            );
+            if call == 0 {
+                result.failure_classification = Some(AgentTaskFailureClassification::Provider);
+            } else {
+                result.metadata = json!({ "model": "openai/gpt-5.6-actual" });
+            }
+            result
+        }
+    }
+
     impl AgentTaskExecutorAdapter for AdoptionExecutor {
         fn execute(
             &self,
@@ -195,6 +223,7 @@ mod provider_rotation_tests {
         let calls = Arc::clone(&executor.calls);
         let scheduler = AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(1);
+        plan.tasks[0].executor.model = Some("primary-model".to_string());
         plan.options.rotation = Some(rotation_policy(vec![
             AgentTaskProviderRotationEntry {
                 backend: Some("fallback-backend-a".to_string()),
@@ -240,18 +269,79 @@ mod provider_rotation_tests {
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0]["attempt"], 1);
         assert_eq!(attempts[0]["backend"], "test");
+        assert_eq!(attempts[0]["requested_model"], "primary-model");
+        assert_eq!(attempts[0]["attempted_model"], "primary-model");
         assert_eq!(attempts[0]["failure_classification"], "provider");
         assert_eq!(attempts[0]["status"], "provider_error");
         assert_eq!(attempts[1]["attempt"], 2);
         assert_eq!(attempts[1]["backend"], "fallback-backend-a");
+        assert_eq!(attempts[1]["requested_model"], "primary-model");
+        assert_eq!(attempts[1]["attempted_model"], "fallback-model-a");
+        assert!(attempts[1].get("candidate_producing_model").is_none());
         assert_eq!(attempts[1]["status"], "succeeded");
         assert_eq!(
             aggregate.outcomes[0].metadata["execution_budget"]["executions_used"], 2,
             "only dispatched provider attempts consume the execution budget"
         );
         assert!(aggregate.events.iter().any(|event| {
-            event.message.as_deref() == Some("provider rotation queued: entry 1 of 2")
+            event.message.as_deref()
+                == Some("provider rotation queued: entry 1 of 2; backend=fallback-backend-a, model=fallback-model-a")
         }));
+    }
+
+    #[test]
+    fn same_backend_model_rotation_announces_and_records_the_producing_model() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.model = Some("openai/gpt-5.6-sol".to_string());
+        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
+            backend: Some("opencode".to_string()),
+            model: Some("openai/gpt-5.6-terra".to_string()),
+            ..Default::default()
+        }]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        let attempts = aggregate.outcomes[0]
+            .metadata
+            .pointer("/provider_rotation/attempts")
+            .and_then(Value::as_array)
+            .expect("rotation attempts evidence");
+        assert_eq!(attempts[1]["backend"], "opencode");
+        assert_eq!(attempts[1]["requested_model"], "openai/gpt-5.6-sol");
+        assert_eq!(attempts[1]["attempted_model"], "openai/gpt-5.6-terra");
+        assert!(attempts[1].get("candidate_producing_model").is_none());
+        assert!(aggregate.events.iter().any(|event| {
+            event.message.as_deref()
+                == Some("provider rotation queued: entry 1 of 1; backend=opencode, model=openai/gpt-5.6-terra")
+        }));
+    }
+
+    #[test]
+    fn rotation_records_a_provider_reported_model_that_differs_from_the_attempted_model() {
+        let scheduler = AgentTaskScheduler::new(ProviderReportedRotationExecutor {
+            calls: AtomicUsize::new(0),
+        });
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].executor.model = Some("openai/gpt-5.6-sol".to_string());
+        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
+            backend: Some("opencode".to_string()),
+            model: Some("openai/gpt-5.6-terra".to_string()),
+            ..Default::default()
+        }]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        let attempt = &aggregate.outcomes[0].metadata["provider_rotation"]["attempts"][1];
+        assert_eq!(attempt["attempted_model"], "openai/gpt-5.6-terra");
+        assert_eq!(
+            attempt["candidate_producing_model"],
+            "openai/gpt-5.6-actual"
+        );
     }
 
     #[test]
@@ -696,7 +786,8 @@ mod provider_rotation_tests {
             "the rotated provider receives a new scratch root"
         );
         assert!(aggregate.events.iter().any(|event| {
-            event.message.as_deref() == Some("provider rotation queued: entry 1 of 1")
+            event.message.as_deref()
+                == Some("provider rotation queued: entry 1 of 1; backend=fallback-backend-a, model=not recorded")
         }));
     }
 

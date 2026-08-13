@@ -1028,6 +1028,13 @@ where
                                 running_task.candidate_artifacts,
                                 &outcome,
                             );
+                            if request.metadata["model_selection"]["requested"].is_null() {
+                                if !request.metadata.is_object() {
+                                    request.metadata = serde_json::json!({});
+                                }
+                                request.metadata["model_selection"]["requested"] =
+                                    serde_json::json!(request.executor.model());
+                            }
                             AgentTaskScheduleSupport::apply_rotation_entry(
                                 &mut request,
                                 entry,
@@ -1040,9 +1047,11 @@ where
                                 AgentTaskState::Queued,
                                 next_attempt,
                                 Some(format!(
-                                    "provider rotation queued: entry {} of {}",
+                                    "provider rotation queued: entry {} of {}; backend={}, model={}",
                                     running_task.rotation_index + 1,
-                                    policy.entries.len()
+                                    policy.entries.len(),
+                                    request.executor.backend,
+                                    request.executor.model().unwrap_or("not recorded")
                                 )),
                             ));
                             queued.push_back(ScheduledTask {
@@ -1271,6 +1280,9 @@ pub(crate) fn persist_resolved_provider_model(
         "model_identity".to_string(),
         serde_json::json!({
             "requested": requested,
+            "attempted": resolved,
+            "candidate_producing": provider_reported,
+            // Retained for consumers of the previous outcome metadata shape.
             "resolved": resolved,
             "provider_reported": provider_reported,
             "actual": provider_reported,
