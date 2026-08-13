@@ -24,9 +24,16 @@ exec perl -MPOSIX=setsid,WNOHANG -e '
         exec @ARGV or die "exec: $!\n";
     }
     my $cleanup = sub {
+        # A clean test leaves no process in its private group. Avoid charging
+        # nextest process-per-test execution a grace period in that case.
+        return unless kill 0, -$child;
         kill "TERM", -$child;
-        select undef, undef, undef, 1;
-        kill "KILL", -$child;
+        # Give actual descendants a bounded chance to exit cleanly before
+        # enforcing the same process-group cleanup guarantee.
+        if (kill 0, -$child) {
+            select undef, undef, undef, 1;
+            kill "KILL", -$child if kill 0, -$child;
+        }
         waitpid $child, 0;
     };
     $SIG{HUP} = $SIG{INT} = $SIG{TERM} = sub { $cleanup->(); exit 143; };

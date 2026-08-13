@@ -2274,6 +2274,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn hermetic_runner_clean_exits_do_not_pay_descendant_cleanup_grace_period() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let runner = workspace.join("scripts/nextest-hermetic-test-environment.sh");
+        let started = Instant::now();
+        for _ in 0..4 {
+            let status = Command::new("sh")
+                .arg(&runner)
+                .arg("true")
+                .status()
+                .expect("run hermetic test runner");
+            assert!(status.success());
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "clean test processes must not each pay the one-second descendant cleanup grace period"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn hermetic_runner_reaps_descendants_after_a_panicking_test_binary() {
         let temp = tempfile::tempdir().expect("tempdir");
         let descendant = temp.path().join("descendant.pid");
