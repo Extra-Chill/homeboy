@@ -40,6 +40,7 @@ pub(super) fn request(
         readiness_invocation: None,
         runner_sources: Vec::new(),
         dependency_failure_patterns: Vec::new(),
+        immediate_failure_patterns: Vec::new(),
         config_preflights: Vec::new(),
         lab_runtime_components: Vec::new(),
         timeout_artifact_discovery: AgentTaskProviderTimeoutArtifactDiscovery::default(),
