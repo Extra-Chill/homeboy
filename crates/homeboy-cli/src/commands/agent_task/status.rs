@@ -3642,6 +3642,17 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
     let provider_boundary_recorded =
         provider_handle_count > 0 || runner_job_id.is_some() || has_active_provider_execution;
     let local_provider_ownership = metadata.get("local_provider_ownership");
+    let local_supervisor = metadata.get("local_cook_supervisor").cloned().or_else(|| {
+        metadata
+            .get("detached_cook_handoff")
+            .filter(|handoff| handoff.get("supervisor_job_id").is_some())
+            .map(|handoff| {
+                json!({
+                    "job_id": handoff.get("supervisor_job_id"),
+                    "reattach_command": handoff.get("reattach_command"),
+                })
+            })
+    });
 
     json!({
         "status": if terminal { "terminal" } else if stale { "stale" } else if waiting_for_capacity { "waiting_for_capacity" } else { "active" },
@@ -3658,6 +3669,7 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
         },
         "provider_activity": provider_activity_summary(metadata),
         "supervision": supervision_summary(metadata),
+        "local_cook_supervisor": local_supervisor,
         "stale_reason": metadata.get("stale_running_reason"),
         "runner_queue": metadata.get("runner_queue"),
         "next_action": if terminal && candidate_recoverable {
@@ -5086,6 +5098,29 @@ mod tests {
         assert_eq!(
             accepted_handoff["liveness"]["provider_boundary"]["runner_job_id"],
             "accepted-daemon-job"
+        );
+
+        let supervised = compact_status_summary(
+            &json!({
+                "run_id": "cook-attempt-1",
+                "state": "running",
+                "tasks": [],
+                "metadata": {
+                    "local_cook_supervisor": {
+                        "job_id": "controller-job-1",
+                        "reattach_command": "homeboy agent-task status cook-1 --full"
+                    }
+                }
+            }),
+            "cook-attempt-1",
+        );
+        assert_eq!(
+            supervised["liveness"]["local_cook_supervisor"]["job_id"],
+            "controller-job-1"
+        );
+        assert_eq!(
+            supervised["liveness"]["local_cook_supervisor"]["reattach_command"],
+            "homeboy agent-task status cook-1 --full"
         );
     }
 
