@@ -231,7 +231,10 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
     let status = bounded_output(status);
     let status_stdout = String::from_utf8_lossy(&status.stdout);
     assert!(status.status.success(), "{status_stdout}");
-    assert!(status_stdout.contains("\"state\": \"failed\""), "{status_stdout}");
+    assert!(
+        status_stdout.contains("\"state\": \"failed\""),
+        "{status_stdout}"
+    );
     assert!(
         status_stdout.contains("\"tasks\": []")
             && status_stdout.contains("\"max_attempts\": 0")
@@ -345,7 +348,11 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
         assert!(status.status.success(), "{status_stdout}");
         let terminal = serde_json::from_str::<serde_json::Value>(&status_stdout)
             .ok()
-            .and_then(|status| status.pointer("/data/state").and_then(serde_json::Value::as_str))
+            .and_then(|status| {
+                status
+                    .pointer("/data/state")
+                    .and_then(serde_json::Value::as_str)
+            })
             .is_some_and(|state| matches!(state, "succeeded" | "failed" | "cancelled"));
         if terminal {
             break;
