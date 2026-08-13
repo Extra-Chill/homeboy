@@ -35,8 +35,8 @@ homeboy daemon recover --yes      # resolve and run it
 Dry run is the default because recovery mutates the daemon that owns the
 caller's durable jobs. The output carries the resolved `plan` (each step with
 its code, its rendered command, and its argv), the `stale_reason_code` it
-matched, and `next_command`. A blocked recovery, a stale postcondition, or an
-unavailable postcondition read returns a nonzero structured outcome while
+matched, and `next_command`. A preview, blocked recovery, stale postcondition,
+or unavailable postcondition read returns a nonzero structured outcome while
 preserving the plan and any applied-step evidence.
 
 A report the evidence authorizes nothing for does not produce an empty plan. It
