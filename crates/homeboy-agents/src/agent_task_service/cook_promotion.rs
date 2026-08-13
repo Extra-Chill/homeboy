@@ -9,12 +9,13 @@
 //! terminal provider result and publish controller-owned state; grouping them
 //! keeps the promote → finalize boundary in one place.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
 use homeboy_engine_primitives::content_hash;
+use homeboy_engine_primitives::shell::quote_args;
 
 use crate::agent_task_finalization::{
     finalize_pr_with_backend, preflight_pr_with_backend, validate_publication_intent,
@@ -24,8 +25,9 @@ use crate::agent_task_finalization::{
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
-    candidate_fingerprint, promote_with_checkpoint, resume_promoted_patch,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    candidate_fingerprint, canonical_recoverable_patch_artifacts, promote_with_checkpoint,
+    resume_promoted_patch, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+    AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -79,6 +81,10 @@ pub(crate) fn promote_attempt(
 ) -> Result<AgentTaskPromotionReport> {
     let (source, source_path) = promotion_source(run_id)?;
     let selected_task_id = selected_candidate_task_id(run_id)?;
+    let artifact_id = match continuation_artifact_id(run_id)? {
+        Some(artifact_id) => Some(artifact_id),
+        None => canonical_cook_patch_artifact_id(options, run_id)?,
+    };
     promote_with_checkpoint(
         AgentTaskPromotionOptions {
             source,
@@ -90,7 +96,7 @@ pub(crate) fn promote_attempt(
             candidate_ref: None,
             to_worktree: options.to_worktree.clone(),
             task_id: selected_task_id,
-            artifact_id: None,
+            artifact_id,
             dry_run: false,
             gates: options.gates.clone(),
             provider_command: options.provider_command.clone(),
@@ -109,6 +115,209 @@ pub(crate) fn promote_attempt(
             Ok(())
         },
     )
+}
+
+/// Cook owns selection across provider rotations. Collapse equivalent artifact
+/// aliases before promotion, but require an explicit operator choice for patches
+/// that remain distinct after normalized content and provenance comparison.
+pub(crate) fn canonical_cook_patch_artifact_id(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let (source, source_path) = promotion_source(run_id)?;
+    let task_id = selected_candidate_task_id(run_id)?;
+    let aggregate = agent_task_lifecycle::read_attempt_aggregate(run_id)?;
+    let Some(outcome) = aggregate
+        .outcomes
+        .iter()
+        .find(|outcome| task_id.as_deref().is_none_or(|id| outcome.task_id == id))
+    else {
+        return Ok(None);
+    };
+    let promotion_options = AgentTaskPromotionOptions {
+        source,
+        source_run_id: Some(run_id.to_string()),
+        source_path,
+        source_worktree_path: options.source_worktree_path.clone(),
+        base_ref: Some(options.base.clone()),
+        task_base_sha: options.task_base_sha.clone(),
+        candidate_ref: None,
+        to_worktree: options.to_worktree.clone(),
+        task_id,
+        artifact_id: None,
+        dry_run: false,
+        gates: options.gates.clone(),
+        provider_command: options.provider_command.clone(),
+        provider_invocation: options.provider_invocation.clone(),
+    };
+    let canonical = canonical_recoverable_patch_artifacts(outcome, &promotion_options)?;
+    match canonical.artifacts.as_slice() {
+        [] => Ok(None),
+        [artifact] => Ok(Some(artifact.id.clone())),
+        artifacts => {
+            let choices = artifacts
+                .iter()
+                .map(|artifact| {
+                    json!({
+                        "artifact_id": artifact.id,
+                        "sha256": artifact.sha256,
+                        "command": cook_promotion_command(options, run_id, &outcome.task_id, &artifact.id),
+                    })
+                })
+                .collect::<Vec<_>>();
+            Err(Error::new(
+                homeboy_core::ErrorCode::ValidationInvalidArgument,
+                "Cook found distinct canonical patch candidates; select one before promotion",
+                json!({
+                    "field": "artifact_id",
+                    "state": "selection_required",
+                    "selection_required": true,
+                    "choices": choices,
+                }),
+            ))
+        }
+    }
+}
+
+/// Render an explicit promotion command from Cook's durable execution contract.
+/// Every gate and provider field is included so a manual choice cannot silently
+/// fall back to CLI defaults that differ from the original Cook.
+pub(crate) fn cook_promotion_command(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+    task_id: &str,
+    artifact_id: &str,
+) -> String {
+    quote_args(&cook_promotion_argv(options, run_id, task_id, artifact_id))
+}
+
+/// The exact CLI argv required to reproduce Cook's promotion contract.
+pub(crate) fn cook_promotion_argv(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+    task_id: &str,
+    artifact_id: &str,
+) -> Vec<String> {
+    let mut command = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "promote".to_string(),
+        run_id.to_string(),
+        "--to-worktree".to_string(),
+        options.to_worktree.clone(),
+        "--base".to_string(),
+        options.base.clone(),
+        "--task-id".to_string(),
+        task_id.to_string(),
+        "--artifact-id".to_string(),
+        artifact_id.to_string(),
+    ];
+    for (flag, values) in [
+        ("--verify", &options.gates.verify),
+        ("--private-verify", &options.gates.private_verify),
+    ] {
+        for value in values {
+            command.extend([flag.to_string(), value.clone()]);
+        }
+    }
+    let gates = serde_json::to_value(&options.gates).unwrap_or(Value::Null);
+    for (key, flag) in [
+        ("private_gate_reveal", "--private-gate-reveal"),
+        ("execution_policy", "--gate-execution-policy"),
+        ("gate_timeout_seconds", "--gate-timeout-seconds"),
+        (
+            "gate_heartbeat_interval_seconds",
+            "--gate-heartbeat-interval-seconds",
+        ),
+        (
+            "gate_no_progress_timeout_seconds",
+            "--gate-no-progress-timeout-seconds",
+        ),
+    ] {
+        if let Some(value) = gates.get(key) {
+            let value = value
+                .as_str()
+                .map(|value| value.replace('_', "-"))
+                .or_else(|| value.as_u64().map(|value| value.to_string()));
+            if let Some(value) = value {
+                command.extend([flag.to_string(), value]);
+            }
+        }
+    }
+    for (key, flag) in [
+        ("rerun_completed_gates", "--rerun-completed-gates"),
+        ("accept_inherited_failures", "--accept-inherited-failures"),
+    ] {
+        if gates.get(key).and_then(Value::as_bool) == Some(true) {
+            command.push(flag.to_string());
+        }
+    }
+    if let Some(environment) = gates.get("gate_environment") {
+        if let Some(mode) = environment.get("mode").and_then(Value::as_str) {
+            command.extend([
+                "--gate-environment-mode".to_string(),
+                mode.replace('_', "-"),
+            ]);
+        }
+        for (key, flag) in [("variables", "--gate-env"), ("preserve", "--gate-env-from")] {
+            if let Some(values) = environment.get(key).and_then(Value::as_object) {
+                for (name, value) in values {
+                    if let Some(value) = value.as_str() {
+                        command.extend([flag.to_string(), format!("{name}={value}")]);
+                    }
+                }
+            }
+        }
+        for (key, flag) in [
+            ("isolate_home", "--isolate-gate-home"),
+            ("isolate_xdg", "--isolate-gate-xdg"),
+        ] {
+            if let Some(value) = environment.get(key).and_then(Value::as_bool) {
+                command.push(format!("{flag}={value}"));
+            }
+        }
+        if let Some(value) = environment
+            .get("shared_cargo_target")
+            .and_then(Value::as_bool)
+        {
+            command.push(if value {
+                "--gate-shared-cargo-target".to_string()
+            } else {
+                "--no-gate-shared-cargo-target".to_string()
+            });
+        }
+        if let Some(inputs) = environment
+            .get("extension_inputs")
+            .and_then(Value::as_array)
+        {
+            for input in inputs {
+                if let Ok(input) = serde_json::to_string(input) {
+                    command.extend(["--gate-extension-input".to_string(), input]);
+                }
+            }
+        }
+    }
+    for toolchain in &options.gates.gate_toolchains {
+        if toolchain.probe_arguments == ["--version"] {
+            command.extend(["--gate-toolchain".to_string(), toolchain.command.clone()]);
+        } else if let Ok(toolchain) = serde_json::to_string(toolchain) {
+            command.extend(["--gate-toolchain-spec".to_string(), toolchain]);
+        }
+    }
+    for artifact in &options.gates.gate_package_artifacts {
+        if let Ok(artifact) = serde_json::to_string(artifact) {
+            command.extend(["--gate-package-artifact".to_string(), artifact]);
+        }
+    }
+    if let Some(provider) = &options.provider_command {
+        command.extend(["--provider-command".to_string(), provider.clone()]);
+    }
+    if let Some(invocation) = &options.provider_invocation {
+        for argument in &invocation.argv {
+            command.push(format!("--provider-argv={argument}"));
+        }
+    }
+    command
 }
 
 /// Cook only promotes the candidate selected by the scheduler. A single-task
@@ -163,7 +372,9 @@ pub(crate) fn promote_or_load_attempt(
                     // A resumed verification must retain the scheduler-selected
                     // candidate rather than falling back to aggregate outcome order.
                     task_id: selected_candidate_task_id(run_id)?,
-                    artifact_id: None,
+                    // The checkpoint already authenticated this exact artifact;
+                    // retain its identity rather than selecting an equivalent alias.
+                    artifact_id: Some(promotion.patch_artifact.id.clone()),
                     dry_run: false,
                     gates: options.gates.clone(),
                     provider_command: options.provider_command.clone(),
@@ -193,6 +404,21 @@ pub(crate) fn promote_or_load_attempt(
         })?,
     )?;
     Ok(promotion)
+}
+
+/// A selector is accepted only from the route authority written by
+/// `cook-continue`; normal Cook promotion retains automatic selection.
+fn continuation_artifact_id(run_id: &str) -> Result<Option<String>> {
+    let record = agent_task_lifecycle::exact_record(run_id)?;
+    let Some(route) = record.metadata.get("cook_continue_route") else {
+        return Ok(None);
+    };
+    let artifact_id = route
+        .get("artifact_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string);
+    Ok(artifact_id)
 }
 
 pub(crate) fn persisted_promotion_for_attempt(
@@ -745,7 +971,8 @@ pub(crate) fn recover_moving_base_cook_candidate(
             candidate_ref: None,
             to_worktree: options.to_worktree.clone(),
             task_id: selected_candidate_task_id(&recovery.run_id)?,
-            artifact_id: None,
+            // Moving-base recovery re-verifies the original promoted candidate.
+            artifact_id: Some(recovery.promotion.patch_artifact.id.clone()),
             dry_run: false,
             gates: options.gates.clone(),
             provider_command: options.provider_command.clone(),
@@ -2384,7 +2611,11 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
                 None,
             )
         })?;
-    let model = outcome.selected_model();
+    let terminal = super::cook_pre_execution::terminal_executor_identity(&outcome, &plan, None);
+    let model = terminal
+        .as_ref()
+        .and_then(|identity| identity.model.as_deref())
+        .or_else(|| outcome.selected_model());
     let requested_model = outcome.metadata["model_identity"]["requested"].as_str();
     let resolved_model = outcome.metadata["model_identity"]["resolved"].as_str();
     let provider_reported_model = outcome.metadata["model_identity"]["provider_reported"].as_str();
@@ -2421,7 +2652,10 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
             &outcome.outputs,
         )?
         .filter(|form| form.validate().is_ok()),
-        tool: task.executor.backend.clone(),
+        tool: terminal
+            .as_ref()
+            .map(|identity| identity.backend.clone())
+            .unwrap_or_else(|| task.executor.backend.clone()),
         model: model.map(str::to_string),
         review_form_only: task.inputs["cook_loop"]["review_form_required"] == true,
     })
@@ -2928,6 +3162,7 @@ fn cook_failure_context(
                 .as_u64()
                 .unwrap_or_default(),
         exact_checkpoint_candidate_mismatch(&diagnostic),
+        ambiguous_promotion_artifact_ids(record_run_id, promotion_diagnostic.as_ref(), &recipe),
         record.as_ref().and_then(lab_handoff_runtime_recovery),
     );
     let promotion_provenance = promotion.cloned();
@@ -2958,6 +3193,90 @@ fn cook_failure_context(
     })
 }
 
+/// Artifact IDs are durable controller metadata. Expose them only when the
+/// promotion claim proves selection was the blocker, so a recovery command is
+/// executable rather than a replay of the known-invalid promotion.
+fn ambiguous_promotion_artifact_ids(
+    run_id: &str,
+    diagnostic: Option<&Value>,
+    recipe: &super::AgentTaskCookRecipe,
+) -> Vec<String> {
+    let is_ambiguous_selection = diagnostic.is_some_and(|diagnostic| {
+        diagnostic.pointer("/details/field").and_then(Value::as_str) == Some("artifact_id")
+            && diagnostic
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| {
+                    message.contains("multiple patch artifacts")
+                        || message.contains("distinct actionable patches")
+                        || message.contains("distinct canonical patch candidates")
+                })
+    });
+    if !is_ambiguous_selection {
+        return Vec::new();
+    }
+    let Ok(aggregate) = agent_task_lifecycle::read_attempt_aggregate(run_id) else {
+        return Vec::new();
+    };
+    let Some(outcome) = aggregate.selected_outcome().or_else(|| {
+        (aggregate.outcomes.len() == 1)
+            .then(|| aggregate.outcomes.first())
+            .flatten()
+    }) else {
+        return Vec::new();
+    };
+    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
+        return outcome
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
+            })
+            .map(|artifact| artifact.id.clone())
+            .collect();
+    }
+    if !recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == run_id)
+    {
+        return Vec::new();
+    }
+    let Ok(recipe_options) = super::reconstruct_options(recipe) else {
+        return Vec::new();
+    };
+    let Ok((source, source_path)) = promotion_source(run_id) else {
+        return Vec::new();
+    };
+    canonical_recoverable_patch_artifacts(
+        outcome,
+        &AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some(run_id.to_string()),
+            source_path,
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: recipe_options.to_worktree,
+            task_id: selected_candidate_task_id(run_id).ok().flatten(),
+            artifact_id: None,
+            dry_run: false,
+            gates: crate::agent_task_gate::VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+    )
+    .map(|canonical| {
+        canonical
+            .artifacts
+            .into_iter()
+            .map(|artifact| artifact.id)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 struct CookRecoveryActions {
     legal_actions: Vec<super::AgentTaskCookRecoveryAction>,
     next_actions: Vec<super::AgentTaskCookRecoveryAction>,
@@ -2973,6 +3292,7 @@ fn cook_recovery_actions(
     blocking_claim: bool,
     provider_retry_available: bool,
     exact_checkpoint_candidate_mismatch: bool,
+    ambiguous_artifact_ids: Vec<String>,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
 ) -> CookRecoveryActions {
     if !recovery_legal {
@@ -3017,6 +3337,15 @@ fn cook_recovery_actions(
             action: "fork_replacement".to_string(),
             command: format!("homeboy agent-task retry {run_id} --run"),
         });
+    } else if !ambiguous_artifact_ids.is_empty() {
+        actions.extend(ambiguous_artifact_ids.into_iter().map(|artifact_id| {
+            super::AgentTaskCookRecoveryAction {
+                action: "resume_with_artifact".to_string(),
+                command: format!(
+                    "homeboy agent-task cook-continue {run_id} --rearm --artifact-id {artifact_id}"
+                ),
+            }
+        }));
     } else if continuation_eligible {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "resume".to_string(),
@@ -3092,6 +3421,7 @@ mod recovery_action_tests {
                 false,
                 retry_available,
                 exact_checkpoint_candidate_mismatch,
+                Vec::new(),
                 None,
             );
             let actions = recovery
@@ -3140,6 +3470,7 @@ mod recovery_action_tests {
             false,
             false,
             true,
+            Vec::new(),
             None,
         );
 
@@ -3184,6 +3515,58 @@ mod recovery_action_tests {
                 "details": { "recovery": { "action": "resume" } },
             })
         )));
+    }
+
+    #[test]
+    fn ambiguous_artifact_selection_advertises_only_selector_continuations() {
+        let recovery = cook_recovery_actions(
+            "promotion_failed",
+            "ambiguous-attempt-1",
+            true,
+            false,
+            false,
+            false,
+            vec!["first-patch".to_string(), "second-patch".to_string()],
+            None,
+        );
+
+        assert_eq!(
+            recovery
+                .legal_actions
+                .iter()
+                .map(|action| action.command.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "homeboy agent-task status ambiguous-attempt-1 --full",
+                "homeboy agent-task diagnose ambiguous-attempt-1",
+                "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id first-patch",
+                "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id second-patch",
+            ]
+        );
+    }
+
+    #[test]
+    fn ambiguous_selector_actions_do_not_advertise_mime_shaped_or_invalid_artifacts() {
+        let recovery = cook_recovery_actions(
+            "promotion_failed",
+            "ambiguous-attempt-1",
+            true,
+            false,
+            false,
+            false,
+            vec!["canonical-patch".to_string()],
+            None,
+        );
+        assert_eq!(
+            recovery.legal_actions.last().map(|action| action.command.as_str()),
+            Some(
+                "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id canonical-patch"
+            )
+        );
+        assert!(!recovery
+            .legal_actions
+            .iter()
+            .any(|action| action.command.contains("mime-shaped")));
     }
 }
 

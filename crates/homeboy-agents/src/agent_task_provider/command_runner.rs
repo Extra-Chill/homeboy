@@ -60,6 +60,7 @@ pub(super) fn run_materialized_provider_command(
     loop {
         let mut outcome =
             run_materialized_provider_command_once(request, provider, run_id, execution_attempt);
+        classify_provider_policy_denial(request, &mut outcome);
         classify_transient_provider_outcome(&mut outcome);
 
         let retryable = outcome_is_transient(&outcome);
@@ -138,6 +139,38 @@ pub(super) fn describe_controller_owned_publication(
 /// safe to retry.
 fn outcome_is_transient(outcome: &AgentTaskOutcome) -> bool {
     outcome.failure_classification == Some(AgentTaskFailureClassification::Transient)
+}
+
+/// A provider policy rejecting a controller-projected evidence path is an
+/// execution-environment contract failure, not a task failure. Mark it
+/// explicitly so scheduler retry policy terminates without spending retries.
+fn classify_provider_policy_denial(
+    request: &AgentTaskExecutorRequest,
+    outcome: &mut AgentTaskOutcome,
+) {
+    let Some(declared) = request.request.executor.config["evidence_inputs"].as_array() else {
+        return;
+    };
+    let declared_paths = declared
+        .iter()
+        .filter_map(|input| input.get("path").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    let denied_path = outcome.diagnostics.iter().find_map(|diagnostic| {
+        (diagnostic.data["kind"].as_str() == Some("permission_denied"))
+            .then(|| diagnostic.data["path"].as_str())
+            .flatten()
+    });
+    if denied_path.is_some_and(|path| declared_paths.contains(path)) {
+        outcome.failure_classification = Some(AgentTaskFailureClassification::PolicyDenied);
+        if outcome.metadata.is_null() {
+            outcome.metadata = json!({});
+        }
+        outcome.metadata["control_plane_failure"] = json!({
+            "phase": "provider_evidence_preflight",
+            "reason": "declared_evidence_policy_denied",
+            "path": denied_path,
+        });
+    }
 }
 
 /// Promote a `ProviderError`/`Provider` outcome to the `Transient`

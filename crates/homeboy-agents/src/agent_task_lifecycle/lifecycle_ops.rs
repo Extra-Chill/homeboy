@@ -411,6 +411,22 @@ pub fn record_detached_cook_handoff_child(
     Ok(record.expect("detached handoff parent exists"))
 }
 
+/// Persist the daemon job that supervises this locally launched Cook.
+pub fn record_detached_cook_supervisor(cook_id: &str, job_id: &str) -> Result<()> {
+    let cook_id = sanitize_run_id(cook_id);
+    let job_id = job_id.to_string();
+    let _ = store::mutate_record(&cook_id, |record| {
+        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+            return false;
+        }
+        record.metadata["detached_cook_handoff"]["supervisor_job_id"] = json!(job_id);
+        record.metadata["detached_cook_handoff"]["reattach_command"] =
+            json!(format!("homeboy agent-task status {cook_id} --full"));
+        true
+    })?;
+    Ok(())
+}
+
 /// Terminalize a handoff parent once no child can materialize its first
 /// attempt. A previously requested cancellation remains authoritative.
 pub fn fail_detached_cook_handoff_parent(
@@ -2681,8 +2697,27 @@ pub fn status_with_options(
     run_id: &str,
     options: AgentTaskStatusOptions,
 ) -> Result<AgentTaskStatusOutcome> {
+    status_with_options_inner(run_id, options, false)
+}
+
+/// Reconcile one literal durable record without following a Cook alias. Scoped
+/// repair uses this when a logical Cook id has both a handoff parent and an
+/// attempt, because each record is independently authoritative evidence.
+pub fn exact_status(run_id: &str) -> Result<AgentTaskRunRecord> {
+    Ok(status_with_options_inner(run_id, AgentTaskStatusOptions::default(), true)?.record)
+}
+
+fn status_with_options_inner(
+    run_id: &str,
+    options: AgentTaskStatusOptions,
+    exact: bool,
+) -> Result<AgentTaskStatusOutcome> {
     let requested_run_id = sanitize_run_id(run_id);
-    let resolved_run_id = resolve_run_id(run_id)?;
+    let resolved_run_id = if exact {
+        requested_run_id.clone()
+    } else {
+        resolve_run_id(run_id)?
+    };
     let _ = reconcile_deferred_candidate(&resolved_run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
     if let Ok(admission) = homeboy_core::controller_runtime::admission_status(&record.run_id) {
@@ -2929,7 +2964,7 @@ pub fn status_with_options(
             }
         }
     }
-    if requested_run_id != record.run_id {
+    if !exact && requested_run_id != record.run_id {
         if let Ok(index) = store::read_cook_index(&requested_run_id) {
             project_cook_alias_adoption(&mut record, &index)?;
             let metadata = record.ensure_metadata_object();
@@ -3130,6 +3165,11 @@ pub fn run_record_exists(run_id: &str) -> Result<bool> {
     store::record_exists(&sanitize_run_id(run_id))
 }
 
+/// Non-initializing durable existence check for read-only diagnostics.
+pub fn run_record_exists_readonly(run_id: &str) -> Result<bool> {
+    store::record_exists_readonly(&sanitize_run_id(run_id))
+}
+
 /// Whether a durable run record exists for `run_id` after the same resolution
 /// `retry` applies (a cook id resolves to its latest run). The plain
 /// `run_record_exists` is an exact-match check, so a resolvable id (e.g. a cook
@@ -3296,6 +3336,24 @@ fn retry_with_force_inner(
     let mut plan = load_controller_plan(&source.run_id)?;
     super::cook_workspace_restore::restore_initial_cook_candidate_workspace(&mut plan)?;
     super::cook_workspace_restore::restore_follow_up_cook_candidate_workspace(&mut plan)?;
+    if source
+        .acceptance
+        .as_ref()
+        .is_some_and(|acceptance| acceptance.verdict == AgentTaskAcceptanceVerdict::Rejected)
+    {
+        if let Some(feedback) = source.metadata["acceptance_repair"]["feedback"].as_str() {
+            for task in &mut plan.tasks {
+                task.instructions.push_str(&format!(
+                    "\n\nAddress this reviewer remediation feedback, then preserve the Cook's normal verification and review-form contract:\n{feedback}"
+                ));
+                task.inputs["cook_loop"]["reviewer_remediation"] = json!({
+                    "source_run_id": source.run_id,
+                    "feedback": feedback,
+                    "max_attempts": 1,
+                });
+            }
+        }
+    }
     let mut metadata = serde_json::Map::new();
     if let Some(route) =
         homeboy_core::notification_route::NotificationRoute::from_metadata(&source.metadata)
@@ -3660,23 +3718,87 @@ pub fn record_cook_attempt(
     attempt: u32,
     run_id: &str,
 ) -> Result<AgentTaskCookIndex> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let registration = homeboy_core::config::with_config_lock(|| {
+        record_cook_attempt_locked(cook_id, attempt, run_id)
+    })?;
+    let index = registration.project_terminal_after_unlock()?;
+    complete_detached_cook_handoff_parent(cook_id, run_id)?;
+    Ok(index)
+}
+
+/// Register a Cook attempt while the caller owns the config lock.
+pub(crate) fn record_cook_attempt_locked(
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+) -> Result<CookAttemptRegistration> {
+    let cook_id = sanitize_run_id(cook_id);
+    let run_id = sanitize_run_id(run_id);
+    // Validate both durable ownership projections before changing either one.
+    store::validate_cook_index_attempt(&cook_id, attempt, &run_id)?;
+    let mut record = store::read_record(&run_id)?;
+    let recorded_cook_id = record.metadata.get("cook_id").and_then(Value::as_str);
+    let recorded_attempt = record.metadata.get("cook_attempt").and_then(Value::as_u64);
+    if recorded_cook_id.is_some_and(|value| value != cook_id)
+        || recorded_attempt.is_some_and(|value| value != u64::from(attempt))
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "durable lifecycle run is already owned by a different Cook attempt",
+            Some(run_id),
+            None,
+        ));
+    }
     let recorded_at = now_timestamp();
     let metadata = record.ensure_metadata_object();
-    metadata.insert("cook_id".to_string(), json!(sanitize_run_id(cook_id)));
+    metadata.insert("cook_id".to_string(), json!(&cook_id));
     metadata.insert("cook_attempt".to_string(), json!(attempt));
-    store::write_record(&record)?;
+    if let Ok(parent) = store::read_record(&cook_id) {
+        if let Some(supervisor) = parent.metadata["detached_cook_handoff"]
+            .get("supervisor_job_id")
+            .cloned()
+        {
+            metadata.insert(
+                "local_cook_supervisor".to_string(),
+                json!({
+                    "job_id": supervisor,
+                    "reattach_command": format!("homeboy agent-task status {cook_id} --full"),
+                }),
+            );
+        }
+    }
+    let committed = store::write_record_locked_without_terminal_projection(&record)?;
     // Completion can precede Cook registration during handoff recovery. Re-read
     // its persisted aggregate after the Cook identity is durable, then commit the
     // attempt and substantive pointer in the same index write.
-    let candidate = store::read_aggregate(&record.run_id)
+    let candidate = store::read_aggregate(&committed.run_id)
         .ok()
         .and_then(|aggregate| {
-            substantive_candidate_from_aggregate(&record.run_id, attempt, &aggregate, None)
+            substantive_candidate_from_aggregate(&committed.run_id, attempt, &aggregate, None)
         });
-    let index = store::write_cook_index_attempt(cook_id, attempt, run_id, recorded_at, candidate)?;
-    complete_detached_cook_handoff_parent(cook_id, run_id)?;
-    Ok(index)
+    let index = store::write_cook_index_attempt_locked(
+        &cook_id,
+        attempt,
+        &committed.run_id,
+        recorded_at,
+        candidate,
+    )?;
+    Ok(CookAttemptRegistration {
+        index,
+        run_id: committed.run_id,
+    })
+}
+
+pub(crate) struct CookAttemptRegistration {
+    index: AgentTaskCookIndex,
+    run_id: String,
+}
+
+impl CookAttemptRegistration {
+    pub(crate) fn project_terminal_after_unlock(self) -> Result<AgentTaskCookIndex> {
+        store::project_terminal_record_after_unlock(&self.run_id)?;
+        Ok(self.index)
+    }
 }
 
 /// Record the controller-owned boundary that a resumed Cook must advance.
@@ -4081,6 +4203,65 @@ pub fn exact_record(run_id: &str) -> Result<AgentTaskRunRecord> {
     store::read_record(&sanitize_run_id(run_id))
 }
 
+/// Return the exact durable records a reconciliation request owns. A Cook id
+/// with a materialized detached-handoff parent names both that parent and its
+/// current attempt; an exact attempt remains scoped to itself.
+pub fn reconcile_scope_run_ids(run_id: &str) -> Result<Vec<String>> {
+    let requested = sanitize_run_id(run_id);
+    let mut run_ids = vec![requested.clone()];
+
+    if let Ok(parent) = store::read_record(&requested) {
+        if let Some(attempt_run_id) = parent
+            .metadata
+            .pointer("/detached_cook_handoff/attempt_run_id")
+            .and_then(Value::as_str)
+        {
+            let attempt_run_id = sanitize_run_id(attempt_run_id);
+            let attempt = store::read_record(&attempt_run_id)?;
+            let attempt_cook_id = attempt.metadata.get("cook_id").and_then(Value::as_str);
+            if attempt_cook_id != Some(requested.as_str()) {
+                return Err(Error::validation_invalid_argument(
+                    "detached_cook_handoff.attempt_run_id",
+                    "detached Cook handoff attempt does not belong to its parent Cook",
+                    Some(attempt_run_id),
+                    None,
+                ));
+            }
+            let index = store::read_cook_index(&requested).map_err(|_| {
+                Error::validation_invalid_argument(
+                    "detached_cook_handoff.attempt_run_id",
+                    "detached Cook handoff attempt has no Cook index authority",
+                    Some(attempt.run_id.clone()),
+                    None,
+                )
+            })?;
+            if !index
+                .attempts
+                .iter()
+                .any(|entry| entry.run_id == attempt.run_id)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "detached_cook_handoff.attempt_run_id",
+                    "detached Cook handoff attempt is absent from its Cook index",
+                    Some(attempt.run_id),
+                    None,
+                ));
+            }
+            // The handoff binds this repair to its accepted child. A later
+            // index retry is a separate attempt and remains out of scope.
+            run_ids.push(attempt.run_id);
+        } else if let Ok(index) = store::read_cook_index(&requested) {
+            run_ids.push(index.latest_run_id);
+        }
+    } else if let Ok(index) = store::read_cook_index(&requested) {
+        run_ids[0] = index.latest_run_id;
+    }
+
+    run_ids.sort();
+    run_ids.dedup();
+    Ok(run_ids)
+}
+
 /// Resolve a caller-supplied identifier to the durable run it addresses.
 ///
 /// A Cook id is an alias, not a record: attempts are stored under
@@ -4227,11 +4408,45 @@ pub fn record_acceptance_verdict(
     evidence_refs: Vec<String>,
     token: String,
 ) -> Result<AgentTaskRunRecord> {
+    record_acceptance_verdict_with_feedback(run_id, verdict, evidence_refs, token, None)
+}
+
+/// Record a verdict with bounded reviewer feedback for the single durable Cook
+/// remediation that follows a rejection.
+pub fn record_acceptance_verdict_with_feedback(
+    run_id: &str,
+    verdict: AgentTaskAcceptanceVerdict,
+    evidence_refs: Vec<String>,
+    token: String,
+    feedback: Option<String>,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     if token.trim().is_empty() || evidence_refs.is_empty() {
         return Err(Error::validation_invalid_argument(
             "acceptance",
             "acceptance requires an authority token and at least one evidence reference",
+            None,
+            None,
+        ));
+    }
+    let feedback = feedback
+        .map(|feedback| feedback.trim().to_string())
+        .filter(|feedback| !feedback.is_empty());
+    if feedback
+        .as_ref()
+        .is_some_and(|feedback| feedback.len() > 2000)
+    {
+        return Err(Error::validation_invalid_argument(
+            "feedback",
+            "reviewer remediation feedback must be at most 2000 bytes",
+            None,
+            None,
+        ));
+    }
+    if feedback.is_some() && verdict != AgentTaskAcceptanceVerdict::Rejected {
+        return Err(Error::validation_invalid_argument(
+            "feedback",
+            "reviewer remediation feedback is only valid with a rejected verdict",
             None,
             None,
         ));
@@ -4348,6 +4563,7 @@ pub fn record_acceptance_verdict(
                 "attempts": acceptance.repair_attempts,
                 "max_attempts": 1,
                 "evidence_refs": acceptance.evidence_refs,
+                "feedback": feedback,
             }))
         } else {
             None

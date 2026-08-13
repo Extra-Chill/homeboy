@@ -58,6 +58,7 @@ fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
         runner_id: "homeboy-lab".to_string(),
         connected: true,
         daemon_fresh: true,
+        daemon_compatible: true,
         accepting_jobs: false,
         active_job_count: 0,
         live_daemon_job_count: 0,
@@ -1230,8 +1231,12 @@ fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
     );
     assert!(report.daemon_freshness.expect("live daemon").fresh);
     assert!(
-        !admission.daemon_fresh,
-        "compatibility skew blocks admission"
+        admission.daemon_fresh,
+        "daemon lease evidence remains fresh"
+    );
+    assert!(
+        !admission.daemon_compatible,
+        "compatibility skew is reported separately"
     );
     assert!(
         !admission.accepting_jobs,

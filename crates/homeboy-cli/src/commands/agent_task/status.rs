@@ -99,6 +99,9 @@ pub(super) fn resolve_cook_reader_target(
 }
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
+    if let Some(recipe_only) = recipe_only_status(&args.run_id, args.exact)? {
+        return Ok((recipe_only, 0));
+    }
     let target = resolve_cook_reader_target(&args.run_id, args.exact)?;
     if args.bridge {
         // `--bridge` routes through `agent_task_lifecycle::status()`, which is a
@@ -222,6 +225,51 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     preserve_controller_owner_placement(&mut summary, run_id);
     let exit_code = subject_exit_code(&summary, args.strict_subject_exit);
     Ok((summary, exit_code))
+}
+
+/// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
+/// its exact attempt id, but only `cook-continue` may materialize that attempt.
+fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Result<Option<Value>> {
+    let recipe = match agent_task_service_direct::load_recipe(run_or_cook_id) {
+        Ok(recipe) => recipe,
+        Err(_) => match agent_task_service_direct::load_recipe_for_attempt(run_or_cook_id)? {
+            Some(recipe) => recipe,
+            None => return Ok(None),
+        },
+    };
+    let attempt = if recipe.cook_id == run_or_cook_id && !exact {
+        recipe
+            .attempts
+            .last()
+            .expect("validated recipe has an attempt")
+    } else {
+        let Some(attempt) = recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == run_or_cook_id)
+        else {
+            return Ok(None);
+        };
+        attempt
+    };
+    if agent_task_lifecycle::run_record_exists_readonly(&attempt.run_id)? {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "schema": "homeboy/agent-task-cook/v1",
+        "cook_id": recipe.cook_id,
+        "run_id": attempt.run_id,
+        "latest_run_id": attempt.run_id,
+        "status": "recipe_only_recovery_required",
+        "lifecycle_state": "recipe_persisted_without_lifecycle_record",
+        "provider_budget_consumed": false,
+        "provider_executions_consumed": 0,
+        "guidance": {
+            "action": "materialize_recipe_attempt",
+            "command": format!("homeboy agent-task cook-continue {}", attempt.run_id),
+            "message": "The immutable Cook recipe is durable but its lifecycle record is absent. Continue the exact attempt to materialize the controller lifecycle before provider work."
+        }
+    })))
 }
 
 /// Record whether this read reconciled — i.e. whether producing this answer
@@ -781,8 +829,9 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), exit))
 }
 
-/// `agent-task reconcile <run-id>` always addresses exactly one durable run.
-/// It previews by default; `--apply` is the explicit operator authorization.
+/// `agent-task reconcile <run-id>` addresses one exact record or the explicit
+/// parent/attempt group named by a logical Cook ID. It previews by default;
+/// `--apply` is the explicit operator authorization.
 pub(super) fn reconcile_run(run_id: &str, dry_run: bool) -> CmdResult<Value> {
     let report = agent_task_service_direct::reconcile_run(run_id, dry_run)?;
     let exit = if report.failed > 0 { 1 } else { 0 };
@@ -3594,6 +3643,17 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
     let provider_boundary_recorded =
         provider_handle_count > 0 || runner_job_id.is_some() || has_active_provider_execution;
     let local_provider_ownership = metadata.get("local_provider_ownership");
+    let local_supervisor = metadata.get("local_cook_supervisor").cloned().or_else(|| {
+        metadata
+            .get("detached_cook_handoff")
+            .filter(|handoff| handoff.get("supervisor_job_id").is_some())
+            .map(|handoff| {
+                json!({
+                    "job_id": handoff.get("supervisor_job_id"),
+                    "reattach_command": handoff.get("reattach_command"),
+                })
+            })
+    });
 
     json!({
         "status": if terminal { "terminal" } else if stale { "stale" } else if waiting_for_capacity { "waiting_for_capacity" } else { "active" },
@@ -3610,6 +3670,7 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
         },
         "provider_activity": provider_activity_summary(metadata),
         "supervision": supervision_summary(metadata),
+        "local_cook_supervisor": local_supervisor,
         "stale_reason": metadata.get("stale_running_reason"),
         "runner_queue": metadata.get("runner_queue"),
         "next_action": if terminal && candidate_recoverable {
@@ -5038,6 +5099,29 @@ mod tests {
         assert_eq!(
             accepted_handoff["liveness"]["provider_boundary"]["runner_job_id"],
             "accepted-daemon-job"
+        );
+
+        let supervised = compact_status_summary(
+            &json!({
+                "run_id": "cook-attempt-1",
+                "state": "running",
+                "tasks": [],
+                "metadata": {
+                    "local_cook_supervisor": {
+                        "job_id": "controller-job-1",
+                        "reattach_command": "homeboy agent-task status cook-1 --full"
+                    }
+                }
+            }),
+            "cook-attempt-1",
+        );
+        assert_eq!(
+            supervised["liveness"]["local_cook_supervisor"]["job_id"],
+            "controller-job-1"
+        );
+        assert_eq!(
+            supervised["liveness"]["local_cook_supervisor"]["reattach_command"],
+            "homeboy agent-task status cook-1 --full"
         );
     }
 

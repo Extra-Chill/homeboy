@@ -1254,6 +1254,32 @@ pub fn worktree_provider_idempotency_key(intent: &WorktreeProviderCreateIntent) 
     )
 }
 
+/// Render the configured workspace owner's ensure command for an explicit
+/// lifecycle request. Callers can expose this as a repair action without
+/// assuming that Homeboy owns the workspace implementation.
+pub fn worktree_provider_lifecycle_ensure_argv_from_config(
+    intent: &WorktreeProviderCreateIntent,
+    lifecycle: &WorktreeProviderLifecycleIntent,
+    config: &HomeboyConfig,
+) -> Result<Vec<String>> {
+    let provider_id = select_apply_enabled_worktree_provider_from_config(intent, config)?;
+    let provider = config
+        .worktree_providers
+        .get(&provider_id)
+        .expect("selected provider is configured");
+    let command = provider
+        .commands
+        .ensure
+        .as_ref()
+        .expect("selected lifecycle provider configures ensure");
+    Ok(expand_lifecycle_ensure_command(
+        command,
+        intent,
+        lifecycle,
+        &provision_idempotency_key(intent),
+    ))
+}
+
 /// Stable finalization key. A stale lease may cause multiple invocations, so
 /// providers must use this key to deduplicate their logical terminal effect.
 pub fn worktree_provider_finalization_idempotency_key(
@@ -3139,6 +3165,71 @@ mod tests {
                 .expect("list result mapping")
                 .items,
             "$.result.items"
+        );
+    }
+
+    #[test]
+    fn lifecycle_ensure_argv_uses_the_registered_workspace_owner() {
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "managed".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec!["false".to_string()]),
+                    resolve_not_found_exit_codes: vec![1],
+                    ensure: Some(vec![
+                        "workspace-owner".to_string(),
+                        "worktree".to_string(),
+                        "add".to_string(),
+                        "{repo}".to_string(),
+                        "{head}".to_string(),
+                        "--from={base}".to_string(),
+                        "--task-url={task_url}".to_string(),
+                        "--owner-run-ref={owner_run_ref}".to_string(),
+                    ]),
+                    ..WorktreeProviderCommands::default()
+                },
+                list_result_mapping: None,
+            },
+        );
+        config.settings.insert(
+            WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY.to_string(),
+            json!({ "managed": { "finalize": ["workspace-owner", "finalize"] } }),
+        );
+        let intent = WorktreeProviderCreateIntent {
+            handle: "blocks-engine@fix-12252".to_string(),
+            repo: "blocks-engine".to_string(),
+            base: "origin/trunk".to_string(),
+            head: "fix/12252".to_string(),
+            task_url: "https://example.test/issues/12252".to_string(),
+        };
+        let lifecycle = WorktreeProviderLifecycleIntent {
+            purpose: "agent_task_cook".to_string(),
+            owner_run_ref: "fanout-12252".to_string(),
+            cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+        };
+
+        let argv =
+            worktree_provider_lifecycle_ensure_argv_from_config(&intent, &lifecycle, &config)
+                .expect("registered owner repair argv");
+
+        assert_eq!(
+            argv,
+            vec![
+                "workspace-owner",
+                "worktree",
+                "add",
+                "blocks-engine",
+                "fix/12252",
+                "--from=origin/trunk",
+                "--task-url=https://example.test/issues/12252",
+                "--owner-run-ref=fanout-12252",
+            ]
         );
     }
 

@@ -1176,6 +1176,56 @@ fn durable_finalization_requires_successful_provider_run_and_hydrates_model() {
 }
 
 #[test]
+fn durable_finalization_discloses_terminal_successful_model_after_same_backend_rotation() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(rotated_lifecycle(
+            "opencode",
+            "openai/gpt-5.6-sol",
+            "opencode",
+            "openai/gpt-5.6-terra",
+        )),
+        gate_proof: Some(successful_gate_proof()),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+
+    let report = finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("successful rotated run finalizes");
+
+    assert_eq!(
+        report.review_dossier.ai_assistance.model,
+        "openai/gpt-5.6-terra"
+    );
+}
+
+#[test]
+fn durable_finalization_discloses_terminal_successful_model_after_cross_backend_rotation() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(rotated_lifecycle(
+            "opencode",
+            "openai/gpt-5.6-sol",
+            "claude-code",
+            "anthropic/claude-sonnet-4",
+        )),
+        gate_proof: Some(successful_gate_proof()),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+
+    let report = finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("successful rotated run finalizes");
+
+    assert_eq!(
+        report.review_dossier.ai_assistance.model,
+        "anthropic/claude-sonnet-4"
+    );
+}
+
+#[test]
 fn finalization_keeps_internal_durable_refs_for_operators_but_not_reviewers() {
     let internal_ref = "homeboy://agent-task/run/run-9568/artifacts#task=cook&artifact=patch";
     let reviewer_ref = "https://github.com/Extra-Chill/homeboy/issues/9568";
@@ -1286,7 +1336,7 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
         .push(ProviderRuntimeLifecycle {
             task_id: "task".to_string(),
             backend: "opencode".to_string(),
-            state: ProviderRuntimeState::Failed,
+            state: ProviderRuntimeState::Succeeded,
             stream_uri: None,
             external_runtime_ids: Vec::new(),
             metadata: json!({ "evidence_source": "canonical_executor_outcome" }),
@@ -2011,6 +2061,34 @@ fn successful_lifecycle(model: &str) -> RunLifecycleRecord {
         }],
         ..RunLifecycleRecord::default()
     }
+}
+
+fn rotated_lifecycle(
+    attempted_backend: &str,
+    attempted_model: &str,
+    producing_backend: &str,
+    producing_model: &str,
+) -> RunLifecycleRecord {
+    let mut lifecycle = successful_lifecycle(producing_model);
+    lifecycle.provider_runtime = vec![
+        ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: attempted_backend.to_string(),
+            state: ProviderRuntimeState::Succeeded,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({ "model": attempted_model }),
+        },
+        ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: producing_backend.to_string(),
+            state: ProviderRuntimeState::Succeeded,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({ "model": producing_model }),
+        },
+    ];
+    lifecycle
 }
 
 fn generic_executor_lifecycle(state: ProviderRuntimeState, model: &str) -> RunLifecycleRecord {
