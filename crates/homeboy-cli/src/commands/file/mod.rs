@@ -18,6 +18,7 @@ use args::{EditArgs, FileCommand};
 
 use homeboy::core::context::require_project_base_path;
 use homeboy::core::engine::{command, executor, shell};
+use homeboy::core::error::{Error, Result};
 use homeboy::core::project::files;
 use homeboy::core::server::transfer::{self, TransferConfig, TransferOutput};
 use homeboy::core::{join_remote_path, project};
@@ -50,9 +51,10 @@ pub fn run(args: FileArgs) -> CmdResult<FileCommandOutput> {
         FileCommand::Write {
             project_id,
             path,
+            allow_empty,
             mutation,
         } => {
-            let (out, code) = write(&project_id, &path, mutation.is_apply())?;
+            let (out, code) = write(&project_id, &path, mutation.is_apply(), allow_empty)?;
             Ok((FileCommandOutput::Standard(out), code))
         }
         FileCommand::Mkdir {
@@ -207,8 +209,38 @@ fn read(project_id: &str, path: &str) -> CmdResult<FileOutput> {
     ))
 }
 
-fn write(project_id: &str, path: &str, apply: bool) -> CmdResult<FileOutput> {
+/// Refuse an empty write unless the operator asked for one (#10816).
+///
+/// `files::write` sends `cat > path << 'EOF'`, and the redirect truncates the
+/// destination the moment the shell opens it -- before a single byte of content
+/// is transferred. So an empty payload is not a no-op, it is a deletion that
+/// reports `success: true`. A piped invocation whose producer wrote nothing
+/// destroyed an existing remote file exactly this way.
+///
+/// Truncation is a legitimate thing to want, so this is a guard rather than a
+/// prohibition: `--allow-empty` states the intent explicitly. The default is
+/// the safe one because the destructive reading of an empty stdin is almost
+/// never what the caller meant.
+///
+/// Checked before the dry-run branch too: a plan that does not surface this
+/// refusal would tell the operator the write is fine, and they would then run
+/// the same command with `--apply`.
+fn require_nonempty_write(content: &str, allow_empty: bool, path: &str) -> Result<()> {
+    if !content.is_empty() || allow_empty {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "stdin",
+        "refusing to write 0 bytes: the destination would be truncated to an empty \
+         file. Pass --allow-empty if truncating is what you intend.",
+        Some(path.to_string()),
+        None,
+    ))
+}
+
+fn write(project_id: &str, path: &str, apply: bool, allow_empty: bool) -> CmdResult<FileOutput> {
     let content = files::read_stdin()?;
+    require_nonempty_write(&content, allow_empty, path)?;
     if !apply {
         let project = project::load(project_id)?;
         let project_base_path = require_project_base_path(project_id, &project)?;

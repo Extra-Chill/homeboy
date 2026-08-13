@@ -282,7 +282,31 @@ fn write_content_command(quoted_path: &str, content: &str) -> String {
         command.push_str(&format!("\ntruncate -s -1 {quoted_path}"));
     }
 
+    // Measure the destination and emit the count as the command's last line
+    // (#10816). `bytes_written` used to be `content.len()` -- the length of what
+    // we MEANT to send, echoed back without ever asking the remote. That number
+    // is identical whether every byte landed or none did, so it could not
+    // distinguish a completed write from a truncated one.
+    command.push_str(&format!(
+        "\nprintf '{WRITTEN_BYTES_MARKER}%s\\n' \"$(wc -c < {quoted_path})\""
+    ));
+
     command
+}
+
+/// Sentinel prefixing the verified byte count on the write command's last line.
+///
+/// Distinctive enough that content echoed by a remote shell profile cannot be
+/// mistaken for the measurement.
+const WRITTEN_BYTES_MARKER: &str = "__homeboy_written_bytes__=";
+
+/// Read back the byte count the remote actually measured.
+fn parse_written_bytes(stdout: &str) -> Option<usize> {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix(WRITTEN_BYTES_MARKER))
+        .and_then(|count| count.trim().parse().ok())
 }
 
 /// Write content to file.
@@ -294,10 +318,35 @@ pub fn write(project_id: &str, path: &str, content: &str) -> Result<WriteResult>
     let output = execute_for_project(&project, &command)?;
     command::require_success(output.success, &output.stderr, "WRITE")?;
 
+    // Fail closed on a short write. `cat > path` truncates the destination when
+    // the shell opens the redirect, so a transfer that dies partway leaves a
+    // damaged file behind AND exits 0. Reporting success there is what let an
+    // empty write present as a completed one (#10816).
+    let Some(bytes_written) = parse_written_bytes(&output.stdout) else {
+        return Err(Error::internal_io(
+            format!(
+                "wrote {} bytes to {full_path} but the remote did not report a byte \
+                 count, so the write could not be verified",
+                content.len()
+            ),
+            Some("write".to_string()),
+        ));
+    };
+    if bytes_written != content.len() {
+        return Err(Error::internal_io(
+            format!(
+                "short write to {full_path}: sent {} bytes, destination holds {bytes_written}. \
+                 The file has already been modified and may be truncated; restore it before retrying.",
+                content.len()
+            ),
+            Some("write".to_string()),
+        ));
+    }
+
     Ok(WriteResult {
         base_path: Some(project_base_path),
         path: full_path,
-        bytes_written: content.len(),
+        bytes_written,
     })
 }
 
@@ -675,6 +724,48 @@ mod tests {
         assert_eq!(matches[0].file, "/tmp/file.txt");
         assert_eq!(matches[0].line, 3);
         assert_eq!(matches[0].content, "needle");
+    }
+
+    /// The write must measure the destination, not restate its own intent
+    /// (#10816).
+    #[test]
+    fn the_write_command_measures_the_destination_it_wrote() {
+        let command = write_content_command("'/srv/app/config.php'", "hello\n");
+
+        assert!(
+            command.contains("wc -c < '/srv/app/config.php'"),
+            "the write must read the destination size back: {command}"
+        );
+        assert!(
+            command.trim_end().ends_with('"'),
+            "the measurement must be the last thing the command does, so a \
+             failure earlier in the pipeline cannot be reported as a completed \
+             write: {command}"
+        );
+    }
+
+    /// `bytes_written` is only meaningful if it came from the remote.
+    #[test]
+    fn written_bytes_are_read_from_the_marked_measurement_line() {
+        assert_eq!(
+            parse_written_bytes("__homeboy_written_bytes__=42\n"),
+            Some(42)
+        );
+        // A remote shell profile can print a banner before the command runs.
+        assert_eq!(
+            parse_written_bytes("Welcome to prod\n17\n__homeboy_written_bytes__=42\n"),
+            Some(42)
+        );
+        // The written content itself may contain digits, or even look like a
+        // count. Only the marked line is the measurement.
+        assert_eq!(parse_written_bytes("42\n"), None);
+        // No measurement at all is UNKNOWN, never zero.
+        assert_eq!(parse_written_bytes(""), None);
+        assert_eq!(parse_written_bytes("__homeboy_written_bytes__=\n"), None);
+        assert_eq!(
+            parse_written_bytes("__homeboy_written_bytes__=oops\n"),
+            None
+        );
     }
 
     #[test]
