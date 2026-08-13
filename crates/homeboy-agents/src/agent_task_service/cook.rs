@@ -36,18 +36,20 @@ use super::cook_budget::{
     validate_effective_cook_budget, ExecutionBudgetUsage,
 };
 use super::cook_pre_execution::{
-    materialize_cook_attempt, materialize_initial_cook_attempt, pre_execution_failure_details,
-    pre_execution_failure_phase, pre_execution_failure_report, record_pre_execution_failure,
-    retryable_pre_execution_failure, terminal_executor_matches, with_pre_execution_phase,
+    materialize_cook_attempt_with_store, materialize_initial_cook_attempt_with_store,
+    pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
+    record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
+    with_pre_execution_phase,
 };
 use super::cook_promotion::{
     attempt_needs_execution, cook_report, finalize_or_load_cook_pr,
-    is_moving_base_finalization_error, moving_base_recovery_for_run,
-    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
-    persisted_promotion_for_attempt, promote_or_load_attempt, recover_moving_base_cook_candidate,
-    refreshed_moving_base_recovery, retryable_provider_discovery_failure, CookReportInput,
-    MovingBaseCookRecovery,
+    finalize_or_load_cook_pr_with_store, is_moving_base_finalization_error,
+    moving_base_recovery_for_run_with_store, moving_base_recovery_from_promotion,
+    moving_base_recovery_report, next_moving_base_recovery, persisted_promotion_for_attempt,
+    promote_or_load_attempt, recover_moving_base_cook_candidate, refreshed_moving_base_recovery,
+    retryable_provider_discovery_failure, CookReportInput, MovingBaseCookRecovery,
 };
+use super::cook_recipe::CookRecipeStore;
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
@@ -209,6 +211,17 @@ fn claim_pre_artifact_interruption_retry(
     run_id: &str,
     plan: &AgentTaskPlan,
 ) -> Result<Option<(u32, String)>> {
+    let store = CookRecipeStore::from_current_data_root()?;
+    claim_pre_artifact_interruption_retry_with_store(&store, cook_id, attempt, run_id, plan)
+}
+
+fn claim_pre_artifact_interruption_retry_with_store(
+    store: &CookRecipeStore,
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+) -> Result<Option<(u32, String)>> {
     let next_attempt = attempt.checked_add(1).ok_or_else(|| {
         Error::validation_invalid_argument(
             "cook_recipe.attempts",
@@ -219,7 +232,7 @@ fn claim_pre_artifact_interruption_retry(
     })?;
     let operation_key = pre_artifact_interruption_operation_key(run_id);
     let recipe_next_attempt = || {
-        super::load_recipe(cook_id).map(|recipe| {
+        store.load_recipe(cook_id).map(|recipe| {
             recipe
                 .attempts
                 .iter()
@@ -235,7 +248,7 @@ fn claim_pre_artifact_interruption_retry(
     )? {
         agent_task_lifecycle::ClaimOutcome::Acquired => {
             let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
-            super::record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
+            store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
             agent_task_lifecycle::complete_cook_operation(
                 run_id,
                 &operation_key,
@@ -3002,6 +3015,7 @@ fn child_execution_budget(
     reason = "Cook follow-up retains explicit durable recipe and dispatch identity fields"
 )]
 pub(crate) fn dispatch_cook_follow_up<E>(
+    store: &CookRecipeStore,
     options: &AgentTaskCookServiceOptions,
     executor: E,
     cook_id: &str,
@@ -3023,7 +3037,7 @@ where
     if let Some(reason) = remediation_tool_policy_error(&follow_up_request) {
         return Ok(CookFollowUpDispatch::PolicyFailure { reason });
     }
-    let recipe = super::load_recipe(cook_id)?;
+    let recipe = store.load_recipe(cook_id)?;
     let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
         recipe_attempt.plan.tasks.len() == 1
             && recipe_attempt.plan.tasks[0].inputs["cook_loop"]["artifact_provenance"]
@@ -3191,9 +3205,9 @@ where
     let review_form_only =
         follow_up_plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true;
     if let Some(replaced_run_id) = replaced_run_id {
-        super::record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
+        store.record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
     } else {
-        super::record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
+        store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
     }
     if attempt_needs_execution(&next_run_id) {
         let baseline = materialize_follow_up_baseline(
@@ -3444,7 +3458,24 @@ pub fn run_cook<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    run_cook_with_finalizer(options, executor, finalize_or_load_cook_pr)
+    let store = CookRecipeStore::from_current_data_root()?;
+    run_cook_with_store(&store, options, executor)
+}
+
+/// Run Cook against an explicit durable recipe store. Lifecycle storage remains
+/// ambient; this boundary scopes only Cook recipes and continuations.
+pub fn run_cook_with_store<E>(
+    store: &CookRecipeStore,
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let side_effects = DefaultCookSideEffects::new(|options, run_id, promotion| {
+        finalize_or_load_cook_pr_with_store(store, options, run_id, promotion)
+    });
+    run_cook_with_boundaries_with_store(store, options, executor, side_effects)
 }
 
 pub fn run_terminal_cook_continuation<E>(
@@ -3454,8 +3485,16 @@ pub fn run_terminal_cook_continuation<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    let store = CookRecipeStore::from_current_data_root()?;
     let side_effects = DefaultCookSideEffects::new(finalize_or_load_cook_pr);
-    run_cook_with_boundaries_observed_policy(options, executor, side_effects, None, true)
+    run_cook_with_boundaries_observed_policy_with_store(
+        &store,
+        options,
+        executor,
+        side_effects,
+        None,
+        true,
+    )
 }
 
 /// Run Cook while reporting the authoritative attempt only after its durable
@@ -3482,8 +3521,22 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
+    let store = CookRecipeStore::from_current_data_root()?;
+    run_cook_with_finalizer_with_store(&store, options, executor, finalize)
+}
+
+pub(crate) fn run_cook_with_finalizer_with_store<E, F>(
+    store: &CookRecipeStore,
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    finalize: F,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+{
     let side_effects = DefaultCookSideEffects::new(finalize);
-    run_cook_with_boundaries(options, executor, side_effects)
+    run_cook_with_boundaries_with_store(store, options, executor, side_effects)
 }
 
 fn run_cook_with_boundaries<E, S>(
@@ -3495,7 +3548,21 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
-    run_cook_with_boundaries_observed(options, executor, side_effects, None)
+    let store = CookRecipeStore::from_current_data_root()?;
+    run_cook_with_boundaries_with_store(&store, options, executor, side_effects)
+}
+
+fn run_cook_with_boundaries_with_store<E, S>(
+    store: &CookRecipeStore,
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    side_effects: S,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    S: CookSideEffectService,
+{
+    run_cook_with_boundaries_observed_with_store(store, options, executor, side_effects, None)
 }
 
 /// The component a cook is working on, for notification attribution.
@@ -3550,7 +3617,29 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
-    run_cook_with_boundaries_observed_policy(
+    let store = CookRecipeStore::from_current_data_root()?;
+    run_cook_with_boundaries_observed_with_store(
+        &store,
+        options,
+        executor,
+        side_effects,
+        durable_observer,
+    )
+}
+
+fn run_cook_with_boundaries_observed_with_store<E, S>(
+    store: &CookRecipeStore,
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    side_effects: S,
+    durable_observer: Option<&CookProgressObserver<'_>>,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    S: CookSideEffectService,
+{
+    run_cook_with_boundaries_observed_policy_with_store(
+        store,
         options,
         executor,
         side_effects,
@@ -3570,11 +3659,35 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
+    let store = CookRecipeStore::from_current_data_root()?;
+    run_cook_with_boundaries_observed_policy_with_store(
+        &store,
+        options,
+        executor,
+        side_effects,
+        durable_observer,
+        allow_historical_terminal,
+    )
+}
+
+fn run_cook_with_boundaries_observed_policy_with_store<E, S>(
+    store: &CookRecipeStore,
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    side_effects: S,
+    durable_observer: Option<&CookProgressObserver<'_>>,
+    allow_historical_terminal: bool,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    S: CookSideEffectService,
+{
     // Every exit from the observed boundary funnels through one notification
     // point — including the durable-failure report built from a controller
     // error — so the failure path is not the one that stays silent.
     let notification_options = options.clone();
     let result = run_cook_with_boundaries_reported(
+        store,
         options,
         executor,
         side_effects,
@@ -3594,6 +3707,7 @@ where
 }
 
 fn run_cook_with_boundaries_reported<E, S>(
+    store: &CookRecipeStore,
     options: AgentTaskCookServiceOptions,
     executor: E,
     side_effects: S,
@@ -3605,7 +3719,8 @@ where
     S: CookSideEffectService,
 {
     let failure_options = options.clone();
-    let result = match run_cook_with_boundaries_observed_inner(
+    let result = match run_cook_with_boundaries_observed_inner_with_store(
+        store,
         options,
         executor,
         side_effects,
@@ -3613,7 +3728,7 @@ where
         allow_historical_terminal,
     ) {
         Ok(result) => result,
-        Err(error) => return durable_cook_error_report(&failure_options, error),
+        Err(error) => return durable_cook_error_report_with_store(store, &failure_options, error),
     };
     if let Some(run_id) = result.value.latest_run_id.as_deref() {
         let attempt = result
@@ -3631,7 +3746,7 @@ where
             attempt,
             Some(&result.value.status),
         ) {
-            return durable_cook_error_report(&failure_options, error);
+            return durable_cook_error_report_with_store(store, &failure_options, error);
         }
         if phase == "terminal" {
             if let Err(error) = agent_task_lifecycle::record_cook_terminal_result(
@@ -3639,7 +3754,7 @@ where
                 result.exit_code == 0,
                 result.exit_code,
             ) {
-                return durable_cook_error_report(&failure_options, error);
+                return durable_cook_error_report_with_store(store, &failure_options, error);
             }
         }
     }
@@ -3653,7 +3768,16 @@ fn durable_cook_error_report(
     options: &AgentTaskCookServiceOptions,
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    if super::recipe_exists(&options.cook_id)? {
+    let store = CookRecipeStore::from_current_data_root()?;
+    durable_cook_error_report_with_store(&store, options, error)
+}
+
+fn durable_cook_error_report_with_store(
+    store: &CookRecipeStore,
+    options: &AgentTaskCookServiceOptions,
+    error: Error,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    if store.recipe_exists(&options.cook_id) {
         let mut report = cook_report(CookReportInput {
             cook_id: options.cook_id.clone(),
             status: "durable_failure",
@@ -3691,6 +3815,29 @@ fn durable_cook_error_report(
 }
 
 fn run_cook_with_boundaries_observed_inner<E, S>(
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    side_effects: S,
+    durable_observer: Option<&CookProgressObserver<'_>>,
+    allow_historical_terminal: bool,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    S: CookSideEffectService,
+{
+    let store = CookRecipeStore::from_current_data_root()?;
+    run_cook_with_boundaries_observed_inner_with_store(
+        &store,
+        options,
+        executor,
+        side_effects,
+        durable_observer,
+        allow_historical_terminal,
+    )
+}
+
+fn run_cook_with_boundaries_observed_inner_with_store<E, S>(
+    store: &CookRecipeStore,
     mut options: AgentTaskCookServiceOptions,
     executor: E,
     mut side_effects: S,
@@ -3708,7 +3855,7 @@ where
     // persistence, or a detached handoff can spend provider work. Historical
     // immutable recipes retain their persisted behavior and receive actionable
     // exhaustion guidance if their legacy budget reaches remediation.
-    if !super::recipe_exists(&options.cook_id)? {
+    if !store.recipe_exists(&options.cook_id) {
         validate_effective_cook_budget(
             options.max_attempts,
             &options.initial_plan.options.execution_budget,
@@ -3763,13 +3910,13 @@ where
         .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
         .transpose()?
         .flatten();
-    let existing_recipe = super::recipe_exists(&options.cook_id)?;
+    let existing_recipe = store.recipe_exists(&options.cook_id);
     // A form-only continuation has already appended and persisted its exact
     // attempt. Re-persisting it as a fresh initial recipe would falsely look
     // like an unsafe post-gate correction because the durable lineage now has
     // more attempts than the caller's one-attempt input.
     let recipe = if existing_recipe {
-        let recipe = super::load_recipe(&options.cook_id)?;
+        let recipe = store.load_recipe(&options.cook_id)?;
         if recipe
             .attempts
             .iter()
@@ -3777,11 +3924,11 @@ where
         {
             recipe
         } else {
-            super::persist_initial_recipe(&options)?
+            store.persist_initial_recipe(&options)?
         }
     } else {
         agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
-        super::persist_initial_recipe(&options)?
+        store.persist_initial_recipe(&options)?
     };
     // A recipe can survive an interruption before its first lifecycle record.
     // Resume from the validated durable inputs so ambient transport state cannot
@@ -3826,7 +3973,7 @@ where
     // Recipe persistence and lifecycle materialization are a recoverable saga.
     // Complete it before any capacity, workspace, or provider-facing work so a
     // controller interruption leaves a status-addressable, resumable attempt.
-    materialize_initial_cook_attempt(&options)?;
+    materialize_initial_cook_attempt_with_store(store, &options)?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -3998,7 +4145,8 @@ where
         ));
     }
     if let Some(latest_attempt) = recipe.attempts.last() {
-        materialize_cook_attempt(
+        materialize_cook_attempt_with_store(
+            store,
             &recipe.cook_id,
             &latest_attempt.run_id,
             &latest_attempt.plan,
@@ -4548,8 +4696,8 @@ where
                 }
                 let next_attempt = attempt + 1;
                 let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, next_attempt);
-                super::record_recipe_attempt(&cook_id, next_attempt, &next_run_id, &plan)?;
-                materialize_cook_attempt(&cook_id, &next_run_id, &plan)?;
+                store.record_recipe_attempt(&cook_id, next_attempt, &next_run_id, &plan)?;
+                materialize_cook_attempt_with_store(store, &cook_id, &next_run_id, &plan)?;
                 run_id = next_run_id;
                 next_plan = Some(plan);
                 continue;
@@ -4653,7 +4801,9 @@ where
                         1,
                     ));
                 }
-                match claim_pre_artifact_interruption_retry(&cook_id, attempt, &run_id, &plan)? {
+                match claim_pre_artifact_interruption_retry_with_store(
+                    store, &cook_id, attempt, &run_id, &plan,
+                )? {
                     Some((_next_attempt, next_run_id)) => {
                         run_id = next_run_id;
                         next_plan = Some(plan);
@@ -4984,7 +5134,7 @@ where
                     }));
                 }
                 let mut active_moving_base_recovery = None;
-                let promotion = match moving_base_recovery_for_run(&run_id)? {
+                let promotion = match moving_base_recovery_for_run_with_store(store, &run_id)? {
                     Some(recovery) => match side_effects.recover_moving_base(&options, &recovery) {
                         Ok(promotion) => {
                             agent_task_lifecycle::record_promotion(
@@ -5032,7 +5182,7 @@ where
                                 })?,
                             )?;
                             if recovery.base_movements < 3 {
-                                super::enqueue_terminal_continuation(&cook_id, &run_id)?;
+                                store.enqueue_terminal_continuation(&cook_id, &run_id)?;
                             }
                             let continuation_queued = recovery.base_movements < 3;
                             return Ok(moving_base_recovery_report(
@@ -5074,7 +5224,7 @@ where
                                 .map_err(|error| Error::internal_json(error.to_string(), None))?,
                         )?;
                         if recovery.base_movements < 3 {
-                            super::enqueue_terminal_continuation(&cook_id, &run_id)?;
+                            store.enqueue_terminal_continuation(&cook_id, &run_id)?;
                         }
                         let continuation_queued = recovery.base_movements < 3;
                         return Ok(moving_base_recovery_report(
@@ -5251,6 +5401,7 @@ where
                 let review_form_only =
                     follow_up_request.inputs["cook_loop"]["review_form_required"] == true;
                 match dispatch_cook_follow_up(
+                    store,
                     &options,
                     executor.clone(),
                     &cook_id,

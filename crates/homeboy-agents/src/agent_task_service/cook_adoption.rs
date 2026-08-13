@@ -36,9 +36,10 @@ use super::cook::{
     CookFollowUpBudgetScope, CookFollowUpDispatch,
 };
 use super::cook_promotion::{
-    cook_report, finalize_or_load_cook_pr_with_backend, persisted_promotion_for_attempt,
+    cook_report, finalize_or_load_cook_pr_with_backend_with_store, persisted_promotion_for_attempt,
     promotion_source, CookReportInput,
 };
+use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -237,6 +238,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     executor: E,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let store = CookRecipeStore::from_current_data_root()?;
     let (record, recipe) = resolve_adoption_target_with_attempt(cook_or_run_id, attempt)?;
     let cook_id = &recipe.cook_id;
     let mut options = super::reconstruct_adoption_options(&recipe)?;
@@ -680,6 +682,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             Err(error) => return Err(error),
         };
         let dispatch = dispatch_cook_follow_up(
+            &store,
             &options,
             executor.clone(),
             cook_id,
@@ -698,7 +701,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         return match dispatch {
             CookFollowUpDispatch::Dispatched { run_id } => {
                 agent_task_lifecycle::finish_candidate_adoption(&record.run_id, None)?;
-                options.initial_plan = super::load_recipe(cook_id)?
+                options.initial_plan = store.load_recipe(cook_id)?
                     .attempts
                     .into_iter()
                     .find(|attempt| attempt.run_id == run_id)
@@ -712,11 +715,14 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                         )
                     })?;
                 options.initial_run_id = run_id;
-                let mut result = super::cook::run_cook_with_finalizer(
+                let mut result = super::cook::run_cook_with_finalizer_with_store(
+                    &store,
                     options,
                     executor,
                     |options, run_id, promotion| {
-                        finalize_or_load_cook_pr_with_backend(options, run_id, promotion, backend)
+                        finalize_or_load_cook_pr_with_backend_with_store(
+                            &store, options, run_id, promotion, backend,
+                        )
                     },
                 )?;
                 result.value.attempts.insert(0, attempt);
@@ -827,7 +833,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         "finalization",
         "finalize pull request",
     )?;
-    let mut finalization = match finalize_or_load_cook_pr_with_backend(
+    let mut finalization = match finalize_or_load_cook_pr_with_backend_with_store(
+        &store,
         &options,
         &record.run_id,
         &promotion,

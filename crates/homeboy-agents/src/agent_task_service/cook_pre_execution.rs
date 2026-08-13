@@ -25,6 +25,7 @@ use super::cook::{
     AgentTaskCookServiceOptions,
 };
 use super::cook_promotion::{cook_report, CookReportInput};
+use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
 
 /// Persist the controller-owned initial attempt before transport preparation so
@@ -32,7 +33,16 @@ use super::AgentTaskRunResult;
 pub(crate) fn materialize_initial_cook_attempt(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<()> {
-    materialize_cook_attempt(
+    let store = CookRecipeStore::from_current_data_root()?;
+    materialize_initial_cook_attempt_with_store(&store, options)
+}
+
+pub(crate) fn materialize_initial_cook_attempt_with_store(
+    store: &CookRecipeStore,
+    options: &AgentTaskCookServiceOptions,
+) -> Result<()> {
+    materialize_cook_attempt_with_store(
+        store,
         &options.cook_id,
         &options.initial_run_id,
         &options.initial_plan,
@@ -47,15 +57,25 @@ pub(crate) fn materialize_cook_attempt(
     run_id: &str,
     plan: &AgentTaskPlan,
 ) -> Result<()> {
+    let store = CookRecipeStore::from_current_data_root()?;
+    materialize_cook_attempt_with_store(&store, cook_id, run_id, plan)
+}
+
+pub(crate) fn materialize_cook_attempt_with_store(
+    store: &CookRecipeStore,
+    cook_id: &str,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+) -> Result<()> {
     if agent_task_lifecycle::run_record_exists(run_id)? {
-        return ensure_cook_attempt_index(cook_id, run_id);
+        return ensure_cook_attempt_index(store, cook_id, run_id);
     }
     match agent_task_lifecycle::submit_plan(plan, Some(run_id)) {
-        Ok(_) => ensure_cook_attempt_index(cook_id, run_id),
+        Ok(_) => ensure_cook_attempt_index(store, cook_id, run_id),
         Err(error) => {
             // `submit_plan` persists admission failures before returning them.
             if agent_task_lifecycle::run_record_exists(run_id)? {
-                ensure_cook_attempt_index(cook_id, run_id)?;
+                ensure_cook_attempt_index(store, cook_id, run_id)?;
             }
             Err(error)
         }
@@ -65,8 +85,8 @@ pub(crate) fn materialize_cook_attempt(
 /// Complete the second half of initial-attempt materialization after a crash.
 /// The recipe and run record are independent durable writes, so their exact
 /// identities must agree before repairing the alias/index projection.
-fn ensure_cook_attempt_index(cook_id: &str, run_id: &str) -> Result<()> {
-    let recipe = super::cook_recipe::load_recipe(cook_id)?;
+fn ensure_cook_attempt_index(store: &CookRecipeStore, cook_id: &str, run_id: &str) -> Result<()> {
+    let recipe = store.load_recipe(cook_id)?;
     let attempt = recipe
         .attempts
         .iter()
@@ -143,7 +163,8 @@ pub fn recover_recipe_attempt(
             )
         })?;
 
-    materialize_cook_attempt(&recipe.cook_id, &attempt.run_id, &attempt.plan)?;
+    let store = CookRecipeStore::from_current_data_root()?;
+    materialize_cook_attempt_with_store(&store, &recipe.cook_id, &attempt.run_id, &attempt.plan)?;
     let record = agent_task_lifecycle::exact_record(&attempt.run_id)?;
     super::cook_recipe::validate_recipe_attempt_record(&recipe, &attempt.run_id, &record)?;
     Ok(Some(record))

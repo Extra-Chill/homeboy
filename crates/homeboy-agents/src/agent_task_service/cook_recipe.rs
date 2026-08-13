@@ -132,6 +132,39 @@ impl CookRecipeStore {
         DurableCookContinuationQueue { store: self }.enqueue(continuation, rearm_failed)
     }
 
+    pub fn enqueue_terminal_continuation(&self, cook_id: &str, run_id: &str) -> Result<bool> {
+        self.enqueue_terminal_continuation_with_recovery(cook_id, run_id, false)
+    }
+
+    fn enqueue_terminal_continuation_with_recovery(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+        rearm_failed: bool,
+    ) -> Result<bool> {
+        let recipe = self.load_recipe(cook_id)?;
+        if !recipe
+            .attempts
+            .iter()
+            .any(|attempt| attempt.run_id == run_id)
+        {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "terminal run is not declared by the durable cook recipe",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        let continuation = AgentTaskCookContinuation {
+            schema: CONTINUATION_SCHEMA.to_string(),
+            key: format!("{cook_id}:{run_id}"),
+            cook_id: cook_id.to_string(),
+            run_id: run_id.to_string(),
+            retries: 0,
+        };
+        self.enqueue_continuation(&continuation, rearm_failed)
+    }
+
     pub fn claim_continuation_with_budget(&self, budget: usize) -> Result<CookContinuationClaim> {
         claim_continuation_from(&self.queue_root(), budget)
     }
@@ -1142,7 +1175,7 @@ pub fn reconcile_recipe_attempt_for_continuation(
 }
 
 pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool> {
-    enqueue_terminal_continuation_with_recovery(cook_id, run_id, false)
+    default_store()?.enqueue_terminal_continuation(cook_id, run_id)
 }
 
 /// Explicit operator recovery may rearm a continuation that previously failed
@@ -1160,27 +1193,7 @@ fn enqueue_terminal_continuation_with_recovery(
     run_id: &str,
     rearm_failed: bool,
 ) -> Result<bool> {
-    let recipe = load_recipe(cook_id)?;
-    if !recipe
-        .attempts
-        .iter()
-        .any(|attempt| attempt.run_id == run_id)
-    {
-        return Err(Error::validation_invalid_argument(
-            "cook_recipe.attempts",
-            "terminal run is not declared by the durable cook recipe",
-            Some(run_id.to_string()),
-            None,
-        ));
-    }
-    let continuation = AgentTaskCookContinuation {
-        schema: CONTINUATION_SCHEMA.to_string(),
-        key: format!("{cook_id}:{run_id}"),
-        cook_id: cook_id.to_string(),
-        run_id: run_id.to_string(),
-        retries: 0,
-    };
-    default_store()?.enqueue_continuation(&continuation, rearm_failed)
+    default_store()?.enqueue_terminal_continuation_with_recovery(cook_id, run_id, rearm_failed)
 }
 
 pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
