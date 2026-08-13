@@ -123,7 +123,7 @@ else
   for target in "${TARGETS[@]}"; do
     REQUIRED+=("${PACKAGE_NAME}-${target}.tar.xz" "${PACKAGE_NAME}-${target}.tar.xz.sha256")
   done
-  REQUIRED+=("source.tar.gz" "source.tar.gz.sha256" "sha256.sum")
+  REQUIRED+=("source.tar.gz" "source.tar.gz.sha256" "sha256.sum" "homeboy-installer.sh")
 
   if grep -qE '^[[:space:]]*installers[[:space:]]*=.*homebrew' "${DIST_WORKSPACE}"; then
     REQUIRED+=("${PACKAGE_NAME}.rb")

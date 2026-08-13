@@ -10,8 +10,8 @@ mod types;
 pub mod update_check;
 mod validation;
 
-pub(crate) use admission::with_controller_upgrade_admission;
 pub use admission::{
+    controller_upgrade_admission, ensure_controller_upgrade_admission,
     register_controller_upgrade_admission_provider, ControllerUpgradeAdmission,
     ControllerUpgradeAdmissionProvider, ControllerUpgradeBlocker,
 };
