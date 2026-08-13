@@ -2,6 +2,7 @@ use clap::{Args, Subcommand};
 use homeboy_extension as extension;
 use serde::{Deserialize, Serialize};
 
+use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
 use homeboy::core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, AgentRuntimeDiagnosticsContract,
 };
@@ -158,6 +159,8 @@ enum ExtensionCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Converge installed extensions without replacing the controller binary
+    Converge,
     /// Uninstall a extension
     Uninstall {
         /// Extension ID
@@ -265,6 +268,7 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
             all,
             force,
         } => update_extension(extension_id.as_deref(), all, force),
+        ExtensionCommand::Converge => converge_extensions(),
         ExtensionCommand::Uninstall { extension_id } => uninstall_extension(&extension_id),
         ExtensionCommand::Action {
             extension_id,
@@ -305,6 +309,7 @@ impl ExtensionArgs {
         matches!(
             self.command,
             ExtensionCommand::Update { .. }
+                | ExtensionCommand::Converge
                 | ExtensionCommand::Refresh { .. }
                 | ExtensionCommand::DevRun { .. }
         )
@@ -416,6 +421,18 @@ pub enum ExtensionOutput {
         updated: Vec<UpdateEntry>,
         skipped: Vec<String>,
     },
+    #[serde(rename = "extension.converge")]
+    Converge {
+        controller_version: String,
+        compatibility: Vec<ExtensionConvergenceCompatibility>,
+        updated: Vec<UpdateEntry>,
+        skipped: Vec<homeboy_extension::UpdateSkippedEntry>,
+        revision_evidence: Vec<ExtensionRevisionEvidence>,
+        provider_catalog_before: ProviderCatalogEvidence,
+        provider_catalog_after: ProviderCatalogEvidence,
+        services_restarted: Vec<homeboy_upgrade::upgrade::ServiceRestartEntry>,
+        services_pending_restart: Vec<homeboy_upgrade::upgrade::ServiceRestartEntry>,
+    },
     #[serde(rename = "extension.uninstall")]
     Uninstall {
         extension_id: String,
@@ -445,6 +462,33 @@ pub enum ExtensionOutput {
     DevRun(homeboy::runner::dev_run::ExtensionDevRunOutput),
     #[serde(rename = "extension.set")]
     SetBatch { batch: homeboy::core::BatchResult },
+}
+
+#[derive(Serialize)]
+pub struct ExtensionConvergenceCompatibility {
+    pub extension_id: String,
+    pub core_compatibility: homeboy_extension::CoreCompatibilityReport,
+}
+
+#[derive(Serialize)]
+pub struct ProviderCatalogEvidence {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub provider_ids: Vec<String>,
+    pub diagnostics: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostic_messages: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct ExtensionRevisionEvidence {
+    pub extension_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// `changed` is proven only when both revisions are known and differ.
+    pub status: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1219,6 +1263,123 @@ fn update_all_extensions(force: bool) -> CmdResult<ExtensionOutput> {
     ))
 }
 
+/// Extension-only convergence intentionally has no controller-upgrade admission
+/// or runtime-promotion lease: it never replaces the controller binary.
+fn converge_extensions() -> CmdResult<ExtensionOutput> {
+    let extension_ids = extension::available_extension_ids();
+    let compatibility = extension_ids
+        .iter()
+        .map(|id| {
+            let manifest = extension::load_extension(id)?;
+            let source_revision = homeboy_core::extension_update_check::read_source_revision(id);
+            let report = extension::evaluate_core_compatibility(
+                manifest
+                    .requires
+                    .as_ref()
+                    .and_then(|requires| requires.homeboy.as_deref()),
+                source_revision,
+            )?;
+            if report.status == "incompatible" {
+                return Err(extension::core_incompatible_error("extension", id, report));
+            }
+            Ok(ExtensionConvergenceCompatibility {
+                extension_id: id.clone(),
+                core_compatibility: report,
+            })
+        })
+        .collect::<homeboy::core::Result<Vec<_>>>()?;
+
+    let provider_catalog_before = provider_catalog_evidence(AgentTaskProviderCatalog::discover());
+    let result = extension::update_all(false);
+    let changed_extension_ids = changed_extension_ids(&result.updated);
+    let provider_catalog_after = provider_catalog_evidence(AgentTaskProviderCatalog::refresh());
+    let (services_restarted, services_pending_restart) =
+        homeboy_upgrade::upgrade::restart_extension_services(&changed_extension_ids);
+    let revision_evidence = revision_evidence(&result.updated);
+
+    Ok((
+        ExtensionOutput::Converge {
+            controller_version: extension::installed_homeboy_version(),
+            compatibility,
+            updated: result.updated,
+            skipped: result.skipped_details,
+            revision_evidence,
+            provider_catalog_before,
+            provider_catalog_after,
+            services_restarted,
+            services_pending_restart,
+        },
+        0,
+    ))
+}
+
+fn provider_catalog_evidence(catalog: AgentTaskProviderCatalog) -> ProviderCatalogEvidence {
+    let mut provider_ids = catalog
+        .providers()
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    let diagnostics = catalog.diagnostics().len();
+    let diagnostic_messages = catalog
+        .diagnostics()
+        .iter()
+        .take(8)
+        .map(|diagnostic| {
+            bounded_diagnostic(&format!("{}: {}", diagnostic.class, diagnostic.message))
+        })
+        .collect();
+    ProviderCatalogEvidence {
+        version: catalog.version,
+        provider_ids,
+        diagnostics,
+        diagnostic_messages,
+    }
+}
+
+fn changed_extension_ids(entries: &[UpdateEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| revision_status(entry) == "changed")
+        .map(|entry| entry.extension_id.clone())
+        .collect()
+}
+
+fn revision_evidence(entries: &[UpdateEntry]) -> Vec<ExtensionRevisionEvidence> {
+    entries
+        .iter()
+        .map(|entry| ExtensionRevisionEvidence {
+            extension_id: entry.extension_id.clone(),
+            before: entry.source_update.old_source_revision.clone(),
+            after: entry.source_update.new_source_revision.clone(),
+            status: revision_status(entry),
+        })
+        .collect()
+}
+
+fn revision_status(entry: &UpdateEntry) -> &'static str {
+    match (
+        entry.source_update.old_source_revision.as_deref(),
+        entry.source_update.new_source_revision.as_deref(),
+    ) {
+        (Some(before), Some(after)) if before != after => "changed",
+        (Some(_), Some(_)) => "unchanged",
+        _ => "unknown",
+    }
+}
+
+fn bounded_diagnostic(message: &str) -> String {
+    const LIMIT: usize = 512;
+    if message.len() <= LIMIT {
+        return message.to_string();
+    }
+    let mut end = LIMIT;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... [truncated]", &message[..end])
+}
+
 fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
     let was_linked = is_extension_linked(extension_id);
     let path = homeboy_extension::uninstall(extension_id)?;
@@ -1407,9 +1568,278 @@ fn exec_extension_tool(
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
+    use homeboy_extension::{ExtensionSourceUpdate, UpdateEntry};
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn convergence_restarts_only_extensions_with_changed_source_revisions() {
+        let entries = vec![
+            update_entry("unchanged", Some("abc"), Some("abc")),
+            update_entry("changed", Some("abc"), Some("def")),
+            update_entry("unverifiable", None, None),
+        ];
+
+        assert_eq!(changed_extension_ids(&entries), vec!["changed"]);
+    }
+
+    #[test]
+    fn convergence_keeps_unknown_revisions_out_of_restart_selection() {
+        let entries = vec![update_entry("unknown", None, Some("def"))];
+
+        assert!(changed_extension_ids(&entries).is_empty());
+        assert_eq!(revision_evidence(&entries)[0].status, "unknown");
+    }
+
+    #[test]
+    fn provider_diagnostics_are_bounded() {
+        let diagnostic = bounded_diagnostic(&"x".repeat(600));
+
+        assert!(diagnostic.len() < 540);
+        assert!(diagnostic.ends_with("... [truncated]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn converge_acceptance_preserves_dirty_sources_reports_evidence_restarts_targeted_service_and_rolls_back(
+    ) {
+        with_isolated_home(|home| {
+            homeboy_upgrade::upgrade::register_controller_upgrade_admission_provider(Box::new(
+                BlockedControllerAdmission,
+            ));
+            let root = home.path();
+            let remote = root.join("remote.git");
+            let seed = root.join("seed");
+            let linked = root.join("linked");
+            assert!(git(
+                &root,
+                &["init", "--bare", "--quiet", remote.to_str().unwrap()]
+            ));
+            assert!(git(
+                &root,
+                &[
+                    "clone",
+                    "--quiet",
+                    remote.to_str().unwrap(),
+                    seed.to_str().unwrap()
+                ]
+            ));
+            write_convergence_manifest(&seed, ">=0.0.0");
+            commit_and_push(&seed, "initial");
+            assert!(git(
+                &root,
+                &[
+                    "clone",
+                    "--quiet",
+                    remote.to_str().unwrap(),
+                    linked.to_str().unwrap()
+                ]
+            ));
+
+            let extensions = root.join(".config/homeboy/extensions");
+            fs::create_dir_all(&extensions).expect("extensions dir");
+            symlink(&linked, extensions.join("fixture")).expect("linked extension");
+            let sentinel = root.join("service-restarted");
+            let mut config = homeboy::core::defaults::HomeboyConfig::default();
+            config
+                .resident_services
+                .push(homeboy::core::defaults::ResidentServiceConfig {
+                    id: "fixture-provider".to_string(),
+                    systemd_unit: None,
+                    restart_command: Some(format!("touch {}", sentinel.display())),
+                    extension_ids: vec!["fixture".to_string()],
+                });
+            config
+                .resident_services
+                .push(homeboy::core::defaults::ResidentServiceConfig {
+                    id: "controller-only".to_string(),
+                    systemd_unit: None,
+                    restart_command: Some("false".to_string()),
+                    extension_ids: Vec::new(),
+                });
+            homeboy::core::defaults::save_config(&config).expect("save service config");
+            homeboy::core::defaults::reset_config_cache_for_test();
+
+            fs::write(linked.join("user-notes.txt"), "preserve me").expect("dirty source");
+            let (dirty, _) = converge_extensions().expect("dirty convergence reports skip");
+            let ExtensionOutput::Converge { skipped, .. } = dirty else {
+                panic!("converge output")
+            };
+            assert_eq!(skipped.len(), 1);
+            assert!(skipped[0].reason.contains("uncommitted changes"));
+            assert!(
+                linked.join("user-notes.txt").exists(),
+                "dirty source preserved"
+            );
+            fs::remove_file(linked.join("user-notes.txt")).expect("clean source");
+
+            write_convergence_manifest(&seed, ">=0.0.0");
+            fs::write(seed.join("provider-change"), "new provider").expect("provider change");
+            commit_and_push(&seed, "compatible refresh");
+            let (converged, _) = converge_extensions().expect("compatible convergence");
+            let ExtensionOutput::Converge {
+                updated,
+                revision_evidence,
+                provider_catalog_before,
+                provider_catalog_after,
+                services_restarted,
+                ..
+            } = converged
+            else {
+                panic!("converge output")
+            };
+            assert_eq!(updated.len(), 1);
+            assert_eq!(revision_evidence[0].status, "changed");
+            assert!(revision_evidence[0].before.is_some());
+            assert!(revision_evidence[0].after.is_some());
+            assert!(provider_catalog_before.version.is_some());
+            assert!(provider_catalog_after.version.is_some());
+            assert_eq!(
+                services_restarted
+                    .iter()
+                    .map(|entry| entry.service_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["fixture-provider"]
+            );
+            assert!(sentinel.exists(), "configured extension service restarted");
+
+            let before_rollback =
+                homeboy_core::extension_update_check::read_source_revision("fixture")
+                    .expect("current revision");
+            write_convergence_manifest(&seed, ">=999.0.0");
+            commit_and_push(&seed, "incompatible refresh");
+            let (rolled_back, _) =
+                converge_extensions().expect("rollback is a reported extension skip");
+            let ExtensionOutput::Converge {
+                skipped,
+                services_restarted,
+                ..
+            } = rolled_back
+            else {
+                panic!("converge output")
+            };
+            assert_eq!(skipped.len(), 1);
+            assert!(skipped[0].reason.contains("requires homeboy"));
+            assert_eq!(
+                homeboy_core::extension_update_check::read_source_revision("fixture").as_deref(),
+                Some(before_rollback.as_str())
+            );
+            assert!(
+                services_restarted.is_empty(),
+                "failed refresh has no service effects"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    fn write_convergence_manifest(repo: &Path, requirement: &str) {
+        fs::write(
+            repo.join("fixture.json"),
+            format!(
+                r#"{{"name":"Fixture","version":"1.0.0","requires":{{"homeboy":"{requirement}"}}}}"#
+            ),
+        )
+        .expect("fixture manifest");
+    }
+
+    #[cfg(unix)]
+    fn commit_and_push(repo: &Path, message: &str) {
+        assert!(git(repo, &["add", "."]));
+        assert!(git(
+            repo,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=test",
+                "commit",
+                "--quiet",
+                "-m",
+                message
+            ]
+        ));
+        assert!(git(repo, &["push", "--quiet", "origin", "HEAD:main"]));
+    }
+
+    #[cfg(unix)]
+    fn git(path: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    struct BlockedControllerAdmission;
+
+    impl homeboy_upgrade::upgrade::ControllerUpgradeAdmissionProvider for BlockedControllerAdmission {
+        fn controller_upgrade_admission(
+            &self,
+        ) -> homeboy::core::Result<homeboy_upgrade::upgrade::ControllerUpgradeAdmission> {
+            Ok(homeboy_upgrade::upgrade::ControllerUpgradeAdmission {
+                schema: "homeboy/controller-upgrade-admission/v1",
+                active: 1,
+                stale: 0,
+                suspect: 0,
+                unreconciled: 0,
+                reconcilable: 0,
+                record_health: serde_json::Value::Null,
+                blockers: vec![homeboy_upgrade::upgrade::ControllerUpgradeBlocker {
+                    run_id: "blocked-controller".to_string(),
+                    liveness: "live",
+                    reason: "fixture controller ownership".to_string(),
+                    recovery_command: "fixture recover".to_string(),
+                }],
+            })
+        }
+    }
+
+    #[test]
+    fn extension_only_convergence_does_not_require_controller_upgrade_admission() {
+        with_isolated_home(|_| {
+            let (output, exit_code) = converge_extensions().expect("extension-only convergence");
+
+            assert_eq!(exit_code, 0);
+            let ExtensionOutput::Converge {
+                compatibility,
+                updated,
+                skipped,
+                services_restarted,
+                services_pending_restart,
+                ..
+            } = output
+            else {
+                panic!("expected extension convergence output");
+            };
+            assert!(compatibility.is_empty());
+            assert!(updated.is_empty());
+            assert!(skipped.is_empty());
+            assert!(services_restarted.is_empty());
+            assert!(services_pending_restart.is_empty());
+        });
+    }
+
+    fn update_entry(
+        id: &str,
+        old_revision: Option<&str>,
+        new_revision: Option<&str>,
+    ) -> UpdateEntry {
+        UpdateEntry {
+            extension_id: id.to_string(),
+            old_version: "1.0.0".to_string(),
+            new_version: "1.0.0".to_string(),
+            linked: true,
+            source_path: None,
+            git_root: None,
+            source_update: ExtensionSourceUpdate {
+                old_source_revision: old_revision.map(str::to_string),
+                new_source_revision: new_revision.map(str::to_string),
+                ..Default::default()
+            },
+            repaired_source_metadata: None,
+        }
+    }
 
     /// Installs an extension whose `ready_check` leaves a sentinel behind, so a
     /// test can prove whether the probe ran rather than trusting the reported
