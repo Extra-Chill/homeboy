@@ -743,7 +743,6 @@
         "constant_bypass_literal::crates/homeboy-cli/src/commands/fuzz/execution.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/fuzz/replay.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/issues.rs::ConstantBypassLiteral",
-        "constant_bypass_literal::crates/homeboy-cli/src/commands/observe.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/runs/report/failure_digest/bench.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/runs/report/failure_digest/trace.rs::ConstantBypassLiteral",
         "constant_bypass_literal::crates/homeboy-cli/src/commands/runner/types.rs::ConstantBypassLiteral",

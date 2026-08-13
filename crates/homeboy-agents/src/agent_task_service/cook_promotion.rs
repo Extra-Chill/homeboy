@@ -2400,7 +2400,11 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
                 None,
             )
         })?;
-    let model = outcome.selected_model();
+    let terminal = super::cook_pre_execution::terminal_executor_identity(&outcome, &plan, None);
+    let model = terminal
+        .as_ref()
+        .and_then(|identity| identity.model.as_deref())
+        .or_else(|| outcome.selected_model());
     let requested_model = outcome.metadata["model_identity"]["requested"].as_str();
     let resolved_model = outcome.metadata["model_identity"]["resolved"].as_str();
     let provider_reported_model = outcome.metadata["model_identity"]["provider_reported"].as_str();
@@ -2437,7 +2441,10 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
             &outcome.outputs,
         )?
         .filter(|form| form.validate().is_ok()),
-        tool: task.executor.backend.clone(),
+        tool: terminal
+            .as_ref()
+            .map(|identity| identity.backend.clone())
+            .unwrap_or_else(|| task.executor.backend.clone()),
         model: model.map(str::to_string),
         review_form_only: task.inputs["cook_loop"]["review_form_required"] == true,
     })

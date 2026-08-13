@@ -279,9 +279,9 @@ pub(crate) fn provider_rotation_attempts(
 }
 
 pub(crate) struct TerminalExecutorIdentity {
-    backend: String,
-    selector: Option<String>,
-    model: Option<String>,
+    pub(crate) backend: String,
+    pub(crate) selector: Option<String>,
+    pub(crate) model: Option<String>,
 }
 
 pub(crate) fn terminal_executor_identity(
@@ -302,7 +302,10 @@ pub(crate) fn terminal_executor_identity(
         let terminal = TerminalExecutorIdentity {
             backend: attempt.backend,
             selector: attempt.selector,
-            model: attempt.model,
+            model: attempt
+                .candidate_producing_model
+                .or(attempt.attempted_model)
+                .or(attempt.model),
         };
         if durable_provider_executions.is_some() {
             let durable = terminal_provider_execution(outcome, durable_provider_executions)?;

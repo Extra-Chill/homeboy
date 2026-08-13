@@ -1946,9 +1946,17 @@ fn queue_or_reuse_worktrees(
 
     if args.dry_run {
         if configured_provider_workspace_creation()? {
-            return plan_provider_worktrees_dry_run(args, plan);
+            return with_workspace_owner_repair_commands(
+                args,
+                plan,
+                plan_provider_worktrees_dry_run(args, plan)?,
+            );
         }
-        return queue_or_reuse_worktrees_dry_run(args, plan, queue_create);
+        return with_workspace_owner_repair_commands(
+            args,
+            plan,
+            queue_or_reuse_worktrees_dry_run(args, plan, queue_create)?,
+        );
     }
 
     let mut reused = Vec::new();
@@ -1983,13 +1991,59 @@ fn queue_or_reuse_worktrees(
         }
     }
 
-    Ok(worktree::WorktreeQueueCreateOutput {
-        schema: "homeboy/worktree-queue-create/v1",
-        repo: args.repo.clone(),
-        base_ref: args.from.clone(),
-        dry_run: false,
-        rows,
-    })
+    with_workspace_owner_repair_commands(
+        args,
+        plan,
+        worktree::WorktreeQueueCreateOutput {
+            schema: "homeboy/worktree-queue-create/v1",
+            repo: args.repo.clone(),
+            base_ref: args.from.clone(),
+            dry_run: false,
+            rows,
+        },
+    )
+}
+
+fn with_workspace_owner_repair_commands(
+    args: &AgentTaskFanoutCookBatchArgs,
+    plan: &BatchCookFanoutPlan,
+    mut worktrees: worktree::WorktreeQueueCreateOutput,
+) -> Result<worktree::WorktreeQueueCreateOutput> {
+    if !configured_provider_lifecycle()? {
+        return Ok(worktrees);
+    }
+
+    let config = homeboy::core::defaults::load_config();
+    for row in &mut worktrees.rows {
+        let Some(cook) = plan
+            .cooks
+            .iter()
+            .find(|cook| cook.to_worktree == row.handle)
+        else {
+            continue;
+        };
+        let intent = homeboy::core::worktree_providers::WorktreeProviderCreateIntent {
+            handle: row.handle.clone(),
+            repo: args.repo.clone(),
+            base: args.from.clone(),
+            head: row.branch.clone(),
+            task_url: cook
+                .task_url
+                .clone()
+                .expect("generated cooks have task URLs"),
+        };
+        let lifecycle = homeboy::core::worktree_providers::WorktreeProviderLifecycleIntent {
+            purpose: "agent_task_cook".to_string(),
+            owner_run_ref: cook.run_id(),
+            cleanup_policy:
+                homeboy::core::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+        };
+        row.command =
+            homeboy::core::worktree_providers::worktree_provider_lifecycle_ensure_argv_from_config(
+                &intent, &lifecycle, &config,
+            )?;
+    }
+    Ok(worktrees)
 }
 
 /// Provider-managed destinations have provider-owned path policy. Dry-run
@@ -3727,7 +3781,7 @@ fn cook_batch_next_actions(
             .map(|row| {
                 CommandNextAction::new(
                     format!("create blocked worktree {}", row.handle),
-                    format!("homeboy {}", row.command.join(" ")),
+                    quote_args(&row.command),
                 )
                 .with_kind(CommandNextActionKind::Repair)
             })
@@ -6236,6 +6290,7 @@ fi
             handle: handle.to_string(),
             status,
             command: vec![
+                "homeboy".to_string(),
                 "worktree".to_string(),
                 "create".to_string(),
                 "homeboy".to_string(),
@@ -6314,10 +6369,8 @@ fi
         assert_every_action_is_executable(&actions);
         let commands = action_commands(&actions);
         assert!(
-            commands
-                .iter()
-                .any(|command| command
-                    .contains("worktree create homeboy --branch fix/homeboy@fix-b")),
+            commands.iter().any(|command| command
+                == "homeboy worktree create homeboy --branch fix/homeboy@fix-b --from origin/main"),
             "the blocked row's own command must be offered: {commands:?}"
         );
         assert!(
@@ -6332,6 +6385,41 @@ fi
                 .any(|command| command.contains("--run-plan")),
             "the rerun command must be named: {commands:?}"
         );
+    }
+
+    #[test]
+    fn blocked_workspace_owner_action_round_trips_complete_argv() {
+        let owner_argv = vec![
+            "workspace-owner".to_string(),
+            "worktree".to_string(),
+            "add".to_string(),
+            "blocks-engine".to_string(),
+            "fix/issue-855-blocks-engine".to_string(),
+            "--from=origin/trunk".to_string(),
+            "--task-url=https://example.test/issues/855".to_string(),
+        ];
+        let mut row = worktree_row(
+            "blocks-engine@fix-issue-855-blocks-engine",
+            worktree::WorktreeQueueCreateStatus::Failed,
+        );
+        row.command = owner_argv.clone();
+        let actions = cook_batch_next_actions(
+            &cook_batch_args(),
+            "issue-wave",
+            "blocked",
+            false,
+            false,
+            &worktree_output(vec![row]),
+        );
+        let command = &actions[0].command;
+
+        assert_eq!(command, &quote_args(&owner_argv));
+        assert_eq!(
+            homeboy_engine_primitives::shell::normalize_args(&vec![command.clone()]),
+            owner_argv,
+            "the rendered repair command must round-trip to the registered owner's argv"
+        );
+        assert!(!command.starts_with("homeboy homeboy "));
     }
 
     /// `fanout status|artifacts|resume` read a durable batch record that only

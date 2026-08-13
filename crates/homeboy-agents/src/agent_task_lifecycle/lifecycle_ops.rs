@@ -411,6 +411,22 @@ pub fn record_detached_cook_handoff_child(
     Ok(record.expect("detached handoff parent exists"))
 }
 
+/// Persist the daemon job that supervises this locally launched Cook.
+pub fn record_detached_cook_supervisor(cook_id: &str, job_id: &str) -> Result<()> {
+    let cook_id = sanitize_run_id(cook_id);
+    let job_id = job_id.to_string();
+    let _ = store::mutate_record(&cook_id, |record| {
+        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+            return false;
+        }
+        record.metadata["detached_cook_handoff"]["supervisor_job_id"] = json!(job_id);
+        record.metadata["detached_cook_handoff"]["reattach_command"] =
+            json!(format!("homeboy agent-task status {cook_id} --full"));
+        true
+    })?;
+    Ok(())
+}
+
 /// Terminalize a handoff parent once no child can materialize its first
 /// attempt. A previously requested cancellation remains authoritative.
 pub fn fail_detached_cook_handoff_parent(
@@ -3718,6 +3734,20 @@ pub(crate) fn record_cook_attempt_locked(
     let metadata = record.ensure_metadata_object();
     metadata.insert("cook_id".to_string(), json!(&cook_id));
     metadata.insert("cook_attempt".to_string(), json!(attempt));
+    if let Ok(parent) = store::read_record(&cook_id) {
+        if let Some(supervisor) = parent.metadata["detached_cook_handoff"]
+            .get("supervisor_job_id")
+            .cloned()
+        {
+            metadata.insert(
+                "local_cook_supervisor".to_string(),
+                json!({
+                    "job_id": supervisor,
+                    "reattach_command": format!("homeboy agent-task status {cook_id} --full"),
+                }),
+            );
+        }
+    }
     let committed = store::write_record_locked_without_terminal_projection(&record)?;
     // Completion can precede Cook registration during handoff recovery. Re-read
     // its persisted aggregate after the Cook identity is durable, then commit the

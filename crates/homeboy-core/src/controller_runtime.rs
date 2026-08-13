@@ -2697,6 +2697,27 @@ fn register_test_fixture_candidate(source: &Path, candidate: &Path, expected_dig
 #[cfg(not(all(unix, any(test, feature = "test-support"))))]
 fn register_test_fixture_candidate(_source: &Path, _candidate: &Path, _expected_digest: &str) {}
 
+/// Resolve the test-support controller fixture's digest once, up front.
+///
+/// Pin validation consults that fixture, and its digest cache is process-wide
+/// and deliberately not cleared between tests. A test that measures digest
+/// computations therefore has to decide whether the fixture is warm rather than
+/// inherit the answer from whichever tests ran before it — otherwise it passes
+/// under `cargo test` and fails under nextest, which gives every test its own
+/// process (#12226).
+///
+/// Best effort: with no fixture configured there is nothing to warm, and the
+/// caller's measurement is unaffected.
+#[cfg(all(unix, test))]
+fn warm_test_controller_fixture_digest() {
+    let Some(source) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) else {
+        return;
+    };
+    let source = PathBuf::from(source);
+    crate::test_support::ensure_test_controller_fixture(&source);
+    let _ = test_controller_fixture_digest(&source);
+}
+
 fn required_runtime_string<'a>(runtime: &'a Value, pointer: &str, label: &str) -> Result<&'a str> {
     runtime
         .pointer(pointer)
@@ -4060,6 +4081,16 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         crate::test_support::with_isolated_home(|_| {
+            // `pin_executable` validates the pin it publishes, and validation
+            // resolves the test-support controller fixture's digest. That
+            // fixture cache is process-wide state this test does not own, so
+            // warm it deliberately: the count below is meant to measure
+            // publication, not whether a neighbouring test happened to warm the
+            // fixture first. Leaving it to chance is why this passed under
+            // `cargo test` and failed under nextest, which runs every test in
+            // its own process (#12226).
+            warm_test_controller_fixture_digest();
+
             EXECUTABLE_DIGESTS
                 .get_or_init(|| Mutex::new(BTreeMap::new()))
                 .lock()

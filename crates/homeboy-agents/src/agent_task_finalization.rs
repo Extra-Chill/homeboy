@@ -7,7 +7,7 @@ use crate::agent_task_review_dossier::{
 use homeboy_core::error::{Error, Result};
 use homeboy_core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use homeboy_core::proof::HomeboyProof;
-use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
+use homeboy_core::run_lifecycle_record::{ProviderRuntimeState, RunLifecycleRecord};
 
 pub const AGENT_TASK_PR_FINALIZATION_SCHEMA: &str = "homeboy/agent-task-pr-finalization/v1";
 pub const AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA: &str =
@@ -1046,6 +1046,8 @@ fn durable_model(lifecycle: &RunLifecycleRecord) -> Result<String> {
     let model = lifecycle
         .provider_runtime
         .iter()
+        .rev()
+        .filter(|runtime| runtime.state == ProviderRuntimeState::Succeeded)
         .find_map(|runtime| {
             runtime
                 .metadata
