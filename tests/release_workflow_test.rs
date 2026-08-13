@@ -1320,6 +1320,16 @@ fn release_recovery_builds_its_control_binary_from_main_not_the_recovered_tag() 
     );
 }
 
+#[test]
+fn recovery_builds_publish_the_bootstrap_installer_from_the_control_revision() {
+    let global = job_section(release_workflow(), "build-global-artifacts");
+    let installer = release_step_block(global, "name: Fetch bootstrap installer source");
+
+    assert!(installer.contains("ref: ${{ github.sha }}"));
+    assert!(!installer.contains("needs.prepare.outputs['release-tag']"));
+    assert!(global.contains("cp bootstrap-source/scripts/homeboy-installer.sh"));
+}
+
 /// The control binary is only load-bearing if the finalizer actually runs it.
 /// `source: '.'` alone would rebuild from the recovered tag's tree, which is
 /// the same trap by a different route (#10519).
@@ -1925,6 +1935,7 @@ const HEALTHY_RELEASE_ASSETS: &[&str] = &[
     "homeboy-aarch64-apple-darwin.tar.xz.sha256",
     "homeboy-aarch64-unknown-linux-gnu.tar.xz",
     "homeboy-aarch64-unknown-linux-gnu.tar.xz.sha256",
+    "homeboy-installer.sh",
     "homeboy-x86_64-apple-darwin.tar.xz",
     "homeboy-x86_64-apple-darwin.tar.xz.sha256",
     "homeboy-x86_64-unknown-linux-gnu.tar.xz",
@@ -2064,7 +2075,7 @@ fn planned_contract_rejects_host_only_assets_and_accepts_every_supported_platfor
         "the complete supported-platform plan must pass: {out}"
     );
     assert!(
-        out.contains("13 assets from cargo-dist release plan"),
+        out.contains("14 assets from cargo-dist release plan"),
         "the final contract must include every planned asset, including dist-manifest.json: {out}"
     );
 }

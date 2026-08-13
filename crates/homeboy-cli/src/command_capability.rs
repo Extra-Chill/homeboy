@@ -105,9 +105,12 @@ pub fn classify(args: &[String]) -> CommandCapability {
 
     match args {
         [flag] if flag == "--version" || flag == "-V" => CommandCapability::ReadOnly,
-        [command, subcommand]
+        [command, subcommand, ..]
             if command == "self"
-                && matches!(subcommand.as_str(), "identity" | "inspect" | "status") =>
+                && matches!(
+                    subcommand.as_str(),
+                    "identity" | "inspect" | "status" | "upgrade-admission"
+                ) =>
         {
             CommandCapability::ReadOnly
         }
@@ -174,6 +177,13 @@ mod tests {
             args(&["homeboy", "--version"]),
             args(&["homeboy", "self", "identity"]),
             args(&["homeboy", "self", "status"]),
+            args(&[
+                "homeboy",
+                "self",
+                "upgrade-admission",
+                "--legacy-identity",
+                "homeboy 0.338.0+legacy",
+            ]),
             args(&["homeboy", "status"]),
             args(&[
                 "homeboy",
