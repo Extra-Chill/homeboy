@@ -96,4 +96,9 @@ pub(crate) use lifecycle_record_ops::*;
 pub(crate) use runner_continuation::with_runner_continuation;
 
 #[cfg(test)]
+pub(crate) fn fail_next_record_write_for_test() {
+    store::fail_next_record_write_for_test();
+}
+
+#[cfg(test)]
 mod tests;

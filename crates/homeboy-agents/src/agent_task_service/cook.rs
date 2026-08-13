@@ -3533,6 +3533,10 @@ where
     if let Some(model) = adopted_model {
         options.ai_model = Some(model);
     }
+    // Recipe persistence and lifecycle materialization are a recoverable saga.
+    // Complete it before any capacity, workspace, or provider-facing work so a
+    // controller interruption leaves a status-addressable, resumable attempt.
+    materialize_initial_cook_attempt(&options)?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -3573,7 +3577,6 @@ where
         })
         .transpose()?;
     agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
-    materialize_initial_cook_attempt(&options)?;
     if cook_workspace_lookup_pending(&options.initial_plan) {
         if let Err(error) = materialize_pending_cook_workspace(&mut options) {
             let error = with_pre_execution_phase(error, "worktree_provider_lookup");
