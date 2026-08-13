@@ -37,12 +37,55 @@ else
   [ "$expected" = "$actual" ]
 fi
 
-(cd "$TMP_DIR" && tar -xJf "$ASSET" 2>/dev/null || tar -xf "$ASSET")
-EXTRACTED_BIN="$TMP_DIR/${ASSET%.tar.xz}/homeboy"
-if [ ! -f "$EXTRACTED_BIN" ]; then
-  echo "Expected extracted binary named homeboy" >&2
+CANDIDATE="${ASSET%.tar.xz}/homeboy"
+MEMBERS="$(tar -tJf "$TMP_DIR/$ASSET" 2>/dev/null || tar -tf "$TMP_DIR/$ASSET")" || {
+  echo "Unable to list release archive" >&2
+  exit 1
+}
+CANDIDATE_COUNT=0
+while IFS= read -r member; do
+  member="${member#./}"
+  case "$member" in
+    '' | /* | ../* | */../* | */.. | *//*)
+      echo "Release archive contains an unsafe member path" >&2
+      exit 1
+      ;;
+  esac
+  case "$member" in
+    homeboy | */homeboy)
+      if [ "$member" = "$CANDIDATE" ]; then
+        CANDIDATE_COUNT=$((CANDIDATE_COUNT + 1))
+      else
+        echo "Release archive contains an additional homeboy candidate" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done <<EOF
+$MEMBERS
+EOF
+if [ "$CANDIDATE_COUNT" -ne 1 ]; then
+  echo "Release archive must contain exactly one homeboy candidate" >&2
   exit 1
 fi
+
+CANDIDATE_DETAILS="$(tar -tvJf "$TMP_DIR/$ASSET" "$CANDIDATE" 2>/dev/null || tar -tvf "$TMP_DIR/$ASSET" "$CANDIDATE")" || {
+  echo "Unable to inspect release candidate" >&2
+  exit 1
+}
+case "$CANDIDATE_DETAILS" in
+  -*) ;;
+  *)
+    echo "Release archive candidate must be a regular file" >&2
+    exit 1
+    ;;
+esac
+
+EXTRACTED_BIN="$TMP_DIR/homeboy"
+(tar -xJOf "$TMP_DIR/$ASSET" "$CANDIDATE" 2>/dev/null || tar -xOf "$TMP_DIR/$ASSET" "$CANDIDATE") > "$EXTRACTED_BIN" || {
+  echo "Unable to extract release candidate" >&2
+  exit 1
+}
 chmod 0755 "$EXTRACTED_BIN"
 
 # The staged candidate owns admission; any failure exits before the installed
