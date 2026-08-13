@@ -34,7 +34,7 @@ Run generic agent task plans
 | `homeboy agent-task watch` | Poll a run until it reaches a terminal state |
 | `homeboy agent-task list` | List durable runs, newest first |
 | `homeboy agent-task active` | List queued and running durable runs, newest first |
-| `homeboy agent-task reconcile` | Preview or apply reconciliation for one durable run |
+| `homeboy agent-task reconcile` | Reconcile one durable agent-task run or explicit Cook group. This is a preview by default; use `--apply` only after reviewing the authoritative provider state. Success leaves every selected durable record reconciled to that state |
 | `homeboy agent-task reconcile-records` | Reconcile stored durable run records against authoritative provider state |
 | `homeboy agent-task latest` | Show the latest durable run |
 | `homeboy agent-task logs` | Read the canonical durable event stream for a run |
@@ -422,7 +422,7 @@ List queued and running durable runs, newest first.
 homeboy agent-task reconcile [OPTIONS] <RUN_ID>
 ```
 
-Preview or apply reconciliation for one durable run
+Reconcile one durable agent-task run or explicit Cook group. This is a preview by default; use `--apply` only after reviewing the authoritative provider state. Success leaves every selected durable record reconciled to that state
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -430,8 +430,8 @@ Preview or apply reconciliation for one durable run
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--dry-run` | flag | _no help text_ |
-| `--apply` | flag | _no help text_ |
+| `--dry-run` | flag | Preview the selected durable run/group without persisted mutation. This is the default when `--apply` is omitted |
+| `--apply` | flag | Apply the reviewed reconciliation to the selected durable run/group |
 
 ## `homeboy agent-task reconcile-records`
 
