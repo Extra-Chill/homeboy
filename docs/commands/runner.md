@@ -798,6 +798,17 @@ next actions for the current session, including job log following, cancellation,
 broker claim reconciliation for reverse runners, and artifact lookup/fetch
 commands when the status payload has enough context.
 
+### `peer-sessions`
+
+```sh
+homeboy runner peer-sessions <runner-id>
+homeboy runner peer-sessions <runner-id> --cursor <cursor> --apply
+```
+
+Inspects persisted peer-session snapshots for one runner. Use `--apply` only to
+remove sessions proven dead by the inspection; `--cursor` continues a paginated
+result set.
+
 ### `reconcile`
 
 ```sh

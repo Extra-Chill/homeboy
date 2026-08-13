@@ -1276,7 +1276,7 @@ mod tests {
             let err =
                 resolve_release_artifacts_for_deploy(&[component], &deploy_config, &mut store)
                     .expect_err("a real deploy must still fail on an unresolvable release asset");
-            assert_eq!(err.details["field"].as_str(), Some("releaseArtifact"));
+            assert_eq!(err.details["field"].as_str(), Some("github"));
         });
     }
 

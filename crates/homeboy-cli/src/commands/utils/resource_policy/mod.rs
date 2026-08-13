@@ -1257,6 +1257,7 @@ mod tests {
     fn non_interactive_hot_warning_fails_before_starting_command() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
         let warning = evaluate(
             lab_supported_hot("audit"),
             &resources(ResourceRecommendation::Hot),
@@ -1381,6 +1382,7 @@ mod tests {
     fn non_interactive_local_only_refusal_includes_local_hot_rerun_command() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
         let command = local_only_hot(
             "lint",
             "Changed-scope lint runs stay local because changed-file scopes are not represented in the current Lab portability contract yet.",
@@ -1479,6 +1481,7 @@ mod tests {
     fn portable_refusal_without_runner_requires_lab_recovery_or_deferral() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
         let warning = evaluate(
             lab_supported_hot("audit"),
             &resources(ResourceRecommendation::Warm),
@@ -1504,6 +1507,8 @@ mod tests {
 
     #[test]
     fn disconnected_portable_fuzz_requires_lab_recovery_without_local_rerun() {
+        let _lock = env_lock();
+        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
         let command = Cli::parse_from([
             "homeboy",
             "fuzz",

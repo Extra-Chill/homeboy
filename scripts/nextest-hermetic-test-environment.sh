@@ -61,6 +61,9 @@ export TMP TEMP
 # would be a disk leak. Set HOMEBOY_TEST_KEEP_TMPDIR=1 to retain it for
 # debugging.
 exec perl -MPOSIX=setsid,WNOHANG -e '
+    # Adopt descendants of a completed test group long enough to reap them.
+    # CI containers commonly run a PID 1 that does not reap orphaned children.
+    syscall(157, 36, 1, 0, 0, 0) if $^O eq "linux";
     my $child = fork();
     die "fork: $!\n" unless defined $child;
     if ($child == 0) {
@@ -86,6 +89,7 @@ exec perl -MPOSIX=setsid,WNOHANG -e '
             kill "KILL", -$child if kill 0, -$child;
         }
         waitpid $child, 0;
+        while (waitpid(-1, WNOHANG) > 0) {}
     };
     $SIG{HUP} = $SIG{INT} = $SIG{TERM} = sub {
         $cleanup->();

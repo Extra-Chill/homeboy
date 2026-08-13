@@ -3444,7 +3444,7 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
     }
     if cook_attempt_needs_execution(&options.initial_run_id)
         && !cook_workspace_lookup_pending(&options.initial_plan)
-        && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
+        && options.attempt_dispatcher.is_none()
     {
         validate_cook_workspace(options)?;
     }
@@ -3778,11 +3778,29 @@ fn durable_cook_error_report_with_store(
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     if store.recipe_exists(&options.cook_id) {
+        let attempts = store
+            .load_recipe(&options.cook_id)
+            .ok()
+            .and_then(|recipe| recipe.attempts.last().cloned())
+            .and_then(|attempt| {
+                agent_task_lifecycle::status(&attempt.run_id)
+                    .ok()
+                    .map(|record| AgentTaskCookAttemptReport {
+                        attempt: attempt.attempt,
+                        run_id: attempt.run_id,
+                        run_state: format!("{:?}", record.state),
+                        aggregate_path: record.aggregate_path,
+                        promotion: None,
+                        feedback: None,
+                    })
+            })
+            .into_iter()
+            .collect();
         let mut report = cook_report(CookReportInput {
             cook_id: options.cook_id.clone(),
             status: "durable_failure",
             disposition: CookDisposition::Terminal,
-            attempts: Vec::new(),
+            attempts,
             finalization: None,
             stop_reason: Some(
                 "Cook stopped after durable creation; use the recovery actions in \
@@ -3982,7 +4000,7 @@ where
     // requiring one here turns an accepted detached retry into a local failure.
     if cook_attempt_needs_execution(&options.initial_run_id)
         && !cook_workspace_lookup_pending(&options.initial_plan)
-        && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
+        && options.attempt_dispatcher.is_none()
     {
         validate_cook_workspace(&options)?;
     }
@@ -4301,17 +4319,21 @@ where
             }
             let mut failed_dispatch_plan = None;
             let execution = (|| {
-                if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
+                if options.attempt_dispatcher.is_none() {
                     validate_cook_workspace(&options)?;
                 }
-                homeboy_core::cleanup::admit_reconstructable_artifact_work(
-                    plan.tasks
-                        .iter()
-                        .filter_map(|task| task.workspace.root.as_ref())
-                        .map(PathBuf::from)
-                        .collect(),
-                )
-                .map_err(|error| with_pre_execution_phase(error, "worktree_capacity_admission"))?;
+                if options.attempt_dispatcher.is_none() {
+                    homeboy_core::cleanup::admit_reconstructable_artifact_work(
+                        plan.tasks
+                            .iter()
+                            .filter_map(|task| task.workspace.root.as_ref())
+                            .map(PathBuf::from)
+                            .collect(),
+                    )
+                    .map_err(|error| {
+                        with_pre_execution_phase(error, "worktree_capacity_admission")
+                    })?;
+                }
                 let initial_baseline = if attempt == 1 {
                     materialize_initial_candidate_baseline(
                         &plan,
@@ -4411,14 +4433,11 @@ where
                         });
                     }
                 }
-                if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
+                if options.attempt_dispatcher.is_none() {
                     bind_dispatch_workspace_attestations(&mut dispatch_plan)?;
                 }
                 failed_dispatch_plan = Some(dispatch_plan.clone());
                 if let Some(dispatcher) = &options.attempt_dispatcher {
-                    if options.source_worktree_path.is_some() {
-                        validate_cook_workspace(&options)?;
-                    }
                     dispatcher.dispatch_attempt(
                         dispatch_plan,
                         &run_id,
@@ -4988,7 +5007,7 @@ where
                     status: if selection_required {
                         "selection_required"
                     } else {
-                        "policy_failure"
+                        "durable_failure"
                     },
                     disposition: CookDisposition::Terminal,
                     attempts,

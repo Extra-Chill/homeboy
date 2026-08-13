@@ -739,7 +739,7 @@ mod tests {
                 .expect_err("no composition primary should remain ambiguous");
             assert!(err
                 .message
-                .contains("multiple linked extensions with deps support"));
+                .contains("multiple linked extensions providing 'deps'"));
         });
     }
 
@@ -754,7 +754,7 @@ mod tests {
                 .expect_err("multiple deps providers should be ambiguous without ownership");
             assert!(err
                 .message
-                .contains("multiple linked extensions with deps support"));
+                .contains("multiple linked extensions providing 'deps'"));
 
             component
                 .capability_extensions

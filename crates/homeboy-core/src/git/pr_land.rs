@@ -584,6 +584,12 @@ fn wait_for_checks(
             let mut terminal = report;
             terminal.terminal = true;
             if terminal.blocking_checks.is_empty() {
+                // `checks` is GitHub's aggregate rollup and can still report
+                // FAILURE for a waived non-required check. The exact-head
+                // report above already retained and validated all required
+                // checks, so let the normal readiness gate proceed only after
+                // that stronger condition has passed.
+                pr.checks = Some("SUCCESS".to_string());
                 return Ok(CheckWaitOutcome::Ready {
                     pr,
                     report: terminal,

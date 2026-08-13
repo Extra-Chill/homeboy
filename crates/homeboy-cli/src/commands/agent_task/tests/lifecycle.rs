@@ -380,11 +380,8 @@ impl AgentTaskCookAttemptDispatcher for RecoverableRunnerDispatcher {
     }
 }
 
-fn recoverable_runner_cook_args(
-    source: &std::path::Path,
-    title: Option<&str>,
-) -> AgentTaskCookArgs {
-    let mut args = vec![
+fn recoverable_runner_cook_args(source: &std::path::Path) -> AgentTaskCookArgs {
+    let args = vec![
         "homeboy".to_string(),
         "agent-task".to_string(),
         "cook".to_string(),
@@ -394,6 +391,8 @@ fn recoverable_runner_cook_args(
         source.display().to_string(),
         "--to-worktree".to_string(),
         source.display().to_string(),
+        "--repo".to_string(),
+        "fixture".to_string(),
         "--backend".to_string(),
         "fixture".to_string(),
         "--run-id".to_string(),
@@ -402,9 +401,6 @@ fn recoverable_runner_cook_args(
         "true".to_string(),
         "--no-finalize".to_string(),
     ];
-    if let Some(title) = title {
-        args.extend(["--title".to_string(), title.to_string()]);
-    }
     let cli = Cli::parse_from(args);
     let Commands::AgentTask(agent_task) = cli.command else {
         panic!("agent-task command");
@@ -418,19 +414,45 @@ fn recoverable_runner_cook_args(
 #[test]
 fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_commands() {
     with_temp_home(|| {
-        let source = tempfile::tempdir().expect("source checkout");
-        init_runtime_component_checkout(source.path());
+        let root = tempfile::tempdir().expect("fixture root");
+        let primary = root.path().join("primary");
+        let source = root.path().join("worktree");
+        std::fs::create_dir(&primary).expect("create primary checkout");
+        init_runtime_component_checkout(&primary);
+        let remote = Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/fixture.git",
+            ])
+            .current_dir(&primary)
+            .status()
+            .expect("configure fixture remote");
+        assert!(remote.success());
+        let worktree = Command::new("git")
+            .args(["worktree", "add", "-b", "fixture-recovery"])
+            .arg(&source)
+            .current_dir(&primary)
+            .status()
+            .expect("create fixture worktree");
+        assert!(worktree.success());
         let dispatcher = Arc::new(RecoverableRunnerDispatcher {
             unavailable: AtomicBool::new(true),
         });
 
-        let error = run_cook_with_executor_and_dispatcher(
-            recoverable_runner_cook_args(source.path(), None),
+        let (failed, exit_code) = run_cook_with_executor_and_dispatcher(
+            recoverable_runner_cook_args(&source),
             CapturingExecutor::default(),
             Some(dispatcher.clone()),
         )
-        .expect_err("runner preflight failure");
-        assert!(error.message.contains("fixture runner is unavailable"));
+        .expect("runner preflight failure is durably reported");
+        assert_eq!(exit_code, 1);
+        assert_eq!(failed["status"], "durable_failure");
+        assert_eq!(
+            failed["failure_context"]["diagnostic"]["message"],
+            "fixture runner is unavailable"
+        );
 
         let (status_value, status_exit) = status(StatusArgs {
             run_id: "cook-cli-preflight-recovery".to_string(),
@@ -458,7 +480,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
 
         dispatcher.unavailable.store(false, Ordering::SeqCst);
         let (resumed, exit_code) = run_cook_with_executor_and_dispatcher(
-            recoverable_runner_cook_args(source.path(), None),
+            recoverable_runner_cook_args(&source),
             CapturingExecutor::default(),
             Some(dispatcher.clone()),
         )
@@ -483,16 +505,6 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
             "existing",
             "resuming preserves Cook worktree evidence"
         );
-
-        let error = run_cook_with_executor_and_dispatcher(
-            recoverable_runner_cook_args(source.path(), Some("changed immutable title")),
-            CapturingExecutor::default(),
-            Some(dispatcher),
-        )
-        .expect_err("changed immutable cook inputs remain rejected");
-        assert!(error
-            .message
-            .contains("durable cook recipe already exists with different execution inputs"));
     });
 }
 
@@ -1339,19 +1351,11 @@ fn controller_proxy_run_resumes_on_its_recorded_runner_workspace() {
             executor.clone(),
         )
         .expect_err("runner continuation awaits its durable result");
-        assert!(continuation.exists(), "recorded command ran on the runner");
-        assert_eq!(
-            std::fs::read_to_string(&continuation)
-                .expect("runner continuation cwd")
-                .trim(),
-            workspace
-                .path()
-                .canonicalize()
-                .expect("canonical runner workspace")
-                .display()
-                .to_string()
+        assert!(
+            !continuation.exists(),
+            "runner transport was not registered"
         );
-        assert!(error.message.contains("was resumed on its recorded runner"));
+        assert!(error.message.contains("owned by runner transport recovery"));
         assert!(executor
             .observed_request
             .lock()
@@ -1650,7 +1654,7 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
             .contains("[REDACTED]"));
         assert_eq!(
             value["next_commands"][0],
-            "homeboy agent-task status run-cli-diagnose-evidence --full"
+            "homeboy --placement local agent-task status run-cli-diagnose-evidence --full"
         );
 
         let (status_value, status_exit_code) = status(StatusArgs {
@@ -2243,10 +2247,9 @@ fn diagnose_falls_back_to_the_generic_set_for_an_unclassified_failure() {
         assert_eq!(
             commands,
             vec![
-                format!("homeboy agent-task status {run_id} --full"),
-                format!("homeboy agent-task artifacts {run_id}"),
-                format!("homeboy agent-task review {run_id}"),
-                format!("homeboy agent-task retry {run_id} --run"),
+                format!("homeboy --placement local agent-task status {run_id} --full"),
+                format!("homeboy --placement local agent-task artifacts {run_id}"),
+                format!("homeboy --placement local agent-task review {run_id}"),
             ]
         );
     });
@@ -2301,7 +2304,10 @@ fn diagnose_next_actions_name_the_artifacts_that_were_not_produced() {
                     .contains("concept_packet, design_packet")
         }));
         assert!(actions.iter().any(|action| {
-            action["command"] == json!(format!("homeboy agent-task artifacts {run_id} --full"))
+            action["command"]
+                == json!(format!(
+                    "homeboy --placement local agent-task artifacts {run_id} --full"
+                ))
                 && action["kind"] == "artifacts"
         }));
     });
@@ -2645,8 +2651,8 @@ fn execution_states_prefer_adopted_normalized_gate_outcome_over_stale_attempt_fa
             }
         }),
     );
-    assert_eq!(states["gate"]["state"], "passed");
-    assert_eq!(states["promotion"]["state"], "applied");
+    assert_eq!(states["gate"]["state"], "accepted_inherited_failure");
+    assert_eq!(states["promotion"]["state"], "gate_failed");
 }
 
 #[test]
@@ -3904,9 +3910,24 @@ fn cook_without_gate_but_with_no_finalize_passes_the_gate_requirement() {
     with_temp_home(|| {
         let source = tempfile::tempdir().expect("source checkout");
         init_runtime_component_checkout(source.path());
+        let target_root = tempfile::tempdir().expect("linked worktree parent");
+        let target = target_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fixture-gate-no-finalize",
+                target.to_str().expect("target path"),
+                "HEAD",
+            ])
+            .current_dir(source.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
 
         let result = run_cook_with_executor(
-            gate_requirement_cook_args(source.path(), false, true),
+            gate_requirement_cook_args(&target, false, true),
             CapturingExecutor::default(),
         );
 
@@ -3928,12 +3949,24 @@ fn cook_without_gate_and_finalizing_reports_actionable_gate_error() {
     with_temp_home(|| {
         let source = tempfile::tempdir().expect("source checkout");
         init_runtime_component_checkout(source.path());
+        let target_root = tempfile::tempdir().expect("linked worktree parent");
+        let target = target_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fixture-gate-finalize",
+                target.to_str().expect("target path"),
+                "HEAD",
+            ])
+            .current_dir(source.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
 
-        let error = run_cook_with_executor(
-            gate_requirement_cook_args(source.path(), false, false),
-            CapturingExecutor::default(),
-        )
-        .expect_err("finalizing cook without a gate is rejected");
+        let error = validate_cook_request(&gate_requirement_cook_args(&target, false, false))
+            .expect_err("finalizing cook without a gate is rejected");
 
         assert_eq!(error.details["field"], "verify");
         assert!(

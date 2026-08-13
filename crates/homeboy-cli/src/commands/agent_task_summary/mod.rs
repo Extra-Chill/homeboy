@@ -121,7 +121,7 @@ fn render_status_summary(payload: &Value) -> Option<String> {
 
     let mut lines = vec![
         "Agent task status".to_string(),
-        format!("Subject state: {state}"),
+        format!("Status: {state}"),
         format!("Run: {run_id}"),
         format!("Tasks planned: {tasks_planned}"),
         format!("Tasks attempted: {tasks_attempted}"),
@@ -1379,7 +1379,7 @@ mod tests {
 
             assert!(
                 summary.starts_with(&format!(
-                    "Agent task status\nSubject state: {state}\nRun: homeboy-4345"
+                    "Agent task status\nStatus: {state}\nRun: homeboy-4345"
                 )),
                 "{summary}"
             );

@@ -62,6 +62,20 @@ pub struct JobStore {
     durable_write_skips: Arc<AtomicU64>,
 }
 
+impl JobStore {
+    /// Stable process-local ownership key for runtime state associated with this
+    /// durable queue. Independent test stores must never share supervisors.
+    pub(crate) fn runtime_registry_scope(&self) -> String {
+        match &self.persistence {
+            Some(persistence) => std::fs::canonicalize(&persistence.path)
+                .unwrap_or_else(|_| persistence.path.clone())
+                .to_string_lossy()
+                .into_owned(),
+            None => format!("memory:{:p}", std::sync::Arc::as_ptr(&self.inner)),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct JobStorePersistence {
     pub(super) path: PathBuf,

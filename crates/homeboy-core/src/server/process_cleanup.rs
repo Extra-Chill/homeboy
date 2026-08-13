@@ -132,6 +132,9 @@ fn cleanup_process_group(pgid: libc::pid_t) {
             libc::kill(-pgid, libc::SIGKILL);
         }
     }
+    // Reuse the engine's bounded group reaper so orphaned descendants are
+    // adopted and reaped rather than left as zombies under a non-reaping PID 1.
+    let _ = crate::engine::command::terminate_remaining_process_group(pgid as u32);
 }
 
 #[cfg(test)]

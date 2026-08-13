@@ -173,6 +173,8 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
             "targeted lookup".to_string(),
             "--repo".to_string(),
             "target".to_string(),
+            "--to-worktree".to_string(),
+            target.path().display().to_string(),
             "--no-finalize".to_string(),
         ]))
         .expect("explicit repo must not inspect unrelated registrations");
@@ -1639,6 +1641,8 @@ fn from_spec_dispatch_defaults_replace_stale_workspace_cwd() {
 #[test]
 fn from_spec_dispatch_defaults_replace_stale_cwd_in_snapshot_workspace() {
     let workspace = tempfile::tempdir().expect("workspace dir");
+    std::fs::write(workspace.path().join(".git"), "gitdir: .snapshot-git\n")
+        .expect("snapshot boundary blocks parent repository discovery");
     let mut spec = AgentTaskRepoLoopSpec {
         schema: None,
         loop_id: "repo-loop-snapshot-cwd-defaults".to_string(),

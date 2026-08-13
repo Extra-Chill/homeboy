@@ -883,7 +883,14 @@ fn request_with_controller_dispatch_identity(
         "{}-{}-{}",
         record.loop_id, action.action_id, dedupe_key
     ));
-    let run_id = format!("controller-{identity}");
+    let replay_suffix = record
+        .metadata
+        .get("controller_replay_nonce")
+        .and_then(Value::as_str)
+        .filter(|nonce| !nonce.is_empty())
+        .map(|nonce| format!("-{nonce}"))
+        .unwrap_or_default();
+    let run_id = format!("controller-{identity}{replay_suffix}");
     let task_id = format!("controller-task-{identity}");
 
     if let Some(dispatch) = request.get_mut("dispatch").and_then(Value::as_object_mut) {

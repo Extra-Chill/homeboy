@@ -331,17 +331,22 @@ mod positional_tests {
 
     #[test]
     fn load_uses_path_when_component_missing() {
+        let path = tempfile::tempdir().expect("create component path");
         let args = PositionalComponentArgs {
             component: Some("missing-component".to_string()),
-            path: Some("/tmp/homeboy-missing-component".to_string()),
+            path: Some(path.path().display().to_string()),
         };
+        let expected_path = std::fs::canonicalize(path.path())
+            .expect("canonicalize component path")
+            .display()
+            .to_string();
 
         let loaded = args
             .load()
             .expect("path-based synthetic component should load");
 
         assert_eq!(loaded.id, "missing-component");
-        assert_eq!(loaded.local_path, "/tmp/homeboy-missing-component");
+        assert_eq!(loaded.local_path, expected_path);
         assert_eq!(loaded.remote_path, "");
     }
 

@@ -318,7 +318,12 @@ impl StdinPump {
 pub(crate) fn spawn_stdin_pump(pipe: ChildStdin, source: StdinSource) -> StdinPump {
     let cancelled = Arc::new(AtomicBool::new(false));
     let pump_cancelled = Arc::clone(&cancelled);
-    let cancellable = matches!(&source, StdinSource::Piped(_));
+    // A regular file is finite. Let it drain after a fast child exit so a
+    // localhost SSH envelope cannot observe EOF before its piped payload.
+    let cancellable = matches!(&source, StdinSource::Piped(reader) if !reader
+        .metadata()
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false));
     let handle = thread::spawn(move || match source {
         StdinSource::Reader(mut reader) => copy_stdin_to_child(reader.as_mut(), pipe),
         StdinSource::Piped(reader) => copy_piped_stdin_to_child(reader, pipe, pump_cancelled),

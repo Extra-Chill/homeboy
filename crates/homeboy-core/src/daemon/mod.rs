@@ -379,17 +379,28 @@ struct ControllerJobRuntime {
     supervisor: std::thread::JoinHandle<()>,
 }
 
-fn controller_job_runtimes() -> &'static Mutex<HashMap<Uuid, ControllerJobRuntime>> {
-    static RUNTIMES: OnceLock<Mutex<HashMap<Uuid, ControllerJobRuntime>>> = OnceLock::new();
+type ControllerJobRuntimeKey = (String, Uuid);
+
+fn controller_job_runtime_key(job_store: &JobStore, job_id: Uuid) -> ControllerJobRuntimeKey {
+    (job_store.runtime_registry_scope(), job_id)
+}
+
+fn controller_job_runtimes(
+) -> &'static Mutex<HashMap<ControllerJobRuntimeKey, ControllerJobRuntime>> {
+    static RUNTIMES: OnceLock<Mutex<HashMap<ControllerJobRuntimeKey, ControllerJobRuntime>>> =
+        OnceLock::new();
     RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn controller_job_runtime_count() -> usize {
+pub(crate) fn controller_job_runtime_count(job_store: &JobStore) -> usize {
+    let scope = job_store.runtime_registry_scope();
     controller_job_runtimes()
         .lock()
         .expect("controller runtimes lock")
-        .len()
+        .keys()
+        .filter(|(runtime_scope, _)| runtime_scope == &scope)
+        .count()
 }
 
 pub(crate) const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
@@ -3332,8 +3343,10 @@ fn dispatch_claimed_controller_job(
     // Cancellation is durable first. This channel only wakes the owner quickly;
     // every gate below re-reads the durable flag before doing work.
     let (cancel_tx, cancel_rx) = mpsc::channel();
+    let runtime_key = controller_job_runtime_key(&job_store, job_id);
     // Register ownership before allowing a fast driver to terminalize itself.
     let (start_tx, start_rx) = mpsc::channel();
+    let supervisor_runtime_key = runtime_key.clone();
     let supervisor = std::thread::spawn(move || {
         let _ = start_rx.recv();
         let job = job_store.handle(job_id);
@@ -3358,7 +3371,7 @@ fn dispatch_claimed_controller_job(
             controller_job_runtimes()
                 .lock()
                 .expect("controller runtimes lock")
-                .remove(&job_id);
+                .remove(&supervisor_runtime_key);
             return;
         }
         let prepared = if recovery {
@@ -3378,7 +3391,7 @@ fn dispatch_claimed_controller_job(
                         controller_job_runtimes()
                             .lock()
                             .expect("controller runtimes lock")
-                            .remove(&job_id);
+                            .remove(&supervisor_runtime_key);
                         return;
                     }
                     if job.is_cancelled() {
@@ -3398,7 +3411,7 @@ fn dispatch_claimed_controller_job(
                         controller_job_runtimes()
                             .lock()
                             .expect("controller runtimes lock")
-                            .remove(&job_id);
+                            .remove(&supervisor_runtime_key);
                         return;
                     }
                     prepared
@@ -3409,7 +3422,7 @@ fn dispatch_claimed_controller_job(
                     controller_job_runtimes()
                         .lock()
                         .expect("controller runtimes lock")
-                        .remove(&job_id);
+                        .remove(&supervisor_runtime_key);
                     return;
                 }
             }
@@ -3429,7 +3442,7 @@ fn dispatch_claimed_controller_job(
             controller_job_runtimes()
                 .lock()
                 .expect("controller runtimes lock")
-                .remove(&job_id);
+                .remove(&supervisor_runtime_key);
             return;
         }
         let execute_driver = Arc::clone(&driver);
@@ -3469,7 +3482,7 @@ fn dispatch_claimed_controller_job(
                 controller_job_runtimes()
                     .lock()
                     .expect("controller runtimes lock")
-                    .remove(&job_id);
+                    .remove(&supervisor_runtime_key);
                 return;
             }
             match receiver.recv_timeout(Duration::from_millis(10)) {
@@ -3509,7 +3522,7 @@ fn dispatch_claimed_controller_job(
             controller_job_runtimes()
                 .lock()
                 .expect("controller runtimes lock")
-                .remove(&job_id);
+                .remove(&supervisor_runtime_key);
             return;
         }
     });
@@ -3517,7 +3530,7 @@ fn dispatch_claimed_controller_job(
         .lock()
         .expect("controller runtimes lock")
         .insert(
-            job_id,
+            runtime_key,
             ControllerJobRuntime {
                 cancel: cancel_tx,
                 supervisor,
@@ -3634,7 +3647,7 @@ fn cancel_controller_job(
     if let Some(runtime) = controller_job_runtimes()
         .lock()
         .expect("controller runtimes lock")
-        .get(&job_id)
+        .get(&controller_job_runtime_key(job_store, job_id))
     {
         let _ = runtime.cancel.send(());
     }

@@ -600,6 +600,28 @@ fn apply_migration_sql(connection: &Connection, migration: &Migration) -> Result
         return Ok(());
     }
 
+    if migration.version == 13 {
+        // Some historical stores recorded later migration markers despite never
+        // creating optional child tables. Reap only tables that exist so the
+        // foreign-key migration remains a valid upgrade from those stores.
+        for table in [
+            "artifacts",
+            "findings",
+            "triage_items",
+            "trace_spans",
+            "trace_runs",
+        ] {
+            if table_exists(connection, table)? {
+                connection
+                    .execute_batch(&format!(
+                        "DELETE FROM {table} WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = {table}.run_id);"
+                    ))
+                    .map_err(sqlite_error(format!("apply migration 13 for {table}")))?;
+            }
+        }
+        return Ok(());
+    }
+
     connection
         .execute_batch(migration.sql)
         .map_err(sqlite_error(format!(

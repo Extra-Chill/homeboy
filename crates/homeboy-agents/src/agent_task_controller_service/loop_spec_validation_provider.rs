@@ -44,6 +44,13 @@ impl LoopSpecValidationProvider for AgentTaskLoopSpecValidationProvider {
     }
 }
 
+/// Validate a materialized loop spec where the agent-task subsystem is already
+/// present. This avoids depending on process-wide proof-hook registration for
+/// controller-owned generator evidence.
+pub(crate) fn validate_materialized_loop_spec(spec: &Value) -> Vec<LoopSpecValidationDiagnostic> {
+    AgentTaskLoopSpecValidationProvider.validate_materialized_loop_spec(spec)
+}
+
 /// Register the agent-task loop-spec validation provider. Called once at startup
 /// so core's proof validator can validate materialized loop-spec artifacts
 /// without depending on the agent-task subsystem.
