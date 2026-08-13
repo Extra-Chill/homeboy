@@ -1660,15 +1660,18 @@ fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRecord) {
     let Ok(Some(recipe)) = agent_task_service::load_recipe_for_attempt(&record.run_id) else {
         return;
     };
-    let candidate_produced = record
+    let selected_candidate = record
         .metadata
-        .pointer("/latest_promotion/patch_artifact/sha256")
+        .get("cook_id")
         .and_then(Value::as_str)
-        .is_some();
+        .and_then(|cook_id| agent_task_service_direct::select_cook_candidate(cook_id).ok())
+        .and_then(|selection| serde_json::to_value(selection).ok());
     let finalization_requested = recipe.finalization["no_finalize"] != true;
     if let Some(completion) = agent_task_service_direct::cook_completion(
-        candidate_produced,
+        selected_candidate.as_ref(),
         finalization_requested,
+        // `cook_completion` resolves this receipt from the selected candidate
+        // whenever selection exists. This fallback only serves pre-index reports.
         record.metadata.get("cook_finalization"),
         Some(&record.run_id),
     ) {
