@@ -134,6 +134,19 @@ fn client_connection_args(
         push_option(&mut args, "ServerAliveCountMax=3");
     }
 
+    // ssh allocates a TTY by default only when no remote command is given
+    // (#10839). An interactive session that carries one -- `cd <base_path> &&
+    // exec $SHELL` -- therefore gets no TTY, and the shell it execs would come
+    // up non-interactive, with no prompt and no job control. Ask for the
+    // terminal explicitly.
+    //
+    // Scoped to the interactive path: `interactive` is set by exactly one
+    // caller, `SshClient::execute_interactive`. Every non-interactive caller
+    // captures output and must not be handed a pty.
+    if options.interactive && options.command.is_some() {
+        args.push("-t".to_string());
+    }
+
     args
 }
 

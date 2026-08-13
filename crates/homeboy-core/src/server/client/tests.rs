@@ -1003,3 +1003,39 @@ fn pid_is_alive(pid: libc::pid_t) -> bool {
         .map(crate::process::pid_is_running)
         .unwrap_or(false)
 }
+
+/// An interactive session carrying a remote command needs an explicit tty
+/// (#10839).
+///
+/// `homeboy ssh <project>` sends `cd <base_path> && exec "$SHELL"` so the
+/// session lands in the project root. ssh allocates a tty by default only when
+/// NO command is given, so without `-t` the exec'd shell comes up
+/// non-interactive: no prompt, no job control.
+#[test]
+fn an_interactive_session_carrying_a_command_requests_a_terminal() {
+    let server: Server =
+        serde_json::from_str(r#"{"host":"app.example.test","user":"deploy"}"#).expect("server");
+    let client = SshClient::from_server(&server, "app").expect("client");
+
+    let interactive = client.build_ssh_args(Some("cd '/srv/app' && exec \"$SHELL\""), true);
+    assert!(
+        interactive.contains(&"-t".to_string()),
+        "an interactive session with a command must request a tty: {interactive:?}"
+    );
+
+    // Non-interactive callers capture output and must never be handed a pty:
+    // it would merge stderr into stdout and echo input back into the capture.
+    let captured = client.build_ssh_args(Some("uptime"), false);
+    assert!(
+        !captured.contains(&"-t".to_string()),
+        "output-capturing callers must not be handed a pty: {captured:?}"
+    );
+
+    // A bare interactive session has no command, so ssh allocates the tty
+    // itself and the flag is unnecessary.
+    let bare = client.build_ssh_args(None, true);
+    assert!(
+        !bare.contains(&"-t".to_string()),
+        "ssh already allocates a tty when no command is given: {bare:?}"
+    );
+}
