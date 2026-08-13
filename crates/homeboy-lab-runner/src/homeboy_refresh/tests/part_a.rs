@@ -337,7 +337,7 @@ fn refreshed_daemon_status(connected: bool, identity: Option<&str>) -> RunnerSta
             leaseless_recovery_evidence: None,
         }),
         stale_daemon: None,
-        configured_job_binary_build_identity: None,
+        configured_job_binary_build_identity: identity.map(str::to_string),
         daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
@@ -359,7 +359,7 @@ fn refreshed_daemon_verification_accepts_the_post_start_health_window() {
     let mut statuses = [not_ready, ready].into_iter();
     let mut retries = 0;
 
-    verify_refreshed_daemon_identity_with(
+    verify_refreshed_daemon_topology_with(
         "lab",
         "06bbf46013cf",
         || Ok(statuses.next().expect("post-start status probe")),
@@ -383,7 +383,7 @@ fn refreshed_daemon_verification_converges_after_exact_identity_refresh() {
     let mut statuses = [stale, converged].into_iter();
     let mut retries = 0;
 
-    verify_refreshed_daemon_identity_with(
+    verify_refreshed_daemon_topology_with(
         "lab",
         "19a41cd5102d",
         || Ok(statuses.next().expect("refresh convergence status")),
@@ -394,10 +394,45 @@ fn refreshed_daemon_verification_converges_after_exact_identity_refresh() {
 }
 
 #[test]
+fn refreshed_daemon_verification_retries_until_the_configured_job_binary_converges() {
+    let daemon_identity = "homeboy 0.294.0+19a41cd5102d";
+    let mut stale_configured = refreshed_daemon_status(true, Some(daemon_identity));
+    stale_configured.configured_job_binary_build_identity =
+        Some("homeboy 0.294.0+oldcommit".to_string());
+    let converged = refreshed_daemon_status(true, Some(daemon_identity));
+    let mut statuses = [stale_configured, converged].into_iter();
+    let mut retries = 0;
+
+    verify_refreshed_daemon_topology_with(
+        "lab",
+        "19a41cd5102d",
+        || Ok(statuses.next().expect("topology status probe")),
+        || retries += 1,
+    )
+    .expect("refresh succeeds only after the configured binary and daemon converge");
+
+    assert_eq!(
+        retries, 1,
+        "the stale configured binary is reread before success"
+    );
+}
+
+#[test]
+fn refreshed_daemon_verification_rejects_a_persisted_configured_binary_mismatch() {
+    let mut status = refreshed_daemon_status(true, Some("homeboy 0.294.0+19a41cd5102d"));
+    status.configured_job_binary_build_identity = Some("homeboy 0.294.0+oldcommit".to_string());
+
+    let error = verify_refreshed_daemon_topology_status("lab", "19a41cd5102d", &status)
+        .expect_err("matching daemon alone must not certify refresh success");
+
+    assert!(error.message.contains("retained configured job binary"));
+}
+
+#[test]
 fn refreshed_daemon_verification_rejects_commit_substring_mismatch() {
     let status = refreshed_daemon_status(true, Some("homeboy 0.1.0+x06bbf46013cf"));
 
-    let error = verify_refreshed_daemon_status("lab", "06bbf46013cf", &status)
+    let error = verify_refreshed_daemon_topology_status("lab", "06bbf46013cf", &status)
         .expect_err("the daemon commit component must match exactly");
     assert!(error.message.contains("expected commit `06bbf46013cf`"));
 }

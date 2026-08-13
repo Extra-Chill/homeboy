@@ -433,7 +433,7 @@ fn extension_overlay_lifecycle_uses_ttl_cleanup_policy() {
 }
 
 #[test]
-fn refresh_patch_only_owns_homeboy_path() {
+fn refresh_patch_updates_the_selected_binary_and_control_plane_environment() {
     test_support::with_isolated_home(|_| {
         crate::create(
             r#"{
@@ -454,10 +454,12 @@ fn refresh_patch_only_owns_homeboy_path() {
             refreshed_runner_patch("lab-local", "/runner/ws/homeboy").expect("build refresh patch");
 
         assert_eq!(patch["homeboy_path"], "/runner/ws/homeboy");
-        assert_eq!(
-            patch,
-            serde_json::json!({ "homeboy_path": "/runner/ws/homeboy" })
+        assert_eq!(patch["env"]["HOMEBOY_COMMAND"], "/runner/ws/homeboy");
+        assert!(
+            patch["env"]["HOMEBOY_COMMAND"] == "/runner/ws/homeboy",
+            "refresh updates env to pin daemon startup and queued jobs to the selected binary"
         );
+        assert!(patch["env"]["HOMEBOY_DAEMON_STATE_DIR"].is_null());
     });
 }
 
@@ -503,12 +505,13 @@ fn controller_binary_selection_is_idempotent() {
         assert_eq!(
             promote_verified_runner_binary("lab-local", "/verified/homeboy")
                 .expect("persist controller selection"),
-            ["homeboy_path"]
+            ["env", "homeboy_path"]
         );
-        assert!(
+        assert_eq!(
             promote_verified_runner_binary("lab-local", "/verified/homeboy")
-                .expect("repeat controller selection")
-                .is_empty()
+                .expect("repeat controller selection"),
+            ["env", "homeboy_path"],
+            "promotion always declares the control-plane environment and selected executable it normalizes"
         );
         assert_eq!(
             crate::load("lab-local")
@@ -519,6 +522,52 @@ fn controller_binary_selection_is_idempotent() {
             Some("/verified/homeboy")
         );
     });
+}
+
+#[test]
+fn promotion_repairs_an_acknowledged_but_stale_configured_executable() {
+    let configured_path = std::cell::RefCell::new(Some("/old/homeboy".to_string()));
+    let writes = std::cell::RefCell::new(0);
+
+    let updated_fields = promote_verified_runner_binary_with(
+        "lab",
+        "/selected/homeboy",
+        |_, selected| {
+            *writes.borrow_mut() += 1;
+            // Reproduce the registry split: the first merge reports success,
+            // but the configured executable remains old until the repair write.
+            if *writes.borrow() == 2 {
+                configured_path.replace(Some(selected.to_string()));
+            }
+            Ok(vec!["homeboy_path".to_string()])
+        },
+        |_| Ok(configured_path.borrow().clone()),
+    )
+    .expect("promotion repairs stale configured executable before reconnect");
+
+    assert_eq!(*writes.borrow(), 2);
+    assert_eq!(
+        configured_path.borrow().as_deref(),
+        Some("/selected/homeboy")
+    );
+    assert_eq!(updated_fields, ["homeboy_path", "homeboy_path"]);
+}
+
+#[test]
+fn promotion_failure_names_the_exact_selected_executable_mutation() {
+    let error = promote_verified_runner_binary_with(
+        "lab",
+        "/selected/homeboy",
+        |_, _| Ok(vec!["homeboy_path".to_string()]),
+        |_| Ok(Some("/old/homeboy".to_string())),
+    )
+    .expect_err("an unobservable selection must not proceed to reconnect");
+
+    assert_eq!(error.details["field"], "homeboy_path");
+    let recovery = error.details["tried"][0]
+        .as_str()
+        .expect("exact repair command");
+    assert!(recovery.contains("--select /selected/homeboy --reconnect"));
 }
 
 #[test]
@@ -680,7 +729,7 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
 
         let (selected, exit_code) = refresh_homeboy_binary(options.clone()).expect("selection");
         assert_eq!(exit_code, 0);
-        assert_eq!(selected.updated_fields, ["homeboy_path"]);
+        assert_eq!(selected.updated_fields, ["env", "homeboy_path"]);
         assert_eq!(selected.selected_binary_path, binary.display().to_string());
         assert!(!selected.daemon_refreshed);
         assert!(selected.reconnect_required);
@@ -695,7 +744,7 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
 
         let (repeated, exit_code) = refresh_homeboy_binary(options).expect("repeat selection");
         assert_eq!(exit_code, 0);
-        assert!(repeated.updated_fields.is_empty());
+        assert_eq!(repeated.updated_fields, ["env", "homeboy_path"]);
         assert!(!repeated.daemon_refreshed);
         assert!(repeated.reconnect_required);
     });
@@ -743,7 +792,7 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
         .expect("blocked connect is a structured refresh result");
 
         assert_eq!(exit_code, 1);
-        assert_eq!(output.updated_fields, ["homeboy_path"]);
+        assert_eq!(output.updated_fields, ["env", "homeboy_path"]);
         assert_eq!(output.selected_binary_path, binary.display().to_string());
         assert_eq!(output.plan.mode, "select");
         assert_eq!(output.plan.source, None);
@@ -880,7 +929,7 @@ fn connected_refresh_blocker_preserves_the_newly_selected_binary() {
         let (output, exit_code) = refresh(&second_binary).expect("connected refresh result");
 
         assert_eq!(exit_code, 1);
-        assert_eq!(output.updated_fields, ["homeboy_path"]);
+        assert_eq!(output.updated_fields, ["env", "homeboy_path"]);
         assert_eq!(
             output.selected_binary_path,
             second_binary.display().to_string()
@@ -1304,6 +1353,6 @@ fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
         );
         assert_eq!(runner.env.get("NEW").map(String::as_str), Some("2"));
         assert_eq!(runner.resources["dev_sync"]["new"], true);
-        assert_eq!(result.updated_fields, vec!["homeboy_path"]);
+        assert_eq!(result.updated_fields, vec!["env", "homeboy_path"]);
     });
 }

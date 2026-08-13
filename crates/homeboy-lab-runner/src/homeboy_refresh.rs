@@ -659,7 +659,25 @@ pub fn refresh_homeboy_binary(
                 phase_summary.push(refresh_phase(phase_name, true, 1));
             }
             let failure = ancestry_failure.unwrap_or_else(|| {
-                refresh_verification_failure(&plan, exec_output.clone(), verification.clone())
+                let mut failure =
+                    refresh_verification_failure(&plan, exec_output.clone(), verification.clone());
+                if error.details.get("field").and_then(Value::as_str) == Some("homeboy_path") {
+                    failure.recovery_actions = vec![
+                        homeboy_core::runner_execution_envelope::RunnerExecutionNextAction {
+                            label: "configuration_repair".to_string(),
+                            command: vec![
+                                "homeboy".to_string(),
+                                "runner".to_string(),
+                                "refresh-homeboy".to_string(),
+                                plan.runner_id.clone(),
+                                "--select".to_string(),
+                                selected_binary_path.clone(),
+                                "--reconnect".to_string(),
+                            ],
+                        },
+                    ];
+                }
+                failure
             });
             return Ok((
                 HomeboyBinaryRefreshOutput {
@@ -902,7 +920,7 @@ pub fn refresh_homeboy_binary(
             }
         };
         let daemon_identity_verification = (connect_exit_code == 0)
-            .then(|| verify_refreshed_daemon_identity(&plan.runner_id, &identity))
+            .then(|| verify_refreshed_daemon_topology(&plan.runner_id, &identity))
             .transpose()
             .map_err(|error| error.message);
         daemon_refreshed = daemon_identity_verification.is_ok();
@@ -1330,7 +1348,7 @@ fn refresh_verification_failure(
     failure
 }
 
-fn verify_refreshed_daemon_identity(runner_id: &str, identity: &Value) -> Result<()> {
+fn verify_refreshed_daemon_topology(runner_id: &str, identity: &Value) -> Result<()> {
     let expected_commit = identity
         .get("data")
         .unwrap_or(identity)
@@ -1341,7 +1359,7 @@ fn verify_refreshed_daemon_identity(runner_id: &str, identity: &Value) -> Result
                 "runner `{runner_id}` refreshed binary did not report a git commit"
             ))
         })?;
-    verify_refreshed_daemon_identity_with(
+    verify_refreshed_daemon_topology_with(
         runner_id,
         expected_commit,
         || super::status(runner_id),
@@ -1349,7 +1367,7 @@ fn verify_refreshed_daemon_identity(runner_id: &str, identity: &Value) -> Result
     )
 }
 
-fn verify_refreshed_daemon_identity_with<Status, Wait>(
+fn verify_refreshed_daemon_topology_with<Status, Wait>(
     runner_id: &str,
     expected_commit: &str,
     mut status: Status,
@@ -1361,7 +1379,7 @@ where
 {
     let deadline = Instant::now() + RECONNECT_VERIFICATION_WINDOW;
     loop {
-        match verify_refreshed_daemon_status(runner_id, expected_commit, &status()?) {
+        match verify_refreshed_daemon_topology_status(runner_id, expected_commit, &status()?) {
             Ok(()) => return Ok(()),
             Err(_) if Instant::now() < deadline => wait(),
             Err(error) => return Err(error),
@@ -1369,7 +1387,7 @@ where
     }
 }
 
-fn verify_refreshed_daemon_status(
+fn verify_refreshed_daemon_topology_status(
     runner_id: &str,
     expected_commit: &str,
     status: &super::RunnerStatusReport,
@@ -1400,6 +1418,19 @@ fn verify_refreshed_daemon_status(
     if build_identity_commit(actual_identity) != Some(expected_commit) {
         return Err(Error::internal_unexpected(format!(
             "runner `{runner_id}` reconnect started daemon `{actual_identity}`, expected commit `{expected_commit}`"
+        )));
+    }
+    let configured_identity = status
+        .configured_job_binary_build_identity
+        .as_deref()
+        .ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "runner `{runner_id}` reconnect did not read the configured job binary build identity"
+            ))
+        })?;
+    if build_identity_commit(configured_identity) != Some(expected_commit) {
+        return Err(Error::internal_unexpected(format!(
+            "runner `{runner_id}` reconnect retained configured job binary `{configured_identity}`, expected commit `{expected_commit}`"
         )));
     }
     Ok(())
@@ -2338,12 +2369,59 @@ fn refreshed_runner_patch(runner_id: &str, homeboy_path: &str) -> Result<Value> 
 /// the controller so subsequent jobs use the selected binary.
 fn promote_verified_runner_binary(runner_id: &str, homeboy_path: &str) -> Result<Vec<String>> {
     homeboy_core::config::with_config_lock(|| {
-        let patch = refreshed_runner_patch(runner_id, homeboy_path)?;
-        match merge(Some(runner_id), &patch.to_string(), &[])? {
-            MergeOutput::Single(result) => Ok(result.updated_fields),
-            MergeOutput::Bulk(_) => Ok(Vec::new()),
-        }
+        promote_verified_runner_binary_with(
+            runner_id,
+            homeboy_path,
+            |runner_id, homeboy_path| {
+                let patch = refreshed_runner_patch(runner_id, homeboy_path)?;
+                match merge(Some(runner_id), &patch.to_string(), &[])? {
+                    MergeOutput::Single(result) => Ok(result.updated_fields),
+                    MergeOutput::Bulk(_) => Ok(Vec::new()),
+                }
+            },
+            |runner_id| Ok(load(runner_id)?.settings.homeboy_path),
+        )
     })
+}
+
+/// A merge acknowledgement is not a selection proof: runner configuration is
+/// stored through two registry shapes, and reconnect independently re-reads
+/// the configured executable. Repair a stale write while the promotion lease
+/// still owns this candidate, rather than leaving reconnect to discover it.
+fn promote_verified_runner_binary_with<Promote, Read>(
+    runner_id: &str,
+    homeboy_path: &str,
+    mut promote: Promote,
+    mut read_configured_path: Read,
+) -> Result<Vec<String>>
+where
+    Promote: FnMut(&str, &str) -> Result<Vec<String>>,
+    Read: FnMut(&str) -> Result<Option<String>>,
+{
+    let updated_fields = promote(runner_id, homeboy_path)?;
+    if read_configured_path(runner_id)?.as_deref() == Some(homeboy_path) {
+        return Ok(updated_fields);
+    }
+
+    // The first write was acknowledged but is not observable from the runner
+    // registry. Reapply the exact selected executable before reconnecting.
+    let repaired_fields = promote(runner_id, homeboy_path)?;
+    if read_configured_path(runner_id)?.as_deref() == Some(homeboy_path) {
+        return Ok(updated_fields.into_iter().chain(repaired_fields).collect());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "homeboy_path",
+        format!(
+            "runner `{runner_id}` configuration promotion did not persist selected executable `{homeboy_path}`"
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![format!(
+            "Run `homeboy runner refresh-homeboy {} --select {} --reconnect` to write and reconnect the selected executable.",
+            quote_arg(runner_id),
+            quote_arg(homeboy_path)
+        )]),
+    ))
 }
 
 fn restore_runner_homeboy_path(runner_id: &str, homeboy_path: Option<&str>) -> Result<()> {
