@@ -126,11 +126,11 @@ pub(super) fn run_materialized_provider_command(
     }
 }
 
-struct ImmediateProviderFailure {
+pub(super) struct ImmediateProviderFailure {
     pattern_id: String,
     signature: String,
-    error_refs: Vec<String>,
-    log_lookup: String,
+    pub(super) error_refs: Vec<String>,
+    pub(super) log_lookup: String,
     fallback_action: String,
 }
 
