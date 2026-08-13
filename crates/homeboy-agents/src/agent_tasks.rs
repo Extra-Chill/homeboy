@@ -205,14 +205,15 @@ pub mod cook_loop {
 /// Durable batch/fanout lifecycle records built from independent child runs.
 pub mod batch {
     pub use super::super::agent_task_batch::{
-        artifacts, coordinator_is_cancelled, fanout_aggregate_state,
+        artifacts, claim_fanout_run_batch, coordinator_is_cancelled, fanout_aggregate_state,
         fanout_dependency_graph_with_finalization_statuses, fanout_ready_child_run_ids,
-        persist_fanout_run_batch, read_batch_record, record_coordinator_cancellation,
-        record_fanout_run_batch_failed_admissions, status, submit_plan_batch,
-        AgentTaskBatchArtifactsReport, AgentTaskBatchChildArtifacts, AgentTaskBatchChildRun,
-        AgentTaskBatchCommands, AgentTaskBatchRecord, AgentTaskBatchState,
-        AgentTaskBatchStatusReport, AgentTaskBatchTotals, FanoutRunBatchChild,
-        AGENT_TASK_BATCH_ARTIFACTS_SCHEMA, AGENT_TASK_BATCH_SCHEMA, AGENT_TASK_BATCH_STATUS_SCHEMA,
+        heartbeat_fanout_run_batch, persist_fanout_run_batch, read_batch_record,
+        record_coordinator_cancellation, record_fanout_run_batch_failed_admissions,
+        record_fanout_run_batch_failure, status, submit_plan_batch, AgentTaskBatchArtifactsReport,
+        AgentTaskBatchChildArtifacts, AgentTaskBatchChildRun, AgentTaskBatchCommands,
+        AgentTaskBatchRecord, AgentTaskBatchState, AgentTaskBatchStatusReport,
+        AgentTaskBatchTotals, FanoutRunBatchChild, AGENT_TASK_BATCH_ARTIFACTS_SCHEMA,
+        AGENT_TASK_BATCH_SCHEMA, AGENT_TASK_BATCH_STATUS_SCHEMA,
     };
 }
 

@@ -1667,6 +1667,8 @@ mod run_lifecycle_projection_tests {
         use crate::agent_task_batch::AgentTaskBatchState;
 
         for state in [
+            AgentTaskBatchState::Planning,
+            AgentTaskBatchState::Admitting,
             AgentTaskBatchState::Queued,
             AgentTaskBatchState::Running,
             AgentTaskBatchState::Succeeded,
@@ -1676,6 +1678,8 @@ mod run_lifecycle_projection_tests {
             AgentTaskBatchState::TimedOut,
         ] {
             let expected = match state {
+                AgentTaskBatchState::Planning => RunLifecycleStatus::Queued,
+                AgentTaskBatchState::Admitting => RunLifecycleStatus::Running,
                 AgentTaskBatchState::Queued => RunLifecycleStatus::Queued,
                 AgentTaskBatchState::Running => RunLifecycleStatus::Running,
                 AgentTaskBatchState::Succeeded => RunLifecycleStatus::Succeeded,
