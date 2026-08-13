@@ -274,10 +274,9 @@ fn provider_readiness_rejects_invalid_immediate_failure_configuration_before_exe
         fallback_action: None,
     }];
 
-    let error = validate_provider_runner_readiness_for_backend_with_providers(
-        &[provider], "test", None,
-    )
-    .expect_err("invalid adapter configuration must fail pre-dispatch");
+    let error =
+        validate_provider_runner_readiness_for_backend_with_providers(&[provider], "test", None)
+            .expect_err("invalid adapter configuration must fail pre-dispatch");
 
     assert_eq!(error.details["field"], "immediate_failure_patterns");
     assert!(error.message.contains("invalid error_ref_pattern"));

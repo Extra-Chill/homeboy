@@ -474,9 +474,9 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
                 full: true,
                 no_runner_probe: false,
                 strict_subject_exit: false,
-            watch: false,
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
+                watch: false,
+                interval: "5s".to_string(),
+                timeout: "30m".to_string(),
             })
             .expect("resumed Cook status")
             .0["metadata"]["worktree_provision"]["action"],

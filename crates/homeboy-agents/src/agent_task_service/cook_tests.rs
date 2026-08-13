@@ -9,16 +9,15 @@ use super::super::cook_adoption::{
 };
 use super::super::cook_baseline::git_output;
 use super::super::cook_promotion::{
-    canonical_cook_patch_artifact_id, cook_finalization_options, cook_promotion_argv, cook_report,
-    canonical_cook_recovery_run_id,
-    finalize_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend,
-    moving_base_recovery_for_run, moving_base_recovery_from_promotion, moving_base_recovery_report,
-    next_moving_base_recovery, persist_manual_finalization_intent,
-    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
-    prepare_manual_finalization_identity, record_replacement_gate_proof,
-    recover_cook_pr_with_backend, recover_moving_base_cook_candidate,
-    refreshed_moving_base_recovery, selected_candidate_task_id, CookReportInput,
-    MovingBaseCookRecovery,
+    canonical_cook_patch_artifact_id, canonical_cook_recovery_run_id, cook_finalization_options,
+    cook_promotion_argv, cook_report, finalize_cook_pr_with_backend,
+    finalize_or_load_cook_pr_with_backend, moving_base_recovery_for_run,
+    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
+    persist_manual_finalization_intent, persist_manual_finalization_receipt,
+    persisted_promotion_for_attempt, prepare_manual_finalization_identity,
+    record_replacement_gate_proof, recover_cook_pr_with_backend,
+    recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
+    CookReportInput, MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::persist_initial_recipe;
 use super::*;
@@ -7536,7 +7535,11 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             .expect("source patch remains the canonical candidate");
         assert_eq!(selected_candidate["run_id"], run_id);
         assert_eq!(
-            result.value.completion().expect("in-process completion").state,
+            result
+                .value
+                .completion()
+                .expect("in-process completion")
+                .state,
             "pr_finalized",
             "the form-only continuation owns the canonical source candidate receipt"
         );
@@ -7554,7 +7557,8 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             "exact source status resolves the bound form-only receipt"
         );
         agent_task_lifecycle::rewrite_record_for_test(follow_up_run_id, |record| {
-            record.metadata
+            record
+                .metadata
                 .as_object_mut()
                 .expect("record metadata object")
                 .remove("cook_finalization");
@@ -9434,15 +9438,14 @@ fn canonical_completion_accepts_green_and_recipe_authorized_inherited_gate_evide
     inherited.deterministic_gates[0].status =
         crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure;
     inherited.deterministic_gates[0].exit_code = 1;
-    inherited.deterministic_gates[0].baseline_comparison = Some(
-        crate::agent_task_gate::AgentTaskGateBaselineComparison {
+    inherited.deterministic_gates[0].baseline_comparison =
+        Some(crate::agent_task_gate::AgentTaskGateBaselineComparison {
             base_ref: "main".to_string(),
             exit_code: 1,
             failure_fingerprint: "inherited".to_string(),
             matches_candidate_failure: true,
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
-        },
-    );
+        });
     assert!(canonical_finalization_eligible(&inherited, true, true));
     assert!(!canonical_finalization_eligible(&inherited, false, true));
 }

@@ -2960,7 +2960,10 @@ mod tests {
             let result = run_main_test_workflow(&component, source.path(), args, &run_dir)
                 .expect("missing producer output is a test result");
 
-            assert!(marker.exists(), "inventory producer must run despite zero selected tests");
+            assert!(
+                marker.exists(),
+                "inventory producer must run despite zero selected tests"
+            );
             assert_eq!(result.status, "failed");
             assert_eq!(result.exit_code, 1);
             assert_eq!(result.runner_exit_code, Some(0));
@@ -3078,8 +3081,17 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
             assert_eq!(result.status, "passed");
             assert_eq!(result.exit_code, 0);
             assert_eq!(result.runner_exit_code, Some(0));
-            assert_eq!(result.test_inventory.as_ref().map(|inventory| inventory.test_count), Some(1));
-            assert!(published.is_file(), "validated inventory must publish to the requested path");
+            assert_eq!(
+                result
+                    .test_inventory
+                    .as_ref()
+                    .map(|inventory| inventory.test_count),
+                Some(1)
+            );
+            assert!(
+                published.is_file(),
+                "validated inventory must publish to the requested path"
+            );
             assert_eq!(
                 serde_json::from_slice::<TestInventoryEvidence>(
                     &std::fs::read(&published).expect("published inventory")
@@ -3139,7 +3151,10 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
             assert_eq!(result.status, "passed");
             assert_eq!(result.exit_code, 0);
             assert_eq!(result.runner_exit_code, None);
-            assert!(!marker.exists(), "normal zero scope must not invoke the runner");
+            assert!(
+                !marker.exists(),
+                "normal zero scope must not invoke the runner"
+            );
         });
     }
 
