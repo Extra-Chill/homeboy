@@ -38,21 +38,22 @@ else
 fi
 
 (cd "$TMP_DIR" && tar -xJf "$ASSET" 2>/dev/null || tar -xf "$ASSET")
-if [ ! -f "$TMP_DIR/homeboy" ]; then
+EXTRACTED_BIN="$TMP_DIR/${ASSET%.tar.xz}/homeboy"
+if [ ! -f "$EXTRACTED_BIN" ]; then
   echo "Expected extracted binary named homeboy" >&2
   exit 1
 fi
-chmod 0755 "$TMP_DIR/homeboy"
+chmod 0755 "$EXTRACTED_BIN"
 
 # The staged candidate owns admission; any failure exits before the installed
 # controller is written. Its report binds the candidate decision to legacy identity.
 LEGACY_IDENTITY="$("$BIN_PATH" self identity 2>/dev/null || "$BIN_PATH" --version 2>/dev/null || printf 'unavailable')"
-"$TMP_DIR/homeboy" self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
+"$EXTRACTED_BIN" self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
 
 if [ "${HOMEBOY_INSTALL_USE_SUDO:-false}" != true ] && { [ -w "$BIN_PATH" ] || [ -w "$BIN_DIR" ]; }; then
-  install -m 0755 "$TMP_DIR/homeboy" "$TMP_BIN"
+  install -m 0755 "$EXTRACTED_BIN" "$TMP_BIN"
   mv "$TMP_BIN" "$BIN_PATH"
 else
-  sudo install -m 0755 "$TMP_DIR/homeboy" "$TMP_BIN"
+  sudo install -m 0755 "$EXTRACTED_BIN" "$TMP_BIN"
   sudo mv "$TMP_BIN" "$BIN_PATH"
 fi
