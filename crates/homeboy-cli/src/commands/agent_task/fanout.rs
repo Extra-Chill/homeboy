@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
@@ -2973,6 +2973,8 @@ struct BatchCookSpec {
     concurrency: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_config: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    provider_evidence_inputs: Vec<super::args::AgentTaskProviderEvidenceInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_context: Option<String>,
     to_worktree: String,
@@ -3081,8 +3083,35 @@ impl BatchCookSpec {
                 "each fanout cook requires verify or private_verify so PR finalization has deterministic gates",
             ));
         }
+        let mut prompt = self.prompt.clone();
+        let workspace_root = self.workspace.as_deref().or(self.cwd.as_deref());
+        let mut provider_config = self.provider_config.clone();
+        if let Some(workspace) = workspace_root {
+            let evidence = super::run::project_provider_evidence_inputs(
+                &self.provider_evidence_inputs,
+                Path::new(workspace),
+                None,
+            )?;
+            if !evidence.is_empty() {
+                let raw = provider_config.as_deref().unwrap_or("{}");
+                let mut config: Value = homeboy::core::config::read_json_spec_to_string(raw)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if !config.is_object() {
+                    config = serde_json::json!({});
+                }
+                config["evidence_inputs"] = serde_json::Value::Array(evidence);
+                provider_config = Some(config.to_string());
+            }
+            super::run::rewrite_provider_evidence_prompt(
+                &mut prompt,
+                &self.provider_evidence_inputs,
+                Some(workspace),
+            );
+        }
         let dispatch = AgentTaskDispatchCommand {
-            prompt: self.prompt.clone(),
+            prompt,
             tasks: self.tasks.clone(),
             cwd: self.cwd.clone(),
             workspace: self
@@ -3101,7 +3130,7 @@ impl BatchCookSpec {
             task_id: None,
             core: DispatchCoreInputs {
                 tasks_json: None,
-                provider_config: self.provider_config.clone(),
+                provider_config,
                 client_context: Some(merged_client_context(plan, self)),
                 attempts: self.attempts,
                 same_provider_retries: self.same_provider_retries,
@@ -3268,6 +3297,10 @@ pub(crate) fn cook_batch_fanout_id(args: &AgentTaskFanoutCookBatchArgs) -> Resul
 }
 
 fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCookFanoutPlan> {
+    super::run::validate_provider_evidence_inputs(
+        &args.provider_evidence_inputs,
+        args.prompt_template.as_deref(),
+    )?;
     let profiles = load_verification_profiles(args.verification_profiles.as_deref())?;
     let mut seen = HashSet::new();
     let mut cooks = Vec::with_capacity(args.issues.len());
@@ -3321,6 +3354,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             provider_rotations: None,
             concurrency: 1,
             provider_config: args.provider_config.clone(),
+            provider_evidence_inputs: args.provider_evidence_inputs.clone(),
             client_context: Some(
                 serde_json::json!({
                     "issue_url": issue_url,
@@ -5483,6 +5517,7 @@ fi
             provider_profile: None,
             secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_TOKEN".to_string()],
             provider_config: Some(r#"{"runtime":"opencode"}"#.to_string()),
+            provider_evidence_inputs: Vec::new(),
             ai_tool: None,
             gates: super::super::args::VerifyGateArgs {
                 accept_inherited_failures: false,
