@@ -325,10 +325,7 @@ pub(crate) fn lab_runner_homeboy_metadata(
     // recovery avoids dispatch telling an operator to reinstall the runner's
     // already-incompatible configured binary (#11360).
     let refresh_commands = runner_homeboy_refresh_commands(runner_id, status);
-    let primary_remediation_command = refresh_commands
-        .first()
-        .cloned()
-        .unwrap_or_else(|| runner_homeboy_align_to_controller_command(runner_id));
+    let primary_remediation_command = refresh_commands.first().cloned();
     let topology_recovery_command = primary_remediation_command.clone();
     let controller_binary = std::env::current_exe()
         .ok()
@@ -345,8 +342,8 @@ pub(crate) fn lab_runner_homeboy_metadata(
         "job_command_binary_version": stale_daemon.map(|warning| warning.job_command_binary_version.clone()),
         "job_command_binary_build_identity": stale_daemon.and_then(|warning| warning.job_command_binary_build_identity.clone()),
         "stale_daemon_severity": stale_daemon.map(|warning| warning.severity),
-        "stale_daemon_refresh_command": stale_daemon.map(|warning| warning.refresh_command.clone()),
-        "stale_daemon": status.stale_daemon,
+        "stale_daemon_refresh_command": primary_remediation_command,
+        "stale_daemon": stale_daemon.map(RunnerStaleDaemonWarning::sanitized_for_output),
         "version_drift": lab_runner_homeboy_version_drift(status),
         "primary_remediation_command": primary_remediation_command,
         "topology_recovery_command": topology_recovery_command,
@@ -812,20 +809,19 @@ pub(crate) fn stale_runner_homeboy_error(
                 homeboy_product_identity::product_version()
             )
         });
-    let refresh = refresh_commands.join(" && ");
     let mut tried = Vec::new();
-    tried.push(format!(
-        "One-command topology recovery: {}",
-        refresh_commands
-            .first()
-            .cloned()
-            .unwrap_or_else(|| runner_homeboy_align_to_controller_command(runner_id))
-    ));
-    tried.extend([
-        format!("Reconnect runner `{runner_id}` before retrying Lab offload: {refresh}"),
-        format!("If the runner binary itself is stale, refresh or select a clean runner binary with `{}`.", runner_homeboy_align_to_controller_command(runner_id)),
-        "Use --placement local only if you intentionally want to bypass Lab offload and run locally.".to_string(),
-    ]);
+    if let Some(refresh) = refresh_commands.first() {
+        tried.push(format!("One-command topology recovery: {refresh}"));
+        tried.push(format!(
+            "Reconnect runner `{runner_id}` before retrying Lab offload: {}",
+            refresh_commands.join(" && ")
+        ));
+    } else {
+        tried.push(format!(
+            "Runner `{runner_id}` has no ancestry-verified refresh target. Inspect exact build identities and recover only with an explicit rollback authorization when intended."
+        ));
+    }
+    tried.push("Use --placement local only if you intentionally want to bypass Lab offload and run locally.".to_string());
     Error::validation_invalid_argument(
         "runner",
         format!(
@@ -837,22 +833,14 @@ pub(crate) fn stale_runner_homeboy_error(
 }
 
 pub(crate) fn runner_homeboy_refresh_commands(
-    runner_id: &str,
+    _runner_id: &str,
     status: &RunnerStatusReport,
 ) -> Vec<String> {
-    let commands = status
+    status
         .stale_daemon
         .as_ref()
-        .map(|warning| warning.recovery_commands.clone())
-        .unwrap_or_default();
-    if !commands.is_empty() {
-        return commands;
-    }
-    vec![
-        runner_homeboy_align_to_controller_command(runner_id),
-        format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
-        format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
-    ]
+        .map(RunnerStaleDaemonWarning::safe_recovery_commands)
+        .unwrap_or_default()
 }
 
 pub(crate) fn runner_homeboy_align_to_controller_command(runner_id: &str) -> String {

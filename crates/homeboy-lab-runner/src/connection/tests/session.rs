@@ -819,20 +819,14 @@ fn same_version_different_controller_build_is_incompatible_and_truthful() {
     );
     assert!(warning.message.contains("configured job command binary"));
     assert!(warning.message.contains("controller"));
-    assert_eq!(
-        warning.recovery_commands,
-        ["homeboy runner refresh-homeboy homeboy-lab --ref controller --reconnect --allow-downgrade"]
-    );
-    assert!(!warning.refresh_command.contains("--ref configured"));
-    let diagnostics = serde_json::to_value(&warning).expect("serialize controller build skew");
+    assert!(warning.safe_recovery_commands().is_empty());
+    let diagnostics = serde_json::to_value(warning.sanitized_for_output())
+        .expect("serialize controller build skew");
     assert_eq!(
         diagnostics["mismatch_predicate"],
         "controller_build_commit != job_command_binary_build_commit"
     );
-    assert_eq!(
-        diagnostics["recovery_commands"][0],
-        "homeboy runner refresh-homeboy homeboy-lab --ref controller --reconnect --allow-downgrade"
-    );
+    assert!(diagnostics.get("recovery_commands").is_none());
 }
 
 #[test]
@@ -869,7 +863,8 @@ fn controller_dirty_and_version_skew_serialize_distinct_predicates_and_actions()
         false,
     );
 
-    let dirty_diagnostics = serde_json::to_value(&dirty).expect("serialize dirty controller");
+    let dirty_diagnostics =
+        serde_json::to_value(dirty.sanitized_for_output()).expect("serialize dirty controller");
     // A dirty controller cannot compare; that is not a claim about the runner,
     // so it must not serialize as a staleness predicate (#11101).
     assert_eq!(
@@ -883,24 +878,18 @@ fn controller_dirty_and_version_skew_serialize_distinct_predicates_and_actions()
     // "Your working tree is dirty" has no correct automated remediation, and
     // `homeboy upgrade --force` is a destructive answer to a question nobody
     // asked. Offer none rather than the wrong one.
-    assert!(dirty_diagnostics["recovery_commands"]
-        .as_array()
-        .expect("serialized recovery command list")
-        .is_empty());
+    assert!(dirty_diagnostics.get("recovery_commands").is_none());
     assert!(!dirty.message.contains("upgrade --force"));
     assert!(dirty.message.contains("dirty working tree"));
     assert!(dirty.message.contains("unavailable, not failed"));
 
-    let version_diagnostics =
-        serde_json::to_value(&version_skew).expect("serialize controller version skew");
+    let version_diagnostics = serde_json::to_value(version_skew.sanitized_for_output())
+        .expect("serialize controller version skew");
     assert_eq!(
         version_diagnostics["mismatch_predicate"],
         "controller_version != job_command_binary_version"
     );
-    assert!(version_diagnostics["recovery_commands"]
-        .as_array()
-        .expect("serialized recovery command list")
-        .is_empty());
+    assert!(version_diagnostics.get("recovery_commands").is_none());
 }
 
 fn controller_identity(
@@ -1233,23 +1222,18 @@ fn unverifiable_identity_warning_is_actionable_without_claiming_a_mismatch() {
     assert!(warning.message.contains("could not be verified"));
     assert!(!warning.message.contains("different Homeboy build"));
     assert!(warning.message.contains("/opt/homeboy self identity"));
-    assert_eq!(
-        warning.recovery_commands,
-        ["homeboy runner refresh-homeboy homeboy-lab --reconnect"]
-    );
-    let diagnostics = serde_json::to_value(&warning).expect("serialize unverifiable identity");
+    assert!(warning.safe_recovery_commands().is_empty());
+    let diagnostics = serde_json::to_value(warning.sanitized_for_output())
+        .expect("serialize unverifiable identity");
     assert_eq!(
         diagnostics["mismatch_predicate"],
         "immutable_build_identity(active_daemon_control_plane_build_identity) && immutable_build_identity(job_command_binary_build_identity) == false"
     );
-    assert_eq!(
-        diagnostics["recovery_commands"][0],
-        "homeboy runner refresh-homeboy homeboy-lab --reconnect"
-    );
+    assert!(diagnostics.get("recovery_commands").is_none());
 }
 
 #[test]
-fn stale_daemon_warning_includes_explicit_refresh_recovery_command() {
+fn stale_daemon_warning_with_unverified_ref_withholds_refresh_recovery_command() {
     let warning = RunnerStaleDaemonWarning::new(
         "homeboy-lab",
         "homeboy 0.201.3".to_string(),
@@ -1280,21 +1264,14 @@ fn stale_daemon_warning_includes_explicit_refresh_recovery_command() {
         warning.job_command_binary_build_identity.as_deref(),
         Some("homeboy 0.204.0+new")
     );
-    assert_eq!(
-        warning.refresh_command,
-        "homeboy runner refresh-homeboy homeboy-lab --ref new --reconnect"
-    );
     assert!(warning.message.contains("daemon control plane"));
     assert!(warning.message.contains("job command binary"));
     assert!(warning.message.contains("active jobs are drained"));
-    assert_eq!(
-        warning.recovery_commands,
-        ["homeboy runner refresh-homeboy homeboy-lab --ref new --reconnect"]
-    );
-    assert_ne!(
-        warning.refresh_command,
-        "homeboy runner refresh-homeboy homeboy-lab --ref v0.1.0 --reconnect"
-    );
+    assert!(warning.safe_recovery_commands().is_empty());
+    let diagnostics =
+        serde_json::to_value(warning.sanitized_for_output()).expect("serialize stale warning");
+    assert!(diagnostics.get("refresh_command").is_none());
+    assert!(diagnostics.get("recovery_commands").is_none());
 }
 
 #[test]

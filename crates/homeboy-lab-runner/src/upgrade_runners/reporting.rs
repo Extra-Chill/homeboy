@@ -30,11 +30,18 @@ pub fn runner_stale_daemon(
         .ok()?
         .stale_daemon
         .filter(|warning| !warning.is_unverified())?;
-    Some(RunnerDaemonDriftEntry {
+    Some(runner_daemon_drift_entry(warning))
+}
+
+pub(super) fn runner_daemon_drift_entry(
+    warning: crate::RunnerStaleDaemonWarning,
+) -> RunnerDaemonDriftEntry {
+    let recovery_commands = warning.safe_recovery_commands();
+    RunnerDaemonDriftEntry {
         session_homeboy_version: warning.session_homeboy_version,
         current_homeboy_version: warning.current_homeboy_version,
-        recovery_commands: warning.recovery_commands,
-    })
+        recovery_commands,
+    }
 }
 
 #[expect(
@@ -112,7 +119,7 @@ pub fn runner_upgrade_final_detail(
     if let Some(stale_daemon) = stale_daemon {
         let remediation = stale_daemon.recovery_commands.join(" && ");
         let remediation = if remediation.is_empty() {
-            "homeboy runner disconnect <runner> && homeboy runner connect <runner>".to_string()
+            "inspect exact daemon and runner build identities before selecting a refresh target; use --allow-downgrade only for an intentional rollback".to_string()
         } else {
             remediation
         };

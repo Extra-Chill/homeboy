@@ -965,7 +965,7 @@ impl RunnerStatusReport {
             }
         }
         if let Some(warning) = &self.stale_daemon {
-            warning.primary_recovery_action()
+            warning.safe_recovery_actions().into_iter().next()
         } else if !self.is_connected() {
             Some(crate::daemon_repair::connect_action(&self.runner_id))
         } else if self.active_job_state != RunnerActiveJobState::Available {
@@ -1800,12 +1800,14 @@ pub struct RunnerStaleDaemonWarning {
     pub active_daemon_control_plane_build_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_command_binary_build_identity: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub refresh_command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stale_runtime_paths: Vec<RunnerStaleRuntimePath>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_runtime_paths: Vec<RunnerChangedRuntimePath>,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovery_commands: Vec<String>,
     /// Argv for `recovery_commands`, in the same order.
     ///
@@ -1837,6 +1839,53 @@ pub struct RunnerChangedRuntimePath {
 }
 
 impl RunnerStaleDaemonWarning {
+    /// Recovery commands safe to publish to an operator or machine consumer.
+    ///
+    /// Persisted command text is evidence, not authority. A refresh is exposed
+    /// only when its typed immutable ref equals the observed daemon commit or
+    /// git proves it is a descendant; unknown and divergent histories have no
+    /// mutating recovery recommendation.
+    pub fn safe_recovery_commands(&self) -> Vec<String> {
+        self.safe_recovery_actions()
+            .into_iter()
+            .map(|action| action.render_command())
+            .collect()
+    }
+
+    /// Typed mutating actions authorized by the same monotonic contract as the
+    /// published command projection. Callers must not reconstruct actions from
+    /// persisted command text.
+    pub(crate) fn safe_recovery_actions(&self) -> Vec<ExecutableAction> {
+        let Some(active) = self
+            .active_daemon_control_plane_build_identity
+            .as_deref()
+            .and_then(build_identity_commit)
+        else {
+            return Vec::new();
+        };
+        self.recovery_actions
+            .iter()
+            .filter_map(|action| {
+                let target = action
+                    .args
+                    .windows(2)
+                    .find_map(|args| (args[0] == "--ref").then(|| args[1].as_str()))?;
+                (target == active || commits_are_ancestral(&active, target)).then(|| action.clone())
+            })
+            .collect()
+    }
+
+    /// Remove persisted recovery text that has not passed the monotonic output
+    /// contract before embedding this warning in a broader serialized report.
+    pub fn sanitized_for_output(&self) -> Self {
+        let mut warning = self.clone();
+        let commands = self.safe_recovery_commands();
+        warning.refresh_command = commands.join(" && ");
+        warning.recovery_commands = commands;
+        warning.recovery_actions.clear();
+        warning
+    }
+
     pub fn new(
         runner_id: &str,
         session_homeboy_version: String,
@@ -2035,18 +2084,6 @@ impl RunnerStaleDaemonWarning {
         self.recovery_actions = actions;
     }
 
-    /// The first recovery step expressed as an executable action.
-    ///
-    /// Older persisted warnings can have only `refresh_command`. Preserve that
-    /// serialized command, including a pinned ref, by tokenizing it into argv
-    /// instead of replacing it with a newly composed recovery command.
-    fn primary_recovery_action(&self) -> Option<ExecutableAction> {
-        self.recovery_actions
-            .first()
-            .cloned()
-            .or_else(|| action_from_refresh_command(&self.refresh_command))
-    }
-
     /// Fold the controller↔runner comparison into this warning.
     ///
     /// `controller_identity_unverifiable` means the controller cannot name the
@@ -2138,18 +2175,6 @@ impl RunnerStaleDaemonWarning {
             }
         }
         self
-    }
-
-    /// Each recovery command paired with its argv, in order.
-    ///
-    /// The argv is `None` only when this warning's recovery has no typed form,
-    /// which is the one case a consumer must surface rather than execute.
-    pub(crate) fn recovery_steps(&self) -> Vec<(String, Option<ExecutableAction>)> {
-        self.recovery_commands
-            .iter()
-            .enumerate()
-            .map(|(index, command)| (command.clone(), self.recovery_actions.get(index).cloned()))
-            .collect()
     }
 
     pub(crate) fn recovery_ref(&self) -> Option<String> {
@@ -2258,39 +2283,6 @@ fn redact_runtime_value(value: &str) -> String {
     homeboy_core::redaction::RedactionPolicy::default().redact_env_value(value)
 }
 
-fn action_from_refresh_command(command: &str) -> Option<ExecutableAction> {
-    if command.trim().is_empty() {
-        return None;
-    }
-    if let Some(argv) = shlex::split(command) {
-        if let Some((program, args)) = argv.split_first() {
-            if program == "homeboy"
-                && !args
-                    .iter()
-                    .any(|arg| matches!(arg.as_str(), "&&" | ";" | "|"))
-            {
-                return Some(ExecutableAction::new(
-                    "runner.stale_recovery",
-                    "recover stale runner daemon",
-                    program,
-                    args.iter().cloned(),
-                    ActionSafety::Mutating,
-                ));
-            }
-        }
-    }
-    // Preserve a legacy chained recovery verbatim. Its shell form is already
-    // the published recovery contract; wrapping it avoids silently selecting a
-    // new, unpinned command when no typed steps were persisted.
-    Some(ExecutableAction::new(
-        "runner.stale_recovery",
-        "recover stale runner daemon",
-        "sh",
-        ["-lc", command],
-        ActionSafety::Mutating,
-    ))
-}
-
 /// The recovery for an identity-drifted runner daemon, as argv.
 ///
 /// A rendered string is derived from this; nothing derives argv from a string.
@@ -2330,6 +2322,19 @@ fn recovery_ref(
         }
         None => None,
     }
+}
+
+fn build_identity_commit(identity: &str) -> Option<String> {
+    homeboy_upgrade::upgrade::parse_build_identity_display(identity)
+        .filter(|identity| identity.git_dirty != Some(true))
+        .and_then(|identity| identity.git_commit)
+}
+
+fn commits_are_ancestral(older: &str, newer: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", older, newer])
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 fn same_homeboy_version(left: &str, right: &str) -> bool {

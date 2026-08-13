@@ -42,11 +42,6 @@ pub(crate) use codes::{
     RUNNER_RECONCILE_LEASELESS_ORPHANS, RUNNER_REFRESH_HOMEBOY, STALE_DAEMON_RECOVERY,
 };
 
-/// A step known only as text. Nothing may execute it implicitly.
-pub(crate) fn step(code: &str, command: String) -> DaemonRepairStep {
-    DaemonRepairStep::text(code, command)
-}
-
 /// A step whose argv is authoritative; its text is rendered from the action.
 pub(crate) fn action_step(code: &str, action: ExecutableAction) -> DaemonRepairStep {
     DaemonRepairStep::executable(code, action)
@@ -306,8 +301,8 @@ mod tests {
             // survive the crossing: `homeboy daemon stop` on the controller
             // stops the controller's daemon.
             repair_plan: vec![
-                step("daemon_stop", "homeboy daemon stop".to_string()),
-                step("daemon_start", "homeboy daemon start".to_string()),
+                DaemonRepairStep::text("daemon_stop", "homeboy daemon stop".to_string()),
+                DaemonRepairStep::text("daemon_start", "homeboy daemon start".to_string()),
             ],
         }
     }

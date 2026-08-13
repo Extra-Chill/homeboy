@@ -580,17 +580,7 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
         "homeboy 0.0.0+test"
     );
     assert_eq!(metadata["version_drift"], true);
-    assert_eq!(
-        metadata["refresh_commands"],
-        serde_json::json!([
-            format!(
-                "homeboy runner refresh-homeboy 'homeboy lab' --ref {} --reconnect",
-                expected_controller_refresh_ref()
-            ),
-            "homeboy runner disconnect 'homeboy lab'",
-            "homeboy runner connect 'homeboy lab'"
-        ])
-    );
+    assert_eq!(metadata["refresh_commands"], serde_json::json!([]));
     assert_eq!(
         metadata["upgrade_command"],
         "homeboy upgrade --force --upgrade-runner 'homeboy lab'"
@@ -623,15 +613,12 @@ fn runner_homeboy_version_drift_blocks_offload_with_upgrade_guidance() {
         .message
         .contains(homeboy_product_identity::product_version()));
     let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried.iter().any(
-        |hint| hint.as_str().is_some_and(|hint| hint.contains(&format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-            expected_controller_refresh_ref()
-        )))
-    ));
+    assert!(tried.iter().all(|hint| hint
+        .as_str()
+        .is_some_and(|hint| !hint.contains("refresh-homeboy"))));
     assert!(tried.iter().any(|hint| hint
         .as_str()
-        .is_some_and(|hint| hint.contains("refresh or select a clean runner binary"))));
+        .is_some_and(|hint| hint.contains("no ancestry-verified refresh target"))));
 }
 
 /// Build a reverse-connected status whose runner session reports `version`.
@@ -734,17 +721,22 @@ fn newer_runner_than_controller_points_to_controller_convergence_first() {
         "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
         expected_controller_refresh_ref()
     );
-    assert_eq!(metadata["primary_remediation_command"], expected);
-    assert_eq!(metadata["topology_recovery_command"], expected);
+    assert_eq!(
+        metadata["primary_remediation_command"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        metadata["topology_recovery_command"],
+        serde_json::Value::Null
+    );
     assert!(metadata["controller_binary"].as_str().is_some());
     assert_eq!(metadata["local_upgrade_command"], "homeboy upgrade");
 
     let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
     let tried = err.details["tried"].as_array().expect("tried hints");
     assert!(tried
-        .first()
-        .and_then(|hint| hint.as_str())
-        .is_some_and(|hint| hint.contains(&expected)));
+        .iter()
+        .all(|hint| hint.as_str().is_some_and(|hint| !hint.contains(&expected))));
 }
 
 #[test]
@@ -763,21 +755,14 @@ fn newer_stale_daemon_control_plane_points_to_controller_convergence_first() {
     let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
     assert_eq!(
         metadata["primary_remediation_command"],
-        format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-            expected_controller_refresh_ref()
-        )
+        serde_json::Value::Null
     );
 
     let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
     let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried
-        .first()
-        .and_then(|hint| hint.as_str())
-        .is_some_and(|hint| hint.contains("refresh-homeboy")));
-    assert!(tried.iter().any(|hint| hint
+    assert!(tried.iter().all(|hint| hint
         .as_str()
-        .is_some_and(|hint| hint.contains("One-command topology recovery"))));
+        .is_some_and(|hint| !hint.contains("refresh-homeboy"))));
 }
 
 #[test]
@@ -787,21 +772,14 @@ fn older_runner_than_controller_points_to_runner_refresh_first() {
     let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
     assert_eq!(
         metadata["primary_remediation_command"],
-        format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-            expected_controller_refresh_ref()
-        )
+        serde_json::Value::Null
     );
 
     let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
     let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried
-        .first()
-        .and_then(|hint| hint.as_str())
-        .is_some_and(|hint| hint.contains(&format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-            expected_controller_refresh_ref()
-        ))));
+    assert!(tried.iter().all(|hint| hint
+        .as_str()
+        .is_some_and(|hint| !hint.contains("refresh-homeboy"))));
 }
 
 #[test]
@@ -813,24 +791,18 @@ fn configured_runner_binary_drift_still_converges_to_the_controller() {
 
     assert_eq!(
         metadata["primary_remediation_command"],
-        format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-            expected_controller_refresh_ref()
-        )
+        serde_json::Value::Null
     );
     assert_eq!(
         metadata["topology_recovery_command"],
-        metadata["primary_remediation_command"]
+        serde_json::Value::Null
     );
 
     let err = stale_runner_homeboy_error("homeboy-lab", configured, &status);
     let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried.iter().any(
-        |hint| hint.as_str().is_some_and(|hint| hint.contains(&format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-            expected_controller_refresh_ref()
-        )))
-    ));
+    assert!(tried.iter().all(|hint| hint
+        .as_str()
+        .is_some_and(|hint| !hint.contains("refresh-homeboy"))));
 }
 
 #[test]
@@ -870,12 +842,9 @@ fn cook_metadata_reuses_the_doctor_recovery_action_for_controller_skew() {
     );
     assert_eq!(
         metadata["primary_remediation_command"],
-        doctor_action.render_command()
+        serde_json::Value::Null
     );
-    assert_eq!(
-        metadata["refresh_commands"][0],
-        doctor_action.render_command()
-    );
+    assert_eq!(metadata["refresh_commands"], serde_json::json!([]));
 }
 
 #[test]
@@ -1107,14 +1076,12 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
         .message
         .contains("malformed or misleading provider output"));
     let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried
-        .first()
-        .and_then(|hint| hint.as_str())
-        .is_some_and(|hint| hint
-            .contains("homeboy runner refresh-homeboy 'homeboy lab' --ref new --reconnect")));
+    assert!(tried.iter().all(|hint| hint
+        .as_str()
+        .is_some_and(|hint| !hint.contains("refresh-homeboy"))));
     assert!(tried.iter().any(|hint| hint
         .as_str()
-        .is_some_and(|hint| hint.contains("refresh or select a clean runner binary"))));
+        .is_some_and(|hint| hint.contains("no ancestry-verified refresh target"))));
 }
 
 fn higher_minor_version() -> String {
@@ -1164,24 +1131,43 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
         metadata["stale_daemon"]["job_command_binary_build_identity"],
         "homeboy 0.229.11+new"
     );
-    // The explicit refresh owns the reconnect, so the recovery command avoids
-    // a redundant disconnect/connect loop.
-    let expected_refresh = "homeboy runner refresh-homeboy lab --ref new --reconnect";
-    assert_eq!(
-        metadata["stale_daemon"]["refresh_command"],
-        expected_refresh
-    );
+    assert!(metadata["stale_daemon"].get("refresh_command").is_none());
     assert_eq!(metadata["stale_daemon_severity"], "warning");
-    assert_eq!(metadata["stale_daemon_refresh_command"], expected_refresh);
+    assert_eq!(
+        metadata["stale_daemon_refresh_command"],
+        serde_json::Value::Null
+    );
     assert_eq!(metadata["job_command_binary_version"], "homeboy 0.229.11");
     assert_eq!(
         metadata["job_command_binary_build_identity"],
         "homeboy 0.229.11+new"
     );
-    assert_eq!(
-        metadata["refresh_commands"],
-        serde_json::json!([expected_refresh])
-    );
+    assert_eq!(metadata["refresh_commands"], serde_json::json!([]));
+}
+
+#[test]
+fn exact_active_daemon_target_remains_available_in_metadata_and_offload_error() {
+    let mut status = reverse_status("lab");
+    status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+        "lab",
+        "0.264.0".to_string(),
+        "0.265.0".to_string(),
+        Some("homeboy 0.265.0+aaaaaaaa".to_string()),
+        Some("homeboy 0.265.0+aaaaaaaa".to_string()),
+    ));
+    let refresh = "homeboy runner refresh-homeboy lab --ref aaaaaaaa --reconnect";
+
+    let metadata = lab_runner_homeboy_metadata("lab", "homeboy", &status);
+    assert_eq!(metadata["stale_daemon_refresh_command"], refresh);
+    assert_eq!(metadata["stale_daemon"]["refresh_command"], refresh);
+    assert_eq!(metadata["refresh_commands"], serde_json::json!([refresh]));
+
+    let error = stale_runner_homeboy_error("lab", "homeboy", &status);
+    assert!(error.details["tried"].as_array().is_some_and(|tried| {
+        tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(refresh)))
+    }));
 }
 
 #[test]

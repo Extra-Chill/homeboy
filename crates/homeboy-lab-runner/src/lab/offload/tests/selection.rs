@@ -219,13 +219,6 @@ fn explicit_connected_stale_runner_preserves_drift_diagnosis_and_recovery() {
         Some(&status),
         vec![availability.clone()],
     );
-    let refresh = status
-        .stale_daemon
-        .as_ref()
-        .expect("stale daemon warning")
-        .refresh_command
-        .clone();
-
     assert!(error.message.contains("cannot accept jobs"));
     assert_eq!(
         error.details["runner_availability"]["reasons"],
@@ -240,11 +233,17 @@ fn explicit_connected_stale_runner_preserves_drift_diagnosis_and_recovery() {
         error.details["runner_status"]["stale_daemon"]["job_command_binary_version"],
         "homeboy 0.229.11"
     );
-    assert_eq!(error.details["stale_daemon_recovery_command"], refresh);
+    assert_eq!(
+        error.details["stale_daemon_recovery_command"],
+        serde_json::Value::Null
+    );
+    assert!(error.details["runner_status"]["stale_daemon"]
+        .get("refresh_command")
+        .is_none());
     assert!(error.details["tried"][0]
         .as_str()
         .expect("recovery hint")
-        .contains(&refresh));
+        .contains("Wait for an active Lab runner job"));
 }
 
 #[test]
