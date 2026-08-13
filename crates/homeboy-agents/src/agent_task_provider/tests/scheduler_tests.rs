@@ -478,6 +478,50 @@ fn provider_empty_stdout_captures_bounded_stderr_and_exit_context() {
         .any(|reference| reference.kind == "executor-result"));
 }
 
+#[test]
+fn declared_evidence_policy_denial_is_terminal_without_provider_retry() {
+    let count = tempfile::NamedTempFile::new().expect("count file");
+    let command = format!(
+        "node {} {}",
+        script(&format!("const fs=require('fs');const count=process.argv[2];fs.writeFileSync(count,String((Number(fs.readFileSync(count,'utf8')||0))+1));process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:'task-evidence-policy-denied',status:'failed',diagnostics:[{{class:'provider.permission',message:'denied',data:{{kind:'permission_denied',path:'/workspace/.homeboy/evidence/input.json'}}}}]}}));")),
+        count.path().display(),
+    );
+    let (mut request, provider) = request("task-evidence-policy-denied", command);
+    request.executor.config =
+        json!({"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/input.json"}]});
+
+    let outcome = run_provider_command(&request, &provider, None);
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::PolicyDenied)
+    );
+    assert_eq!(
+        outcome.metadata["control_plane_failure"]["phase"],
+        "provider_evidence_preflight"
+    );
+    assert_eq!(
+        std::fs::read_to_string(count.path()).expect("read count"),
+        "1"
+    );
+}
+
+#[test]
+fn policy_denial_prose_without_a_declared_structured_path_is_not_reclassified() {
+    let command = format!(
+        "node {}",
+        script("process.stdout.write(JSON.stringify({status:'failed',summary:'permission policy denied external_directory /workspace/.homeboy/evidence/input.json'}));")
+    );
+    let (mut request, provider) = request("task-evidence-policy-prose", command);
+    request.executor.config =
+        json!({"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/input.json"}]});
+    let outcome = run_provider_command(&request, &provider, None);
+    assert_ne!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::PolicyDenied)
+    );
+}
+
 /// A provider killed by an external SIGTERM must not be reported as
 /// "the provider produced no output". The two failures have different causes
 /// and different remediations, and collapsing them sends operators at the

@@ -2064,11 +2064,12 @@ fn rejection_allows_one_repair_and_restart_revalidates_before_finalization() {
         .expect("green promotion recorded");
         let _verifier = AcceptanceVerifierTestGuard::install(Box::new(FixtureAcceptanceVerifier));
 
-        let rejected = record_acceptance_verdict(
+        let rejected = record_acceptance_verdict_with_feedback(
             run_id,
             AgentTaskAcceptanceVerdict::Rejected,
             vec!["review://fixture/rejection".to_string()],
             "fixture-token".to_string(),
+            Some("Handle the reviewer concern.".to_string()),
         )
         .expect("rejection recorded");
         assert_eq!(
@@ -2082,6 +2083,18 @@ fn rejection_allows_one_repair_and_restart_revalidates_before_finalization() {
 
         let repair = retry(run_id, None).expect("one rejection repair is available");
         assert_eq!(repair.metadata["acceptance_repair_lineage"]["count"], 1);
+        let persisted_repair_plan = load_plan(&repair.run_id).expect("restart loads repair plan");
+        assert!(persisted_repair_plan.tasks[0]
+            .instructions
+            .contains("Handle the reviewer concern."));
+        assert_eq!(
+            persisted_repair_plan.tasks[0].inputs["cook_loop"]["reviewer_remediation"]["feedback"],
+            "Handle the reviewer concern."
+        );
+        assert_eq!(
+            rejected.metadata["acceptance_repair"]["feedback"], "Handle the reviewer concern.",
+            "reviewer feedback remains durable for the Cook repair planner"
+        );
         let error = retry(&repair.run_id, None).expect_err("repair is bounded to one attempt");
         assert!(error.message.contains("repair budget is exhausted"));
 

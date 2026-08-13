@@ -9,14 +9,15 @@ use super::super::cook_adoption::{
 };
 use super::super::cook_baseline::git_output;
 use super::super::cook_promotion::{
-    cook_finalization_options, cook_report, finalize_cook_pr_with_backend,
-    finalize_or_load_cook_pr_with_backend, moving_base_recovery_for_run,
-    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
-    persist_manual_finalization_intent, persist_manual_finalization_receipt,
-    persisted_promotion_for_attempt, prepare_manual_finalization_identity,
-    record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
-    CookReportInput, MovingBaseCookRecovery,
+    canonical_cook_patch_artifact_id, cook_finalization_options, cook_promotion_argv, cook_report,
+    finalize_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend,
+    moving_base_recovery_for_run, moving_base_recovery_from_promotion, moving_base_recovery_report,
+    next_moving_base_recovery, persist_manual_finalization_intent,
+    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
+    prepare_manual_finalization_identity, record_replacement_gate_proof,
+    recover_cook_pr_with_backend, recover_moving_base_cook_candidate,
+    refreshed_moving_base_recovery, selected_candidate_task_id, CookReportInput,
+    MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::persist_initial_recipe;
 use super::*;
@@ -648,6 +649,367 @@ fn seed_substantive_candidate_aggregate(
         },
     )
     .expect("persist candidate aggregate");
+}
+
+fn seed_patch_alias_aggregate(
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    patches: &[(&str, &std::path::Path, &str)],
+) {
+    use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use crate::agent_task_scheduler::{
+        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+    };
+
+    let task = plan.tasks.first().expect("candidate plan has one task");
+    let artifacts = patches
+        .iter()
+        .map(|(id, path, patch)| {
+            std::fs::write(path, patch).expect("write candidate patch");
+            AgentTaskArtifact {
+                id: (*id).to_string(),
+                kind: "patch".to_string(),
+                path: Some(path.display().to_string()),
+                size_bytes: Some(patch.len() as u64),
+                sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
+                    patch.as_bytes(),
+                )),
+                metadata: serde_json::json!({
+                    "producer_attempt": 2,
+                    "base_ref": "main",
+                    "provider_backend": "fixture",
+                }),
+                ..Default::default()
+            }
+        })
+        .collect();
+    agent_task_lifecycle::record_run_aggregate(
+        run_id,
+        plan,
+        &AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                succeeded: 1,
+                ..Default::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: task.task_id.clone(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: None,
+                failure_classification: None,
+                artifacts,
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: test_review_form_outputs(),
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        },
+    )
+    .expect("persist candidate aggregate");
+}
+
+#[test]
+fn cook_selects_successful_rotated_patch_and_collapses_equivalent_aliases() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("candidate artifacts");
+        let cook_id = "cook-canonical-rotated-alias";
+        let timed_out = "cook-canonical-rotated-alias-attempt-1";
+        let successful = "cook-canonical-rotated-alias-attempt-2";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = timed_out.to_string();
+        persist_initial_recipe(&options).unwrap();
+        super::super::record_recipe_attempt(cook_id, 2, successful, &options.initial_plan).unwrap();
+        for (attempt, run_id) in [(1, timed_out), (2, successful)] {
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
+            agent_task_lifecycle::record_cook_attempt(cook_id, attempt, run_id).unwrap();
+        }
+        seed_timeout_review_form_aggregate(timed_out, &options.initial_plan);
+        let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        seed_patch_alias_aggregate(
+            successful,
+            &options.initial_plan,
+            &[
+                ("patch", &temp.path().join("patch"), patch),
+                ("provider-alias", &temp.path().join("alias"), patch),
+            ],
+        );
+
+        assert_eq!(
+            canonical_cook_patch_artifact_id(&options, successful).unwrap(),
+            Some("patch".to_string())
+        );
+    });
+}
+
+#[test]
+fn cook_requires_selection_for_distinct_canonical_patches_before_promotion() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("candidate artifacts");
+        let cook_id = "cook-canonical-distinct";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        let mut options = options;
+        options.gates.private_verify = vec!["private gate".to_string()];
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .unwrap();
+        seed_patch_alias_aggregate(
+            &options.initial_run_id,
+            &options.initial_plan,
+            &[
+                (
+                    "patch-a",
+                    &temp.path().join("a"),
+                    "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+one\n",
+                ),
+                (
+                    "patch-b",
+                    &temp.path().join("b"),
+                    "diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-old\n+two\n",
+                ),
+            ],
+        );
+
+        let error = canonical_cook_patch_artifact_id(&options, &options.initial_run_id)
+            .expect_err("distinct candidates require a choice");
+        assert_eq!(error.details["state"], "selection_required");
+        assert_eq!(error.details["choices"].as_array().unwrap().len(), 2);
+        assert!(error.details["choices"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("--private-verify"));
+    });
+}
+
+#[test]
+fn cook_selection_command_shell_round_trips_the_full_promotion_contract() {
+    use std::collections::BTreeMap;
+
+    let mut options = batch_cook_options(
+        "cook shell contract",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    options.to_worktree = "repo@candidate worktree".to_string();
+    options.base = "release branch".to_string();
+    options.provider_invocation = Some(homeboy_core::command_invocation::CommandInvocation {
+        argv: vec![
+            "provider tool".to_string(),
+            "--prompt=fix 'quoted' value".to_string(),
+        ],
+        ..Default::default()
+    });
+    options.gates = crate::agent_task_gate::VerifyGateOptions {
+        verify: vec!["cargo test --package 'space name'".to_string()],
+        private_verify: vec!["private gate --token '$SAFE'".to_string()],
+        gate_environment: crate::agent_task_gate::AgentTaskGateEnvironmentPolicy {
+            mode: crate::agent_task_gate::AgentTaskGateEnvironmentMode::Replace,
+            variables: BTreeMap::from([("MESSAGE".to_string(), "hello world".to_string())]),
+            preserve: BTreeMap::from([("TOOL_HOME".to_string(), "HOME/.tool path".to_string())]),
+            extension_inputs: vec![serde_json::from_value(serde_json::json!({
+                "id": "extension input",
+                "source": "/tmp/input with spaces",
+            }))
+            .unwrap()],
+            ..Default::default()
+        },
+        gate_package_artifacts: vec![serde_json::from_value(serde_json::json!({
+            "id": "package artifact",
+            "environment": {"name": "PACKAGE_PATH", "default": "/tmp/package with spaces"},
+            "required_paths": [{"path": "artifact file.json"}],
+            "remediation": {"command": "install --with spaces"},
+        }))
+        .unwrap()],
+        gate_toolchains: vec![crate::agent_task_gate::AgentTaskGateToolchainRequirement {
+            command: "tool with spaces".to_string(),
+            probe_arguments: vec!["probe".to_string(), "--format=json".to_string()],
+        }],
+        ..Default::default()
+    };
+
+    let expected = cook_promotion_argv(&options, "run id", "task id", "patch id");
+    let rendered = super::super::cook_promotion::cook_promotion_command(
+        &options, "run id", "task id", "patch id",
+    );
+    let output = Command::new("sh")
+        .args(["-c", &format!("set -- {rendered}; printf '%s\\0' \"$@\"")])
+        .output()
+        .expect("execute rendered command through POSIX shell");
+    assert!(output.status.success());
+    let actual = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty())
+        .map(|argument| String::from_utf8(argument.to_vec()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    assert!(actual
+        .windows(2)
+        .any(|args| args == ["--verify", "cargo test --package 'space name'"]));
+    assert!(actual
+        .windows(2)
+        .any(|args| args == ["--private-verify", "private gate --token '$SAFE'"]));
+    assert!(actual
+        .windows(2)
+        .any(|args| args == ["--gate-env", "MESSAGE=hello world"]));
+    assert!(actual.contains(&"--provider-argv=provider tool".to_string()));
+    assert!(actual.contains(&"--provider-argv=--prompt=fix 'quoted' value".to_string()));
+    let toolchain_spec = actual
+        .windows(2)
+        .find(|args| args[0] == "--gate-toolchain-spec")
+        .map(|args| {
+            serde_json::from_str::<crate::agent_task_gate::AgentTaskGateToolchainRequirement>(
+                &args[1],
+            )
+            .unwrap()
+        })
+        .expect("non-default toolchain probe is rendered as an exact JSON contract");
+    assert_eq!(toolchain_spec.probe_arguments, ["probe", "--format=json"]);
+}
+
+#[derive(Clone)]
+struct CanonicalSelectionSideEffects {
+    promotions: Arc<AtomicUsize>,
+    selected_artifact: Arc<Mutex<Option<String>>>,
+}
+
+impl CookSideEffectService for CanonicalSelectionSideEffects {
+    fn promote(
+        &mut self,
+        options: &AgentTaskCookServiceOptions,
+        run_id: &str,
+    ) -> Result<AgentTaskPromotionReport> {
+        self.promotions.fetch_add(1, Ordering::SeqCst);
+        let artifact = canonical_cook_patch_artifact_id(options, run_id)?;
+        *self.selected_artifact.lock().unwrap() = artifact;
+        Ok(promotion(run_id))
+    }
+
+    fn recover_moving_base(
+        &mut self,
+        _options: &AgentTaskCookServiceOptions,
+        _recovery: &MovingBaseCookRecovery,
+    ) -> Result<AgentTaskPromotionReport> {
+        unreachable!("canonical selection stops before moving-base recovery")
+    }
+
+    fn finalize(
+        &mut self,
+        _options: &AgentTaskCookServiceOptions,
+        _run_id: &str,
+        _promotion: &AgentTaskPromotionReport,
+    ) -> Result<Value> {
+        unreachable!("no-finalize Cook must not finalize")
+    }
+}
+
+#[test]
+fn cook_promotes_the_rotated_success_after_a_retained_timeout_with_aliases_collapsed() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().unwrap();
+        let cook_id = "cook-full-rotated-alias";
+        let timed_out = "cook-full-rotated-alias-attempt-1";
+        let successful = "cook-full-rotated-alias-attempt-2";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.max_attempts = 2;
+        persist_initial_recipe(&options).unwrap();
+        super::super::record_recipe_attempt(cook_id, 2, successful, &options.initial_plan).unwrap();
+        for (attempt, run_id) in [(1, timed_out), (2, successful)] {
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
+            agent_task_lifecycle::record_cook_attempt(cook_id, attempt, run_id).unwrap();
+        }
+        seed_timeout_review_form_aggregate(timed_out, &options.initial_plan);
+        let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        seed_patch_alias_aggregate(
+            successful,
+            &options.initial_plan,
+            &[
+                ("patch", &temp.path().join("patch"), patch),
+                ("provider-alias", &temp.path().join("alias"), patch),
+            ],
+        );
+        let mut resumed_options = options.clone();
+        resumed_options.initial_run_id = successful.to_string();
+        let promotions = Arc::new(AtomicUsize::new(0));
+        let selected_artifact = Arc::new(Mutex::new(None));
+        let result = run_cook_with_boundaries(
+            resumed_options,
+            UnusedExecutor,
+            CanonicalSelectionSideEffects {
+                promotions: Arc::clone(&promotions),
+                selected_artifact: Arc::clone(&selected_artifact),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.value.status, "green_no_finalize");
+        assert_eq!(promotions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *selected_artifact.lock().unwrap(),
+            Some("patch".to_string())
+        );
+    });
+}
+
+#[test]
+fn cook_persists_selection_required_before_promotion_or_gates() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().unwrap();
+        let cook_id = "cook-full-selection-required";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .unwrap();
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, &options.initial_run_id).unwrap();
+        seed_patch_alias_aggregate(
+            &options.initial_run_id,
+            &options.initial_plan,
+            &[
+                (
+                    "patch-a",
+                    &temp.path().join("a"),
+                    "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+one\n",
+                ),
+                (
+                    "patch-b",
+                    &temp.path().join("b"),
+                    "diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-old\n+two\n",
+                ),
+            ],
+        );
+        let promotions = Arc::new(AtomicUsize::new(0));
+        let result = run_cook_with_boundaries(
+            options.clone(),
+            UnusedExecutor,
+            CanonicalSelectionSideEffects {
+                promotions: Arc::clone(&promotions),
+                selected_artifact: Arc::new(Mutex::new(None)),
+            },
+        )
+        .unwrap();
+        let record = agent_task_lifecycle::status(&options.initial_run_id).unwrap();
+        assert_eq!(result.value.status, "selection_required");
+        assert_eq!(promotions.load(Ordering::SeqCst), 1);
+        assert!(record.metadata.get("latest_promotion").is_none());
+        assert_eq!(
+            record.metadata["cook_selection_required"]["state"],
+            "selection_required"
+        );
+        assert_eq!(
+            record.metadata["cook_selection_required"]["choices"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    });
 }
 
 #[test]
@@ -5494,7 +5856,20 @@ fn cook_persists_materialization_failure_without_provider_execution() {
         assert!(result.value.attempts.is_empty());
         assert!(result.value.failure_context.is_some());
         assert!(super::super::recipe_exists(cook_id).expect("durable recipe lookup"));
-        assert!(!agent_task_lifecycle::run_record_exists(run_id).expect("run record lookup"));
+        let record = agent_task_lifecycle::status(run_id).expect("persisted failed attempt");
+        assert_eq!(
+            record.state,
+            agent_task_lifecycle::AgentTaskRunState::Queued
+        );
+        assert_eq!(
+            result
+                .value
+                .failure_context
+                .unwrap()
+                .provider_executions_consumed,
+            0
+        );
+        assert!(agent_task_lifecycle::run_record_exists(run_id).expect("run record lookup"));
     });
 }
 
@@ -6312,8 +6687,8 @@ fn cook_batch_preserves_order_concurrency_and_failure_isolation_process() {
     .expect("batch completes despite an individual cook failure");
 
     assert_eq!(entered.load(Ordering::SeqCst), 2);
-    assert_eq!(result.exit_code, 0);
-    assert_eq!(result.value.status, "running");
+    assert_eq!(result.exit_code, 0, "{:#?}", result.value);
+    assert_eq!(result.value.status, "running", "{:#?}", result.value);
     assert_eq!(result.value.total, 2);
     assert_eq!(result.value.succeeded, 0);
     assert_eq!(result.value.running, 1);
@@ -7087,12 +7462,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         assert!(backend
             .body
             .contains("**Model:** Implementation: fixture-model-implementation; review form: fixture-model-review"));
-        assert!(backend.body.contains(
-            "**Used for:** Implementation: Homeboy (fixture-provider) authored the delivered candidate changes"
-        ));
-        assert!(backend.body.contains(
-            "Review form: Homeboy (fixture-provider) reviewed the validated candidate and supplied the reviewer metadata."
-        ));
+        assert!(backend.body.contains("**Used for:** test"));
         assert!(backend.committed && backend.pushed && backend.created);
     });
 }
@@ -8069,6 +8439,26 @@ fn terminality_is_declared_by_the_exit_not_read_from_the_status_string() {
         let serialized = serde_json::to_value(&in_flight.value).expect("serialize cook report");
         assert_eq!(serialized["disposition"], "in_flight");
     });
+}
+
+#[test]
+fn selection_required_serializes_as_a_known_terminal_partial_failure() {
+    let report = cook_report(CookReportInput {
+        cook_id: "cook-selection-lifecycle".to_string(),
+        status: "selection_required",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: None,
+        exit_code: 1,
+        invocation_latest_run_id: None,
+    });
+
+    let serialized = serde_json::to_value(&report.value).expect("serialize Cook report");
+    assert_eq!(serialized["status"], "selection_required");
+    assert_eq!(serialized["lifecycle_status"], "partial_failure");
+    assert_eq!(serialized["terminal"], true);
+    assert_eq!(serialized["retryable"], false);
 }
 
 #[test]
@@ -9992,7 +10382,6 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
                 "Close the issue by guarding the reload path.",
                 "Add a null guard in the render path.",
                 "Internal-only change; no compatibility impact.",
-                "Reproduced the failure, isolated the reload path",
                 // Deterministic evidence (orchestrator-owned).
                 "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes as recorded by Cook's deterministic gate.",
                 "Verified candidate scope: 1 changed file(s): src/lib.rs.",
@@ -10031,6 +10420,7 @@ fn cook_finalization_adopts_validated_review_form_used_for_when_option_is_empty(
         );
         options.initial_run_id = run_id.to_string();
         options.ai_used_for.clear();
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
         let plan = options.initial_plan.clone();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
         persist_initial_recipe(&options).unwrap();

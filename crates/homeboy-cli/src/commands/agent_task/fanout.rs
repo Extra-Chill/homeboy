@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
@@ -77,6 +77,66 @@ type CookAttemptDispatcherFactory = dyn Fn(
     ) -> std::sync::Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
     + Send
     + Sync;
+
+const FANOUT_COORDINATOR_HEARTBEAT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+struct CoordinatorHeartbeat {
+    stop: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    stale_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl CoordinatorHeartbeat {
+    fn start(batch_id: String, claim_id: String) -> Self {
+        let (stop, receiver) = std::sync::mpsc::channel();
+        let stale_error = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let worker_error = std::sync::Arc::clone(&stale_error);
+        let worker = std::thread::spawn(move || loop {
+            match receiver.recv_timeout(FANOUT_COORDINATOR_HEARTBEAT_INTERVAL) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Err(error) = batch::heartbeat_fanout_run_batch(&batch_id, &claim_id) {
+                        *worker_error.lock().expect("heartbeat error lock") = Some(error.message);
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+            stale_error,
+        }
+    }
+
+    fn finish(mut self) -> Result<()> {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        if let Some(message) = self
+            .stale_error
+            .lock()
+            .expect("heartbeat error lock")
+            .take()
+        {
+            return Err(Error::validation_invalid_argument(
+                "claim_id", message, None, None,
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for CoordinatorHeartbeat {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
 
 /// Runs controller-owned cook-batch coordination while dispatching its typed
 /// provider attempts through the caller-selected transport.
@@ -1134,42 +1194,85 @@ fn persist_fanout_run_batch_record(plan: &BatchCookFanoutPlan) -> Result<()> {
     Ok(())
 }
 
+fn claim_fanout_run_batch_coordinator(plan: &BatchCookFanoutPlan) -> Result<String> {
+    persist_fanout_run_batch_record(plan)?;
+    if let Some(claim_id) = batch::claim_fanout_run_batch(&plan.fanout_id)? {
+        return Ok(claim_id);
+    }
+    Err(Error::validation_invalid_argument(
+        "fanout_id",
+        "agent-task fanout run-plan is already being coordinated; inspect its durable status",
+        Some(plan.fanout_id.clone()),
+        None,
+    ))
+}
+
+fn record_batch_failure(plan: &BatchCookFanoutPlan, claim_id: &str, stage: &str, error: &Error) {
+    let _ = batch::record_fanout_run_batch_failure(
+        &plan.fanout_id,
+        claim_id,
+        stage,
+        serde_json::json!({ "message": error.message, "details": error.details }),
+    );
+}
+
 fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
     plan: BatchCookFanoutPlan,
     attempt_dispatcher: &CookAttemptDispatcherFactory,
 ) -> CmdResult<Value> {
+    run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(plan, attempt_dispatcher, None)
+}
+
+fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
+    plan: BatchCookFanoutPlan,
+    attempt_dispatcher: &CookAttemptDispatcherFactory,
+    claim_id: Option<String>,
+) -> CmdResult<Value> {
     let gate_workspace = batch_plan_gate_workspace(&plan)?;
     let gate_contract_validation = validate_batch_gate_contracts(&plan, gate_workspace.as_deref())?;
-    persist_fanout_run_batch_record(&plan)?;
-    persist_batch_cook_recipes(&plan, |options| {
-        record_gate_contract_validation(options, &gate_contract_validation);
-        options.attempt_dispatcher = Some(attempt_dispatcher(options));
-    })?;
-    let ready_plan = plan.ready_plan()?;
-    let cooks = compile_batch_cooks(&ready_plan, |options| {
-        record_gate_contract_validation(options, &gate_contract_validation);
-        options.attempt_dispatcher = Some(attempt_dispatcher(options));
-    })?;
-    let concurrency = batch_concurrency(&plan, &cooks);
-    // Resolved once, here, and bound for the whole batch: every worker thread
-    // re-binds this same absolute instant, so the budget covers the batch
-    // rather than restarting per child.
-    let result = with_current_cook_deadline(plan.cook_deadline(), || {
-        agent_task_service::run_cook_batch_with_control(
-            agent_task_service::AgentTaskCookBatchOptions {
-                batch_id: plan.fanout_id.clone(),
-                cooks,
-                max_concurrency: concurrency.limit,
-            },
-            provider::ExtensionProviderAgentTaskExecutor::discover(),
-            agent_task_service::detached_batch_coordinator_control(&plan.fanout_id),
-        )
-    })?;
-    finalize_provider_worktrees(&plan, &result.value)?;
-    record_terminal_batch_admission_failures(&plan, &result.value)?;
-    notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
-    let result = batch_cook_result(&plan, result, &concurrency);
-    Ok(result)
+    let claim_id = match claim_id {
+        Some(claim_id) => claim_id,
+        None => claim_fanout_run_batch_coordinator(&plan)?,
+    };
+    let outcome = (|| {
+        persist_batch_cook_recipes(&plan, |options| {
+            record_gate_contract_validation(options, &gate_contract_validation);
+            options.attempt_dispatcher = Some(attempt_dispatcher(options));
+        })?;
+        let ready_plan = plan.ready_plan()?;
+        let cooks = compile_batch_cooks(&ready_plan, |options| {
+            record_gate_contract_validation(options, &gate_contract_validation);
+            options.attempt_dispatcher = Some(attempt_dispatcher(options));
+        })?;
+        let concurrency = batch_concurrency(&plan, &cooks);
+        // Resolved once, here, and bound for the whole batch: every worker thread
+        // re-binds this same absolute instant, so the budget covers the batch
+        // rather than restarting per child.
+        let heartbeat = CoordinatorHeartbeat::start(plan.fanout_id.clone(), claim_id.clone());
+        let result = with_current_cook_deadline(plan.cook_deadline(), || {
+            batch::heartbeat_fanout_run_batch(&plan.fanout_id, &claim_id)?;
+            agent_task_service::run_cook_batch_with_control(
+                agent_task_service::AgentTaskCookBatchOptions {
+                    batch_id: plan.fanout_id.clone(),
+                    cooks,
+                    max_concurrency: concurrency.limit,
+                },
+                provider::ExtensionProviderAgentTaskExecutor::discover(),
+                agent_task_service::detached_batch_coordinator_control(&plan.fanout_id),
+            )
+        });
+        heartbeat.finish()?;
+        let result = result?;
+        finalize_provider_worktrees(&plan, &result.value)?;
+        record_terminal_batch_admission_failures(&plan, &result.value)?;
+        notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
+        let result = batch_cook_result(&plan, result, &concurrency);
+        Ok(result)
+    })();
+    if let Err(error) = &outcome {
+        record_batch_failure(&plan, &claim_id, "coordinator", error);
+    }
+    outcome
 }
 
 fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
@@ -1186,35 +1289,59 @@ fn run_batch_cook_fanout_plan_with_executor<E>(
 where
     E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
 {
+    run_batch_cook_fanout_plan_with_executor_claim(plan, executor, None)
+}
+
+fn run_batch_cook_fanout_plan_with_executor_claim<E>(
+    plan: BatchCookFanoutPlan,
+    executor: E,
+    claim_id: Option<String>,
+) -> CmdResult<Value>
+where
+    E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
+{
     let gate_workspace = batch_plan_gate_workspace(&plan)?;
     let gate_contract_validation = validate_batch_gate_contracts(&plan, gate_workspace.as_deref())?;
-    persist_fanout_run_batch_record(&plan)?;
-    persist_batch_cook_recipes(&plan, |options| {
-        record_gate_contract_validation(options, &gate_contract_validation);
-    })?;
-    let ready_plan = plan.ready_plan()?;
-    let cooks = compile_batch_cooks(&ready_plan, |options| {
-        record_gate_contract_validation(options, &gate_contract_validation);
-    })?;
-    let concurrency = batch_concurrency(&plan, &cooks);
-    // See the sibling runner: the budget is resolved once and bound for the
-    // whole batch so it does not restart per child.
-    let result = with_current_cook_deadline(plan.cook_deadline(), || {
-        agent_task_service::run_cook_batch_with_control(
-            agent_task_service::AgentTaskCookBatchOptions {
-                batch_id: plan.fanout_id.clone(),
-                cooks,
-                max_concurrency: concurrency.limit,
-            },
-            executor,
-            agent_task_service::detached_batch_coordinator_control(&plan.fanout_id),
-        )
-    })?;
-    finalize_provider_worktrees(&plan, &result.value)?;
-    record_terminal_batch_admission_failures(&plan, &result.value)?;
-    notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
-    let result = batch_cook_result(&plan, result, &concurrency);
-    Ok(result)
+    let claim_id = match claim_id {
+        Some(claim_id) => claim_id,
+        None => claim_fanout_run_batch_coordinator(&plan)?,
+    };
+    let outcome = (|| {
+        persist_batch_cook_recipes(&plan, |options| {
+            record_gate_contract_validation(options, &gate_contract_validation);
+        })?;
+        let ready_plan = plan.ready_plan()?;
+        let cooks = compile_batch_cooks(&ready_plan, |options| {
+            record_gate_contract_validation(options, &gate_contract_validation);
+        })?;
+        let concurrency = batch_concurrency(&plan, &cooks);
+        // See the sibling runner: the budget is resolved once and bound for the
+        // whole batch so it does not restart per child.
+        let heartbeat = CoordinatorHeartbeat::start(plan.fanout_id.clone(), claim_id.clone());
+        let result = with_current_cook_deadline(plan.cook_deadline(), || {
+            batch::heartbeat_fanout_run_batch(&plan.fanout_id, &claim_id)?;
+            agent_task_service::run_cook_batch_with_control(
+                agent_task_service::AgentTaskCookBatchOptions {
+                    batch_id: plan.fanout_id.clone(),
+                    cooks,
+                    max_concurrency: concurrency.limit,
+                },
+                executor,
+                agent_task_service::detached_batch_coordinator_control(&plan.fanout_id),
+            )
+        });
+        heartbeat.finish()?;
+        let result = result?;
+        finalize_provider_worktrees(&plan, &result.value)?;
+        record_terminal_batch_admission_failures(&plan, &result.value)?;
+        notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
+        let result = batch_cook_result(&plan, result, &concurrency);
+        Ok(result)
+    })();
+    if let Err(error) = &outcome {
+        record_batch_failure(&plan, &claim_id, "coordinator", error);
+    }
+    outcome
 }
 
 fn validate_batch_gate_contracts(
@@ -1555,8 +1682,26 @@ fn cook_batch_inner(
         .cooks
         .iter()
         .any(|cook| !cook.private_verify.is_empty());
-    validate_batch_cook_gates(&plan, batch_gate_workspace(&args)?)?;
-    let worktrees = queue_or_reuse_worktrees(&args, &plan)?;
+    let persisted = args.run_plan && !args.dry_run;
+    let claim_id = persisted
+        .then(|| claim_fanout_run_batch_coordinator(&plan))
+        .transpose()?;
+    if let Err(error) = validate_batch_cook_gates(&plan, batch_gate_workspace(&args)?) {
+        record_batch_preflight_failure(claim_id.as_deref(), &plan, "gate_preflight", &error)?;
+        return Err(error);
+    }
+    let worktrees = match queue_or_reuse_worktrees(&args, &plan) {
+        Ok(worktrees) => worktrees,
+        Err(error) => {
+            record_batch_preflight_failure(
+                claim_id.as_deref(),
+                &plan,
+                "worktree_preflight",
+                &error,
+            )?;
+            return Err(error);
+        }
+    };
     bind_materialized_worktree_paths(&mut plan, &worktrees);
     let blocked = worktrees
         .rows
@@ -1569,6 +1714,14 @@ fn cook_batch_inner(
             )
         })
         .count();
+    if persisted && blocked > 0 {
+        batch::record_fanout_run_batch_failure(
+            &plan.fanout_id,
+            claim_id.as_deref().expect("persisted coordinator claim"),
+            "worktree_preflight",
+            serde_json::json!({ "worktrees": worktrees.rows }),
+        )?;
+    }
     let can_run = !args.dry_run
         && blocked == 0
         && worktrees
@@ -1576,11 +1729,27 @@ fn cook_batch_inner(
             .iter()
             .all(|row| matches!(row.status, worktree::WorktreeQueueCreateStatus::Created));
     let private_artifact_path = if can_run && plan_has_private_gates {
-        bind_materialized_worktrees(&mut plan, &worktrees)?;
+        if let Err(error) = bind_materialized_worktrees(&mut plan, &worktrees) {
+            record_batch_preflight_failure(
+                claim_id.as_deref(),
+                &plan,
+                "worktree_preflight",
+                &error,
+            )?;
+            return Err(error);
+        }
         Some(persist_private_batch_plan(&plan)?)
     } else {
         if can_run {
-            bind_materialized_worktrees(&mut plan, &worktrees)?;
+            if let Err(error) = bind_materialized_worktrees(&mut plan, &worktrees) {
+                record_batch_preflight_failure(
+                    claim_id.as_deref(),
+                    &plan,
+                    "worktree_preflight",
+                    &error,
+                )?;
+                return Err(error);
+            }
         }
         None
     };
@@ -1588,16 +1757,30 @@ fn cook_batch_inner(
         // Compare the exact workspace-bound recipe that provider execution will
         // persist, not the handle-only planning form created before worktree
         // materialization.
-        preflight_batch_cook_recipes(&plan, attempt_dispatcher)?;
+        if let Err(error) = preflight_batch_cook_recipes(&plan, attempt_dispatcher) {
+            record_batch_preflight_failure(
+                claim_id.as_deref(),
+                &plan,
+                "provider_preflight",
+                &error,
+            )?;
+            return Err(error);
+        }
     } else if args.dry_run {
         preflight_batch_cook_recipe_declarations(&plan)?;
     }
     let run_result = if args.run_plan && can_run {
         let (value, exit_code) = match attempt_dispatcher {
-            Some(dispatcher) => {
-                run_batch_cook_fanout_plan_with_attempt_dispatcher(plan.clone(), dispatcher)?
-            }
-            None => run_batch_cook_fanout_plan(plan.clone())?,
+            Some(dispatcher) => run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
+                plan.clone(),
+                dispatcher,
+                claim_id.clone(),
+            )?,
+            None => run_batch_cook_fanout_plan_with_executor_claim(
+                plan.clone(),
+                provider::ExtensionProviderAgentTaskExecutor::discover(),
+                claim_id.clone(),
+            )?,
         };
         Some(serde_json::json!({ "exit_code": exit_code, "result": value }))
     } else {
@@ -1625,40 +1808,56 @@ fn cook_batch_inner(
 
     Ok((
         serde_json::json!({
-            "schema": "homeboy/agent-task-cook-batch/v1",
-            "fanout_id": plan.fanout_id,
-            "status": status,
-            "dry_run": args.dry_run,
-            "summary": {
-                "issues": plan.cooks.len(),
-                "worktrees_total": worktrees.rows.len(),
-                "worktrees_blocked": blocked,
-            },
-            "preflight": {
-                "provider_readiness_command": provider_readiness_command(&args),
-                "provider_selection": provider_selection_preflight(&args),
-                "deterministic_gates": effective_batch_cook_gates(&plan)
-            },
-            "worktrees": worktrees,
-            "plan": public_batch_cook_plan(&plan),
-            "run_result": run_result,
-            "commands": cook_batch_commands(&args, plan_has_private_gates, private_artifact_path.as_deref()),
-            // `run_result.is_some()` rather than `args.run_plan`: the durable
-            // batch record the status/artifacts/resume commands read only
-            // exists once the plan actually ran.
-            "next_actions": cook_batch_next_actions(
-                &args,
-                &plan.fanout_id,
-                status,
-                run_result.is_some(),
-                resume_legal,
-                &worktrees,
-                plan_has_private_gates,
-                private_artifact_path.as_deref(),
-            ),
-        }),
+                "schema": "homeboy/agent-task-cook-batch/v1",
+                "fanout_id": plan.fanout_id,
+                "status": status,
+                "dry_run": args.dry_run,
+                "summary": {
+                    "issues": plan.cooks.len(),
+                    "worktrees_total": worktrees.rows.len(),
+                    "worktrees_blocked": blocked,
+                },
+                "preflight": {
+                    "provider_readiness_command": provider_readiness_command(&args),
+                    "provider_selection": provider_selection_preflight(&args),
+                    "deterministic_gates": effective_batch_cook_gates(&plan)
+                },
+                "worktrees": worktrees,
+                "plan": public_batch_cook_plan(&plan),
+                "run_result": run_result,
+        "commands": cook_batch_commands(&args, plan_has_private_gates, private_artifact_path.as_deref()),
+                // Named run-plan persists before worktree/provider preflight, so
+                // status and artifacts remain available when admission is blocked.
+                "next_actions": cook_batch_next_actions(
+                    &args,
+                    &plan.fanout_id,
+                    status,
+                    persisted,
+                    resume_legal,
+                    &worktrees,
+                    plan_has_private_gates,
+                    private_artifact_path.as_deref(),
+                ),
+            }),
         exit_code,
     ))
+}
+
+fn record_batch_preflight_failure(
+    claim_id: Option<&str>,
+    plan: &BatchCookFanoutPlan,
+    stage: &str,
+    error: &Error,
+) -> Result<()> {
+    let Some(claim_id) = claim_id else {
+        return Ok(());
+    };
+    batch::record_fanout_run_batch_failure(
+        &plan.fanout_id,
+        claim_id,
+        stage,
+        serde_json::json!({ "message": error.message, "details": error.details }),
+    )
 }
 
 fn normalize_cook_batch_repo(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
@@ -1786,6 +1985,12 @@ fn cook_batch_argv(args: &AgentTaskFanoutCookBatchArgs) -> Vec<String> {
         for value in values {
             command.extend([flag.to_string(), value.clone()]);
         }
+    }
+    for value in &args.gates.gate_toolchain_specs {
+        command.extend([
+            "--gate-toolchain-spec".to_string(),
+            serde_json::to_string(value).expect("gate toolchain spec serializes"),
+        ]);
     }
     for (flag, values) in [
         ("--gate-env", &args.gates.gate_environment),
@@ -2768,6 +2973,8 @@ struct BatchCookSpec {
     concurrency: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_config: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    provider_evidence_inputs: Vec<super::args::AgentTaskProviderEvidenceInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_context: Option<String>,
     to_worktree: String,
@@ -2876,8 +3083,35 @@ impl BatchCookSpec {
                 "each fanout cook requires verify or private_verify so PR finalization has deterministic gates",
             ));
         }
+        let mut prompt = self.prompt.clone();
+        let workspace_root = self.workspace.as_deref().or(self.cwd.as_deref());
+        let mut provider_config = self.provider_config.clone();
+        if let Some(workspace) = workspace_root {
+            let evidence = super::run::project_provider_evidence_inputs(
+                &self.provider_evidence_inputs,
+                Path::new(workspace),
+                None,
+            )?;
+            if !evidence.is_empty() {
+                let raw = provider_config.as_deref().unwrap_or("{}");
+                let mut config: Value = homeboy::core::config::read_json_spec_to_string(raw)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if !config.is_object() {
+                    config = serde_json::json!({});
+                }
+                config["evidence_inputs"] = serde_json::Value::Array(evidence);
+                provider_config = Some(config.to_string());
+            }
+            super::run::rewrite_provider_evidence_prompt(
+                &mut prompt,
+                &self.provider_evidence_inputs,
+                Some(workspace),
+            );
+        }
         let dispatch = AgentTaskDispatchCommand {
-            prompt: self.prompt.clone(),
+            prompt,
             tasks: self.tasks.clone(),
             cwd: self.cwd.clone(),
             workspace: self
@@ -2896,7 +3130,7 @@ impl BatchCookSpec {
             task_id: None,
             core: DispatchCoreInputs {
                 tasks_json: None,
-                provider_config: self.provider_config.clone(),
+                provider_config,
                 client_context: Some(merged_client_context(plan, self)),
                 attempts: self.attempts,
                 same_provider_retries: self.same_provider_retries,
@@ -3063,6 +3297,10 @@ pub(crate) fn cook_batch_fanout_id(args: &AgentTaskFanoutCookBatchArgs) -> Resul
 }
 
 fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCookFanoutPlan> {
+    super::run::validate_provider_evidence_inputs(
+        &args.provider_evidence_inputs,
+        args.prompt_template.as_deref(),
+    )?;
     let profiles = load_verification_profiles(args.verification_profiles.as_deref())?;
     let mut seen = HashSet::new();
     let mut cooks = Vec::with_capacity(args.issues.len());
@@ -3116,6 +3354,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             provider_rotations: None,
             concurrency: 1,
             provider_config: args.provider_config.clone(),
+            provider_evidence_inputs: args.provider_evidence_inputs.clone(),
             client_context: Some(
                 serde_json::json!({
                     "issue_url": issue_url,
@@ -3746,10 +3985,8 @@ fn cook_batch_commands(
 /// # Why the branches differ
 ///
 /// `homeboy agent-task fanout status|artifacts|resume <fanout_id>` all read a
-/// durable batch record, and that record is only persisted once the plan is
-/// actually run (`persist_fanout_run_batch_record`). Offering them for a
-/// dry run or a blocked plan would name commands that fail. Each branch
-/// therefore emits only what is executable at that point.
+/// durable batch record. A named run-plan creates it before preflight, so a
+/// blocked durable batch exposes status and artifacts alongside repair steps.
 fn cook_batch_next_actions(
     args: &AgentTaskFanoutCookBatchArgs,
     fanout_id: &str,
@@ -3800,6 +4037,22 @@ fn cook_batch_next_actions(
             CommandNextAction::new("rerun this cook-batch once the worktrees exist", command)
                 .with_kind(CommandNextActionKind::Repair),
         );
+        if executed {
+            actions.push(
+                CommandNextAction::new(
+                    "show persisted batch status",
+                    format!("homeboy agent-task fanout status {fanout_id}"),
+                )
+                .with_kind(CommandNextActionKind::Show),
+            );
+            actions.push(
+                CommandNextAction::new(
+                    "list persisted batch artifacts",
+                    format!("homeboy agent-task fanout artifacts {fanout_id}"),
+                )
+                .with_kind(CommandNextActionKind::Artifacts),
+            );
+        }
         return actions;
     }
 
@@ -5264,6 +5517,7 @@ fi
             provider_profile: None,
             secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_TOKEN".to_string()],
             provider_config: Some(r#"{"runtime":"opencode"}"#.to_string()),
+            provider_evidence_inputs: Vec::new(),
             ai_tool: None,
             gates: super::super::args::VerifyGateArgs {
                 accept_inherited_failures: false,
@@ -5284,6 +5538,7 @@ fi
                 gate_environment: Vec::new(),
                 gate_environment_preserve: Vec::new(),
                 gate_toolchains: Vec::new(),
+                gate_toolchain_specs: Vec::new(),
                 isolate_gate_home: true,
                 isolate_gate_xdg: true,
                 gate_shared_cargo_target: false,
@@ -5355,6 +5610,12 @@ fi
             handle.gates.gate_environment_mode = "replace".to_string();
             handle.gates.gate_environment = vec![("FEATURE".to_string(), "enabled".to_string())];
             handle.gates.gate_toolchains = vec!["fixture-tool".to_string()];
+            handle.gates.gate_toolchain_specs = vec![
+                homeboy::agents::agent_tasks::gate::AgentTaskGateToolchainRequirement {
+                    command: "custom-tool".to_string(),
+                    probe_arguments: vec!["probe".to_string(), "--json".to_string()],
+                },
+            ];
             handle.max_concurrency = Some(3);
             handle.max_duration = Some(120);
             let error = normalize_cook_batch_repo(&mut handle).expect_err("handle is not a repo");
@@ -5370,6 +5631,66 @@ fi
                 .expect("private reentry instruction");
             assert!(reentry.contains("--repo fixture"));
             assert!(!reentry.contains(private_sentinel));
+            let mut public_handle = handle.clone();
+            public_handle.gates.private_verify.clear();
+            let mut corrected = public_handle.clone();
+            corrected.repo = "fixture".to_string();
+            let expected_command = quote_args(&cook_batch_argv(&corrected));
+            let error = normalize_cook_batch_repo(&mut public_handle)
+                .expect_err("public fixture handle remains invalid");
+            assert_eq!(
+                error.details["correction_command"], expected_command,
+                "the correction changes only --repo"
+            );
+
+            let cli = Cli::try_parse_from(cook_batch_argv(&corrected))
+                .expect("correction command remains a valid invocation");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let AgentTaskCommand::Fanout(fanout) = agent_task.command else {
+                panic!("fanout command");
+            };
+            let AgentTaskFanoutCommand::CookBatch(replayed) = fanout.command else {
+                panic!("cook-batch command");
+            };
+            assert_eq!(replayed.repo, "fixture");
+            assert_eq!(replayed.from, corrected.from);
+            assert_eq!(replayed.base, corrected.base);
+            assert_eq!(replayed.branch_prefix, corrected.branch_prefix);
+            assert_eq!(replayed.fanout_id, corrected.fanout_id);
+            assert_eq!(replayed.backend, corrected.backend);
+            assert_eq!(replayed.selector, corrected.selector);
+            assert_eq!(replayed.model, corrected.model);
+            assert_eq!(replayed.provider_profile, corrected.provider_profile);
+            assert_eq!(replayed.secret_env, corrected.secret_env);
+            assert_eq!(replayed.gates.verify, corrected.gates.verify);
+            assert_eq!(
+                replayed.gates.private_verify,
+                corrected.gates.private_verify
+            );
+            assert_eq!(
+                replayed.gates.gate_execution_policy,
+                corrected.gates.gate_execution_policy
+            );
+            assert_eq!(
+                replayed.gates.gate_timeout_seconds,
+                corrected.gates.gate_timeout_seconds
+            );
+            assert_eq!(
+                replayed.gates.gate_environment,
+                corrected.gates.gate_environment
+            );
+            assert_eq!(
+                replayed.gates.gate_toolchains,
+                corrected.gates.gate_toolchains
+            );
+            assert_eq!(
+                replayed.gates.gate_toolchain_specs,
+                corrected.gates.gate_toolchain_specs
+            );
+            assert_eq!(replayed.max_concurrency, corrected.max_concurrency);
+            assert_eq!(replayed.max_duration, corrected.max_duration);
 
             let mut unknown = cook_batch_args();
             unknown.repo = home.path().join("unknown").to_string_lossy().to_string();
@@ -6359,7 +6680,7 @@ fi
             &cook_batch_args(),
             "issue-wave",
             "blocked",
-            false,
+            true,
             false,
             &worktrees,
             false,
@@ -6385,6 +6706,12 @@ fi
                 .any(|command| command.contains("--run-plan")),
             "the rerun command must be named: {commands:?}"
         );
+        assert!(commands
+            .iter()
+            .any(|command| command == "homeboy agent-task fanout status issue-wave"));
+        assert!(commands
+            .iter()
+            .any(|command| command == "homeboy agent-task fanout artifacts issue-wave"));
     }
 
     #[test]
@@ -6410,6 +6737,8 @@ fi
             false,
             false,
             &worktree_output(vec![row]),
+            false,
+            None,
         );
         let command = &actions[0].command;
 
@@ -6422,9 +6751,8 @@ fi
         assert!(!command.starts_with("homeboy homeboy "));
     }
 
-    /// `fanout status|artifacts|resume` read a durable batch record that only
-    /// exists once the plan ran. Offering them before that names commands that
-    /// fail.
+    /// Named run-plans persist before preflight, while dry plans have no durable
+    /// batch record to inspect.
     #[test]
     fn batch_record_commands_are_only_offered_once_the_batch_has_run() {
         let worktrees = worktree_output(vec![worktree_row(

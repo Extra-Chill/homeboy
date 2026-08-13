@@ -113,6 +113,8 @@ pub enum CookStatus {
     ExecutionBudgetExhausted,
     /// Stopped by policy.
     PolicyFailure,
+    /// Stopped until an operator selects one of several distinct patch candidates.
+    SelectionRequired,
     /// The provider failed.
     ProviderFailure,
     /// Failed with a durable recipe intact.
@@ -156,6 +158,7 @@ impl CookStatus {
             "retries_exhausted" => Self::RetriesExhausted,
             "execution_budget_exhausted" => Self::ExecutionBudgetExhausted,
             "policy_failure" => Self::PolicyFailure,
+            "selection_required" => Self::SelectionRequired,
             "provider_failure" => Self::ProviderFailure,
             "durable_failure" => Self::DurableFailure,
             "pre_execution_failure" => Self::PreExecutionFailure,
@@ -188,6 +191,7 @@ impl CookStatus {
             Self::RetriesExhausted => "retries_exhausted",
             Self::ExecutionBudgetExhausted => "execution_budget_exhausted",
             Self::PolicyFailure => "policy_failure",
+            Self::SelectionRequired => "selection_required",
             Self::ProviderFailure => "provider_failure",
             Self::DurableFailure => "durable_failure",
             Self::PreExecutionFailure => "pre_execution_failure",
@@ -315,6 +319,7 @@ mod tests {
             "cancelled",
             "timed_out",
             "durable_failure",
+            "selection_required",
         ] {
             assert!(
                 !CookStatus::from_status(status).is_in_flight(),
@@ -388,6 +393,7 @@ mod tests {
             CookStatus::RetriesExhausted,
             CookStatus::ExecutionBudgetExhausted,
             CookStatus::PolicyFailure,
+            CookStatus::SelectionRequired,
             CookStatus::ProviderFailure,
             CookStatus::DurableFailure,
             CookStatus::PreExecutionFailure,

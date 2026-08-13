@@ -867,6 +867,16 @@ const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route
 /// Record that the `cook-continue` lifecycle route selected this exact attempt.
 /// This is durable route authority, not caller-controlled plan metadata.
 pub fn authorize_cook_continue_route(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    authorize_cook_continue_route_with_artifact(options, None)
+}
+
+/// Persist the continuation-only patch selection beside route authority. The
+/// selector is consumed solely by controller promotion and never reaches a
+/// provider request, so retrying promotion cannot spend another execution.
+pub fn authorize_cook_continue_route_with_artifact(
+    options: &AgentTaskCookServiceOptions,
+    artifact_id: Option<&str>,
+) -> Result<()> {
     agent_task_lifecycle::exact_record(&options.initial_run_id)?;
     agent_task_lifecycle::record_metadata_value(
         &options.initial_run_id,
@@ -875,6 +885,7 @@ pub fn authorize_cook_continue_route(options: &AgentTaskCookServiceOptions) -> R
             "schema": COOK_CONTINUE_ROUTE_SCHEMA,
             "cook_id": options.cook_id,
             "run_id": options.initial_run_id,
+            "artifact_id": artifact_id,
         }),
     )
 }
@@ -1478,7 +1489,12 @@ pub struct AgentTaskCookBatchReport {
 /// from, so this parses instead of keeping a second copy of that list.
 /// Anything unparseable stays `Unknown` rather than being guessed.
 fn batch_lifecycle_status(status: &str) -> RunLifecycleStatus {
-    serde_json::from_value(Value::String(status.to_string())).unwrap_or(RunLifecycleStatus::Unknown)
+    match status {
+        "planning" => RunLifecycleStatus::Queued,
+        "admitting" => RunLifecycleStatus::Running,
+        _ => serde_json::from_value(Value::String(status.to_string()))
+            .unwrap_or(RunLifecycleStatus::Unknown),
+    }
 }
 
 impl AgentTaskCookBatchReport {
@@ -1667,6 +1683,8 @@ mod run_lifecycle_projection_tests {
         use crate::agent_task_batch::AgentTaskBatchState;
 
         for state in [
+            AgentTaskBatchState::Planning,
+            AgentTaskBatchState::Admitting,
             AgentTaskBatchState::Queued,
             AgentTaskBatchState::Running,
             AgentTaskBatchState::Succeeded,
@@ -1676,6 +1694,8 @@ mod run_lifecycle_projection_tests {
             AgentTaskBatchState::TimedOut,
         ] {
             let expected = match state {
+                AgentTaskBatchState::Planning => RunLifecycleStatus::Queued,
+                AgentTaskBatchState::Admitting => RunLifecycleStatus::Running,
                 AgentTaskBatchState::Queued => RunLifecycleStatus::Queued,
                 AgentTaskBatchState::Running => RunLifecycleStatus::Running,
                 AgentTaskBatchState::Succeeded => RunLifecycleStatus::Succeeded,
@@ -2359,6 +2379,18 @@ fn cook_batch_result(
     let total = cooks.len();
     let mut totals = crate::agent_task_batch::AgentTaskBatchTotals::default();
     for cell in &cooks {
+        let status = CookStatus::from_status(&cell.status);
+        match status {
+            CookStatus::Queued => {
+                totals.queued += 1;
+                continue;
+            }
+            CookStatus::Running | CookStatus::InFlight => {
+                totals.running += 1;
+                continue;
+            }
+            _ => {}
+        }
         // A provider-success cell can retain its legacy zero exit code while a
         // Cook that requested a PR is still incomplete. Aggregate completion
         // follows the explicit end-to-end projection, not provider evidence.
@@ -2371,9 +2403,7 @@ fn cook_batch_result(
             totals.failed += 1;
             continue;
         }
-        match CookStatus::from_status(&cell.status) {
-            CookStatus::Queued => totals.queued += 1,
-            CookStatus::Running | CookStatus::InFlight => totals.running += 1,
+        match status {
             CookStatus::Cancelled => totals.cancelled += 1,
             CookStatus::TimedOut => totals.timed_out += 1,
             _ if cell.exit_code == 0 => totals.succeeded += 1,
@@ -4528,14 +4558,28 @@ where
                     promotion: None,
                     feedback: None,
                 });
-                let recovery = "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string();
+                let selection_required = error.details["selection_required"] == Value::Bool(true);
+                let recovery = if selection_required {
+                    agent_task_lifecycle::record_metadata_value(
+                        &run_id,
+                        "cook_selection_required",
+                        error.details.clone(),
+                    )?;
+                    "Cook found distinct canonical patch candidates. Select one of the exact commands in failure_context before promotion.".to_string()
+                } else {
+                    "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string()
+                };
                 agent_task_lifecycle::record_cook_controller_failure(
                     &run_id,
                     &bounded_error_diagnostic(&error),
                 )?;
                 return Ok(cook_report(CookReportInput {
                     cook_id,
-                    status: "policy_failure",
+                    status: if selection_required {
+                        "selection_required"
+                    } else {
+                        "policy_failure"
+                    },
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,

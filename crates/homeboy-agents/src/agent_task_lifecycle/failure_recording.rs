@@ -1073,6 +1073,12 @@ pub(crate) fn project_terminal_artifacts(
             let remote_runner = record.runner_id().filter(|runner_id| {
                 super::lifecycle_ops::execution_runner_id().as_deref() != Some(*runner_id)
             });
+            // Only artifacts consumed after terminalization need controller
+            // bytes. Other declarations remain review metadata and can name a
+            // producer-local path that no longer exists.
+            if !requires_durable_lab_projection(artifact) {
+                continue;
+            }
             if actionable
                 && (artifact.size_bytes.is_none()
                     || artifact.sha256.is_none()
@@ -1108,7 +1114,7 @@ pub(crate) fn project_terminal_artifacts(
             sha2::Digest::update(&mut id_hash, [0]);
             sha2::Digest::update(&mut id_hash, logical_id.as_bytes());
             let artifact_id = format!("agent-task-{:x}", id_hash.finalize());
-            let metadata = json!({
+            let mut metadata = json!({
                 "name": logical_id,
                 "agent_task": {
                     "task_id": outcome.task_id,
@@ -1116,14 +1122,38 @@ pub(crate) fn project_terminal_artifacts(
                     "runner_provenance": artifact.metadata,
                 }
             });
-            if reusable_terminal_artifact(
-                &store,
-                &record.run_id,
-                &outcome.task_id,
-                artifact,
-                &artifact_id,
-                &metadata,
-            )? {
+            if remote_runner.is_none() {
+                // A local artifact record is copied into the observation store
+                // before it can be reused, so tag that retained controller copy
+                // before the idempotency check below.
+                metadata["agent_task"]["projection"] = json!("controller_local");
+            }
+            // Prefer pre-existing executor-finalized bytes over a legacy
+            // direct import. The import remains evidence, while the finalized
+            // projection keeps its established derived controller identity.
+            let finalized_path = remote_runner
+                .map(|_| controller_finalized_artifact_path(artifact))
+                .transpose()?
+                .flatten();
+            if finalized_path.is_some() {
+                stamp_legacy_artifact_provenance(
+                    &store,
+                    &record.run_id,
+                    &outcome.task_id,
+                    artifact,
+                    &artifact_id,
+                )?;
+            }
+            if finalized_path.is_none()
+                && reusable_terminal_artifact(
+                    &store,
+                    &record.run_id,
+                    &outcome.task_id,
+                    artifact,
+                    &artifact_id,
+                    &metadata,
+                )?
+            {
                 continue;
             }
             if let Some(runner_id) = remote_runner {
@@ -1136,41 +1166,39 @@ pub(crate) fn project_terminal_artifacts(
                     ));
                 }
                 validate_artifact_runner_binding(artifact, runner_id)?;
-                match controller_finalized_artifact_path(artifact)? {
-                    Some(path) => {
-                        let mut controller_hash = sha2::Sha256::new();
-                        sha2::Digest::update(&mut controller_hash, b"controller");
-                        sha2::Digest::update(&mut controller_hash, [0]);
-                        sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());
-                        let controller_artifact_id =
-                            format!("agent-task-{:x}", controller_hash.finalize());
-                        let mut metadata = metadata;
-                        metadata["agent_task"]["projection"] = json!("controller_finalized");
-                        store.record_verified_artifact_with_id(
-                            &record.run_id,
-                            &artifact.kind,
-                            path,
-                            &controller_artifact_id,
-                            artifact
-                                .size_bytes
-                                .and_then(|size| i64::try_from(size).ok()),
-                            artifact.sha256.as_deref(),
-                            metadata,
-                        )?;
-                    }
-                    None => {
-                        let remote_ref = homeboy_core::execution_contract::EXECUTION_CONTRACT
-                            .artifacts
-                            .runner_artifact_ref(runner_id, &record.run_id, logical_id);
-                        let mirror_result = if requires_durable_lab_projection(artifact) {
-                            (|| -> Result<()> {
-                                let mirror = tempfile::NamedTempFile::new().map_err(|error| {
-                                    Error::internal_io(
-                                        error.to_string(),
-                                        Some("create controller artifact mirror".to_string()),
-                                    )
-                                })?;
-                                let download =
+                if let Some(path) = finalized_path {
+                    let mut controller_hash = sha2::Sha256::new();
+                    sha2::Digest::update(&mut controller_hash, b"controller");
+                    sha2::Digest::update(&mut controller_hash, [0]);
+                    sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());
+                    let controller_artifact_id =
+                        format!("agent-task-{:x}", controller_hash.finalize());
+                    let mut metadata = metadata;
+                    metadata["agent_task"]["projection"] = json!("controller_finalized");
+                    store.record_verified_artifact_with_id(
+                        &record.run_id,
+                        &artifact.kind,
+                        path,
+                        &controller_artifact_id,
+                        artifact
+                            .size_bytes
+                            .and_then(|size| i64::try_from(size).ok()),
+                        artifact.sha256.as_deref(),
+                        metadata,
+                    )?;
+                } else {
+                    let remote_ref = homeboy_core::execution_contract::EXECUTION_CONTRACT
+                        .artifacts
+                        .runner_artifact_ref(runner_id, &record.run_id, logical_id);
+                    let mirror_result = if requires_durable_lab_projection(artifact) {
+                        (|| -> Result<()> {
+                            let mirror = tempfile::NamedTempFile::new().map_err(|error| {
+                                Error::internal_io(
+                                    error.to_string(),
+                                    Some("create controller artifact mirror".to_string()),
+                                )
+                            })?;
+                            let download =
                                 homeboy_core::observation::runs_service::runner_evidence::with_runner_evidence(
                                     |p| {
                                         p.download_remote_artifact(
@@ -1180,23 +1208,22 @@ pub(crate) fn project_terminal_artifacts(
                                     },
                                 )
                                 .map_err(|error| error.with_retryable(true))?;
-                                let expected_size = artifact.size_bytes.expect("checked above");
-                                let expected_sha256 =
-                                    artifact.sha256.as_deref().expect("checked above");
-                                let actual_size = std::fs::metadata(&download.output_path)
-                                    .map_err(|error| {
-                                        Error::internal_io(
-                                            error.to_string(),
-                                            Some("inspect controller artifact mirror".to_string()),
-                                        )
-                                    })?
-                                    .len();
-                                let actual_sha256 = homeboy_core::artifact_metadata::sha256_file(
-                                    &download.output_path,
-                                )?;
-                                if actual_size != expected_size || actual_sha256 != expected_sha256
-                                {
-                                    return Err(Error::validation_invalid_argument(
+                            let expected_size = artifact.size_bytes.expect("checked above");
+                            let expected_sha256 =
+                                artifact.sha256.as_deref().expect("checked above");
+                            let actual_size = std::fs::metadata(&download.output_path)
+                                .map_err(|error| {
+                                    Error::internal_io(
+                                        error.to_string(),
+                                        Some("inspect controller artifact mirror".to_string()),
+                                    )
+                                })?
+                                .len();
+                            let actual_sha256 = homeboy_core::artifact_metadata::sha256_file(
+                                &download.output_path,
+                            )?;
+                            if actual_size != expected_size || actual_sha256 != expected_sha256 {
+                                return Err(Error::validation_invalid_argument(
                                     "artifact_id",
                                     format!(
                                         "runner artifact mirror for run '{}', task '{}', and artifact '{}' does not match the aggregate SHA-256 and size",
@@ -1205,62 +1232,69 @@ pub(crate) fn project_terminal_artifacts(
                                     Some(artifact.id.clone()),
                                     None,
                                 ));
-                                }
-                                let mut controller_hash = sha2::Sha256::new();
-                                sha2::Digest::update(&mut controller_hash, b"controller");
-                                sha2::Digest::update(&mut controller_hash, [0]);
-                                sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());
-                                let controller_artifact_id =
-                                    format!("agent-task-{:x}", controller_hash.finalize());
-                                let mut controller_metadata = metadata.clone();
-                                controller_metadata["agent_task"]["projection"] =
-                                    json!("runner_mirrored");
-                                store.record_verified_artifact_with_id(
-                                    &record.run_id,
-                                    &artifact.kind,
-                                    &download.output_path,
-                                    &controller_artifact_id,
-                                    Some(expected_size as i64),
-                                    Some(expected_sha256),
-                                    controller_metadata,
-                                )?;
-                                Ok(())
-                            })()
-                        } else {
+                            }
+                            let mut controller_hash = sha2::Sha256::new();
+                            sha2::Digest::update(&mut controller_hash, b"controller");
+                            sha2::Digest::update(&mut controller_hash, [0]);
+                            sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());
+                            let controller_artifact_id =
+                                format!("agent-task-{:x}", controller_hash.finalize());
+                            let mut controller_metadata = metadata.clone();
+                            controller_metadata["agent_task"]["projection"] =
+                                json!("runner_mirrored");
+                            store.record_verified_artifact_with_id(
+                                &record.run_id,
+                                &artifact.kind,
+                                &download.output_path,
+                                &controller_artifact_id,
+                                Some(expected_size as i64),
+                                Some(expected_sha256),
+                                controller_metadata,
+                            )?;
                             Ok(())
-                        };
+                        })()
+                    } else {
+                        Ok(())
+                    };
 
-                        // Preserve the canonical runner retrieval alias even when
-                        // the controller also materializes verified bytes.
-                        store.import_artifact(&homeboy_core::observation::ArtifactRecord {
-                            id: artifact_id,
-                            run_id: record.run_id.clone(),
-                            kind: artifact.kind.clone(),
-                            artifact_type: "remote_file".to_string(),
-                            path: remote_ref,
-                            url: None,
-                            public_url: None,
-                            viewer_url: None,
-                            viewer_links: Vec::new(),
-                            sha256: artifact.sha256.clone(),
-                            size_bytes: artifact
-                                .size_bytes
-                                .and_then(|value| i64::try_from(value).ok()),
-                            mime: artifact.mime.clone(),
-                            metadata_json: metadata,
-                            created_at: chrono::Utc::now().to_rfc3339(),
-                        })?;
-                        if let Err(error) = mirror_result {
-                            projection_error.get_or_insert(error);
-                        }
+                    // Preserve the canonical runner retrieval alias even when
+                    // the controller also materializes verified bytes.
+                    store.import_artifact(&homeboy_core::observation::ArtifactRecord {
+                        id: artifact_id,
+                        run_id: record.run_id.clone(),
+                        kind: artifact.kind.clone(),
+                        artifact_type: "remote_file".to_string(),
+                        path: remote_ref,
+                        url: None,
+                        public_url: None,
+                        viewer_url: None,
+                        viewer_links: Vec::new(),
+                        sha256: artifact.sha256.clone(),
+                        size_bytes: artifact
+                            .size_bytes
+                            .and_then(|value| i64::try_from(value).ok()),
+                        mime: artifact.mime.clone(),
+                        metadata_json: metadata,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                    })?;
+                    if let Err(error) = mirror_result {
+                        projection_error.get_or_insert(error);
                     }
                 }
             } else {
                 let path = artifact.path.as_deref().expect("local path checked above");
+                let path = controller_projected_local_artifact_path(
+                    &record.run_id,
+                    &outcome.task_id,
+                    &artifact.id,
+                    path,
+                    artifact.size_bytes.expect("checked above"),
+                    artifact.sha256.as_deref().expect("checked above"),
+                )?;
                 store.record_verified_artifact_with_id(
                     &record.run_id,
                     &artifact.kind,
-                    path,
+                    &path,
                     &artifact_id,
                     artifact
                         .size_bytes
@@ -1274,11 +1308,61 @@ pub(crate) fn project_terminal_artifacts(
     projection_error.map_or(Ok(()), Err)
 }
 
+/// Copy local producer output under controller ownership before publishing its
+/// projection. The aggregate path remains provenance only and may disappear
+/// when the producer workspace is cleaned up.
+fn controller_projected_local_artifact_path(
+    run_id: &str,
+    task_id: &str,
+    artifact_id: &str,
+    source: &str,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<std::path::PathBuf> {
+    let bytes = std::fs::read(source).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("read local artifact {source}")),
+        )
+    })?;
+    if bytes.len() as u64 != expected_size
+        || homeboy_engine_primitives::content_hash::sha256_hex(&bytes) != expected_sha256
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "local artifact does not match its declared SHA-256 and size",
+            Some(artifact_id.to_string()),
+            None,
+        ));
+    }
+    let path = homeboy_core::paths::artifact_root()?
+        .join("controller-projected-agent-task-artifacts")
+        .join(homeboy_core::paths::sanitize_path_segment(run_id))
+        .join(homeboy_core::paths::sanitize_path_segment(task_id))
+        .join(homeboy_core::paths::sanitize_path_segment(artifact_id));
+    std::fs::create_dir_all(path.parent().expect("projection path parent")).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create controller artifact projection".to_string()),
+        )
+    })?;
+    std::fs::write(&path, bytes).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "write controller artifact projection {}",
+                path.display()
+            )),
+        )
+    })?;
+    Ok(path)
+}
+
 fn requires_durable_lab_projection(artifact: &AgentTaskArtifact) -> bool {
     crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
         || matches!(
             artifact.kind.as_str(),
-            "transcript" | "agent-result" | "agent_result"
+            "transcript" | "result" | "agent-result" | "agent_result"
         )
 }
 
@@ -1335,10 +1419,35 @@ fn reusable_terminal_artifact(
                 None,
             ));
         }
-        // Imported bundles can carry the deterministic artifact id and verified
-        // bytes before terminal reconciliation adds controller lookup metadata.
-        // Stamp that single local record rather than creating a second projection.
-        store.update_artifact_metadata(artifact_id, metadata.clone())?;
+        if controller_owned_artifact_path(Path::new(&existing.path)) {
+            // Pre-marker controller projections already have durable storage;
+            // retain their record and stamp the current lookup metadata.
+            store.update_artifact_metadata(artifact_id, metadata.clone())?;
+            return Ok(true);
+        }
+
+        // A directly imported observation artifact is durable controller
+        // evidence even when its original path was outside the artifact root.
+        // Preserve that record and derive a separate controller-local copy
+        // before allowing terminal recovery to use its verified bytes.
+        let path = controller_projected_local_artifact_path(
+            run_id,
+            task_id,
+            &artifact.id,
+            &existing.path,
+            artifact.size_bytes.expect("checked above"),
+            expected_sha256,
+        )?;
+        let controller_artifact_id = controller_projection_artifact_id(artifact_id);
+        store.record_verified_artifact_with_id(
+            run_id,
+            &artifact.kind,
+            path,
+            &controller_artifact_id,
+            expected_size,
+            Some(expected_sha256),
+            metadata.clone(),
+        )?;
         return Ok(true);
     }
 
@@ -1350,6 +1459,97 @@ fn reusable_terminal_artifact(
         Some(artifact_id.to_string()),
         None,
     ))
+}
+
+fn controller_projection_artifact_id(artifact_id: &str) -> String {
+    let mut controller_hash = sha2::Sha256::new();
+    sha2::Digest::update(&mut controller_hash, b"controller");
+    sha2::Digest::update(&mut controller_hash, [0]);
+    sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());
+    format!("agent-task-{:x}", controller_hash.finalize())
+}
+
+/// Retain legacy imported evidence while making its lifecycle association
+/// explicit. This never grants projection authority to its external path.
+fn stamp_legacy_artifact_provenance(
+    store: &homeboy_core::observation::ObservationStore,
+    run_id: &str,
+    task_id: &str,
+    artifact: &AgentTaskArtifact,
+    artifact_id: &str,
+) -> Result<()> {
+    let Some(existing) = store.get_artifact(artifact_id)? else {
+        return Ok(());
+    };
+    let expected_size = i64::try_from(artifact.size_bytes.expect("checked above")).ok();
+    let expected_sha256 = artifact.sha256.as_deref().expect("checked above");
+    if existing.artifact_type != "file"
+        || existing.run_id != run_id
+        || existing.kind != artifact.kind
+        || existing.size_bytes != expected_size
+        || existing.sha256.as_deref() != Some(expected_sha256)
+        || std::fs::metadata(&existing.path)
+            .map(|metadata| {
+                metadata.is_file() && i64::try_from(metadata.len()).ok() == expected_size
+            })
+            .unwrap_or(false)
+            == false
+        || homeboy_core::artifact_metadata::sha256_file(Path::new(&existing.path))
+            .ok()
+            .as_deref()
+            != Some(expected_sha256)
+    {
+        return Ok(());
+    }
+    let mut metadata = existing.metadata_json;
+    if !metadata.is_object() {
+        metadata = json!({});
+    }
+    let agent_task = metadata["agent_task"].as_object_mut();
+    if agent_task.is_none() {
+        metadata["agent_task"] = json!({});
+    }
+    let agent_task = metadata["agent_task"]
+        .as_object_mut()
+        .expect("agent task metadata object");
+    let existing_task_id = agent_task.get("task_id").and_then(Value::as_str);
+    let existing_logical_id = agent_task
+        .get("logical_artifact_id")
+        .and_then(Value::as_str);
+    if existing_task_id.is_some_and(|value| value != task_id)
+        || existing_logical_id.is_some_and(|value| value != artifact.id)
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!("existing artifact record conflicts with terminal artifact projection: {artifact_id}"),
+            Some(artifact_id.to_string()),
+            None,
+        ));
+    }
+    agent_task.insert("task_id".to_string(), json!(task_id));
+    agent_task.insert("logical_artifact_id".to_string(), json!(artifact.id));
+    store.update_artifact_metadata(artifact_id, metadata)?;
+    Ok(())
+}
+
+/// Observation artifacts are controller-owned only when their resolved file is
+/// beneath the controller artifact root. A matching digest alone must not turn
+/// an ephemeral producer path into durable lifecycle input.
+fn controller_owned_artifact_path(path: &Path) -> bool {
+    let Ok(root) = homeboy_core::paths::artifact_root().and_then(|root| {
+        std::fs::canonicalize(root).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("resolve controller artifact root".to_string()),
+            )
+        })
+    }) else {
+        return false;
+    };
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    path.starts_with(root)
 }
 
 /// Find finalized bytes already copied into the controller artifact root. Lab
@@ -1435,12 +1635,19 @@ pub fn verified_controller_artifact_projection_path(
         return Ok(None);
     };
     let store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    let candidates: Vec<_> = store
+    let mut candidates: Vec<_> = store
         .list_artifacts(run_id)?
         .into_iter()
         .filter(|candidate| {
             candidate.artifact_type == "file"
                 && candidate.kind == artifact.kind
+                && (matches!(
+                    candidate
+                        .metadata_json
+                        .pointer("/agent_task/projection")
+                        .and_then(serde_json::Value::as_str),
+                    Some("controller_local" | "controller_finalized" | "runner_mirrored")
+                ) || controller_owned_artifact_path(Path::new(&candidate.path)))
                 && candidate
                     .metadata_json
                     .pointer("/agent_task/task_id")
@@ -1467,7 +1674,7 @@ pub fn verified_controller_artifact_projection_path(
             None,
         ));
     }
-    let candidate = &candidates[0];
+    let mut candidate = candidates.pop().expect("one candidate checked above");
     let path = PathBuf::from(&candidate.path);
     let actual_size = std::fs::metadata(&path)
         .ok()
@@ -1487,6 +1694,27 @@ pub fn verified_controller_artifact_projection_path(
             Some(artifact.id.clone()),
             None,
         ));
+    }
+    if !controller_owned_artifact_path(&path) {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "controller-side artifact projection for run '{run_id}', task '{task_id}', and artifact '{}' is not stored under controller ownership",
+                artifact.id
+            ),
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    if !matches!(
+        candidate
+            .metadata_json
+            .pointer("/agent_task/projection")
+            .and_then(serde_json::Value::as_str),
+        Some("controller_local" | "controller_finalized" | "runner_mirrored")
+    ) {
+        candidate.metadata_json["agent_task"]["projection"] = json!("controller_local");
+        store.update_artifact_metadata(&candidate.id, candidate.metadata_json)?;
     }
     Ok(Some(path))
 }

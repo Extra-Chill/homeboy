@@ -486,6 +486,9 @@ pub(crate) fn controller_upgrade_admission_for_records(
     }
     let mut blockers = records
         .iter()
+        // Durable terminal state is authoritative even when stale ownership
+        // metadata remains from the process that produced it.
+        .filter(|record| !record.state.is_terminal())
         .filter_map(|record| {
             let liveness =
                 classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
@@ -508,7 +511,11 @@ pub(crate) fn controller_upgrade_admission_for_records(
                         .runner_id()
                         .map(|runner| format!("homeboy runner reconcile {runner}"))
                         .unwrap_or_else(|| {
-                            format!("homeboy agent-task reconcile {group_run_id} --dry-run")
+                            if liveness == AgentTaskLiveness::Active {
+                                format!("homeboy agent-task cancel {group_run_id}")
+                            } else {
+                                format!("homeboy agent-task reconcile {group_run_id} --apply")
+                            }
                         })
                 };
                 ControllerUpgradeBlocker {
@@ -602,19 +609,14 @@ fn classify_liveness(
         if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
             return AgentTaskLiveness::Unreconciled;
         }
-        // A serialized queued task is not liveness evidence: it can survive a
-        // controller crash indefinitely. A queued record is live only with a
-        // fresh update (or fresh submission before its first update), a live
-        // local owner, or a complete pending runner submission within its
-        // acceptance deadline.
-        let heartbeat_age =
-            last_update_age_minutes.or_else(|| age_minutes(Some(&record.submitted_at), now));
-        let has_fresh_heartbeat =
-            heartbeat_age.is_some_and(|age| age < RUNNING_HEARTBEAT_STALE_MINUTES);
+        // A queued record has no executing work of its own. Fresh timestamps
+        // only prove that it was serialized recently, not that an owner still
+        // exists. Retain it as active solely with a live owner or a complete
+        // runner submission that is still inside its acceptance deadline.
         let has_live_owner = record.owner_process_is_running();
         let has_live_submission_intent =
             agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now);
-        if !has_fresh_heartbeat && !has_live_owner && !has_live_submission_intent {
+        if !has_live_owner && !has_live_submission_intent {
             return AgentTaskLiveness::Stale;
         }
         return AgentTaskLiveness::Active;

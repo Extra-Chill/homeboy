@@ -26,12 +26,13 @@ use homeboy::core::worktree_providers::{
 use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
-    AgentTaskCookArgs, CookContinueArgs, LifecycleReadArgs, PromotionProviderArgs, RetryArgs,
-    RunArgs, RunPlanArgs, SubmitArgs,
+    AgentTaskCookArgs, AgentTaskProviderEvidenceInput, CookContinueArgs, LifecycleReadArgs,
+    PromotionProviderArgs, RetryArgs, RunArgs, RunPlanArgs, SubmitArgs,
 };
 use super::gate_contract::validate_gate_contracts;
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Operator-facing durable identity block for a Cook that has just become
 /// addressable.
@@ -251,7 +252,10 @@ where
         let dispatcher = reconstruct_dispatcher;
         let executor = executor.clone();
         let execute = |options| {
-            agent_task_service::authorize_cook_continue_route(&options)?;
+            agent_task_service::authorize_cook_continue_route_with_artifact(
+                &options,
+                args.artifact_id.as_deref(),
+            )?;
             let cook = if historical_terminal {
                 agent_task_service::run_terminal_cook_continuation(options, executor.clone())?
             } else {
@@ -304,7 +308,10 @@ where
     };
     options.initial_run_id = attempt.run_id.clone();
     options.initial_plan = attempt.plan.clone();
-    agent_task_service::authorize_cook_continue_route(&options)?;
+    agent_task_service::authorize_cook_continue_route_with_artifact(
+        &options,
+        args.artifact_id.as_deref(),
+    )?;
     let result = if terminal_review_form_continuation {
         agent_task_service::run_terminal_cook_continuation(options, executor)?
     } else {
@@ -1428,6 +1435,10 @@ pub(crate) fn validate_cook_request_with_provenance(
             ]),
         ));
     }
+    validate_provider_evidence_inputs(
+        &args.provider_evidence_inputs,
+        args.dispatch.prompt.as_deref(),
+    )?;
     let dispatch = dispatch_args_for_cook(args);
     dispatch_service::validate_single_cook_prompt_source(
         dispatch.prompt.as_deref(),
@@ -1593,10 +1604,20 @@ where
     // bare rejection.
     let provision = provision_cook_destination(&args)?;
 
+    let workspace = provision.get("path").and_then(Value::as_str).map(Path::new);
+    if let Some(workspace) = workspace {
+        project_provider_evidence_inputs(&args.provider_evidence_inputs, workspace, None)?;
+    }
+
     let mut dispatch_args = dispatch_args_for_cook(&args);
     // Resolve @file / stdin / stored-ref prompts before anything consumes the
     // prompt, so the executor receives the exact bytes (#10100).
     resolve_dispatch_prompt(&mut dispatch_args)?;
+    rewrite_provider_evidence_prompt(
+        &mut dispatch_args.prompt,
+        &args.provider_evidence_inputs,
+        provision.get("path").and_then(Value::as_str),
+    );
     let requested_cook_id = dispatch_args.run_id.clone();
     if let Some(cook_id) = requested_cook_id.as_deref() {
         dispatch_args.run_id = Some(
@@ -2031,10 +2052,17 @@ pub(crate) fn compile_cook_plan(
         ));
     }
     let mut dispatch = dispatch_args_for_cook(args);
+    resolve_dispatch_prompt(&mut dispatch)?;
     // Provisioning makes an explicit --cwd authoritative, otherwise this is the
     // resolved managed destination. Pass that exact linked worktree downstream.
     dispatch.cwd = None;
     dispatch.workspace = workspace.clone();
+    validate_provider_evidence_inputs(&args.provider_evidence_inputs, dispatch.prompt.as_deref())?;
+    rewrite_provider_evidence_prompt(
+        &mut dispatch.prompt,
+        &args.provider_evidence_inputs,
+        workspace.as_deref(),
+    );
     if let Some(workspace) = workspace.as_deref() {
         validate_cook_destination_identity(args, Path::new(workspace))?;
     }
@@ -2077,7 +2105,452 @@ pub(crate) fn compile_cook_plan(
     homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover()
         .validate_explicit_models(&plan)?;
     record_cook_goal(&mut plan, args.goal.as_deref());
+    if !args.provider_evidence_inputs.is_empty() {
+        let evidence = project_provider_evidence_inputs(
+            &args.provider_evidence_inputs,
+            Path::new(workspace.as_deref().expect("bound Cook workspace")),
+            None,
+        )?;
+        for task in &mut plan.tasks {
+            if !task.executor.config.is_object() {
+                task.executor.config = serde_json::json!({});
+            }
+            task.executor.config["evidence_inputs"] = serde_json::to_value(&evidence)
+                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+        }
+    }
     Ok(plan)
+}
+
+pub(crate) fn validate_provider_evidence_inputs(
+    inputs: &[AgentTaskProviderEvidenceInput],
+    prompt: Option<&str>,
+) -> homeboy::core::Result<()> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut sources = std::collections::BTreeSet::new();
+    for input in inputs {
+        if input.id.trim().is_empty()
+            || input.id.contains(['/', '\\'])
+            || input.id == "."
+            || input.id == ".."
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "provider-evidence",
+                "provider evidence ids must be non-empty path-free names",
+                Some(input.id.clone()),
+                None,
+            ));
+        }
+        if !ids.insert(input.id.clone()) || !sources.insert(input.source.clone()) {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "provider-evidence",
+                "provider evidence ids and sources must be unique",
+                Some(input.source.clone()),
+                None,
+            ));
+        }
+        let source = Path::new(&input.source);
+        let metadata = std::fs::symlink_metadata(source).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "provider-evidence",
+                "provider evidence sources must be existing absolute regular files",
+                Some(format!("{}: {error}", input.source)),
+                None,
+            )
+        })?;
+        if !source.is_absolute() || !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(homeboy::core::Error::validation_invalid_argument("provider-evidence", "provider evidence sources must be existing absolute regular files without symlinks", Some(input.source.clone()), None));
+        }
+    }
+    if let Some(prompt) = prompt {
+        for token in prompt.split_whitespace() {
+            let path = token.trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
+                )
+            });
+            if path.starts_with('/') && !sources.contains(path) {
+                return Err(homeboy::core::Error::validation_invalid_argument("prompt", format!("prompt names undeclared absolute evidence path `{path}`"), Some(path.to_string()), Some(vec!["Declare it with --provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}' so Homeboy projects it into the provider workspace.".to_string()])));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn projected_provider_evidence(
+    inputs: &[AgentTaskProviderEvidenceInput],
+    workspace: Option<&str>,
+) -> homeboy::core::Result<Vec<Value>> {
+    let workspace = workspace.ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence requires a bound Cook workspace",
+            None,
+            None,
+        )
+    })?;
+    Ok(inputs.iter().map(|input| serde_json::json!({
+        "id": input.id,
+        "path": Path::new(workspace).join(".homeboy/evidence").join(&input.id).join(Path::new(&input.source).file_name().unwrap_or_default()).display().to_string(),
+        "read_only": true,
+    })).collect())
+}
+
+pub(crate) fn project_provider_evidence_inputs(
+    inputs: &[AgentTaskProviderEvidenceInput],
+    workspace: &Path,
+    prompt: Option<&str>,
+) -> homeboy::core::Result<Vec<Value>> {
+    validate_provider_evidence_inputs(inputs, prompt)?;
+    let mut projected = projected_provider_evidence(inputs, workspace.to_str())?;
+    for (input, projection) in inputs.iter().zip(&mut projected) {
+        let destination = PathBuf::from(projection["path"].as_str().expect("evidence path"));
+        let (bytes, digest) =
+            secure_provider_evidence_copy(Path::new(&input.source), &destination)?;
+        projection["size_bytes"] = serde_json::json!(bytes);
+        projection["sha256"] = serde_json::json!(digest);
+    }
+    Ok(projected)
+}
+
+#[cfg(unix)]
+fn secure_provider_evidence_copy(
+    source: &Path,
+    destination: &Path,
+) -> homeboy::core::Result<(u64, String)> {
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    fn directory(path: &Path, create: bool) -> homeboy::core::Result<std::fs::File> {
+        if !path.is_absolute() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "provider-evidence",
+                "evidence paths must be absolute",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+        let root = std::ffi::CString::new("/").expect("root");
+        let fd = unsafe {
+            libc::open(
+                root.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(homeboy::core::Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                None,
+            ));
+        }
+        let mut current = unsafe { std::fs::File::from_raw_fd(fd) };
+        for component in path.components().skip(1) {
+            let name = std::ffi::CString::new(component.as_os_str().as_bytes()).map_err(|_| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "provider-evidence",
+                    "evidence path contains NUL",
+                    None,
+                    None,
+                )
+            })?;
+            if create {
+                let result = unsafe { libc::mkdirat(current.as_raw_fd(), name.as_ptr(), 0o700) };
+                if result != 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+                {
+                    return Err(homeboy::core::Error::internal_io(
+                        std::io::Error::last_os_error().to_string(),
+                        Some(path.display().to_string()),
+                    ));
+                }
+            }
+            let fd = unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "provider-evidence",
+                    "evidence paths cannot traverse symlink or non-directory components",
+                    Some(path.display().to_string()),
+                    None,
+                ));
+            }
+            current = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        Ok(current)
+    }
+    let source_parent = directory(source.parent().expect("source parent"), false)?;
+    let source_name = std::ffi::CString::new(source.file_name().expect("source name").as_bytes())
+        .expect("source name");
+    let source_fd = unsafe {
+        libc::openat(
+            source_parent.as_raw_fd(),
+            source_name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if source_fd < 0 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence source could not be securely opened",
+            Some(source.display().to_string()),
+            None,
+        ));
+    }
+    let input = unsafe { std::fs::File::from_raw_fd(source_fd) };
+    let metadata = input.metadata().map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(source.display().to_string()))
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_PROVIDER_EVIDENCE_BYTES {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence must be a bounded regular file",
+            Some(source.display().to_string()),
+            None,
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    input
+        .take(MAX_PROVIDER_EVIDENCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(source.display().to_string()))
+        })?;
+    if bytes.len() as u64 > MAX_PROVIDER_EVIDENCE_BYTES {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence exceeds the maximum size",
+            Some(source.display().to_string()),
+            None,
+        ));
+    }
+    let parent = directory(destination.parent().expect("destination parent"), true)?;
+    let final_name = std::ffi::CString::new(
+        destination
+            .file_name()
+            .expect("destination name")
+            .as_bytes(),
+    )
+    .expect("destination name");
+    let temporary_name = std::ffi::CString::new(format!(".evidence-{}", uuid::Uuid::new_v4()))
+        .expect("temporary name");
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            temporary_name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o400,
+        )
+    };
+    if fd < 0 {
+        return Err(homeboy::core::Error::internal_io(
+            std::io::Error::last_os_error().to_string(),
+            Some(destination.display().to_string()),
+        ));
+    }
+    let mut output = unsafe { std::fs::File::from_raw_fd(fd) };
+    output
+        .write_all(&bytes)
+        .and_then(|_| output.sync_all())
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(destination.display().to_string()),
+            )
+        })?;
+    if unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            temporary_name.as_ptr(),
+            parent.as_raw_fd(),
+            final_name.as_ptr(),
+        )
+    } != 0
+    {
+        return Err(homeboy::core::Error::internal_io(
+            std::io::Error::last_os_error().to_string(),
+            Some(destination.display().to_string()),
+        ));
+    }
+    Ok((
+        bytes.len() as u64,
+        format!(
+            "sha256:{}",
+            homeboy_engine_primitives::content_hash::sha256_hex(&bytes)
+        ),
+    ))
+}
+
+#[cfg(not(unix))]
+fn secure_provider_evidence_copy(
+    source: &Path,
+    destination: &Path,
+) -> homeboy::core::Result<(u64, String)> {
+    let bytes = std::fs::read(source).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(source.display().to_string()))
+    })?;
+    if bytes.len() as u64 > MAX_PROVIDER_EVIDENCE_BYTES {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence exceeds the maximum size",
+            Some(source.display().to_string()),
+            None,
+        ));
+    }
+    std::fs::create_dir_all(destination.parent().expect("destination parent")).map_err(
+        |error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(destination.display().to_string()),
+            )
+        },
+    )?;
+    std::fs::write(destination, &bytes).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some(destination.display().to_string()),
+        )
+    })?;
+    Ok((
+        bytes.len() as u64,
+        format!(
+            "sha256:{}",
+            homeboy_engine_primitives::content_hash::sha256_hex(&bytes)
+        ),
+    ))
+}
+
+pub(crate) fn rewrite_provider_evidence_prompt(
+    prompt: &mut Option<String>,
+    inputs: &[AgentTaskProviderEvidenceInput],
+    workspace: Option<&str>,
+) {
+    let Some(prompt) = prompt else { return };
+    let Some(workspace) = workspace else { return };
+    for input in inputs {
+        let destination = Path::new(workspace)
+            .join(".homeboy/evidence")
+            .join(&input.id)
+            .join(Path::new(&input.source).file_name().unwrap_or_default());
+        *prompt = prompt.replace(&input.source, &destination.display().to_string());
+    }
+}
+
+#[cfg(test)]
+mod provider_evidence_tests {
+    use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn projects_declared_file_and_rewrites_prompt_to_workspace_evidence() {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let source = temp.path().join("external.json");
+        std::fs::write(&source, "{\"accepted\":true}").expect("write evidence");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let source = source.canonicalize().expect("canonical source");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "acceptance".to_string(),
+            source: source.display().to_string(),
+        };
+
+        let projected = project_provider_evidence_inputs(&[input.clone()], &workspace, None)
+            .expect("project declared evidence");
+        let path = PathBuf::from(projected[0]["path"].as_str().expect("projected path"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read projected evidence"),
+            "{\"accepted\":true}"
+        );
+        assert!(std::fs::metadata(&path)
+            .expect("evidence metadata")
+            .permissions()
+            .readonly());
+        assert_eq!(
+            projected[0]["sha256"],
+            "sha256:11a49f853eb8befe94fef278d487125cd20930b9e41c4c0934394443e7f00878"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("evidence mode")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o400
+        );
+
+        let mut prompt = Some(format!("Read {} before editing.", source.display()));
+        rewrite_provider_evidence_prompt(&mut prompt, &[input], workspace.to_str());
+        assert_eq!(
+            prompt.expect("rewritten prompt"),
+            format!("Read {} before editing.", path.display())
+        );
+    }
+
+    #[test]
+    fn rejects_undeclared_absolute_prompt_path_before_provider_admission() {
+        let error = validate_provider_evidence_inputs(&[], Some("Read /private/evidence.json."))
+            .expect_err("undeclared prompt path is rejected");
+        assert_eq!(error.details["field"], "prompt");
+        assert!(error.message.contains("undeclared absolute evidence path"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_evidence_source() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let source = temp.path().join("source.json");
+        let link = temp.path().join("source-link.json");
+        std::fs::write(&source, "{}").expect("write source");
+        symlink(&source, &link).expect("create source symlink");
+        let error = project_provider_evidence_inputs(
+            &[AgentTaskProviderEvidenceInput {
+                id: "source".to_string(),
+                source: link.display().to_string(),
+            }],
+            temp.path(),
+            None,
+        )
+        .expect_err("symlink source rejected");
+        assert!(error.message.contains("regular files"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_destination_ancestor_without_writing_through_it() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let source = temp.path().join("source.json");
+        let outside = temp.path().join("outside");
+        let workspace = temp.path().join("workspace");
+        std::fs::write(&source, "{}").expect("write source");
+        std::fs::create_dir_all(&outside).expect("create outside");
+        std::fs::create_dir_all(workspace.join(".homeboy")).expect("create workspace");
+        symlink(&outside, workspace.join(".homeboy/evidence")).expect("create destination symlink");
+        let error = project_provider_evidence_inputs(
+            &[AgentTaskProviderEvidenceInput {
+                id: "source".to_string(),
+                source: source
+                    .canonicalize()
+                    .expect("canonical source")
+                    .display()
+                    .to_string(),
+            }],
+            &workspace.canonicalize().expect("canonical workspace"),
+            None,
+        )
+        .expect_err("symlink destination rejected");
+        assert!(error.message.contains("symlink or non-directory"));
+        assert!(!outside.join("source/source.json").exists());
+    }
 }
 
 #[cfg(unix)]
@@ -2369,6 +2842,7 @@ where
                     cook_or_attempt_id: result.record.run_id,
                     preflight: false,
                     rearm: false,
+                    artifact_id: None,
                     full: false,
                 },
                 executor,
@@ -2555,6 +3029,7 @@ mod tests {
                 cook_or_attempt_id: "missing-cook".to_string(),
                 preflight: true,
                 rearm: false,
+                artifact_id: None,
                 full: false,
             })
             .expect("preflight returns a machine-readable rejection");
