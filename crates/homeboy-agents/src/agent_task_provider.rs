@@ -116,8 +116,9 @@ use catalog::{
 };
 #[cfg(test)]
 use command_runner::{
-    is_transient_provider_error, provider_command_env, render_provider_command_display,
-    run_provider_command, run_provider_command_once, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
+    immediate_provider_failure, is_transient_provider_error, provider_command_env,
+    render_provider_command_display, run_provider_command, run_provider_command_once,
+    PROVIDER_TRANSIENT_MAX_ATTEMPTS,
 };
 #[cfg(test)]
 use fixtures::fixture_artifact;

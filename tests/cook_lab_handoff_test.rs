@@ -352,8 +352,9 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
                 status
                     .pointer("/data/state")
                     .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
             })
-            .is_some_and(|state| matches!(state, "succeeded" | "failed" | "cancelled"));
+            .is_some_and(|state| matches!(state.as_str(), "succeeded" | "failed" | "cancelled"));
         if terminal {
             break;
         }
