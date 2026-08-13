@@ -124,7 +124,10 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 AgentTaskOutcomeStatus::Failed,
                 AgentTaskFailureClassification::InvalidInput,
                 "agent_task.provider_immediate_failure_configuration_invalid",
-                format!("provider '{}' has invalid immediate failure configuration: {message}", provider.id),
+                format!(
+                    "provider '{}' has invalid immediate failure configuration: {message}",
+                    provider.id
+                ),
                 json!({ "provider_id": provider.id, "backend": provider.backend }),
             );
         }

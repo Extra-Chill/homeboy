@@ -1854,9 +1854,8 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
 }
 
 pub(crate) fn canonical_cook_recovery_run_id(cook_id: &str) -> Option<String> {
-    let candidate = canonical_cook_candidate(cook_id)
-        .filter(|candidate| candidate["incomplete"] != true)
-        ?;
+    let candidate =
+        canonical_cook_candidate(cook_id).filter(|candidate| candidate["incomplete"] != true)?;
     let source_run_id = candidate["run_id"].as_str()?.to_string();
     if source_run_id.is_empty() {
         return None;
