@@ -348,12 +348,14 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
         assert!(status.status.success(), "{status_stdout}");
         let terminal = serde_json::from_str::<serde_json::Value>(&status_stdout)
             .ok()
-            .and_then(|status| {
-                status
-                    .pointer("/data/state")
-                    .and_then(serde_json::Value::as_str)
-            })
-            .is_some_and(|state| matches!(state, "succeeded" | "failed" | "cancelled"));
+            .is_some_and(|status| {
+                matches!(
+                    status
+                        .pointer("/data/state")
+                        .and_then(serde_json::Value::as_str),
+                    Some("succeeded" | "failed" | "cancelled")
+                )
+            });
         if terminal {
             break;
         }
