@@ -6410,6 +6410,8 @@ fi
             false,
             false,
             &worktree_output(vec![row]),
+            false,
+            None,
         );
         let command = &actions[0].command;
 

@@ -1608,9 +1608,7 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
         assert_eq!(admission.blockers[0].run_id, cook_id);
         assert_eq!(
             admission.blockers[0].recovery_command,
-            format!(
-                "homeboy runner reconcile lab && homeboy agent-task reconcile {cook_id} --dry-run"
-            )
+            format!("homeboy runner reconcile lab && homeboy agent-task cancel {cook_id}")
         );
     });
 }
@@ -1693,8 +1691,7 @@ fn upgrade_admission_keeps_an_unindexed_handoff_child_independent_with_executabl
         }));
         assert!(admission.blockers.iter().any(|blocker| {
             blocker.run_id == attempt_id
-                && blocker.recovery_command
-                    == format!("homeboy agent-task reconcile {attempt_id} --dry-run")
+                && blocker.recovery_command == format!("homeboy agent-task cancel {attempt_id}")
         }));
         assert!(agent_task_lifecycle::reconcile_record_health(true).is_ok());
     });
@@ -2082,9 +2079,43 @@ fn discovery_filters_by_cook_identity_and_classifies_only_live_queued_records_as
             .runs
             .iter()
             .find(|run| run.run_id == "run-fresh-queued-task")
-            .expect("fresh queued task remains active");
-        assert_eq!(fresh_queued_task.liveness, Some(AgentTaskLiveness::Active));
-        assert_eq!(active.liveness_summary.expect("summary").stale, 3);
+            .expect("ownerless queued task remains reconcilable");
+        assert_eq!(fresh_queued_task.liveness, Some(AgentTaskLiveness::Stale));
+        assert_eq!(active.liveness_summary.expect("summary").stale, 6);
+
+        let applied = reconcile_run("run-fresh-queued-task", false)
+            .expect("ownerless queued task reconciles");
+        assert_eq!(applied.reconciled, 1);
+        assert_eq!(applied.runs[0].action, "reconciled");
+        assert_eq!(
+            lifecycle_status("run-fresh-queued-task")
+                .expect("reconciled queued task")
+                .state,
+            AgentTaskRunState::Cancelled
+        );
+    });
+}
+
+#[test]
+fn upgrade_admission_ignores_terminal_records_with_stale_owner_metadata() {
+    with_isolated_home(|_| {
+        for (run_id, state) in [
+            ("terminal-succeeded", AgentTaskRunState::Succeeded),
+            ("terminal-failed", AgentTaskRunState::Failed),
+        ] {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                agent_task_lifecycle::set_run_state(record, state);
+                record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
+            })
+            .expect("terminal record stored");
+        }
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert!(admission.allows_controller_replacement());
+        assert!(admission.blockers.is_empty());
     });
 }
 
@@ -2140,10 +2171,10 @@ fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
         assert_eq!(admission.stale, 2);
         assert_eq!(admission.active, 1);
         assert_eq!(admission.blockers.len(), 2);
-        assert!(admission
-            .blockers
-            .iter()
-            .any(|blocker| blocker.run_id == "live-owner"));
+        assert!(admission.blockers.iter().any(|blocker| {
+            blocker.run_id == "live-owner"
+                && blocker.recovery_command == "homeboy agent-task cancel live-owner"
+        }));
         let runner = admission
             .blockers
             .iter()
