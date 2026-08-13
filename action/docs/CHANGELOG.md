@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.26] - 2026-08-13
+
+### Changed
+- pin the durationless shard partitioning CI actually uses
+
 ## [2.11.25] - 2026-08-12
 
 ### Changed
