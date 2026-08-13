@@ -982,6 +982,18 @@ fn enqueue_terminal_continuation_with_recovery(
 }
 
 pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
+    Ok(claim_continuation_with_budget(usize::MAX)?.claim)
+}
+
+pub struct CookContinuationClaim {
+    pub claim: Option<ClaimedCookContinuation>,
+    pub inspected: usize,
+    pub limit_reached: bool,
+}
+
+/// Claim one valid continuation after terminalizing malformed entries within a
+/// caller-owned admission budget.
+pub fn claim_continuation_with_budget(budget: usize) -> Result<CookContinuationClaim> {
     let root = queue_root()?;
     fs::create_dir_all(&root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
@@ -991,11 +1003,20 @@ pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
     pending.sort_by_key(|entry| entry.file_name());
+    let mut inspected = 0;
     for entry in pending {
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("pending") {
             continue;
         }
+        if inspected == budget {
+            return Ok(CookContinuationClaim {
+                claim: None,
+                inspected,
+                limit_reached: true,
+            });
+        }
+        inspected += 1;
         let claimed = path.with_extension(format!("claimed.{}", std::process::id()));
         if fs::rename(&path, &claimed).is_err() {
             continue;
@@ -1020,12 +1041,20 @@ pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
             fail_claimed_path(&claimed, &error.message)?;
             continue;
         }
-        return Ok(Some(ClaimedCookContinuation {
-            continuation,
-            path: claimed,
-        }));
+        return Ok(CookContinuationClaim {
+            claim: Some(ClaimedCookContinuation {
+                continuation,
+                path: claimed,
+            }),
+            inspected,
+            limit_reached: false,
+        });
     }
-    Ok(None)
+    Ok(CookContinuationClaim {
+        claim: None,
+        inspected,
+        limit_reached: false,
+    })
 }
 
 /// Claim one specific continuation without consuming another Cook's pending

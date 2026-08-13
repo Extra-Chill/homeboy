@@ -185,7 +185,7 @@ impl Commands {
             }) => LabCommandContract::runner_resident(AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
-                    agent_task::AgentTaskCommand::Run(_) | agent_task::AgentTaskCommand::RunNext,
+                    agent_task::AgentTaskCommand::Run(_) | agent_task::AgentTaskCommand::RunNext(_),
             }) => LabCommandContract::runner_resident(AGENT_TASK_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:

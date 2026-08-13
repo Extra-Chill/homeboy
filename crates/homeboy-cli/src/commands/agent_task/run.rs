@@ -2,7 +2,7 @@
 //! resume, and retry.
 
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,7 +27,7 @@ use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
     AgentTaskCookArgs, CookContinueArgs, LifecycleReadArgs, PromotionProviderArgs, RetryArgs,
-    RunArgs, RunPlanArgs, SubmitArgs,
+    RunArgs, RunNextArgs, RunPlanArgs, SubmitArgs,
 };
 use super::gate_contract::validate_gate_contracts;
 
@@ -2245,21 +2245,37 @@ where
     ))
 }
 
-pub(super) fn run_next() -> CmdResult<Value> {
-    run_next_with_executor(ExtensionProviderAgentTaskExecutor::discover())
+pub(super) fn run_next(args: RunNextArgs) -> CmdResult<Value> {
+    run_next_with_executor_and_fanout(ExtensionProviderAgentTaskExecutor::discover(), args.fanout)
 }
 
 pub(super) fn run_next_with_executor<E>(executor: E) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    run_next_with_executor_and_fanout(executor, None)
+}
+
+pub(super) fn run_next_with_executor_and_fanout<E>(
+    executor: E,
+    fanout_id: Option<String>,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let scoped_run_ids = fanout_id
+        .as_deref()
+        .map(homeboy::agents::agent_tasks::batch::owned_child_run_ids)
+        .transpose()?
+        .map(|run_ids| run_ids.into_iter().collect::<HashSet<_>>());
     let result = agent_task_service::run_next_with_cook_dispatcher(
         executor,
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+        scoped_run_ids.as_ref(),
     )?;
     let Some(aggregate) = result.value else {
         return Ok((
-            serde_json::json!({ "claimed": false, "queue_skips": result.skipped }),
+            serde_json::json!({ "claimed": false, "queue_skips": result.skipped, "queue_admission": result.queue_admission }),
             0,
         ));
     };
@@ -2268,6 +2284,10 @@ where
         object.insert(
             "queue_skips".to_string(),
             serde_json::to_value(result.skipped).unwrap_or(Value::Null),
+        );
+        object.insert(
+            "queue_admission".to_string(),
+            serde_json::to_value(result.queue_admission).unwrap_or(Value::Null),
         );
     }
     Ok((value, result.exit_code))

@@ -22,6 +22,12 @@ pub struct RunArgs {
     pub timeout_ms: Option<u64>,
 }
 #[derive(Args, Debug)]
+pub struct RunNextArgs {
+    /// Claim only queued child runs belonging to this durable fanout.
+    #[arg(long, value_name = "ID")]
+    pub fanout: Option<String>,
+}
+#[derive(Args, Debug)]
 pub struct SubmitArgs {
     /// Agent-task plan as a JSON spec: inline JSON, `@FILE` to read a file, or
     /// `-` to read stdin. A bare path is NOT accepted — use `@/path/plan.json`.

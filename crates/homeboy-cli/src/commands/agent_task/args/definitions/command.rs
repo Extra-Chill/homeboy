@@ -22,7 +22,7 @@ use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
     LifecycleReadArgs, LogsArgs, PromoteArgs, QuarantineArgs, RearmArgs,
     RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs,
-    RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
+    RunNextArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
 };
 
 pub use super::super::auth::{
@@ -91,8 +91,8 @@ pub enum AgentTaskCommand {
     RunPlan(RunPlanArgs),
     /// Execute a previously submitted durable run.
     Run(RunArgs),
-    /// Claim and execute the oldest queued durable run.
-    RunNext,
+    /// Claim and execute the oldest queued durable run, optionally within one fanout.
+    RunNext(RunNextArgs),
     /// Persist an agent-task plan and return a durable run id without executing it.
     Submit(SubmitArgs),
     /// Read durable run status.

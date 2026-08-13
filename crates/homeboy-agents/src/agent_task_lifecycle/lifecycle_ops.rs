@@ -2266,7 +2266,14 @@ pub struct AgentTaskQueuedRunSkip {
 pub struct AgentTaskQueuedRunClaim {
     pub record: Option<AgentTaskRunRecord>,
     pub skipped: Vec<AgentTaskQueuedRunSkip>,
+    pub inspected: usize,
+    pub admission_limit_reached: bool,
 }
+
+/// A claim call makes bounded, observable admission progress even when old
+/// durable records are malformed. The next invocation resumes after the
+/// quarantined records rather than letting stale history monopolize a worker.
+pub const MAX_QUEUE_ADMISSION_RECORDS: usize = 64;
 
 /// Claim the oldest executable queued record. Invalid provenance is retained on
 /// a nonterminal quarantine record before any running transition can occur.
@@ -2279,12 +2286,37 @@ pub fn claim_next_eligible_queued_run() -> Result<AgentTaskQueuedRunClaim> {
 pub fn claim_next_eligible_queued_run_with_preflight(
     preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskQueuedRunClaim> {
+    claim_next_eligible_queued_run_with_preflight_and_filter(|_| true, preflight)
+}
+
+/// Claim the oldest eligible queued record that matches a caller-owned scope.
+/// Records outside the scope are not inspected, quarantined, or allowed to
+/// delay admission for targeted work.
+pub fn claim_next_eligible_queued_run_with_preflight_and_filter(
+    include: impl Fn(&AgentTaskRunRecord) -> bool,
+    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+) -> Result<AgentTaskQueuedRunClaim> {
+    claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
+        include,
+        MAX_QUEUE_ADMISSION_RECORDS,
+        preflight,
+    )
+}
+
+/// Scoped queued admission with an explicit remaining budget shared with other
+/// admission phases in the same dispatch invocation.
+pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
+    include: impl Fn(&AgentTaskRunRecord) -> bool,
+    limit: usize,
+    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+) -> Result<AgentTaskQueuedRunClaim> {
     let mut queued: Vec<AgentTaskRunRecord> = store::read_records()?
         .into_iter()
         .filter(|record| {
             record.state == AgentTaskRunState::Queued
                 && !is_transport_proxy(record)
                 && record.metadata.get("queue_quarantine").is_none()
+                && include(record)
         })
         .collect();
     queued.sort_by(|left, right| {
@@ -2294,7 +2326,17 @@ pub fn claim_next_eligible_queued_run_with_preflight(
     });
 
     let mut skipped = Vec::new();
+    let mut inspected = 0;
     for record in queued {
+        if inspected == limit {
+            return Ok(AgentTaskQueuedRunClaim {
+                record: None,
+                skipped,
+                inspected,
+                admission_limit_reached: true,
+            });
+        }
+        inspected += 1;
         let plan = match validate_controller_runtime(&record.run_id)
             .and_then(|_| load_controller_plan(&record.run_id))
         {
@@ -2315,6 +2357,8 @@ pub fn claim_next_eligible_queued_run_with_preflight(
                 return Ok(AgentTaskQueuedRunClaim {
                     record: Some(claimed),
                     skipped,
+                    inspected,
+                    admission_limit_reached: false,
                 })
             }
             Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
@@ -2328,6 +2372,8 @@ pub fn claim_next_eligible_queued_run_with_preflight(
     Ok(AgentTaskQueuedRunClaim {
         record: None,
         skipped,
+        inspected,
+        admission_limit_reached: false,
     })
 }
 

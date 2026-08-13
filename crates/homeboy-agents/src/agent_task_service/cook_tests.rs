@@ -28,6 +28,7 @@ use crate::agent_task_finalization::{
     AgentTaskPrRef, AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
     RealAgentTaskPrFinalizationBackend,
 };
+use crate::agent_task_lifecycle::AgentTaskRunState;
 use crate::agent_task_scheduler::AgentTaskState;
 use homeboy_core::run_lifecycle_record::{
     ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
@@ -313,9 +314,12 @@ fn run_next_skips_persisted_test_detached_recipe_and_executes_eligible_work() {
         )
         .expect("eligible work queued");
 
-        let result =
-            super::super::run_next_with_cook_dispatcher(ImmediateSuccessExecutor, |_| Ok(None))
-                .expect("ineligible continuation does not block eligible work");
+        let result = super::super::run_next_with_cook_dispatcher(
+            ImmediateSuccessExecutor,
+            |_| Ok(None),
+            None,
+        )
+        .expect("ineligible continuation does not block eligible work");
 
         assert_eq!(
             result.value.expect("eligible aggregate").plan_id,
@@ -340,6 +344,125 @@ fn run_next_skips_persisted_test_detached_recipe_and_executes_eligible_work() {
         );
         assert_eq!(result.skipped[0].error_code, "validation.invalid_argument");
         assert!(result.skipped[0].remediation.contains("agent-task status"));
+    });
+}
+
+#[test]
+fn scoped_run_next_claims_its_fanout_cook_continuation_by_exact_identity() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut options = batch_cook_options(
+            "scoped-continuation",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.initial_plan.metadata["batch_id"] = serde_json::json!("scoped-fanout");
+        persist_initial_recipe(&options).expect("persisted recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .expect("declared Cook attempt submitted");
+        agent_task_lifecycle::record_cook_attempt(&options.cook_id, 1, &options.initial_run_id)
+            .expect("Cook identity persisted");
+        crate::agent_task_batch::persist_fanout_run_batch(
+            "scoped-fanout",
+            "scoped-fanout",
+            &[crate::agent_task_batch::FanoutRunBatchChild {
+                task_id: "child".to_string(),
+                run_id: options.initial_run_id.clone(),
+            }],
+            serde_json::json!({}),
+        )
+        .expect("fanout persisted");
+        agent_task_lifecycle::cancel_run(&options.initial_run_id, Some("fixture terminal"))
+            .expect("attempt terminal");
+        super::super::enqueue_terminal_continuation(&options.cook_id, &options.initial_run_id)
+            .expect("continuation queued");
+        let scope = crate::agent_task_batch::owned_child_run_ids("scoped-fanout")
+            .expect("owned fanout child");
+
+        let result = super::super::run_next_with_cook_dispatcher(
+            ImmediateSuccessExecutor,
+            |_| Ok(None),
+            Some(&scope),
+        )
+        .expect("scoped continuation admission");
+
+        assert_eq!(
+            result.skipped.len(),
+            1,
+            "claimed continuation returns its diagnostic"
+        );
+        assert!(
+            super::super::claim_continuation_for(&options.cook_id, &options.initial_run_id)
+                .expect("continuation lookup")
+                .is_none(),
+            "the scoped claim consumed exactly this fanout continuation"
+        );
+    });
+}
+
+#[test]
+fn scoped_run_next_skips_bad_fanout_continuation_and_claims_queued_child() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut bad = batch_cook_options(
+            "scoped-bad-continuation",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        bad.initial_plan.metadata["batch_id"] = serde_json::json!("scoped-recovery");
+        persist_initial_recipe(&bad).expect("persisted bad recipe");
+        agent_task_lifecycle::submit_plan(&bad.initial_plan, Some(&bad.initial_run_id))
+            .expect("bad attempt submitted");
+        agent_task_lifecycle::record_cook_attempt(&bad.cook_id, 1, &bad.initial_run_id)
+            .expect("bad Cook identity persisted");
+        agent_task_lifecycle::cancel_run(&bad.initial_run_id, Some("fixture terminal"))
+            .expect("bad attempt terminal");
+        super::super::enqueue_terminal_continuation(&bad.cook_id, &bad.initial_run_id)
+            .expect("bad continuation queued");
+
+        let mut ready = batch_cook_options(
+            "scoped-ready-child",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        )
+        .initial_plan;
+        ready.plan_id = "scoped-ready".to_string();
+        ready.metadata["batch_id"] = serde_json::json!("scoped-recovery");
+        agent_task_lifecycle::submit_plan(&ready, Some("scoped-ready-child"))
+            .expect("ready child submitted");
+        crate::agent_task_batch::persist_fanout_run_batch(
+            "scoped-recovery",
+            "scoped-recovery",
+            &[
+                crate::agent_task_batch::FanoutRunBatchChild {
+                    task_id: "bad".to_string(),
+                    run_id: bad.initial_run_id.clone(),
+                },
+                crate::agent_task_batch::FanoutRunBatchChild {
+                    task_id: "ready".to_string(),
+                    run_id: "scoped-ready-child".to_string(),
+                },
+            ],
+            serde_json::json!({}),
+        )
+        .expect("fanout persisted");
+        let scope = crate::agent_task_batch::owned_child_run_ids("scoped-recovery")
+            .expect("owned children");
+
+        let result = super::super::run_next_with_cook_dispatcher(
+            ImmediateSuccessExecutor,
+            |_| Ok(None),
+            Some(&scope),
+        )
+        .expect("bad continuation does not block scoped queue admission");
+
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].run_id, bad.initial_run_id);
+        assert_eq!(
+            result.value.expect("ready aggregate").plan_id,
+            "scoped-ready"
+        );
+        assert_eq!(
+            agent_task_lifecycle::status("scoped-ready-child")
+                .expect("ready child status")
+                .state,
+            AgentTaskRunState::Succeeded
+        );
     });
 }
 
@@ -385,9 +508,12 @@ fn run_next_redacts_poisoned_recipe_dispatcher_kind() {
         )
         .expect("eligible work queued");
 
-        let result =
-            super::super::run_next_with_cook_dispatcher(ImmediateSuccessExecutor, |_| Ok(None))
-                .expect("poisoned continuation does not block eligible work");
+        let result = super::super::run_next_with_cook_dispatcher(
+            ImmediateSuccessExecutor,
+            |_| Ok(None),
+            None,
+        )
+        .expect("poisoned continuation does not block eligible work");
         let status = agent_task_lifecycle::status(&options.initial_run_id)
             .expect("continuation record status");
         let logs =
@@ -428,9 +554,12 @@ fn malformed_continuation_does_not_head_of_line_block_run_next() {
         )
         .expect("eligible work queued");
 
-        let result =
-            super::super::run_next_with_cook_dispatcher(ImmediateSuccessExecutor, |_| Ok(None))
-                .expect("malformed continuation is skipped");
+        let result = super::super::run_next_with_cook_dispatcher(
+            ImmediateSuccessExecutor,
+            |_| Ok(None),
+            None,
+        )
+        .expect("malformed continuation is skipped");
 
         assert_eq!(
             result.value.expect("eligible aggregate").plan_id,

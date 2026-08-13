@@ -3,6 +3,7 @@
 //! and the shared `AgentTaskRunResult` envelope. Pure move out of the former
 //! `agent_task_service.rs` god-file.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -263,13 +264,20 @@ pub struct AgentTaskRunNextResult {
     pub value: Option<AgentTaskAggregate>,
     pub exit_code: i32,
     pub skipped: Vec<AgentTaskRunNextSkip>,
+    pub queue_admission: AgentTaskQueueAdmission,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentTaskQueueAdmission {
+    pub inspected: usize,
+    pub limit_reached: bool,
 }
 
 pub fn run_next<E>(executor: E) -> Result<AgentTaskRunNextResult>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    run_next_with_cook_dispatcher(executor, |_| Ok(None))
+    run_next_with_cook_dispatcher(executor, |_| Ok(None), None)
 }
 
 pub fn run_next_with_cook_dispatcher<E>(
@@ -279,13 +287,20 @@ pub fn run_next_with_cook_dispatcher<E>(
     ) -> Result<
         Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
     >,
+    scoped_run_ids: Option<&HashSet<String>>,
 ) -> Result<AgentTaskRunNextResult>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    run_next_with_cook_dispatcher_and_queue_preflight(executor, dispatcher, |plan| {
-        preflight_queued_plan_provider_eligibility(plan)
-    })
+    run_next_with_cook_dispatcher_and_queue_preflight(
+        executor,
+        dispatcher,
+        scoped_run_ids,
+        |record, plan| {
+            validate_queued_cook_identity(record)?;
+            preflight_queued_plan_provider_eligibility(plan)
+        },
+    )
 }
 
 pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight<E>(
@@ -295,62 +310,89 @@ pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight<E>(
     ) -> Result<
         Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
     >,
-    queue_preflight: impl Fn(&AgentTaskPlan) -> Result<()>,
+    scoped_run_ids: Option<&HashSet<String>>,
+    queue_preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskRunNextResult>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
     let mut skipped = Vec::new();
-    while let Some(claim) = super::claim_continuation()? {
-        let cook_id = claim.continuation().cook_id.clone();
-        let run_id = claim.continuation().run_id.clone();
-        let recipe = match super::load_recipe(&cook_id) {
-            Ok(recipe) => recipe,
-            Err(error) => {
-                claim.fail(&redacted_continuation_failure(&error))?;
-                skipped.push(continuation_skip(run_id, None, false, error));
+    let mut inspected = 0;
+    if let Some(scoped_run_ids) = scoped_run_ids {
+        let mut scoped_run_ids = scoped_run_ids.iter().collect::<Vec<_>>();
+        scoped_run_ids.sort();
+        for run_id in scoped_run_ids {
+            let record = agent_task_lifecycle::exact_record(run_id)?;
+            let Some(cook_id) = record.metadata.get("cook_id").and_then(Value::as_str) else {
                 continue;
+            };
+            let Some(claim) = super::claim_continuation_for(cook_id, run_id)? else {
+                continue;
+            };
+            let result =
+                consume_claimed_continuation(claim, executor.clone(), &dispatcher, skipped)?;
+            if result.value.is_some() {
+                return Ok(result);
             }
-        };
-        let dispatcher_value = recipe.promotion_transport.pointer("/attempt_dispatch/kind");
-        let dispatcher_kind = dispatcher_value
-            .and_then(Value::as_str)
-            .and_then(agent_task_lifecycle::trusted_dispatcher_kind);
-        let unsupported_dispatcher_kind = dispatcher_value.is_some() && dispatcher_kind.is_none();
-        if let Err(error) = dispatcher(&recipe.promotion_transport["attempt_dispatch"]).and_then(
-            |attempt_dispatcher| {
-                super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher).map(|_| ())
-            },
-        ) {
-            claim.fail(&redacted_continuation_failure(&error))?;
-            skipped.push(continuation_skip(
-                run_id,
-                dispatcher_kind,
-                unsupported_dispatcher_kind,
-                error,
-            ));
-            continue;
+            skipped = result.skipped;
         }
-        let exit_code = super::consume_claimed_with_dispatcher(
-            claim,
-            |recipe| dispatcher(recipe),
-            |options| super::run_cook(options, executor.clone()).map(|result| result.exit_code),
-        )?;
-        let latest_run_id = agent_task_lifecycle::cook_index(&cook_id)
-            .map(|index| index.latest_run_id)
-            .unwrap_or(run_id);
-        let aggregate = agent_task_lifecycle::read_aggregate(&latest_run_id).ok();
+    } else {
+        loop {
+            let continuation = super::claim_continuation_with_budget(
+                agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS.saturating_sub(inspected),
+            )?;
+            inspected += continuation.inspected;
+            if continuation.limit_reached {
+                return Ok(AgentTaskRunNextResult {
+                    value: None,
+                    exit_code: 0,
+                    skipped,
+                    queue_admission: AgentTaskQueueAdmission {
+                        inspected,
+                        limit_reached: true,
+                    },
+                });
+            }
+            let Some(claim) = continuation.claim else {
+                break;
+            };
+            let result =
+                consume_claimed_continuation(claim, executor.clone(), &dispatcher, skipped)?;
+            if result.value.is_some() {
+                return Ok(AgentTaskRunNextResult {
+                    queue_admission: AgentTaskQueueAdmission {
+                        inspected,
+                        limit_reached: false,
+                    },
+                    ..result
+                });
+            }
+            skipped = result.skipped;
+        }
+    }
+    let remaining_budget =
+        agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS.saturating_sub(inspected);
+    if remaining_budget == 0 {
         return Ok(AgentTaskRunNextResult {
-            value: aggregate.map(|aggregate| {
-                crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate)
-            }),
-            exit_code,
+            value: None,
+            exit_code: 0,
             skipped,
+            queue_admission: AgentTaskQueueAdmission {
+                inspected,
+                limit_reached: true,
+            },
         });
     }
-    let claim = agent_task_lifecycle::claim_next_eligible_queued_run_with_preflight(|_, plan| {
-        queue_preflight(plan)
-    })?;
+    let claim =
+        agent_task_lifecycle::claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
+            |record| scoped_run_ids.is_none_or(|run_ids| run_ids.contains(&record.run_id)),
+            remaining_budget,
+            |record, plan| queue_preflight(record, plan),
+        )?;
+    let queue_admission = AgentTaskQueueAdmission {
+        inspected: inspected + claim.inspected,
+        limit_reached: claim.admission_limit_reached,
+    };
     skipped.extend(claim.skipped.into_iter().map(|skip| AgentTaskRunNextSkip {
         run_id: skip.run_id,
         submitted_at: skip.submitted_at,
@@ -369,6 +411,7 @@ where
             value: None,
             exit_code: 0,
             skipped,
+            queue_admission,
         });
     };
 
@@ -379,7 +422,91 @@ where
         )),
         exit_code: result.exit_code,
         skipped,
+        queue_admission,
     })
+}
+
+fn validate_queued_cook_identity(record: &AgentTaskRunRecord) -> Result<()> {
+    let Some(cook_id) = record.metadata.get("cook_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let recipe = super::load_recipe(cook_id)?;
+    super::validate_recipe_attempt_record(&recipe, &record.run_id, record)
+}
+
+fn consume_claimed_continuation<E>(
+    claim: super::ClaimedCookContinuation,
+    executor: E,
+    dispatcher: &impl Fn(
+        &Value,
+    ) -> Result<
+        Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
+    >,
+    mut skipped: Vec<AgentTaskRunNextSkip>,
+) -> Result<AgentTaskRunNextResult>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let cook_id = claim.continuation().cook_id.clone();
+    let run_id = claim.continuation().run_id.clone();
+    let recipe = match super::load_recipe(&cook_id) {
+        Ok(recipe) => recipe,
+        Err(error) => {
+            claim.fail(&redacted_continuation_failure(&error))?;
+            skipped.push(continuation_skip(run_id, None, false, error));
+            return Ok(unclaimed_continuation_result(skipped));
+        }
+    };
+    let dispatcher_value = recipe.promotion_transport.pointer("/attempt_dispatch/kind");
+    let dispatcher_kind = dispatcher_value
+        .and_then(Value::as_str)
+        .and_then(agent_task_lifecycle::trusted_dispatcher_kind);
+    let unsupported_dispatcher_kind = dispatcher_value.is_some() && dispatcher_kind.is_none();
+    if let Err(error) =
+        dispatcher(&recipe.promotion_transport["attempt_dispatch"]).and_then(|attempt_dispatcher| {
+            super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher).map(|_| ())
+        })
+    {
+        claim.fail(&redacted_continuation_failure(&error))?;
+        skipped.push(continuation_skip(
+            run_id,
+            dispatcher_kind,
+            unsupported_dispatcher_kind,
+            error,
+        ));
+        return Ok(unclaimed_continuation_result(skipped));
+    }
+    let exit_code = super::consume_claimed_with_dispatcher(
+        claim,
+        |recipe| dispatcher(recipe),
+        |options| super::run_cook(options, executor.clone()).map(|result| result.exit_code),
+    )?;
+    let latest_run_id = agent_task_lifecycle::cook_index(&cook_id)
+        .map(|index| index.latest_run_id)
+        .unwrap_or(run_id);
+    let aggregate = agent_task_lifecycle::read_aggregate(&latest_run_id).ok();
+    Ok(AgentTaskRunNextResult {
+        value: aggregate
+            .map(|aggregate| crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate)),
+        exit_code,
+        skipped,
+        queue_admission: AgentTaskQueueAdmission {
+            inspected: 0,
+            limit_reached: false,
+        },
+    })
+}
+
+fn unclaimed_continuation_result(skipped: Vec<AgentTaskRunNextSkip>) -> AgentTaskRunNextResult {
+    AgentTaskRunNextResult {
+        value: None,
+        exit_code: 0,
+        skipped,
+        queue_admission: AgentTaskQueueAdmission {
+            inspected: 0,
+            limit_reached: false,
+        },
+    }
 }
 
 fn redacted_continuation_failure(error: &Error) -> String {
