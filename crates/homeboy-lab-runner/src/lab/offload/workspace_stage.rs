@@ -698,6 +698,9 @@ fn materialize_agent_task_evidence_inputs_on_runner(
     remote_cwd: &str,
 ) -> Result<Vec<LabWorkspaceMappingEntry>> {
     let paths = declared_agent_task_evidence_inputs(args);
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
     let source = source_path
         .canonicalize()
         .unwrap_or_else(|_| source_path.to_path_buf());
