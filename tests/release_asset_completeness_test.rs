@@ -70,8 +70,11 @@ fn write_artifacts(root: &Path) -> BTreeMap<String, String> {
     fs::write(artifacts.join("sha256.sum"), checksum).expect("write aggregate sidecar");
     // `Preserve existing published asset bytes` copies every planned asset --
     // including the announce manifest -- into the recovery artifact directory.
-    fs::write(artifacts.join(ANNOUNCE_ASSET), "{\"dist_version\":\"0.31.0\"}\n")
-        .expect("write announce manifest");
+    fs::write(
+        artifacts.join(ANNOUNCE_ASSET),
+        "{\"dist_version\":\"0.31.0\"}\n",
+    )
+    .expect("write announce manifest");
 
     ASSETS
         .into_iter()
