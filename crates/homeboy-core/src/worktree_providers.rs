@@ -2305,6 +2305,21 @@ fn validate_provider_handle(
         if worktree.safety.dirty {
             error.details["workspace"] =
                 dirty_worktree_details(provider_id, worktree, &baseline_verification, &path);
+        } else if blocked == ["unpushed"] {
+            error.details["workspace"] = serde_json::json!({
+                "classification": "workspace.untrusted_unpushed",
+                "reason": "exact_clean_checkout_and_head_not_trusted",
+                "owning_layer": "worktree_provider",
+                "provider_id": provider_id,
+                "resolution": {
+                    "handle": worktree.handle,
+                    "path": worktree.path,
+                    "branch": worktree.branch,
+                    "primary": worktree.safety.primary,
+                    "safety": worktree.safety,
+                },
+                "inspect_command": git_status_command(&path),
+            });
         }
         return Err(error);
     }
@@ -2590,6 +2605,7 @@ fn trusted_unpushed_destination_matches(
         return false;
     };
     path == trusted_path
+        && changed_paths(&path).is_empty()
         && crate::git::run_git(
             &path,
             &["rev-parse", "--verify", "HEAD^{commit}"],
@@ -5617,6 +5633,23 @@ mod tests {
             resolved.worktree.path,
             workspace.path().display().to_string()
         );
+
+        std::fs::write(workspace.path().join("uncommitted"), "drift\n")
+            .expect("introduce uncommitted drift");
+        let dirty =
+            resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+                "fixture@cook-target",
+                &config,
+                None,
+                Some(&TrustedUnpushedWorktree {
+                    path: workspace.path().to_path_buf(),
+                    head: head.clone(),
+                }),
+            )
+            .expect_err("trusted unpushed destination must still be clean");
+        assert!(dirty.message.contains("dirty"));
+        std::fs::remove_file(workspace.path().join("uncommitted"))
+            .expect("remove uncommitted drift");
 
         let stale =
             resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(

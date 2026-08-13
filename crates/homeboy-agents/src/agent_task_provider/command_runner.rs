@@ -41,6 +41,9 @@ pub(super) const PROVIDER_TRANSIENT_MAX_ATTEMPTS: u32 = 3;
 /// (250ms, 500ms, ...). Keeps a single network blip from failing a whole cook
 /// task without introducing unbounded delay.
 const PROVIDER_TRANSIENT_BASE_BACKOFF_MS: u64 = 250;
+const IMMEDIATE_FAILURE_WINDOW: Duration = Duration::from_secs(10);
+const IMMEDIATE_FAILURE_SIGNATURE_TEXT_LIMIT: usize = 4 * 1024;
+const IMMEDIATE_FAILURE_ERROR_REF_LIMIT: usize = 8;
 
 /// Run the provider command with a bounded retry on transient provider/network
 /// failures.
@@ -57,11 +60,50 @@ pub(super) fn run_materialized_provider_command(
     execution_attempt: u32,
 ) -> AgentTaskOutcome {
     let mut retry_attempt = 1;
+    // This state belongs to one invocation's retry sequence. It cannot couple
+    // unrelated tasks that happen to use the same provider concurrently.
+    let mut prior_immediate_failure = None;
     loop {
+        let started = Instant::now();
         let mut outcome =
             run_materialized_provider_command_once(request, provider, run_id, execution_attempt);
         classify_provider_policy_denial(request, &mut outcome);
         classify_transient_provider_outcome(&mut outcome);
+
+        if let Some(failure) = immediate_provider_failure(provider, &outcome, started.elapsed()) {
+            if prior_immediate_failure.as_deref() == Some(failure.signature.as_str()) {
+                if outcome.failure_classification != Some(AgentTaskFailureClassification::Transient)
+                {
+                    outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+                }
+                outcome.diagnostics.push(AgentTaskDiagnostic {
+                    class: "agent_task.provider_immediate_failure_retry_suppressed".to_string(),
+                    message: format!(
+                        "provider '{}' repeated immediate '{}' failure; same-provider retry suppressed",
+                        provider.id, failure.pattern_id
+                    ),
+                    data: json!({
+                        "provider_id": provider.id,
+                        "backend": provider.backend,
+                        "failure_pattern": failure.pattern_id,
+                        "provider_error_refs": failure.error_refs,
+                        "retryable": false,
+                        "retryability_reason": "identical immediate provider failure repeated in this task/provider retry sequence",
+                        "log_lookup": failure.log_lookup,
+                        "fallback_action": failure.fallback_action,
+                        "scope": "task_provider_retry_sequence",
+                    }),
+                });
+                attach_runtime_tool_provenance(request, &mut outcome);
+                link_latest_executor_evidence(request, &mut outcome, run_id);
+                return outcome;
+            }
+            prior_immediate_failure = Some(failure.signature);
+            // The adapter declared this server-side failure retryable. Retain
+            // Homeboy's normal one-retry recovery path until the same signature
+            // proves it is not a transient blip.
+            outcome.failure_classification = Some(AgentTaskFailureClassification::Transient);
+        }
 
         let retryable = outcome_is_transient(&outcome);
         if !retryable || retry_attempt >= PROVIDER_TRANSIENT_MAX_ATTEMPTS {
@@ -82,6 +124,155 @@ pub(super) fn run_materialized_provider_command(
         }
         retry_attempt += 1;
     }
+}
+
+struct ImmediateProviderFailure {
+    pattern_id: String,
+    signature: String,
+    error_refs: Vec<String>,
+    log_lookup: String,
+    fallback_action: String,
+}
+
+fn immediate_provider_failure(
+    provider: &AgentTaskExecutorProvider,
+    outcome: &AgentTaskOutcome,
+    elapsed: Duration,
+) -> Option<ImmediateProviderFailure> {
+    if elapsed >= IMMEDIATE_FAILURE_WINDOW
+        || !matches!(
+            outcome.status,
+            AgentTaskOutcomeStatus::ProviderError | AgentTaskOutcomeStatus::Failed
+        )
+        || !matches!(
+            outcome.failure_classification,
+            None | Some(AgentTaskFailureClassification::Provider)
+                | Some(AgentTaskFailureClassification::Transient)
+        )
+    {
+        return None;
+    }
+    let text = provider_failure_text(outcome);
+    provider
+        .immediate_failure_patterns
+        .iter()
+        .find_map(|pattern| {
+            if !pattern.retryable || pattern.error_contains_any.is_empty() {
+                return None;
+            }
+            let matches = pattern.error_contains_any.iter().any(|needle| {
+                !needle.is_empty()
+                    && text
+                        .to_ascii_lowercase()
+                        .contains(&needle.to_ascii_lowercase())
+            });
+            matches.then(|| {
+                let error_refs = pattern
+                    .error_ref_pattern
+                    .as_deref()
+                    .and_then(|expression| regex::Regex::new(expression).ok())
+                    .map(|expression| {
+                        expression
+                            .find_iter(&text)
+                            .take(IMMEDIATE_FAILURE_ERROR_REF_LIMIT)
+                            .map(|matched| matched.as_str().to_string())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let normalized = pattern
+                    .error_ref_pattern
+                    .as_deref()
+                    .and_then(|expression| regex::Regex::new(expression).ok())
+                    .map(|expression| {
+                        expression
+                            .replace_all(&text, "[provider-error-ref]")
+                            .into_owned()
+                    })
+                    .unwrap_or_else(|| text.clone());
+                let normalized = bounded_text(&normalized, IMMEDIATE_FAILURE_SIGNATURE_TEXT_LIMIT);
+                ImmediateProviderFailure {
+                pattern_id: pattern.id.clone(),
+                signature: format!(
+                    "{}:{}:{}",
+                    provider.id,
+                    pattern.id,
+                    homeboy_engine_primitives::content_hash::sha256_hex(normalized.as_bytes())
+                ),
+                error_refs,
+                log_lookup: pattern.log_lookup.clone().unwrap_or_else(|| {
+                    "homeboy agent-task logs <run-id> --task <task-id>".to_string()
+                }),
+                fallback_action: pattern.fallback_action.clone().unwrap_or_else(|| {
+                    "Select another configured provider or pause until this provider is healthy."
+                        .to_string()
+                }),
+            }
+            })
+        })
+}
+
+/// Validate adapter-owned failure signatures before they can affect dispatch.
+/// Invalid regular expressions must be a visible manifest contract error, not
+/// a silent opt-out from retry suppression.
+pub fn validate_provider_immediate_failure_patterns(
+    provider: &AgentTaskExecutorProvider,
+) -> std::result::Result<(), String> {
+    for pattern in &provider.immediate_failure_patterns {
+        if pattern.id.trim().is_empty()
+            || pattern
+                .error_contains_any
+                .iter()
+                .all(|value| value.trim().is_empty())
+        {
+            return Err(
+                "immediate failure patterns need an id and at least one non-empty error substring"
+                    .to_string(),
+            );
+        }
+        if let Some(expression) = &pattern.error_ref_pattern {
+            if expression.len() > 512 {
+                return Err(format!(
+                    "immediate failure pattern '{}' error_ref_pattern exceeds 512 bytes",
+                    pattern.id
+                ));
+            }
+            let expression = regex::Regex::new(expression).map_err(|error| {
+                format!(
+                    "immediate failure pattern '{}' has invalid error_ref_pattern: {error}",
+                    pattern.id
+                )
+            })?;
+            if expression.is_match("") {
+                return Err(format!(
+                    "immediate failure pattern '{}' error_ref_pattern must not match an empty string",
+                    pattern.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn provider_failure_text(outcome: &AgentTaskOutcome) -> String {
+    let mut text = outcome.summary.clone().unwrap_or_default();
+    for diagnostic in &outcome.diagnostics {
+        text.push('\n');
+        text.push_str(&diagnostic.message);
+        text.push('\n');
+        text.push_str(&diagnostic.data.to_string());
+    }
+    text
+}
+
+fn bounded_text(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut start = text.len() - limit;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
 }
 
 fn attach_runtime_tool_provenance(

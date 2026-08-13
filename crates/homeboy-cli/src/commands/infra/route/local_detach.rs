@@ -51,20 +51,13 @@ use crate::core::io::output_file::write_output_file;
 
 const HANDOFF_SCHEMA: &str = "homeboy/agent-task-cook-local-detach-handoff/v1";
 
-/// Bound on how long the launcher waits for the detached cook to publish its
-/// durable identity before reporting the handoff as still pending.
+/// Bound on how long the launcher waits for the detached cook to materialize
+/// its first executable attempt before reporting the handoff as pending.
 ///
-/// This wait is no longer load-bearing. The daemon submit returns a job id
-/// synchronously, and `record_detached_cook_handoff_parent` makes the cook id
-/// resolvable before a child even exists, so both handles in the envelope are
-/// addressable the moment it is printed. What the wait still buys is the
-/// *attempt* id, which genuinely does not exist until the cook materializes its
-/// first attempt and which no design can conjure synchronously.
-///
-/// It is kept at its historical default so no existing caller that reads
-/// `run_id` regresses, and it is now safe to set to `0`: a zero-wait envelope
-/// still names an addressable cook and an inspectable controller job, which was
-/// not true before the daemon owned the lifecycle.
+/// The placeholder and controller job make the Cook addressable before this
+/// boundary, but they do not prove the child has durable execution ownership.
+/// `accepted` is reserved for that later proof. A zero wait consequently emits
+/// a pending handoff, never an unproven acceptance.
 const DEFAULT_HANDOFF_TIMEOUT_MS: u64 = 30_000;
 const HANDOFF_POLL: Duration = Duration::from_millis(100);
 
@@ -270,15 +263,23 @@ pub(super) fn intercept_local_detached_cook(
             )
         },
     )?;
-    // The parent record and admitted controller job are the authoritative durable
-    // transition. Do not wait for a slow provider to materialize its first attempt.
-    let handoff = DetachedCookHandoff {
-        state: DetachedHandoffState::Accepted,
-        run_id: Some(cook_id.clone()),
-        waited_ms: 0,
-    };
-    crate::commands::agent_task::run::announce_durable_cook_identity(Some(&cook_id), &cook_id);
     if cli.detach_after_handoff {
+        // Controller supervision makes the placeholder addressable, but
+        // acceptance requires the child to durably materialize its first
+        // executable attempt. Until then, callers receive an explicitly pending
+        // handoff instead of a success that could be followed by a zero-task
+        // terminal placeholder. Attached callers stream immediately; they do
+        // not receive a handoff acknowledgement to classify.
+        let handoff = await_durable_handoff(&cook_id, &mut child, handoff_timeout())?;
+        if handoff.state == DetachedHandoffState::ExitedBeforeHandoff {
+            return Err(Error::validation_invalid_argument(
+                "detach-after-handoff",
+                "detached Cook exited before materializing its first attempt",
+                Some(cook_id),
+                None,
+            ));
+        }
+        crate::commands::agent_task::run::announce_durable_cook_identity(Some(&cook_id), &cook_id);
         let envelope = handoff_envelope(
             &cook_id,
             pid,
@@ -689,9 +690,9 @@ fn handoff_timeout() -> Duration {
     Duration::from_millis(millis)
 }
 
-/// Poll durable state until the detached cook is addressable, it dies, or the
-/// bound elapses. A launcher that returned before the record existed would hand
-/// back an id that `agent-task status` cannot yet resolve.
+/// Poll durable state until the detached cook materializes an executable
+/// attempt, it dies, or the bound elapses. The placeholder is addressable while
+/// pending; an index whose named attempt can be read proves durable ownership.
 ///
 /// Liveness is read from the child handle rather than from the pid. The
 /// detached cook is still this process's direct child until this process exits,
@@ -702,35 +703,77 @@ fn await_durable_handoff(
     cook_id: &str,
     child: &mut std::process::Child,
     timeout: Duration,
-) -> DetachedCookHandoff {
+) -> homeboy::core::Result<DetachedCookHandoff> {
     let started = Instant::now();
     loop {
-        if agent_task_lifecycle::cook_index_exists(cook_id).unwrap_or(false) {
-            let run_id = agent_task_lifecycle::cook_index(cook_id)
-                .ok()
-                .map(|index| index.latest_run_id);
-            return DetachedCookHandoff {
+        if let Some(run_id) = durable_attempt_id(cook_id) {
+            return Ok(DetachedCookHandoff {
                 state: DetachedHandoffState::Accepted,
-                run_id,
+                run_id: Some(run_id),
                 waited_ms: started.elapsed().as_millis() as u64,
-            };
+            });
         }
-        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-            return DetachedCookHandoff {
-                state: DetachedHandoffState::ExitedBeforeHandoff,
-                run_id: None,
-                waited_ms: started.elapsed().as_millis() as u64,
-            };
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                // Process exit and index publication can cross. Re-read the
+                // durable ownership proof before failing, and let lifecycle
+                // reject a stale failure mutation if materialization wins this
+                // race afterward.
+                if let Some(run_id) = durable_attempt_id(cook_id) {
+                    return Ok(DetachedCookHandoff {
+                        state: DetachedHandoffState::Accepted,
+                        run_id: Some(run_id),
+                        waited_ms: started.elapsed().as_millis() as u64,
+                    });
+                }
+                agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                    cook_id,
+                    "detached Cook exited before materializing its first attempt",
+                )?;
+                if let Some(run_id) = durable_attempt_id(cook_id) {
+                    return Ok(DetachedCookHandoff {
+                        state: DetachedHandoffState::Accepted,
+                        run_id: Some(run_id),
+                        waited_ms: started.elapsed().as_millis() as u64,
+                    });
+                }
+                return Ok(DetachedCookHandoff {
+                    state: DetachedHandoffState::ExitedBeforeHandoff,
+                    run_id: None,
+                    waited_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            // An observation error is not proof that the child died. Preserve
+            // the pending contract and let durable supervision continue.
+            Err(_) => {
+                return Ok(DetachedCookHandoff {
+                    state: DetachedHandoffState::Pending,
+                    run_id: None,
+                    waited_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            Ok(None) => {}
         }
         if started.elapsed() >= timeout {
-            return DetachedCookHandoff {
+            return Ok(DetachedCookHandoff {
                 state: DetachedHandoffState::Pending,
                 run_id: None,
                 waited_ms: started.elapsed().as_millis() as u64,
-            };
+            });
         }
         std::thread::sleep(HANDOFF_POLL);
     }
+}
+
+/// Read the exact durable attempt an accepted handoff names. An index file on
+/// its own is not sufficient: a caller must be able to resolve the attempt it
+/// receives immediately.
+fn durable_attempt_id(cook_id: &str) -> Option<String> {
+    let run_id = agent_task_lifecycle::cook_index(cook_id)
+        .ok()?
+        .latest_run_id;
+    (!run_id.trim().is_empty() && agent_task_lifecycle::exact_record(&run_id).is_ok())
+        .then_some(run_id)
 }
 
 /// The launcher's only output: a bounded, machine-readable handoff naming the
@@ -1536,7 +1579,8 @@ mod tests {
                 .spawn()
                 .expect("spawn slow preparation fixture");
 
-            let handoff = await_durable_handoff(cook_id, &mut child, Duration::from_millis(5));
+            let handoff = await_durable_handoff(cook_id, &mut child, Duration::from_millis(5))
+                .expect("observe bounded pending handoff");
 
             assert_eq!(handoff.state, DetachedHandoffState::Pending);
             assert_eq!(
@@ -1563,6 +1607,191 @@ mod tests {
     }
 
     #[test]
+    fn a_materialized_attempt_is_the_boundary_for_accepted_handoff() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-materialized-acceptance";
+            let attempt_id = "cook-materialized-acceptance-attempt-1";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "materialized-acceptance-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
+                .expect("persist executable attempt");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
+                .expect("publish durable Cook attempt ownership");
+            let mut child = Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn live detached child");
+
+            let handoff = await_durable_handoff(cook_id, &mut child, Duration::from_millis(0))
+                .expect("observe materialized handoff");
+
+            assert_eq!(handoff.state, DetachedHandoffState::Accepted);
+            assert_eq!(handoff.run_id.as_deref(), Some(attempt_id));
+            terminate_and_reap_detached_child(&mut child);
+        });
+    }
+
+    #[test]
+    fn materialization_lock_first_makes_exit_failure_a_non_panicking_no_op() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-materialized-parent-preserved";
+            let attempt_id = "cook-materialized-parent-preserved-attempt-1";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "materialized-parent-preserved-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
+                .expect("persist executable attempt");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
+                .expect("publish durable Cook attempt ownership");
+
+            agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                cook_id,
+                "stale detached child exit observation",
+            )
+            .expect("protected materialized parent makes exit failure a no-op");
+
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("read materialized handoff parent");
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["state"],
+                "redirected"
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["attempt_run_id"],
+                attempt_id
+            );
+            assert_ne!(
+                parent.metadata["detached_cook_handoff"]["reason"],
+                "stale detached child exit observation"
+            );
+        });
+    }
+
+    #[test]
+    fn exit_lock_first_blocks_later_attempt_materialization() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-exit-before-materialization";
+            let attempt_id = "cook-exit-before-materialization-attempt-1";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "exit-before-materialization-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
+                .expect("persist attempt before ownership arbitration");
+
+            agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                cook_id,
+                "detached Cook exited before materializing its first attempt",
+            )
+            .expect("exit wins the handoff arbitration");
+
+            assert!(
+                agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id).is_err(),
+                "a terminal exit winner must prevent later index publication"
+            );
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("read exit-winning handoff parent");
+            assert_eq!(
+                parent.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["state"],
+                "exited_before_handoff"
+            );
+            assert!(
+                !agent_task_lifecycle::cook_index_exists(cook_id)
+                    .expect("exit winner left no Cook index"),
+                "a failed placeholder cannot coexist with an accepted Cook alias"
+            );
+        });
+    }
+
+    #[test]
+    fn cancellation_lock_first_blocks_later_attempt_materialization() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-cancel-before-materialization";
+            let attempt_id = "cook-cancel-before-materialization-attempt-1";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "cancel-before-materialization-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
+                .expect("persist attempt before ownership arbitration");
+
+            let cancelled = agent_task_lifecycle::cancel_run(cook_id, None)
+                .expect("cancellation wins the handoff arbitration");
+            assert_eq!(
+                cancelled.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+
+            assert!(
+                agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id).is_err(),
+                "a cancelled parent must prevent attempt and index publication"
+            );
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("read cancellation-winning handoff parent");
+            assert_eq!(
+                parent.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
+                "cancelled"
+            );
+            assert!(
+                !agent_task_lifecycle::cook_index_exists(cook_id)
+                    .expect("cancel winner left no Cook index"),
+                "a cancelled placeholder cannot resurrect a Cook alias"
+            );
+        });
+    }
+
+    #[test]
+    fn materialization_lock_first_remains_cancel_resolvable() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-materialized-before-cancel";
+            let attempt_id = "cook-materialized-before-cancel-attempt-1";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "materialized-before-cancel-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
+                .expect("persist executable attempt");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
+                .expect("materialization wins the handoff arbitration");
+
+            let cancelled = agent_task_lifecycle::cancel_run(cook_id, None)
+                .expect("Cook alias resolves to its materialized attempt");
+            assert_eq!(cancelled.run_id, attempt_id);
+            assert_eq!(
+                cancelled.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(
+                agent_task_lifecycle::exact_record(attempt_id)
+                    .expect("read materialized cancelled attempt")
+                    .state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+        });
+    }
+
+    #[test]
     fn a_dead_detached_process_is_never_reported_as_an_accepted_handoff() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-never-submitted";
@@ -1574,20 +1803,24 @@ mod tests {
                 .expect("spawn a child that exits immediately");
 
             let handoff =
-                await_durable_handoff(cook_id, &mut child, std::time::Duration::from_millis(5_000));
+                await_durable_handoff(cook_id, &mut child, std::time::Duration::from_millis(5_000))
+                    .expect("observe exited handoff");
 
             assert_eq!(handoff.state, DetachedHandoffState::ExitedBeforeHandoff);
             assert_eq!(handoff.run_id, None);
-            agent_task_lifecycle::fail_detached_cook_handoff_parent(
-                cook_id,
-                "detached Cook exited before materializing its first attempt",
-            )
-            .expect("terminalize exited handoff");
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("the observer terminalizes the exited handoff parent");
             assert_eq!(
-                agent_task_lifecycle::exact_record(cook_id)
-                    .expect("read exited handoff parent")
-                    .state,
+                parent.state,
                 agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["state"],
+                "exited_before_handoff"
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["reason"],
+                "detached Cook exited before materializing its first attempt"
             );
         });
     }

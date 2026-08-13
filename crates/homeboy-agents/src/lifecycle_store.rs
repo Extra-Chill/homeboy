@@ -229,6 +229,20 @@ pub(super) fn mutate_record(
     Ok(record)
 }
 
+/// Mutate a record while the caller owns the config lock. Terminal authority is
+/// deliberately deferred to the caller's post-lock projection, matching
+/// [`write_record_locked_without_terminal_projection`].
+pub(super) fn mutate_record_locked_without_terminal_projection(
+    run_id: &str,
+    mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
+) -> Result<Option<AgentTaskRunRecord>> {
+    let mut record = read_record(run_id)?;
+    if !mutate(&mut record) {
+        return Ok(None);
+    }
+    write_record_locked_without_terminal_projection(&record).map(Some)
+}
+
 /// Commit the controller projection and child aggregate in one observation row.
 /// The JSON aggregate is a post-commit cache: readers use the committed row, so
 /// interruption before or after cache persistence exposes a complete state.

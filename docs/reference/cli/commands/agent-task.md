@@ -343,6 +343,9 @@ Read durable run status
 | `--full` | flag | _no help text_ |
 | `--strict-subject-exit` | flag | Exit nonzero when the inspected Cook needs follow-up action |
 | `--no-runner-probe` | flag | _no help text_ |
+| `--watch` | flag | Follow this durable status until it reaches a terminal state or the timeout expires |
+| `--interval` | `<DURATION>` | Delay between status reads while following. Accepts ms, s, m, h, or d |
+| `--timeout` | `<DURATION>` | Total time to follow before returning the latest partial status. Accepts ms, s, m, h, or d |
 
 ## `homeboy agent-task watch`
 

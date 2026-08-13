@@ -412,6 +412,20 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
         }
     };
 
+    super::command_runner::validate_provider_immediate_failure_patterns(provider).map_err(
+        |message| {
+            Error::validation_invalid_argument(
+                "immediate_failure_patterns",
+                format!(
+                    "provider '{}' has invalid immediate failure configuration: {message}",
+                    provider.id
+                ),
+                Some(provider.backend.clone()),
+                None,
+            )
+        },
+    )?;
+
     provider_executable_env(provider).map_err(|error| {
         Error::validation_invalid_argument(
             "backend",

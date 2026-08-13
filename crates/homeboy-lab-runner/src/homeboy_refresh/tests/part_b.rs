@@ -505,7 +505,7 @@ fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
 }
 
 #[test]
-fn controller_binary_selection_is_idempotent() {
+fn controller_binary_selection_reports_fresh_main_control_plane_fields() {
     test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
@@ -790,6 +790,7 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
         assert_eq!(selected.selected_binary_path, binary.display().to_string());
         assert!(!selected.daemon_refreshed);
         assert!(selected.reconnect_required);
+        assert!(selected.next_actions.is_empty());
         assert_eq!(
             crate::load("lab-local")
                 .expect("reload controller registry")
@@ -804,7 +805,58 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
         assert_eq!(repeated.updated_fields, ["env", "homeboy_path"]);
         assert!(!repeated.daemon_refreshed);
         assert!(repeated.reconnect_required);
+        assert!(repeated.next_actions.is_empty());
     });
+}
+
+#[test]
+fn verified_materialized_refresh_defers_controller_materialization_to_exact_continuation() {
+    let identity = serde_json::json!({
+        "data": {
+            "display": "homeboy 1.2.3+exact-remote-sha",
+            "git_commit": "exact-remote-sha"
+        }
+    });
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "materialize".to_string(),
+        source: Some("https://example.test/Extra-Chill/homeboy.git".to_string()),
+        git_ref: Some("candidate".to_string()),
+        target_dir: Some("/runner/homeboy".to_string()),
+        binary_path: "/runner/homeboy".to_string(),
+        script: "runner-only materialization".to_string(),
+        reconnect: true,
+        followup_commands: Vec::new(),
+    };
+
+    let actions = controller_continuation_actions(&plan, &identity).expect("continuation");
+    assert_eq!(actions.len(), 1);
+    let action = &actions[0];
+    assert_eq!(action.commit, "exact-remote-sha");
+    assert_eq!(
+        action.source,
+        "https://example.test/Extra-Chill/homeboy.git"
+    );
+    assert_eq!(
+        action.command[0..3],
+        ["homeboy", "runtime", "materialize-controller"]
+    );
+    assert!(action.command.iter().any(|arg| arg == "exact-remote-sha"));
+    assert!(!action.command.iter().any(|arg| arg == "refresh-homeboy"));
+    assert!(action.invocation.is_empty());
+    assert!(!action
+        .invocation
+        .iter()
+        .any(|arg| arg.contains("refresh-homeboy")));
+
+    let select = HomeboyBinaryRefreshPlan {
+        mode: "select".to_string(),
+        source: None,
+        ..plan
+    };
+    assert!(controller_continuation_actions(&select, &identity)
+        .expect("select continuation")
+        .is_empty());
 }
 
 #[test]
