@@ -11,6 +11,7 @@ use homeboy_core::runner_execution_envelope::{
     PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
     PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
+use std::path::PathBuf;
 
 /// Owned command facts consumed while materializing a workspace. This keeps the
 /// durable controller path bounded by the request lifetime rather than forcing
@@ -376,6 +377,26 @@ fn prepare_lab_offload_workspace_stage_inner(
         );
     }
 
+    let evidence_entries = materialize_agent_task_evidence_inputs_on_runner(
+        runner_id,
+        &offload_args,
+        source_path,
+        &remote_cwd,
+    )?;
+    if !evidence_entries.is_empty() {
+        let evidence_count = evidence_entries.len();
+        workspace_mapping.extend(evidence_entries);
+        plan = with_step(
+            plan,
+            PlanStep::ready(
+                "lab.materialize_provider_evidence",
+                "lab.materialize_provider_evidence",
+            )
+            .inputs(PlanValues::new().json("count", evidence_count))
+            .build(),
+        );
+    }
+
     let synced_extra_workspaces = sync_extra_lab_workspaces(
         runner_id,
         &synced.local_path,
@@ -665,6 +686,114 @@ fn prepare_lab_offload_workspace_stage_inner(
         runtime_overlay_env,
         runtime_overlay_metadata,
     })
+}
+
+/// Explicitly transfer controller-projected provider evidence into the primary
+/// runner workspace. Git-based Lab materialization deliberately excludes
+/// untracked files, so evidence must travel outside the snapshot contract.
+fn materialize_agent_task_evidence_inputs_on_runner(
+    runner_id: &str,
+    args: &[String],
+    source_path: &Path,
+    remote_cwd: &str,
+) -> Result<Vec<LabWorkspaceMappingEntry>> {
+    let paths = declared_agent_task_evidence_inputs(args);
+    let source = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+    let transfer = lab_runner_file_transfer(runner_id)?;
+    let mut entries = Vec::new();
+    for (path, expected_sha256) in paths {
+        let local = PathBuf::from(&path);
+        let canonical = local.canonicalize().map_err(|error| {
+            Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab offload declared evidence is unavailable on the controller",
+                Some(format!("{path}: {error}")),
+                None,
+            )
+        })?;
+        let relative = canonical.strip_prefix(&source).map_err(|_| {
+            Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab offload evidence must be projected inside the Cook workspace",
+                Some(path.clone()),
+                None,
+            )
+        })?;
+        let remote = format!(
+            "{}/{}",
+            remote_cwd.trim_end_matches('/'),
+            relative.display()
+        );
+        let parent = remote.rsplit_once('/').map_or("/", |(parent, _)| parent);
+        transfer.ensure_directory(parent)?;
+        transfer.upload_private_file_atomic(
+            &canonical.display().to_string(),
+            &remote,
+            expected_sha256
+                .strip_prefix("sha256:")
+                .unwrap_or(&expected_sha256),
+        )?;
+        entries.push(workspace_mapping_entry_for_materialized_file(
+            "provider_evidence",
+            "<controller-projected-evidence>",
+            remote,
+        ));
+    }
+    Ok(entries)
+}
+
+fn declared_agent_task_evidence_inputs(
+    args: &[String],
+) -> std::collections::BTreeMap<String, String> {
+    let mut paths = std::collections::BTreeMap::new();
+    for (index, arg) in args.iter().enumerate() {
+        let spec = if matches!(arg.as_str(), "--plan" | "--attempt-plan") {
+            args.get(index + 1).cloned()
+        } else if let Some(spec) = arg
+            .strip_prefix("--plan=")
+            .or_else(|| arg.strip_prefix("--attempt-plan="))
+        {
+            Some(spec.to_string())
+        } else {
+            continue;
+        };
+        let Some(spec) = spec else { continue };
+        let raw = if let Some(path) = spec.strip_prefix('@') {
+            std::fs::read_to_string(path).ok()
+        } else {
+            Some(spec.clone())
+        };
+        let Some(raw) = raw else { continue };
+        let Ok(plan) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(tasks) = plan.get("tasks").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for task in tasks {
+            let Some(inputs) = task
+                .get("executor")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|executor| executor.get("config"))
+                .and_then(|config| config.get("evidence_inputs"))
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            for input in inputs {
+                if let (Some(path), Some(sha256)) = (
+                    input.get("path").and_then(serde_json::Value::as_str),
+                    input.get("sha256").and_then(serde_json::Value::as_str),
+                ) {
+                    paths.insert(path.to_string(), sha256.to_string());
+                }
+            }
+        }
+    }
+
+    paths
 }
 
 pub(crate) fn workspace_path_materialization_plan(
@@ -1052,6 +1181,50 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
+
+    #[test]
+    fn discovers_only_declared_provider_evidence_from_cook_attempt_plan() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            format!(
+                "--attempt-plan={}",
+                serde_json::json!({
+                    "id": "cook",
+                    "tasks": [{
+                        "task_id": "task",
+                        "executor": {"backend": "fixture", "config": {
+                            "evidence_inputs": [{"path": "/workspace/.homeboy/evidence/one/input.json", "sha256": "sha256:abc"}]
+                        }}
+                    }]
+                })
+            ),
+        ];
+
+        assert_eq!(
+            declared_agent_task_evidence_inputs(&args),
+            std::collections::BTreeMap::from([(
+                "/workspace/.homeboy/evidence/one/input.json".to_string(),
+                "sha256:abc".to_string()
+            )])
+        );
+
+        let plan_equals = vec![
+            "homeboy".to_string(),
+            format!(
+                "--plan={}",
+                serde_json::json!({"tasks":[{"executor":{"config":{"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/two/input.json","sha256":"sha256:def"}]}}}]})
+            ),
+        ];
+        assert_eq!(
+            declared_agent_task_evidence_inputs(&plan_equals),
+            std::collections::BTreeMap::from([(
+                "/workspace/.homeboy/evidence/two/input.json".to_string(),
+                "sha256:def".to_string()
+            )])
+        );
+    }
 
     #[test]
     fn same_rig_jobs_derive_distinct_registry_roots_from_unique_workspaces() {

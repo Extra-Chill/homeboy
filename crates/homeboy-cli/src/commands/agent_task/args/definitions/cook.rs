@@ -20,6 +20,14 @@ use homeboy::agents::agent_tasks::gate::{
 use super::super::super::super::agent_task_dispatch::DispatchArgs;
 use super::super::super::review;
 
+/// A bounded, controller-projected input available to the provider as read-only
+/// workspace evidence.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderEvidenceInput {
+    pub id: String,
+    pub source: String,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct VerifyGateArgs {
     /// Deterministic verification command that must pass before the cook
@@ -906,6 +914,10 @@ pub struct AgentTaskCookArgs {
     /// --prompt, it supplies the one provider task.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
+    /// Read-only external file projected into `.homeboy/evidence/<id>/` in the
+    /// Cook workspace. Repeat for each source the provider may read.
+    #[arg(long = "provider-evidence", value_name = "JSON", value_parser = parse_provider_evidence_input)]
+    pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
     /// Workspace handle the cook edits, verifies, and finalizes into. The handle
     /// is `<repo>@<branch-slug>`, where the slug replaces every character of
     /// --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle
@@ -1009,6 +1021,13 @@ pub struct AgentTaskCookArgs {
     /// not caller input: Cook persists it with the compiled plan.
     #[arg(skip)]
     pub repository_identity: Option<serde_json::Value>,
+}
+
+pub(crate) fn parse_provider_evidence_input(
+    value: &str,
+) -> Result<AgentTaskProviderEvidenceInput, String> {
+    serde_json::from_str(value)
+        .map_err(|error| format!("invalid provider evidence declaration: {error}"))
 }
 
 #[derive(Args, Clone, Debug)]

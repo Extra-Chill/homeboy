@@ -511,6 +511,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
         assert!(status.success());
         let (value, exit_code) = run_cook_with_executor(
             AgentTaskCookArgs {
+                provider_evidence_inputs: Vec::new(),
                 dispatch: DispatchArgs {
                     prompt: None,
                     tasks: Vec::new(),
@@ -915,6 +916,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (value, exit_code) = run_cook_with_executor_and_dispatcher(
             AgentTaskCookArgs {
+                provider_evidence_inputs: Vec::new(),
                 dispatch: DispatchArgs {
                     prompt: Some("commit a change".to_string()),
                     tasks: Vec::new(),
