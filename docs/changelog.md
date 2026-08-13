@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.345.1] - 2026-08-13
+
+### Changed
+- exercise strict checksum parser
+- inject cook storage roots
+- cargo fmt the announce manifest fixture write
+- consolidate CLI integration targets
+
+### Fixed
+- resolve GitHub releases by apiUrl instead of databaseId
+- enforce monotonic recovery guidance
+- bound doctor SSH fallback
+- honor explicit candidate state dirs
+- refresh Lab admission before refusal
+- fail blocked recover outcomes
+- validate installer archive members
+- clarify reconciliation ownership contracts
+- scope reconcile refreshes
+- separate required and allowed asset contracts in release recovery
+- canonicalize checksum sidecars
+- use cargo-dist archive layout in installer
+- report reconcile convergence outcome
+- refresh capabilities after doctor
+
 ## [0.345.0] - 2026-08-13
 
 ### Added
