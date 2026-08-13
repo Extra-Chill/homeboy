@@ -725,7 +725,9 @@ fn current_executable() -> Result<PathBuf> {
     })
 }
 
-fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
+/// Seal a verified executable for a command-scoped controller continuation.
+/// The returned pin is content-addressed, executable, and self-identifying.
+pub fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
     let digest = controller_executable_digest(executable)?;
     let pinned_path = pinned_path(identity, &digest)?;
     publish_pin(executable, &pinned_path, &digest)?;
@@ -733,6 +735,73 @@ fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
     let runtime = runtime_pin(identity, executable, &pinned_path, &digest);
     validate_pin(&runtime)?;
     Ok(runtime)
+}
+
+/// Build and seal a controller executable from the exact source revision the
+/// runner already verified. This is intentionally explicit: runner refreshes
+/// must not depend on controller network or build availability.
+pub fn materialize_source_commit(source: &str, commit: &str, identity: &str) -> Result<Value> {
+    let workspace = tempfile::tempdir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create controller candidate workspace".to_string()),
+        )
+    })?;
+    let checkout = workspace.path().join("source");
+    run_command(
+        "git",
+        ["clone", "--quiet", source, &checkout.display().to_string()],
+    )?;
+    run_command(
+        "git",
+        [
+            "-C",
+            &checkout.display().to_string(),
+            "checkout",
+            "--quiet",
+            "--detach",
+            commit,
+        ],
+    )?;
+    let resolved = Command::new("git")
+        .args(["-C", &checkout.display().to_string(), "rev-parse", "HEAD"])
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("verify controller candidate source commit".to_string()),
+            )
+        })?;
+    if !resolved.status.success() || String::from_utf8_lossy(&resolved.stdout).trim() != commit {
+        return Err(Error::validation_invalid_argument(
+            "commit",
+            "controller candidate source did not resolve the requested exact commit",
+            Some(commit.to_string()),
+            None,
+        ));
+    }
+    let target =
+        crate::cleanup::acquire_shared_cargo_target(&format!("controller-runtime:{commit}"))?;
+    let build = Command::new("cargo")
+        .args(["build", "--release", "--bin", "homeboy"])
+        .env("CARGO_TARGET_DIR", target.target_dir())
+        .current_dir(&checkout)
+        .status()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("build controller candidate source".to_string()),
+            )
+        })?;
+    if !build.success() {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            format!("controller candidate build failed with status {build}"),
+            Some(source.to_string()),
+            None,
+        ));
+    }
+    pin_executable(&target.target_dir().join("release/homeboy"), identity)
 }
 
 fn runtime_pin(identity: &str, executable: &Path, pinned_path: &Path, digest: &str) -> Value {

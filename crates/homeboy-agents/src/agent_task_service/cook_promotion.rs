@@ -35,7 +35,11 @@ use crate::agent_task_review_dossier::{
 };
 use homeboy_core::{config, Error, Result};
 
-use super::cook::{AgentTaskCookAttemptReport, AgentTaskCookReport, AgentTaskCookServiceOptions};
+use super::cook::{
+    canonical_candidate_finalization, canonical_cook_candidate, cook_finalization_is_pr_receipt,
+    review_form_attempt_is_ready_for_cook_continuation, AgentTaskCookAttemptReport,
+    AgentTaskCookReport, AgentTaskCookServiceOptions,
+};
 use super::AgentTaskRunResult;
 
 pub fn source_worktree_path(cwd: Option<String>, workspace: Option<String>) -> Option<PathBuf> {
@@ -1797,30 +1801,10 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     {
         run_or_cook_id.to_string()
     } else {
-        let mut applied_run_id = None;
-        for attempt in recipe.attempts.iter().rev() {
-            if persisted_promotion_for_attempt(&attempt.run_id)?.is_some_and(|promotion| {
-                // #11460 stopped flattening an explicitly accepted inherited
-                // baseline failure into Applied, so selecting only on Applied
-                // made recovery unable to find the very attempt it exists to
-                // recover. Selection is permissive on purpose: finalization
-                // still enforces finalization_eligible against the cook's own
-                // accept_inherited_failures, so a candidate the operator has
-                // not accepted still fails there, with its specific reason
-                // instead of "no attempt with an applied promotion".
-                let outcome = promotion.gate_outcome();
-                outcome.status == AgentTaskPromotionStatus::Applied
-                    || (outcome.status == AgentTaskPromotionStatus::GateFailed
-                        && promotion.finalization_eligible(true))
-            }) {
-                applied_run_id = Some(attempt.run_id.clone());
-                break;
-            }
-        }
-        applied_run_id.ok_or_else(|| {
+        canonical_cook_recovery_run_id(&recipe.cook_id).ok_or_else(|| {
             Error::validation_invalid_argument(
                 "run_or_cook_id",
-                "durable Cook recipe has no attempt with an applied promotion",
+                "durable Cook has no canonical promotable candidate",
                 Some(run_or_cook_id.to_string()),
                 None,
             )
@@ -1867,6 +1851,37 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         agent_task_lifecycle::record_cook_finalization(&run_id, value.clone())?;
     }
     Ok(value)
+}
+
+pub(crate) fn canonical_cook_recovery_run_id(cook_id: &str) -> Option<String> {
+    let candidate = canonical_cook_candidate(cook_id)
+        .filter(|candidate| candidate["incomplete"] != true)
+        ?;
+    let source_run_id = candidate["run_id"].as_str()?.to_string();
+    if source_run_id.is_empty() {
+        return None;
+    }
+    let recipe = super::cook_recipe::load_recipe(cook_id).ok()?;
+    for attempt in recipe.attempts.iter().rev() {
+        let Ok(record) = agent_task_lifecycle::exact_record(&attempt.run_id) else {
+            continue;
+        };
+        if review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record).ok()?
+            && persisted_promotion_for_attempt(&attempt.run_id)
+                .ok()
+                .flatten()
+                .is_some_and(|promotion| {
+                    promotion
+                        .provenance
+                        .pointer("/cook_follow_up/source_run_id")
+                        .and_then(Value::as_str)
+                        == Some(source_run_id.as_str())
+                })
+        {
+            return Some(attempt.run_id.clone());
+        }
+    }
+    Some(source_run_id)
 }
 
 /// Recover a standalone manual-finalization record. Unlike Cook attempts, a
@@ -1924,6 +1939,11 @@ fn completed_finalization_receipt_for_recovery(
     recipe: &super::cook_recipe::AgentTaskCookRecipe,
     run_or_cook_id: &str,
 ) -> Result<Option<Value>> {
+    if run_or_cook_id == recipe.cook_id {
+        let selected_candidate = canonical_cook_candidate(&recipe.cook_id);
+        let receipt = canonical_candidate_finalization(selected_candidate.as_ref(), None, None);
+        return Ok(receipt.filter(cook_finalization_is_pr_receipt));
+    }
     let run_ids = if recipe
         .attempts
         .iter()

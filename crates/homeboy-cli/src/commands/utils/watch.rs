@@ -208,18 +208,22 @@ where
             });
         }
 
-        if let Some(timeout) = config.timeout {
-            if elapsed() >= timeout {
+        let sleep_for = if let Some(timeout) = config.timeout {
+            let waited = elapsed();
+            if waited >= timeout {
                 return Ok(WatchResult {
                     item,
                     conclusion: WatchConclusion::TimedOut,
                     poll_count,
-                    waited: elapsed(),
+                    waited,
                 });
             }
-        }
+            config.interval.min(timeout - waited)
+        } else {
+            config.interval
+        };
 
-        sleep(config.interval);
+        sleep(sleep_for);
     }
 }
 
@@ -437,6 +441,32 @@ mod tests {
         assert!(result.timed_out());
         assert_eq!(result.item, "running");
         assert!(result.waited >= Duration::from_secs(3));
+    }
+
+    #[test]
+    fn loop_never_sleeps_past_its_timeout() {
+        let poller = ScriptedPoller::new(&["running"]);
+        let clock = Cell::new(Duration::ZERO);
+        let sleeps = RefCell::new(Vec::new());
+        let result = watch_loop(
+            &poller,
+            "watched-1",
+            &WatchConfig {
+                interval: Duration::from_secs(10),
+                timeout: Some(Duration::from_secs(3)),
+            },
+            |by| {
+                sleeps.borrow_mut().push(by);
+                clock.set(clock.get() + by);
+            },
+            || clock.get(),
+            |_item, _poll| {},
+        )
+        .expect("loop");
+
+        assert_eq!(result.conclusion, WatchConclusion::TimedOut);
+        assert_eq!(result.waited, Duration::from_secs(3));
+        assert_eq!(sleeps.into_inner(), vec![Duration::from_secs(3)]);
     }
 
     #[test]

@@ -85,7 +85,7 @@ fn cook_progress_message(phase: &str, cook_id: Option<&str>, run_id: Option<&str
     };
     match run_id {
         Some(run_id) => format!(
-            "Cook {phase}: durable run `{run_id}`. Status: `homeboy agent-task status {run_id}`. Evidence: `homeboy agent-task evidence {run_id} --full`."
+            "Cook {phase}: durable run `{run_id}`. Follow: `homeboy agent-task status {run_id} --watch`. Status: `homeboy agent-task status {run_id}`. Evidence: `homeboy agent-task evidence {run_id} --full`."
         ),
         None => format!("Cook {phase}{identity}."),
     }
@@ -350,6 +350,7 @@ mod progress_tests {
         // after an interrupted observation without guessing the run identity.
         let message = cook_progress_message("provider_ready", None, Some("run-123"));
         assert!(message.contains("agent-task status run-123"));
+        assert!(message.contains("agent-task status run-123 --watch"));
         assert!(message.contains("agent-task evidence run-123 --full"));
     }
 

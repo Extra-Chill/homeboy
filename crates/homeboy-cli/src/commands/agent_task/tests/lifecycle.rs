@@ -440,6 +440,9 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("cook status resolves through its public alias");
         assert_eq!(status_exit, 0);
@@ -471,6 +474,9 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
                 full: true,
                 no_runner_probe: false,
                 strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
             })
             .expect("resumed Cook status")
             .0["metadata"]["worktree_provision"]["action"],
@@ -543,6 +549,9 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("status reports recipe-only Cook without mutation");
         assert_eq!(status_exit, 0);
@@ -1191,6 +1200,9 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("controller status resolves");
         let (logs_value, logs_exit) = logs(LogsArgs {
@@ -1441,6 +1453,9 @@ fn submit_run_status_reports_terminal_state() {
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("status loaded");
         let (bridge_status_json, bridge_status_exit_code) = status(StatusArgs {
@@ -1451,6 +1466,9 @@ fn submit_run_status_reports_terminal_state() {
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("bridge status loaded");
         let record: AgentTaskRunRecord = serde_json::from_value(status_json).expect("record");
@@ -1484,6 +1502,9 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("status loaded");
         let (logs_value, _) = logs(LogsArgs {
@@ -1640,6 +1661,9 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("status loaded");
         assert_eq!(status_exit_code, 0);
@@ -1892,6 +1916,9 @@ fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit()
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("status loaded");
 
@@ -1987,6 +2014,9 @@ fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("status loaded");
         assert_eq!(
@@ -2459,6 +2489,9 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("status loaded");
         assert_eq!(status_exit_code, 0);
@@ -2946,6 +2979,9 @@ fn terminal_provider_failure_with_large_promotion_evidence_keeps_full_readers_lo
             strict_subject_exit: false,
             bridge: false,
             since_cursor: None,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("read status without a runner");
         let (diagnose_value, _) = diagnose(DiagnoseArgs {
@@ -3287,6 +3323,9 @@ fn exact_full_status_displays_retained_safe_quarantine_diagnostic() {
             full: true,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("exact full status");
 
@@ -3646,6 +3685,9 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("bridge resume reconciles terminal projection");
 
@@ -3679,6 +3721,9 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("bridge reconciliation is idempotent");
         assert_eq!(
@@ -3720,6 +3765,9 @@ fn non_bridge_resume_keeps_aggregate_output_shape() {
             full: false,
             no_runner_probe: false,
             strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
         })
         .expect("ordinary resume returns terminal aggregate");
 

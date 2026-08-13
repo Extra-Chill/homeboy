@@ -10,6 +10,7 @@ use super::super::cook_adoption::{
 use super::super::cook_baseline::git_output;
 use super::super::cook_promotion::{
     canonical_cook_patch_artifact_id, cook_finalization_options, cook_promotion_argv, cook_report,
+    canonical_cook_recovery_run_id,
     finalize_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend,
     moving_base_recovery_for_run, moving_base_recovery_from_promotion, moving_base_recovery_report,
     next_moving_base_recovery, persist_manual_finalization_intent,
@@ -2827,6 +2828,124 @@ fn batch_cook_options(
         attempt_dispatcher: Some(dispatcher),
         harvest_context: Default::default(),
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn initial_cook_adopts_only_clean_issue_owned_unpushed_provider_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let primary = tempfile::tempdir().expect("primary repository");
+        let target = home.path().join("issue-worktree");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?} failed", args);
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(primary.path(), &["init", "--initial-branch=main"]);
+        git(
+            primary.path(),
+            &["config", "user.email", "agent@example.test"],
+        );
+        git(primary.path(), &["config", "user.name", "Agent"]);
+        std::fs::write(primary.path().join("tracked"), "base\n").unwrap();
+        git(primary.path(), &["add", "tracked"]);
+        git(primary.path(), &["commit", "-m", "base"]);
+        let base = git(primary.path(), &["rev-parse", "HEAD"]);
+        git(
+            primary.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "issue-11091",
+                target.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(target.join("candidate"), "committed\n").unwrap();
+        git(&target, &["add", "candidate"]);
+        git(&target, &["commit", "-m", "candidate"]);
+
+        let provider = home.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                serde_json::json!({"worktrees": [{
+                    "handle": "fixture@issue-11091", "path": target, "branch": "issue-11091",
+                    "task_url": "https://example.test/issues/11091",
+                    "safety": {"dirty": false, "unpushed": true, "primary": false}
+                }]})
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).unwrap();
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy_core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: Some("$.task_url".to_string()),
+                    },
+                ),
+            },
+        );
+        homeboy_core::defaults::save_config(&config).unwrap();
+
+        let mut options =
+            batch_cook_options("issue-11091", Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.to_worktree = "fixture@issue-11091".to_string();
+        options.source_worktree_path = Some(target.clone());
+        options.task_base_sha = Some(base);
+        options.initial_plan.tasks[0].workspace.task_url =
+            Some("https://example.test/issues/11091".to_string());
+        validate_cook_workspace(&options)
+            .expect("clean issue-owned committed checkout is adoptable");
+
+        std::fs::write(target.join("dirty"), "drift\n").unwrap();
+        let error = validate_cook_workspace(&options).expect_err("dirty checkout remains blocked");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
+        std::fs::remove_file(target.join("dirty")).unwrap();
+
+        options.initial_plan.tasks[0].workspace.task_url =
+            Some("https://example.test/issues/other".to_string());
+        let error =
+            validate_cook_workspace(&options).expect_err("wrong task ownership remains blocked");
+        assert!(error.message.contains("not owned by this Cook task"));
+
+        options.initial_plan.tasks[0].workspace.task_url =
+            Some("https://example.test/issues/11091".to_string());
+        options.task_base_sha = Some("0000000000000000000000000000000000000000".to_string());
+        let error = validate_cook_workspace(&options).expect_err("unsafe ancestry remains blocked");
+        assert!(error.message.contains("cannot be trusted"));
+    });
 }
 
 #[cfg(unix)]
@@ -7410,6 +7529,56 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             AgentTaskCookLoopStatus::GreenCompleted
         );
         let follow_up_run_id = &result.value.attempts[1].run_id;
+        let selected_candidate = result
+            .value
+            .selected_candidate
+            .as_ref()
+            .expect("source patch remains the canonical candidate");
+        assert_eq!(selected_candidate["run_id"], run_id);
+        assert_eq!(
+            result.value.completion().expect("in-process completion").state,
+            "pr_finalized",
+            "the form-only continuation owns the canonical source candidate receipt"
+        );
+        let source_record = agent_task_lifecycle::exact_record(run_id).expect("source record");
+        assert_eq!(
+            cook_completion(
+                Some(selected_candidate),
+                true,
+                source_record.metadata.get("cook_finalization"),
+                Some(run_id),
+            )
+            .expect("exact source status completion")
+            .state,
+            "pr_finalized",
+            "exact source status resolves the bound form-only receipt"
+        );
+        agent_task_lifecycle::rewrite_record_for_test(follow_up_run_id, |record| {
+            record.metadata
+                .as_object_mut()
+                .expect("record metadata object")
+                .remove("cook_finalization");
+        })
+        .expect("remove form-only receipt");
+        let awaiting = result.value.completion().expect("recoverable completion");
+        assert_eq!(awaiting.state, "candidate_awaiting_finalization");
+        assert_eq!(
+            awaiting.next_action.expect("recovery action").command,
+            format!("homeboy agent-task finalize-pr --recover {follow_up_run_id}"),
+            "the bound form-only continuation owns failed-finalization recovery"
+        );
+        let unrelated_run_id = format!("{cook_id}-unrelated-continuation");
+        super::super::record_recipe_attempt(cook_id, 3, &unrelated_run_id, &options.initial_plan)
+            .expect("persist unrelated recipe attempt");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&unrelated_run_id))
+            .expect("persist unrelated attempt record");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 3, &unrelated_run_id)
+            .expect("link unrelated attempt");
+        assert_eq!(
+            canonical_cook_recovery_run_id(cook_id).as_deref(),
+            Some(follow_up_run_id.as_str()),
+            "an unrelated newer continuation cannot replace the bound form-only recovery owner"
+        );
         let follow_up_promotion = persisted_promotion_for_attempt(follow_up_run_id)
             .unwrap()
             .expect("form-only continuation carries promoted candidate");
@@ -8506,6 +8675,12 @@ fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run
             });
         })
         .expect("persist promotion provenance");
+        agent_task_lifecycle::record_promotion(
+            latest_run_id,
+            serde_json::to_value(promotion(latest_run_id))
+                .expect("serialize newer otherwise eligible promotion"),
+        )
+        .expect("persist unrelated newer promotion");
 
         let report = cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
@@ -8529,6 +8704,11 @@ fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run
             options.initial_plan.tasks[0].task_id
         );
         assert_eq!(provenance["selected_artifact_id"], "candidate");
+        assert_eq!(
+            canonical_cook_recovery_run_id(cook_id).as_deref(),
+            Some(selected_run_id),
+            "Cook alias recovery follows the canonical older candidate rather than a newer unrelated eligible promotion"
+        );
         assert_eq!(provenance["applied_promotion"]["identity"], "candidate-sha");
         assert_eq!(
             provenance["applied_promotion"]["destination"],
@@ -8537,6 +8717,18 @@ fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run
         assert_eq!(
             provenance["applied_promotion"]["fingerprint"],
             "candidate-fingerprint"
+        );
+        let finalized = serde_json::json!({ "status": "review_ready", "pr_number": 12291 });
+        agent_task_lifecycle::record_cook_finalization(selected_run_id, finalized.clone())
+            .expect("persist selected candidate receipt");
+        assert_eq!(
+            canonical_candidate_finalization(
+                Some(&provenance),
+                Some(&serde_json::json!({ "status": "review_ready", "pr_number": 99999 })),
+                Some(latest_run_id),
+            ),
+            Some(finalized),
+            "exact status for a newer non-substantive attempt resolves the canonical candidate receipt"
         );
     });
 }
@@ -9229,6 +9421,36 @@ fn promotion_with_existing_path(run_id: &str, path: &std::path::Path) -> AgentTa
     promotion.target.path = Some(path.clone());
     promotion.provenance["worktree_path"] = serde_json::json!(path);
     promotion
+}
+
+#[test]
+fn canonical_completion_accepts_green_and_recipe_authorized_inherited_gate_evidence() {
+    let mut green = promotion("canonical-green");
+    green.patch_artifact.sha256 = Some("canonical-sha".to_string());
+    assert!(canonical_finalization_eligible(&green, false, true));
+
+    let mut inherited = green.clone();
+    inherited.status = AgentTaskPromotionStatus::GateFailed;
+    inherited.deterministic_gates[0].status =
+        crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure;
+    inherited.deterministic_gates[0].exit_code = 1;
+    inherited.deterministic_gates[0].baseline_comparison = Some(
+        crate::agent_task_gate::AgentTaskGateBaselineComparison {
+            base_ref: "main".to_string(),
+            exit_code: 1,
+            failure_fingerprint: "inherited".to_string(),
+            matches_candidate_failure: true,
+            result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
+        },
+    );
+    assert!(canonical_finalization_eligible(&inherited, true, true));
+    assert!(!canonical_finalization_eligible(&inherited, false, true));
+}
+
+#[test]
+fn canonical_completion_requires_a_valid_review_form() {
+    let green = promotion("canonical-missing-review-form");
+    assert!(!canonical_finalization_eligible(&green, false, false));
 }
 
 fn tracked_promotion_continuation_options(
