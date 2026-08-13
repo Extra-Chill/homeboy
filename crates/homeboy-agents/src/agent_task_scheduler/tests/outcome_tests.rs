@@ -27,6 +27,8 @@ fn provider_reported_model_is_retained_separately_from_requested_and_resolved_mo
         outcome.metadata["model_identity"],
         json!({
             "requested": "openai/gpt-5.6-sol",
+            "attempted": "openai/gpt-5.6-terra",
+            "candidate_producing": "openai/gpt-5.6-terra",
             "resolved": "openai/gpt-5.6-terra",
             "provider_reported": "openai/gpt-5.6-terra",
             "actual": "openai/gpt-5.6-terra",
