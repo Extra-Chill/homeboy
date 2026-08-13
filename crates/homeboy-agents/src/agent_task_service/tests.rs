@@ -1518,6 +1518,216 @@ fn scoped_reconcile_applies_only_the_inspected_run_and_preserves_other_stale_rec
 }
 
 #[test]
+fn scoped_reconcile_keeps_exact_attempts_separate_and_expands_cook_aliases_to_their_parent() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-reconcile-alias";
+        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            // Model the durable parent/attempt link while both projections are
+            // stale, before normal handoff completion terminalizes the parent.
+            record.metadata["detached_cook_handoff"]["attempt_run_id"] =
+                serde_json::json!(&attempt_id);
+        })
+        .expect("link stale parent projection");
+        for run_id in [cook_id, attempt_id.as_str()] {
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
+                record.metadata["runner_pid"] = serde_json::json!(u32::MAX);
+                if record.run_id == attempt_id {
+                    record.metadata["cook_id"] = serde_json::json!(cook_id);
+                }
+            })
+            .expect("stale record");
+        }
+        index_cook_attempt(cook_id, &attempt_id);
+
+        let exact = reconcile_run(&attempt_id, true).expect("exact attempt preview");
+        assert_eq!(exact.scope, format!("run:{attempt_id}"));
+        assert_eq!(exact.resolved_run_ids, vec![attempt_id.clone()]);
+        assert_eq!(exact.runs.len(), 1);
+
+        let alias = reconcile_run(cook_id, true).expect("logical Cook preview");
+        assert_eq!(alias.scope, format!("run:{cook_id}"));
+        assert_eq!(alias.requested_run_id.as_deref(), Some(cook_id));
+        assert_eq!(
+            alias.resolved_run_ids,
+            vec![cook_id.to_string(), attempt_id.clone()]
+        );
+        assert_eq!(alias.runs.len(), 2);
+
+        let applied = reconcile_run(cook_id, false).expect("logical Cook apply");
+        assert_eq!(applied.reconciled, 2, "{applied:?}");
+        assert!(applied.runs.iter().all(|run| run.action == "reconciled"));
+        for run_id in [cook_id, attempt_id.as_str()] {
+            assert_eq!(
+                agent_task_lifecycle::exact_record(run_id)
+                    .expect("exact durable record")
+                    .state,
+                AgentTaskRunState::Cancelled,
+                "{run_id} must be cancelled through its own exact record"
+            );
+        }
+    });
+}
+
+#[test]
+fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-upgrade-alias";
+        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["attempt_run_id"] =
+                serde_json::json!(&attempt_id);
+        })
+        .expect("link parent");
+        for run_id in [cook_id, attempt_id.as_str()] {
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
+                if record.run_id == cook_id {
+                    record.metadata["runner_pid"] = serde_json::json!(std::process::id());
+                } else {
+                    record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+                    record.updated_at = None;
+                    record.metadata["cook_id"] = serde_json::json!(cook_id);
+                    record.metadata["runner_id"] = serde_json::json!("lab");
+                    record.metadata["runner_job_id"] = serde_json::json!("stale-job");
+                }
+            })
+            .expect("live linked record");
+        }
+        index_cook_attempt(cook_id, &attempt_id);
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert_eq!(admission.blockers.len(), 1);
+        assert_eq!(admission.blockers[0].run_id, cook_id);
+        assert_eq!(
+            admission.blockers[0].recovery_command,
+            format!(
+                "homeboy runner reconcile lab && homeboy agent-task reconcile {cook_id} --dry-run"
+            )
+        );
+    });
+}
+
+#[test]
+fn scoped_reconcile_rejects_a_parent_child_link_with_disagreeing_cook_identity() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-reconcile-parent";
+        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["attempt_run_id"] =
+                serde_json::json!(&attempt_id);
+        })
+        .expect("link parent");
+        agent_task_lifecycle::rewrite_record_for_test(&attempt_id, |record| {
+            record.metadata["cook_id"] = serde_json::json!("other-cook");
+        })
+        .expect("write disagreement");
+        index_cook_attempt(cook_id, &attempt_id);
+
+        let error = reconcile_run(cook_id, true).expect_err("reject mismatched child identity");
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("does not belong"));
+    });
+}
+
+#[test]
+fn scoped_reconcile_rejects_a_parent_child_link_without_cook_index_authority() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-reconcile-unindexed";
+        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["attempt_run_id"] =
+                serde_json::json!(&attempt_id);
+        })
+        .expect("link parent");
+        agent_task_lifecycle::rewrite_record_for_test(&attempt_id, |record| {
+            record.metadata["cook_id"] = serde_json::json!(cook_id);
+        })
+        .expect("write matching Cook identity");
+
+        let error = reconcile_run(cook_id, true).expect_err("reject unindexed child link");
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("no Cook index authority"));
+    });
+}
+
+#[test]
+fn upgrade_admission_keeps_an_unindexed_handoff_child_independent_with_executable_remediation() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-upgrade-unindexed";
+        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
+            record.metadata["runner_pid"] = serde_json::json!(std::process::id());
+            record.metadata["detached_cook_handoff"]["attempt_run_id"] =
+                serde_json::json!(&attempt_id);
+        })
+        .expect("unindexed parent link");
+        agent_task_lifecycle::rewrite_record_for_test(&attempt_id, |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
+            record.metadata["runner_pid"] = serde_json::json!(std::process::id());
+            record.metadata["cook_id"] = serde_json::json!(cook_id);
+        })
+        .expect("unindexed child");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert_eq!(admission.blockers.len(), 2);
+        assert!(admission.blockers.iter().any(|blocker| {
+            blocker.run_id == cook_id
+                && blocker.recovery_command == "homeboy agent-task reconcile-records --dry-run"
+        }));
+        assert!(admission.blockers.iter().any(|blocker| {
+            blocker.run_id == attempt_id
+                && blocker.recovery_command
+                    == format!("homeboy agent-task reconcile {attempt_id} --dry-run")
+        }));
+        assert!(agent_task_lifecycle::reconcile_record_health(true).is_ok());
+    });
+}
+
+#[test]
+fn scoped_reconcile_uses_validated_handoff_child_not_later_index_attempt() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-reconcile-accepted-child";
+        let attempt_one = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        let attempt_two = agent_task_lifecycle::cook_attempt_run_id(cook_id, 2);
+        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id).expect("parent");
+        for run_id in [&attempt_one, &attempt_two] {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("attempt");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["cook_id"] = serde_json::json!(cook_id);
+            })
+            .expect("record Cook identity");
+        }
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["attempt_run_id"] =
+                serde_json::json!(&attempt_one);
+        })
+        .expect("bind accepted child");
+        index_cook_attempts(cook_id, &attempt_one, &attempt_two);
+
+        let scope = agent_task_lifecycle::reconcile_scope_run_ids(cook_id).expect("scope");
+        assert_eq!(scope, vec![cook_id.to_string(), attempt_one]);
+        assert!(!scope.contains(&attempt_two));
+    });
+}
+
+#[test]
 fn scoped_reconcile_is_a_no_op_when_the_owner_becomes_live_after_preview() {
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-owner-changed"))
@@ -2491,4 +2701,29 @@ fn discovery_plan() -> AgentTaskPlan {
     plan.tasks[0].workspace.root = Some("/tmp/homeboy".to_string());
     plan.tasks[0].workspace.slug = Some("homeboy".to_string());
     plan
+}
+
+fn index_cook_attempt(cook_id: &str, run_id: &str) {
+    index_cook_attempts(cook_id, run_id, run_id);
+}
+
+fn index_cook_attempts(cook_id: &str, first_run_id: &str, latest_run_id: &str) {
+    agent_task_lifecycle::replace_cook_index_for_test(&agent_task_lifecycle::AgentTaskCookIndex {
+        schema: "homeboy/agent-task-cook-index/v1".to_string(),
+        cook_id: cook_id.to_string(),
+        latest_run_id: latest_run_id.to_string(),
+        latest_substantive_candidate: None,
+        attempts: [first_run_id, latest_run_id]
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, run_id)| agent_task_lifecycle::AgentTaskCookIndexAttempt {
+                    attempt: (index + 1) as u32,
+                    run_id: run_id.to_string(),
+                    recorded_at: chrono::Utc::now().to_rfc3339(),
+                },
+            )
+            .collect(),
+    })
+    .expect("index Cook attempt");
 }
