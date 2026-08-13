@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::process::Output;
+use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 use homeboy_core::observation::{NewRunRecord, ObservationStore, RunListFilter};
@@ -289,6 +289,172 @@ fn non_tty_local_wait_stays_foreground() {
     assert!(
         !stdout.contains("\"status\": \"in_flight\""),
         "a default local wait must not return an in-flight Cook report: {stdout}"
+    );
+}
+
+/// A foreground client is an observer after acceptance, not the owner of local
+/// provider work. Killing it must leave the daemon-supervised Cook to retain its
+/// terminal artifacts (#12248).
+#[test]
+fn foreground_local_cook_survives_client_termination_with_artifacts() {
+    let context = HermeticTestContext::new();
+    let (_checkout_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("local-cook-durability");
+    let component_id = "local-cook-durability";
+    let mut register = context.command(TestBinary::HomeboyFixture);
+    register.args([
+        "component",
+        "create",
+        "--local-path",
+        checkout.to_str().expect("checkout path"),
+    ]);
+    let registered = bounded_output(register);
+    assert!(
+        registered.status.success(),
+        "register Cook component: stdout={} stderr={}",
+        String::from_utf8_lossy(&registered.stdout),
+        String::from_utf8_lossy(&registered.stderr),
+    );
+    let task_worktree = context
+        .root()
+        .join("foreground-client-termination-worktree");
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "foreground-client-termination",
+            task_worktree.to_str().expect("task worktree path"),
+        ],
+    );
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for fixture worktree");
+    let cook_id = "foreground-client-termination";
+    let client_stdout = context.root().join("foreground-client.stdout");
+    let client_stderr = context.root().join("foreground-client.stderr");
+    let provider_started = context.root().join("fixture-provider-started");
+    let mut client = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    client
+        .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "20000")
+        .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &provider_started)
+        .args([
+            "--placement",
+            "local",
+            "agent-task",
+            "cook",
+            "--run-id",
+            cook_id,
+            "--repo",
+            component_id,
+            "--backend",
+            "fixture",
+            "--prompt",
+            "complete after the observing client exits",
+            "--cwd",
+            task_worktree.to_str().expect("task worktree path"),
+            "--to-worktree",
+            task_worktree.to_str().expect("task worktree path"),
+            "--verify",
+            "true",
+            "--max-attempts",
+            "1",
+            "--no-finalize",
+        ])
+        .stdout(Stdio::from(
+            std::fs::File::create(&client_stdout).expect("create client stdout"),
+        ))
+        .stderr(Stdio::from(
+            std::fs::File::create(&client_stderr).expect("create client stderr"),
+        ));
+    let mut client = client.spawn().expect("start foreground Cook client");
+
+    // The fixture writes this marker only after the scheduler has reserved its
+    // provider execution. This avoids repeatedly cold-starting status CLIs and
+    // distinguishes the pre-dispatch `provider_start` progress event from the
+    // durable provider boundary we must kill the client during.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if provider_started.exists() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Cook did not start provider work: child log={} client stdout={} stderr={}",
+            std::fs::read_to_string(
+                context
+                    .data_dir()
+                    .join("agent-task-detached")
+                    .join(cook_id)
+                    .join("cook.log"),
+            )
+            .unwrap_or_default(),
+            std::fs::read_to_string(&client_stdout).unwrap_or_default(),
+            std::fs::read_to_string(&client_stderr).unwrap_or_default(),
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    status.args(["agent-task", "status", cook_id, "--full"]);
+    let provider_status = bounded_output(status);
+    assert!(
+        provider_status.status.success()
+            && String::from_utf8_lossy(&provider_status.stdout)
+                .contains("\"active_execution_count\": 1"),
+        "Cook did not durably record provider work: {}",
+        String::from_utf8_lossy(&provider_status.stdout),
+    );
+
+    client.kill().expect("terminate observing client");
+    client.wait().expect("reap observing client");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if std::fs::read_to_string(
+            context
+                .data_dir()
+                .join("agent-task-detached")
+                .join(cook_id)
+                .join("cook.log"),
+        )
+        .unwrap_or_default()
+        .contains("Cook terminal")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Cook did not terminalize after client termination"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    status.args(["agent-task", "status", cook_id, "--full"]);
+    let output = bounded_output(status);
+    let completed = String::from_utf8_lossy(&output.stdout).into_owned();
+    let terminal_provider_success = serde_json::from_str::<serde_json::Value>(&completed)
+        .ok()
+        .is_some_and(|result| {
+            result
+                .pointer("/data/aggregate/status")
+                .and_then(serde_json::Value::as_str)
+                == Some("succeeded")
+                && result
+                    .pointer("/data/lifecycle/execution/state")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("succeeded")
+        });
+    assert!(
+        output.status.success() && terminal_provider_success,
+        "Cook did not complete after client termination: {completed}"
+    );
+    assert!(
+        completed.contains("changes.patch"),
+        "terminal artifacts retained: {completed}"
     );
 }
 

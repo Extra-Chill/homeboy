@@ -765,7 +765,7 @@ jobs:
           # short and no stranded draft can ever be adopted. `expected-assets`
           # must therefore describe cargo-dist's complete published inventory,
           # not just its planned payloads.
-          EXPECTED_ASSETS="$(jq -c '. + ["dist-manifest.json"] | unique' <<< "${PLANNED_ARTIFACTS}")"
+          EXPECTED_ASSETS="$(jq -c '. + ["dist-manifest.json", "homeboy-installer.sh"] | unique' <<< "${PLANNED_ARTIFACTS}")"
           echo "planned-artifacts=${PLANNED_ARTIFACTS}" >> "$GITHUB_OUTPUT"
           echo "expected-assets=${EXPECTED_ASSETS}" >> "$GITHUB_OUTPUT"
 
@@ -983,6 +983,16 @@ jobs:
           path: target/distrib/
           merge-multiple: true
 
+      # Recovery builds intentionally use the historical release tag, which
+      # predates this bootstrap asset. Fetch the invoking control revision
+      # separately so every repaired release can publish the current installer.
+      - name: Fetch bootstrap installer source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: bootstrap-source
+          persist-credentials: false
+
       - id: cargo-dist
         shell: bash
         run: |
@@ -995,9 +1005,12 @@ jobs:
             DIST_ALLOW_DIRTY=""
           fi
           dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" ${DIST_ALLOW_DIRTY} > dist-manifest.json
+          cp bootstrap-source/scripts/homeboy-installer.sh target/distrib/homeboy-installer.sh
+          chmod 0755 target/distrib/homeboy-installer.sh
           echo "dist ran successfully"
           echo "paths<<EOF" >> "$GITHUB_OUTPUT"
           jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo target/distrib/homeboy-installer.sh >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
 

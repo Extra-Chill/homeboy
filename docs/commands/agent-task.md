@@ -90,6 +90,66 @@ ordering and output bindings belong in the existing single-run `fanout submit` /
 
 ### Cook/Review
 
+### File-backed verification gates
+
+Use `--verify-file <path>` or `--private-verify-file <path>` for shell programs
+with loops, quotes, newlines, or `$variables`. Each option is repeatable. Homeboy
+reads the regular UTF-8 file from the controller invocation directory before it
+provisions a worktree or dispatches a provider, then executes and persists that
+exact snapshot. Changing the source file afterwards cannot change the Cook.
+
+```sh
+homeboy agent-task cook --prompt @task.md --to-worktree project@fix-gate \
+  --verify-file ./quality-gate.sh \
+  --private-verify-file ./private-gate.sh
+```
+
+For example, `quality-gate.sh` can contain this program without shell-argument
+interpolation:
+
+```sh
+for file in src/*.rs; do
+  cargo fmt --check -- "$file"
+done
+```
+
+Relative paths resolve from the directory where the `homeboy` controller command
+starts, not from the destination worktree. Quote inline gates with single quotes
+when they are concise, such as `--verify 'cargo fmt --check'`; use a file for
+complex programs. Files must be readable, non-empty, regular files no larger than
+1 MiB. Durable gate policy records `source_kind`, SHA-256 digest, byte size, and
+redaction policy. Public file paths are retained as provenance; private file paths
+and private program text are redacted from that provenance. Existing inline
+`--verify` and `--private-verify` commands remain supported.
+
+Private gate programs, whether inline or file-backed, use the existing trusted
+durable Cook recipe boundary so retries and adoption can replay the declared gate.
+They are not protected as secret material at rest. Homeboy excludes private gate
+text and paths from public Cook-batch plans, preflight summaries, reviewer-facing
+evidence, and agent feedback according to `--private-gate-reveal`; operators who
+need encrypted secret storage should supply a non-secret command that retrieves
+credentials at execution time rather than place credentials in a gate program.
+
+For a Cook-batch with private gates, Homeboy atomically retains the exact plan in
+`$HOMEBOY_DATA_DIR/agent-task/private-batch-plans/<fanout-id>.json` before it
+returns its public result. The returned `run-plan --input @<absolute-path>` command
+uses that controller-owned artifact; its private contents are never included in
+public JSON. Its SHA-256 checksum detects accidental corruption in trusted local
+state; it is not adversarial authentication. On Unix, the private artifact
+directory is mode `0700` and temporary/final artifacts are created mode `0600`
+before private bytes are written; rename preserves that mode. Other platforms use
+their platform-default owner-private file semantics where exposed by the runtime.
+Artifacts are retained with Homeboy controller data until data-root cleanup. On
+platforms without Unix device/inode identity APIs, Homeboy retains
+the portable descriptor-bound contract: it opens once, validates the opened
+descriptor as a regular bounded file, and reads that descriptor; Unix additionally
+uses no-follow, nonblocking open flags and verifies device/inode identity.
+
+`fanout plan --input @<private-artifact>` may inspect this trusted local artifact,
+but it returns only the same public projection used by Cook-batch output: private
+gate commands and paths remain redacted. `fanout run-plan` is the execution path
+that loads the private gate bytes.
+
 ### Provider Execution Budgets
 
 Every agent-task plan serializes one `execution_budget` per task: total provider
@@ -852,6 +912,26 @@ Cook entries accept dispatch fields such as `prompt`, `tasks`, `repo`, `cwd`,
 `provider_config`, and `client_context`. Review fields include `to_worktree`,
 `provider_command`, `verify`, `private_verify`, `max_attempts`, `base`, `head`,
 `title`, `commit_message`, `protected_branches`, `ai_tool`, and `ai_used_for`.
+
+## Gate Command Contracts
+
+Before Cook provisions a worktree or dispatches a provider, Homeboy validates
+each exact simple `homeboy ...` deterministic gate against the installed Clap
+contract, including global flags and required arguments. Compound shell gates
+remain external and unvalidated during admission. Gate validation is recorded as
+`gate_contract_validation` in the Cook plan; gate execution remains separate
+promotion evidence.
+
+Repository `homeboy.json` entries under `scripts.lint` and `scripts.test` are
+capability identities, not top-level CLI verbs. Use their canonical gate forms:
+
+```sh
+homeboy review lint --path .
+homeboy review test --path .
+```
+
+Other shell gates remain unvalidated during admission. Declare a `--gate-toolchain`
+when Homeboy must probe an external executable before provider dispatch.
 Each cook must declare at least one deterministic `verify` or `private_verify`
 gate so PR finalization is reviewer-ready.
 

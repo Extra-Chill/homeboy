@@ -674,10 +674,12 @@ pub struct RunnerAdmissionSummary {
     pub runner_id: String,
     /// Whether the runner's session is connected.
     pub connected: bool,
-    /// Whether the selected daemon's build matches what the controller
-    /// requires (i.e. no stale-daemon warning). `false` means a version
-    /// convergence is needed before admission.
+    /// Whether the daemon freshness predicate permits admission. An absent
+    /// observation remains unverified rather than stale.
     pub daemon_fresh: bool,
+    /// Whether the selected daemon and configured job binary are compatible
+    /// with the controller for admission.
+    pub daemon_compatible: bool,
     /// Whether the runner can admit a new workload now: connected, fresh, and
     /// not otherwise blocked.
     pub accepting_jobs: bool,
@@ -753,19 +755,29 @@ impl RunnerStatusReport {
             .filter(|warning| !warning.blocks_admission())
     }
 
-    /// The daemon freshness fence shared by status, placement, and dispatch.
-    /// A compatibility warning or a daemon's own non-fresh observation both
-    /// prohibit new work; rotation safety is evaluated separately.
+    /// Whether daemon freshness permits admission. An absent observation is
+    /// unverified rather than a hard stale result.
+    pub fn daemon_fresh(&self) -> bool {
+        self.daemon_freshness
+            .as_ref()
+            .is_none_or(|freshness| freshness.fresh)
+    }
+
+    /// Whether the selected daemon is compatible with the controller and
+    /// configured job binary for admission.
+    pub fn daemon_compatible_for_admission(&self) -> bool {
+        self.admission_blocking_stale_daemon().is_none()
+    }
+
+    /// The admission freshness fence shared by placement and dispatch.
+    /// Compatibility and the daemon's own freshness observation both prohibit
+    /// new work; rotation safety is evaluated separately.
     ///
     /// A report that established nothing is not a fence — it is surfaced as
     /// `unverified` and scored down instead, so an unprobeable runner is
     /// neither silently healthy nor uniformly stale.
     pub fn daemon_fresh_for_admission(&self) -> bool {
-        self.admission_blocking_stale_daemon().is_none()
-            && self
-                .daemon_freshness
-                .as_ref()
-                .is_none_or(|freshness| freshness.fresh)
+        self.daemon_compatible_for_admission() && self.daemon_fresh()
     }
 
     /// Capacity remains owned by `RunnerAvailability`; this method only adds
@@ -818,11 +830,11 @@ impl RunnerStatusReport {
         draining_generation_count: usize,
     ) -> RunnerAdmissionSummary {
         let connected = self.is_connected();
-        // A compatibility warning and the daemon's own freshness probe both
-        // fence admission. The latter is especially important after losing a
-        // direct SSH session: no warning exists, but a missing lease can still
-        // make replacement unsafe.
-        let daemon_fresh = self.daemon_fresh_for_admission();
+        // Compatibility and an explicitly non-fresh daemon both fence
+        // admission. An absent freshness observation retains the established
+        // unverified/scored-down behavior rather than becoming hard stale.
+        let daemon_fresh = self.daemon_fresh();
+        let daemon_compatible = self.daemon_compatible_for_admission();
         let live_daemon_job_count = self.active_job_count;
         let retained_durable_job_count = owners
             .iter()
@@ -881,8 +893,11 @@ impl RunnerStatusReport {
         // active-job count. Admission and rotation remain fail-closed until a
         // current job view is available.
         let active_jobs_available = self.active_job_state == RunnerActiveJobState::Available;
-        let accepting_jobs =
-            connected && daemon_fresh && active_jobs_available && blocking_generation.is_none();
+        let accepting_jobs = connected
+            && daemon_fresh
+            && daemon_compatible
+            && active_jobs_available
+            && blocking_generation.is_none();
         let safe_to_rotate = connected
             && self.rotation_evidence_is_unambiguous()
             && active_jobs_available
@@ -911,6 +926,7 @@ impl RunnerStatusReport {
             runner_id: self.runner_id.clone(),
             connected,
             daemon_fresh,
+            daemon_compatible,
             accepting_jobs,
             active_job_count: self.active_job_count,
             live_daemon_job_count,
@@ -1290,10 +1306,14 @@ mod status_serialization_tests {
             recovery_actions: Vec::new(),
         });
         let summary = report.admission_summary(0);
-        assert!(!summary.daemon_fresh);
+        assert!(
+            summary.daemon_fresh,
+            "missing freshness evidence remains unverified rather than stale"
+        );
+        assert!(!summary.daemon_compatible);
         assert!(
             !summary.accepting_jobs,
-            "a stale daemon must not admit work"
+            "an incompatible daemon must not admit work"
         );
         assert_eq!(
             summary.next_action.as_deref(),
@@ -1301,6 +1321,53 @@ mod status_serialization_tests {
             "the legacy serialized recovery remains the action source when argv is unavailable"
         );
         assert!(!summary.safe_to_rotate, "missing daemon evidence is unsafe");
+    }
+
+    #[test]
+    fn admission_summary_separates_fresh_daemon_from_controller_configured_skew() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(fresh_daemon_freshness());
+        report.stale_daemon = Some(
+            RunnerStaleDaemonWarning::new(
+                "homeboy-lab",
+                "0.339.0".to_string(),
+                "0.339.0".to_string(),
+                Some("homeboy 0.339.0+daemon".to_string()),
+                Some("homeboy 0.339.0+configured".to_string()),
+            )
+            .with_controller_compatibility(
+                "homeboy-lab",
+                "0.338.0".to_string(),
+                "homeboy 0.338.0+controller".to_string(),
+                false,
+                true,
+                false,
+            ),
+        );
+
+        let summary = report.admission_summary(0);
+
+        assert!(summary.daemon_fresh);
+        assert!(!summary.daemon_compatible);
+        assert!(!summary.accepting_jobs);
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner refresh-homeboy homeboy-lab --ref configured --reconnect")
+        );
+    }
+
+    #[test]
+    fn admission_summary_missing_freshness_remains_unverified_not_stale() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+
+        let summary = report.admission_summary(0);
+
+        assert!(summary.daemon_fresh);
+        assert!(summary.daemon_compatible);
+        assert!(summary.accepting_jobs);
+        assert!(report.daemon_fresh_for_admission());
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub mod contract;
 pub mod controller;
 pub mod doctor;
 pub mod fanout;
+pub(crate) mod gate_contract;
 pub mod loop_definition;
 pub mod prompts;
 pub mod retained_artifacts;
@@ -306,12 +307,14 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             } else {
                 homeboy::agents::agent_tasks::lifecycle::AgentTaskAcceptanceVerdict::Rejected
             };
-            let record = homeboy::agents::agent_tasks::lifecycle::record_acceptance_verdict(
-                &args.run_id,
-                verdict,
-                args.evidence_refs,
-                args.token,
-            )?;
+            let record =
+                homeboy::agents::agent_tasks::lifecycle::record_acceptance_verdict_with_feedback(
+                    &args.run_id,
+                    verdict,
+                    args.evidence_refs,
+                    args.token,
+                    args.feedback,
+                )?;
             Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
         }
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),

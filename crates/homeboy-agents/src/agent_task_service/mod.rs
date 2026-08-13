@@ -39,6 +39,8 @@ pub use cook_baseline::*;
 pub use cook_batch_job::*;
 pub use cook_budget::*;
 pub use cook_job::*;
+#[cfg(not(test))]
+pub use cook_pre_execution::recover_recipe_attempt;
 #[cfg(test)]
 pub(crate) use cook_pre_execution::*;
 pub use cook_promotion::*;
