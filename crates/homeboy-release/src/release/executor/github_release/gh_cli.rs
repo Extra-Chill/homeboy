@@ -678,11 +678,22 @@ pub(crate) fn gh_release_metadata(
     }
 }
 
-/// Resolve a release (published or draft) by id.
+/// Resolve a release (published or draft) by its REST API URL.
 ///
-/// Two calls, both O(1): `gh release view --json databaseId` sees drafts
-/// because it is GraphQL-backed, and `repos/{owner}/{repo}/releases/{id}`
-/// returns the REST shape whose `digest` field recovery requires.
+/// Two calls, both O(1): `gh release view --json apiUrl` sees drafts because it
+/// is GraphQL-backed, and that URL returns the REST shape whose `digest` field
+/// recovery requires.
+///
+/// `apiUrl` rather than `databaseId` (#11250). `databaseId` is not a stable
+/// part of the `gh release view --json` contract -- a `gh` build that omits it
+/// rejects the whole call with `Unknown JSON field: "databaseId"`, which
+/// stranded `extrachill-events` `v0.56.5` after its tag, draft and asset had
+/// all been created. `apiUrl` is present in that same build's own list of
+/// available fields, so it is the field this lookup can actually rely on.
+///
+/// It is also the more direct one: `apiUrl` IS the endpoint, so there is no
+/// numeric id to validate and no `repos/{owner}/{repo}/releases/{id}` to
+/// reassemble from parts that could disagree with the release just resolved.
 fn gh_release_metadata_by_id(
     github: &GitHubRepo,
     config: &GithubConfig,
@@ -694,44 +705,30 @@ fn gh_release_metadata_by_id(
             github,
             config,
             &[
-                "release",
-                "view",
-                tag,
-                "--repo",
-                repo_flag,
-                "--json",
-                "databaseId",
-                "--jq",
-                ".databaseId",
+                "release", "view", tag, "--repo", repo_flag, "--json", "apiUrl", "--jq", ".apiUrl",
             ],
         ),
         github_release_upload_timeout(),
     );
     if view.timed_out || view.exit_code != Some(0) {
         return Err(GitHubReleaseMetadataError {
-            message: gh_failure_detail("gh release view databaseId", &view),
-            diagnostics: vec![gh_failure_diagnostic(
-                "gh release view databaseId",
-                tag,
-                &view,
-            )],
+            message: gh_failure_detail("gh release view apiUrl", &view),
+            diagnostics: vec![gh_failure_diagnostic("gh release view apiUrl", tag, &view)],
         });
     }
-    let release_id = view.stdout.trim();
-    if release_id.is_empty() || !release_id.bytes().all(|byte| byte.is_ascii_digit()) {
+    let endpoint = view.stdout.trim().to_string();
+    // Fail closed on anything that is not this repository's release endpoint.
+    // An empty result, an error string, or a URL pointing at another repo must
+    // not become a `gh api` argument.
+    if !is_release_api_url(&endpoint, repo_flag) {
         return Err(GitHubReleaseMetadataError {
             message: format!(
-                "gh release view returned no usable release id for {tag} on {repo_flag}"
+                "gh release view returned no usable release API URL for {tag} on {repo_flag}"
             ),
-            diagnostics: vec![gh_failure_diagnostic(
-                "gh release view databaseId",
-                tag,
-                &view,
-            )],
+            diagnostics: vec![gh_failure_diagnostic("gh release view apiUrl", tag, &view)],
         });
     }
 
-    let endpoint = format!("repos/{repo_flag}/releases/{release_id}");
     let output = run_gh_command(
         gh_command(github, config, &["api", &endpoint]),
         github_release_upload_timeout(),
@@ -754,6 +751,24 @@ fn gh_release_metadata_by_id(
             &output,
         )],
     })
+}
+
+/// Accept only this repository's own release endpoint.
+///
+/// `apiUrl` comes back as `<api-root>/repos/{owner}/{repo}/releases/{id}`, and
+/// the id segment is the numeric REST id. Checking the shape keeps the previous
+/// fail-closed guarantee: an empty result, an error string, or a URL belonging
+/// to some other repository can never be handed to `gh api`. The api root is
+/// deliberately not pinned, so GitHub Enterprise (`.../api/v3/repos/...`)
+/// resolves exactly like github.com.
+fn is_release_api_url(candidate: &str, repo_flag: &str) -> bool {
+    let Some((prefix, id)) = candidate.rsplit_once('/') else {
+        return false;
+    };
+    candidate.starts_with("https://")
+        && prefix.ends_with(&format!("/repos/{repo_flag}/releases"))
+        && !id.is_empty()
+        && id.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Compose the tag-lookup failure with the failures that actually explain a
@@ -1861,6 +1876,75 @@ mod tests {
         );
     }
 
+    /// The release lookup may only request `--json` fields that `gh` actually
+    /// serves (#11250).
+    ///
+    /// `databaseId` is not a stable part of the `gh release view --json`
+    /// contract. A `gh` build that omits it does not degrade -- it rejects the
+    /// entire call with `Unknown JSON field: "databaseId"`, which stranded
+    /// `extrachill-events` `v0.56.5` with its tag, draft and asset already
+    /// created and finalization refused. `apiUrl` appears in that same build's
+    /// own "Available fields" list, which is the property being pinned here.
+    #[test]
+    fn the_release_lookup_requests_only_a_universally_served_json_field() {
+        let source = include_str!("gh_cli.rs");
+        let body = source
+            .split("fn gh_release_metadata_by_id(")
+            .nth(1)
+            .expect("gh_release_metadata_by_id should exist")
+            .split("\nfn ")
+            .next()
+            .expect("the function body should be delimited");
+
+        assert!(
+            body.contains("\"apiUrl\""),
+            "the release lookup must resolve through apiUrl"
+        );
+        assert!(
+            !body.contains("\"databaseId\""),
+            "gh release view must not request databaseId: a gh build without that \
+             field rejects the whole call and strands the release (#11250)"
+        );
+    }
+
+    /// The URL from `gh` is an argument to `gh api`, so it is validated before
+    /// use. Dropping the numeric-id check must not drop the fail-closed
+    /// guarantee it provided.
+    #[test]
+    fn only_this_repositorys_own_release_endpoint_is_accepted() {
+        let repo = "Extra-Chill/homeboy";
+
+        assert!(is_release_api_url(
+            "https://api.github.com/repos/Extra-Chill/homeboy/releases/370046503",
+            repo
+        ));
+        // GitHub Enterprise mounts the API under a path prefix.
+        assert!(is_release_api_url(
+            "https://ghe.example.com/api/v3/repos/Extra-Chill/homeboy/releases/12",
+            repo
+        ));
+
+        for rejected in [
+            // `--jq` on an absent field yields empty output.
+            "",
+            // An error string must never reach `gh api`.
+            "Unknown JSON field: \"databaseId\"",
+            // Another repository's release.
+            "https://api.github.com/repos/Extra-Chill/other/releases/1",
+            // The collection, not a release.
+            "https://api.github.com/repos/Extra-Chill/homeboy/releases",
+            // A non-numeric id is not a REST release id.
+            "https://api.github.com/repos/Extra-Chill/homeboy/releases/RE_kwDO",
+            // Plaintext transport.
+            "http://api.github.com/repos/Extra-Chill/homeboy/releases/1",
+        ] {
+            assert!(
+                !is_release_api_url(rejected, repo),
+                "must fail closed on {rejected:?}"
+            );
+        }
+    }
+
     /// Both failures must survive into the message. A stranded release is
     /// diagnosed from why every lookup failed, not just the first (#10441).
     #[test]
@@ -1868,7 +1952,7 @@ mod tests {
         let first = GitHubReleaseMetadataError {
             message: "id lookup failed".to_string(),
             diagnostics: vec![GitHubCommandFailureDiagnostic {
-                operation: "gh release view databaseId".to_string(),
+                operation: "gh release view apiUrl".to_string(),
                 endpoint: "v1.2.3".to_string(),
                 summary: "first".to_string(),
                 stdout: String::new(),
@@ -1983,7 +2067,7 @@ mod tests {
     fn the_composed_message_leads_with_the_cause_not_the_by_design_404() {
         let primary = failed_output("", "HTTP 404: Not Found", Some(1), false);
         let draft = GitHubReleaseMetadataError {
-            message: "gh release view databaseId exited with status 1".to_string(),
+            message: "gh release view apiUrl exited with status 1".to_string(),
             diagnostics: Vec::new(),
         };
 
@@ -1991,7 +2075,7 @@ mod tests {
 
         let cause = error
             .message
-            .find("gh release view databaseId")
+            .find("gh release view apiUrl")
             .expect("the causal failure must survive");
         let expected_404 = error
             .message
