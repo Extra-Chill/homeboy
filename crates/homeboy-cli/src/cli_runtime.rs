@@ -135,6 +135,18 @@ pub fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
     )
 }
 
+/// Installed command/capability metadata for admission checks. Extension
+/// discovery intentionally skips readiness probes at this phase.
+pub fn current_augmented_command_surface() -> crate::cli_surface::CommandSurface {
+    let discovery = collect_extension_cli_info_metadata_only();
+    command_surface_from(build_augmented_command(&discovery.info, &discovery.health))
+}
+
+pub(crate) fn current_augmented_command_contract() -> clap::Command {
+    let discovery = collect_extension_cli_info_metadata_only();
+    build_augmented_command(&discovery.info, &discovery.health)
+}
+
 /// Register every provider hook the CLI wires before the startup terminal-run
 /// reconcile.
 ///

@@ -912,6 +912,26 @@ Cook entries accept dispatch fields such as `prompt`, `tasks`, `repo`, `cwd`,
 `provider_config`, and `client_context`. Review fields include `to_worktree`,
 `provider_command`, `verify`, `private_verify`, `max_attempts`, `base`, `head`,
 `title`, `commit_message`, `protected_branches`, `ai_tool`, and `ai_used_for`.
+
+## Gate Command Contracts
+
+Before Cook provisions a worktree or dispatches a provider, Homeboy validates
+each exact simple `homeboy ...` deterministic gate against the installed Clap
+contract, including global flags and required arguments. Compound shell gates
+remain external and unvalidated during admission. Gate validation is recorded as
+`gate_contract_validation` in the Cook plan; gate execution remains separate
+promotion evidence.
+
+Repository `homeboy.json` entries under `scripts.lint` and `scripts.test` are
+capability identities, not top-level CLI verbs. Use their canonical gate forms:
+
+```sh
+homeboy review lint --path .
+homeboy review test --path .
+```
+
+Other shell gates remain unvalidated during admission. Declare a `--gate-toolchain`
+when Homeboy must probe an external executable before provider dispatch.
 Each cook must declare at least one deterministic `verify` or `private_verify`
 gate so PR finalization is reviewer-ready.
 

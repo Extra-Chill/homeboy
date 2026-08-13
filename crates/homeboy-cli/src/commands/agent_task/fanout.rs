@@ -4,7 +4,7 @@ use homeboy_engine_primitives::content_hash;
 use homeboy_engine_primitives::shell::quote_args;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -52,6 +52,7 @@ use super::args::{
     AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
 };
 use super::command_json_value;
+use super::gate_contract::{validate_gate_contracts, GateContractValidation};
 
 pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
     match args.command {
@@ -1137,12 +1138,16 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
     plan: BatchCookFanoutPlan,
     attempt_dispatcher: &CookAttemptDispatcherFactory,
 ) -> CmdResult<Value> {
+    let gate_workspace = batch_plan_gate_workspace(&plan)?;
+    let gate_contract_validation = validate_batch_gate_contracts(&plan, gate_workspace.as_deref())?;
     persist_fanout_run_batch_record(&plan)?;
     persist_batch_cook_recipes(&plan, |options| {
+        record_gate_contract_validation(options, &gate_contract_validation);
         options.attempt_dispatcher = Some(attempt_dispatcher(options));
     })?;
     let ready_plan = plan.ready_plan()?;
     let cooks = compile_batch_cooks(&ready_plan, |options| {
+        record_gate_contract_validation(options, &gate_contract_validation);
         options.attempt_dispatcher = Some(attempt_dispatcher(options));
     })?;
     let concurrency = batch_concurrency(&plan, &cooks);
@@ -1181,10 +1186,16 @@ fn run_batch_cook_fanout_plan_with_executor<E>(
 where
     E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
 {
+    let gate_workspace = batch_plan_gate_workspace(&plan)?;
+    let gate_contract_validation = validate_batch_gate_contracts(&plan, gate_workspace.as_deref())?;
     persist_fanout_run_batch_record(&plan)?;
-    persist_batch_cook_recipes(&plan, |_| {})?;
+    persist_batch_cook_recipes(&plan, |options| {
+        record_gate_contract_validation(options, &gate_contract_validation);
+    })?;
     let ready_plan = plan.ready_plan()?;
-    let cooks = compile_batch_cooks(&ready_plan, |_| {})?;
+    let cooks = compile_batch_cooks(&ready_plan, |options| {
+        record_gate_contract_validation(options, &gate_contract_validation);
+    })?;
     let concurrency = batch_concurrency(&plan, &cooks);
     // See the sibling runner: the budget is resolved once and bound for the
     // whole batch so it does not restart per child.
@@ -1204,6 +1215,46 @@ where
     notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
     let result = batch_cook_result(&plan, result, &concurrency);
     Ok(result)
+}
+
+fn validate_batch_gate_contracts(
+    plan: &BatchCookFanoutPlan,
+    workspace: Option<&std::path::Path>,
+) -> Result<GateContractValidation> {
+    let gates = plan
+        .cooks
+        .iter()
+        .flat_map(|cook| cook.verify.iter().chain(&cook.private_verify).cloned())
+        .collect::<BTreeSet<_>>();
+    if workspace.is_none()
+        && gates.iter().any(|gate| {
+            matches!(
+                gate.split_whitespace().collect::<Vec<_>>().as_slice(),
+                ["homeboy", "lint", ..] | ["homeboy", "test", ..]
+            )
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            "gate declaration",
+            "fanout cannot diagnose a repository script alias before worktree creation because no authoritative registered component workspace is available; register the repository primary or use `homeboy review lint --path .` / `homeboy review test --path .`.",
+            None,
+            None,
+        ));
+    }
+    // A set ensures shared and child gates are admitted exactly once per wave.
+    validate_gate_contracts(
+        gates,
+        workspace,
+        &crate::cli_runtime::current_augmented_command_contract(),
+    )
+}
+
+fn record_gate_contract_validation(
+    options: &mut AgentTaskCookServiceOptions,
+    validation: &GateContractValidation,
+) {
+    options.initial_plan.metadata["gate_contract_validation"] =
+        serde_json::to_value(validation).expect("gate contract validation serializes");
 }
 
 fn finalize_provider_worktrees(
@@ -1504,7 +1555,7 @@ fn cook_batch_inner(
         .cooks
         .iter()
         .any(|cook| !cook.private_verify.is_empty());
-    validate_batch_cook_gates(&plan)?;
+    validate_batch_cook_gates(&plan, batch_gate_workspace(&args)?)?;
     let worktrees = queue_or_reuse_worktrees(&args, &plan)?;
     bind_materialized_worktree_paths(&mut plan, &worktrees);
     let blocked = worktrees
@@ -3257,7 +3308,10 @@ fn load_verification_profiles(spec: Option<&str>) -> Result<VerificationProfiles
     Ok(profiles)
 }
 
-fn validate_batch_cook_gates(plan: &BatchCookFanoutPlan) -> Result<()> {
+fn validate_batch_cook_gates(
+    plan: &BatchCookFanoutPlan,
+    workspace: Option<std::path::PathBuf>,
+) -> Result<()> {
     for cook in &plan.cooks {
         if cook.verify.is_empty() && cook.private_verify.is_empty() {
             return Err(Error::validation_invalid_argument(
@@ -3268,7 +3322,39 @@ fn validate_batch_cook_gates(plan: &BatchCookFanoutPlan) -> Result<()> {
             ));
         }
     }
+    validate_batch_gate_contracts(plan, workspace.as_deref())?;
     Ok(())
+}
+
+fn batch_gate_workspace(args: &AgentTaskFanoutCookBatchArgs) -> Result<Option<std::path::PathBuf>> {
+    let component = homeboy::core::component::registered()?
+        .into_iter()
+        .find(|component| component.id == args.repo);
+    let Some(component) = component else {
+        return Ok(None);
+    };
+    let path = std::path::PathBuf::from(component.local_path);
+    Ok(path.is_dir().then_some(path))
+}
+
+fn batch_plan_gate_workspace(plan: &BatchCookFanoutPlan) -> Result<Option<std::path::PathBuf>> {
+    let repositories = plan
+        .cooks
+        .iter()
+        .filter_map(|cook| cook.repo.as_deref())
+        .collect::<BTreeSet<_>>();
+    if repositories.len() != 1 {
+        return Ok(None);
+    }
+    let repository = repositories.into_iter().next().expect("one repository");
+    let component = homeboy::core::component::registered()?
+        .into_iter()
+        .find(|component| component.id == repository);
+    let Some(component) = component else {
+        return Ok(None);
+    };
+    let path = std::path::PathBuf::from(component.local_path);
+    Ok(path.is_dir().then_some(path))
 }
 
 fn effective_batch_cook_gates(plan: &BatchCookFanoutPlan) -> Vec<Value> {
@@ -5484,8 +5570,43 @@ fi
         );
 
         let plan = build_cook_batch_plan(&args).expect("plan before worktree creation");
-        let error = validate_batch_cook_gates(&plan).expect_err("every child needs a gate");
+        let error = validate_batch_cook_gates(&plan, None).expect_err("every child needs a gate");
         assert_eq!(error.details["problem"], "gate_missing: every cook-batch child requires verify or private_verify before worktree creation");
+    }
+
+    #[test]
+    fn cook_batch_rejects_repository_script_alias_before_worktree_queueing() {
+        with_isolated_home(|home| {
+            let source = home.path().join("fixture-primary");
+            std::fs::create_dir_all(&source).expect("primary directory");
+            std::fs::write(
+                source.join("homeboy.json"),
+                r#"{"scripts":{"lint":["check"]}}"#,
+            )
+            .expect("component manifest");
+            write_component_registration(home.path(), "fixture", &source);
+
+            let mut args = cook_batch_args();
+            args.repo = "fixture".to_string();
+            args.gates.verify = vec!["homeboy lint fixture --path .".to_string()];
+            let error =
+                cook_batch(args).expect_err("script alias must reject before queuing worktrees");
+            assert!(error.message.contains("repository script identity"));
+            assert!(error.message.contains("homeboy review lint --path ."));
+            assert!(!home.path().join("fixture@fix-issue-6453-fixture").exists());
+        });
+    }
+
+    #[test]
+    fn fanout_alias_without_a_component_root_reports_the_admission_limit() {
+        let mut args = cook_batch_args();
+        args.gates.verify = vec!["homeboy lint fixture --path .".to_string()];
+        let plan = build_cook_batch_plan(&args).expect("plan");
+        let error = validate_batch_gate_contracts(&plan, None)
+            .expect_err("alias needs an authoritative workspace");
+        assert!(error
+            .message
+            .contains("no authoritative registered component workspace"));
     }
 
     #[test]

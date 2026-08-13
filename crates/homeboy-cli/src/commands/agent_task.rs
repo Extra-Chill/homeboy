@@ -17,6 +17,7 @@ pub mod contract;
 pub mod controller;
 pub mod doctor;
 pub mod fanout;
+pub(crate) mod gate_contract;
 pub mod loop_definition;
 pub mod prompts;
 pub mod retained_artifacts;
