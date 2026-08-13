@@ -19,29 +19,53 @@ use homeboy_extension_contract::{
 
 use crate::{extension_store::load_all_extensions, notification_route::NotificationRoute};
 
-const RESOLVER_TIMEOUT: Duration = Duration::from_secs(2);
+const AMBIENT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const RESOLVER_OUTPUT_LIMIT: usize = 16 * 1024;
 
 /// Ask installed transport resolvers for a route. One match is selected; zero
-/// matches retains route-less behavior. Any invalid declaration or outcome is a
-/// hard error so caller context can never select an unintended destination.
+/// matches retains route-less behavior. Ambient discovery has one aggregate
+/// deadline, so optional resolvers cannot delay durable submission per install.
+/// A resolver that cannot start or exceeds that deadline is skipped with a
+/// bounded diagnostic; malformed, invalid, and ambiguous results fail closed.
 pub fn resolve_installed() -> Result<Option<NotificationRoute>> {
+    resolve_installed_with_timeout(AMBIENT_DISCOVERY_TIMEOUT)
+}
+
+fn resolve_installed_with_timeout(timeout: Duration) -> Result<Option<NotificationRoute>> {
     let extensions = load_all_extensions()?;
     let mut matches = Vec::new();
+    let started = Instant::now();
     for extension in extensions {
         for transport in &extension.notification_transports {
             let Some(resolver) = &transport.route_resolver else {
                 continue;
             };
-            if let Some(route) = invoke(
+            let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                ambient_discovery_warning("notification route resolver discovery timed out");
+                return select_match(matches);
+            };
+            match invoke(
                 resolver,
                 &transport.id,
                 extension.extension_path.as_deref().unwrap_or_default(),
-            )? {
-                matches.push(route);
+                remaining,
+            ) {
+                Ok(Some(route)) => matches.push(route),
+                Ok(None) => {}
+                Err(InvokeError::Optional(message)) => {
+                    ambient_discovery_warning(message);
+                    if started.elapsed() >= timeout {
+                        return select_match(matches);
+                    }
+                }
+                Err(InvokeError::Fatal(error)) => return Err(error),
             }
         }
     }
+    select_match(matches)
+}
+
+fn select_match(mut matches: Vec<NotificationRoute>) -> Result<Option<NotificationRoute>> {
     match matches.len() {
         0 => Ok(None),
         1 => Ok(matches.pop()),
@@ -51,23 +75,29 @@ pub fn resolve_installed() -> Result<Option<NotificationRoute>> {
     }
 }
 
-/// Apply the route precedence contract without making resolver execution a
-/// fallback for an explicit caller choice.
+/// Apply the explicit route precedence contract. Ambient resolver execution is
+/// intentionally owned by the Cook submission path, after request validation.
 pub fn resolve_from_cli_or_env(
     cli_transport: Option<&str>,
     cli_route: Option<&str>,
 ) -> Result<Option<NotificationRoute>> {
     match crate::notification_route::from_cli_or_env(cli_transport, cli_route)? {
         Some(route) => Ok(Some(route)),
-        None => resolve_installed(),
+        None => Ok(None),
     }
+}
+
+enum InvokeError {
+    Optional(&'static str),
+    Fatal(Error),
 }
 
 fn invoke(
     resolver: &NotificationRouteResolverConfig,
     transport: &str,
     extension_path: &str,
-) -> Result<Option<NotificationRoute>> {
+    timeout: Duration,
+) -> std::result::Result<Option<NotificationRoute>, InvokeError> {
     let argv: Vec<String> = resolver
         .command
         .iter()
@@ -79,55 +109,85 @@ fn invoke(
         transport: transport.to_string(),
     })
     .expect("resolver request is serializable");
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(&argv[1..])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| resolver_error("could not start an installed notification route resolver"))?;
-    child
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|_| {
+        InvokeError::Optional("could not start an installed notification route resolver")
+    })?;
+    if child
         .stdin
         .take()
         .expect("piped stdin")
         .write_all(&request)
-        .map_err(|_| resolver_error("could not send the resolver request"))?;
+        .is_err()
+    {
+        terminate(&mut child, None);
+        return Err(InvokeError::Fatal(resolver_error(
+            "could not send the resolver request",
+        )));
+    }
     let stdout = child.stdout.take().expect("piped stdout");
     let reader = thread::spawn(move || read_bounded(stdout));
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|_| resolver_error("could not wait for a notification route resolver"))?
-        {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(_) => {
+                terminate(&mut child, Some(reader));
+                return Err(InvokeError::Fatal(resolver_error(
+                    "could not wait for a notification route resolver",
+                )));
+            }
+        };
+        if let Some(status) = status {
+            // A resolver parent can exit while a descendant retains stdout.
+            // Reap its group before joining the reader so that cannot bypass
+            // the aggregate deadline by withholding EOF.
+            kill_process_group(&mut child);
             break status;
         }
-        if started.elapsed() >= RESOLVER_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(resolver_error("notification route resolver timed out"));
+        if started.elapsed() >= timeout {
+            terminate(&mut child, Some(reader));
+            return Err(InvokeError::Optional(
+                "notification route resolver discovery timed out",
+            ));
         }
         thread::sleep(Duration::from_millis(10));
     };
-    let (stdout, oversized) = reader
-        .join()
-        .map_err(|_| resolver_error("notification route resolver output reader failed"))?;
+    let (stdout, oversized) = reader.join().map_err(|_| {
+        InvokeError::Fatal(resolver_error(
+            "notification route resolver output reader failed",
+        ))
+    })?;
     if oversized {
-        return Err(resolver_error(
+        return Err(InvokeError::Fatal(resolver_error(
             "notification route resolver output exceeded its limit",
-        ));
+        )));
     }
     if !status.success() {
-        return Err(resolver_error(
+        return Err(InvokeError::Fatal(resolver_error(
             "notification route resolver exited unsuccessfully",
-        ));
+        )));
     }
-    let response: NotificationRouteResolverResponse = serde_json::from_slice(&stdout)
-        .map_err(|_| resolver_error("notification route resolver returned malformed output"))?;
+    let response: NotificationRouteResolverResponse =
+        serde_json::from_slice(&stdout).map_err(|_| {
+            InvokeError::Fatal(resolver_error(
+                "notification route resolver returned malformed output",
+            ))
+        })?;
     if response.schema != NOTIFICATION_ROUTE_RESOLVER_SCHEMA {
-        return Err(resolver_error(
+        return Err(InvokeError::Fatal(resolver_error(
             "notification route resolver returned an unsupported schema",
-        ));
+        )));
     }
     match (response.status, response.route) {
         (NotificationRouteResolverStatus::Unmatched, None) => Ok(None),
@@ -135,13 +195,45 @@ fn invoke(
             NotificationRoute::new(transport, route)
                 .map(Some)
                 .map_err(|_| {
-                    resolver_error("notification route resolver returned an invalid route")
+                    InvokeError::Fatal(resolver_error(
+                        "notification route resolver returned an invalid route",
+                    ))
                 })
         }
-        _ => Err(resolver_error(
+        _ => Err(InvokeError::Fatal(resolver_error(
             "notification route resolver returned an invalid result shape",
-        )),
+        ))),
     }
+}
+
+fn terminate(child: &mut std::process::Child, reader: Option<thread::JoinHandle<(Vec<u8>, bool)>>) {
+    kill_process_group(child);
+    let _ = child.wait();
+    if let Some(reader) = reader {
+        let _ = reader.join();
+    }
+}
+
+/// Kill the resolver's whole process group so grandchildren cannot retain its
+/// stdout pipe after the aggregate deadline has expired.
+#[cfg(unix)]
+fn kill_process_group(child: &mut std::process::Child) {
+    if child.id() <= i32::MAX as u32 {
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+    } else {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
+fn ambient_discovery_warning(message: &str) {
+    eprintln!("Warning: {message}; continuing without an ambient notification route.");
 }
 
 fn read_bounded(mut reader: impl Read) -> (Vec<u8>, bool) {
@@ -173,6 +265,11 @@ mod tests {
 
     #[cfg(unix)]
     fn install_resolver(id: &str, command: &str) {
+        install_resolver_command(id, vec!["sh", "-c", command]);
+    }
+
+    #[cfg(unix)]
+    fn install_resolver_command(id: &str, command: Vec<&str>) {
         let mut manifest: homeboy_extension_contract::ExtensionManifest =
             serde_json::from_value(serde_json::json!({
                 "name": "Resolver test",
@@ -180,7 +277,7 @@ mod tests {
                 "notification_transports": [{
                     "id": "synthetic.completed",
                     "command": ["true"],
-                    "route_resolver": { "command": ["sh", "-c", command] }
+                    "route_resolver": { "command": command }
                 }]
             }))
             .unwrap();
@@ -211,6 +308,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ambient_start_failures_preserve_route_less_behavior() {
+        crate::test_support::with_isolated_home(|_| {
+            install_resolver_command("resolver-test", vec!["/definitely/not/a/resolver"]);
+            assert_eq!(resolve_installed().unwrap(), None);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn malformed_and_oversized_results_fail_closed() {
         crate::test_support::with_isolated_home(|_| {
             install_resolver("resolver-test", "printf not-json");
@@ -230,7 +336,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ambiguity_invalid_routes_and_timeouts_fail_closed() {
+    fn ambiguity_and_invalid_routes_fail_closed() {
         crate::test_support::with_isolated_home(|_| {
             let matched = "printf '%s' '{\"schema\":\"homeboy/notification-route-resolver/v1\",\"status\":\"matched\",\"route\":\"route\"}'";
             install_resolver("resolver-one", matched);
@@ -247,12 +353,24 @@ mod tests {
                 .to_string()
                 .contains("invalid route"));
         });
-        crate::test_support::with_isolated_home(|_| {
-            install_resolver("resolver-test", "sleep 3");
-            assert!(resolve_installed()
-                .unwrap_err()
-                .to_string()
-                .contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambient_discovery_uses_one_deadline_and_reaps_process_groups() {
+        crate::test_support::with_isolated_home(|home| {
+            let marker = home.path().join("resolver-descendant-ran");
+            let command = format!("(sleep 1; touch {}) & wait", marker.display());
+            install_resolver("resolver-one", &command);
+            install_resolver("resolver-two", "sleep 1");
+            let started = Instant::now();
+            assert_eq!(
+                resolve_installed_with_timeout(Duration::from_millis(100)).unwrap(),
+                None
+            );
+            assert!(started.elapsed() < Duration::from_millis(500));
+            thread::sleep(Duration::from_secs(1));
+            assert!(!marker.exists());
         });
     }
 

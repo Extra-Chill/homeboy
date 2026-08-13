@@ -264,8 +264,9 @@ values, or ambient context keys; extensions alone choose what inherited context
 to read. Extension list and show output expose only `has_route_resolver`, never
 resolver argv or caller context.
 
-Homeboy invokes declared resolvers only after neither `--notification-transport`
-plus `--notification-route` nor the paired `HOMEBOY_NOTIFICATION_TRANSPORT` and
+Homeboy invokes declared resolvers only for validated `agent-task cook`
+submissions after neither `--notification-transport` plus
+`--notification-route` nor the paired `HOMEBOY_NOTIFICATION_TRANSPORT` and
 `HOMEBOY_NOTIFICATION_ROUTE` values selected a route. Explicit CLI values win,
 then the environment pair, then exactly one resolver match. No match preserves
 the route-less policy.
@@ -288,13 +289,19 @@ or:
 {"schema":"homeboy/notification-route-resolver/v1","status":"matched","route":"opaque-destination"}
 ```
 
-Resolvers have a two-second execution limit and a 16 KiB stdout limit. Their
-stderr is not retained. Multiple matches, a non-zero exit, malformed or
-oversized output, a timeout, an unsupported schema, an invalid result shape, or
-an invalid/secret-bearing route fail closed with a typed
-`notification_route_resolver` diagnostic. A selected route is validated and
-bound before durable submission, so detached, fanout, resume, daemon, and
-delivery paths reuse their existing route persistence.
+Only validated `agent-task cook` submissions without an explicit CLI or
+environment route run ambient resolver discovery. All installed resolvers share
+one two-second aggregate execution limit and a 16 KiB stdout limit per resolver.
+Their stderr is not retained. A resolver that cannot start or exhausts the
+aggregate limit emits a bounded warning and Cook continues route-less. Multiple
+matches, a non-zero exit, malformed or oversized output, an unsupported schema,
+an invalid result shape, or an invalid/secret-bearing route fail closed with a
+typed `notification_route_resolver` diagnostic. Timed-out Unix resolvers are
+killed as a process group so descendants cannot retain their pipes. A selected
+route is validated and bound before durable submission, so detached, fanout,
+resume, daemon, and delivery paths reuse their existing route persistence.
+Cook seals to its pinned controller runtime before ambient discovery, so exactly
+that executing runtime resolves and persists the selected route once.
 
 Known sidecar names default to these run-directory paths when `path` is omitted:
 
