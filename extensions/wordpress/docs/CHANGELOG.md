@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.47] - 2026-08-13
+
+### Fixed
+- explain stale database secret setup
+
 ## [3.34.46] - 2026-08-12
 
 ### Fixed
