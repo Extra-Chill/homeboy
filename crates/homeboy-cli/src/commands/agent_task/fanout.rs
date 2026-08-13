@@ -1787,6 +1787,12 @@ fn cook_batch_argv(args: &AgentTaskFanoutCookBatchArgs) -> Vec<String> {
             command.extend([flag.to_string(), value.clone()]);
         }
     }
+    for value in &args.gates.gate_toolchain_specs {
+        command.extend([
+            "--gate-toolchain-spec".to_string(),
+            serde_json::to_string(value).expect("gate toolchain spec serializes"),
+        ]);
+    }
     for (flag, values) in [
         ("--gate-env", &args.gates.gate_environment),
         ("--gate-env-from", &args.gates.gate_environment_preserve),
@@ -5230,6 +5236,7 @@ fi
                 gate_environment: Vec::new(),
                 gate_environment_preserve: Vec::new(),
                 gate_toolchains: Vec::new(),
+                gate_toolchain_specs: Vec::new(),
                 isolate_gate_home: true,
                 isolate_gate_xdg: true,
                 gate_shared_cargo_target: false,
@@ -5301,6 +5308,12 @@ fi
             handle.gates.gate_environment_mode = "replace".to_string();
             handle.gates.gate_environment = vec![("FEATURE".to_string(), "enabled".to_string())];
             handle.gates.gate_toolchains = vec!["fixture-tool".to_string()];
+            handle.gates.gate_toolchain_specs = vec![
+                homeboy::agents::agent_tasks::gate::AgentTaskGateToolchainRequirement {
+                    command: "custom-tool".to_string(),
+                    probe_arguments: vec!["probe".to_string(), "--json".to_string()],
+                },
+            ];
             handle.max_concurrency = Some(3);
             handle.max_duration = Some(120);
             let error = normalize_cook_batch_repo(&mut handle).expect_err("handle is not a repo");
@@ -5316,6 +5329,66 @@ fi
                 .expect("private reentry instruction");
             assert!(reentry.contains("--repo fixture"));
             assert!(!reentry.contains(private_sentinel));
+            let mut public_handle = handle.clone();
+            public_handle.gates.private_verify.clear();
+            let mut corrected = public_handle.clone();
+            corrected.repo = "fixture".to_string();
+            let expected_command = quote_args(&cook_batch_argv(&corrected));
+            let error = normalize_cook_batch_repo(&mut public_handle)
+                .expect_err("public fixture handle remains invalid");
+            assert_eq!(
+                error.details["correction_command"], expected_command,
+                "the correction changes only --repo"
+            );
+
+            let cli = Cli::try_parse_from(cook_batch_argv(&corrected))
+                .expect("correction command remains a valid invocation");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let AgentTaskCommand::Fanout(fanout) = agent_task.command else {
+                panic!("fanout command");
+            };
+            let AgentTaskFanoutCommand::CookBatch(replayed) = fanout.command else {
+                panic!("cook-batch command");
+            };
+            assert_eq!(replayed.repo, "fixture");
+            assert_eq!(replayed.from, corrected.from);
+            assert_eq!(replayed.base, corrected.base);
+            assert_eq!(replayed.branch_prefix, corrected.branch_prefix);
+            assert_eq!(replayed.fanout_id, corrected.fanout_id);
+            assert_eq!(replayed.backend, corrected.backend);
+            assert_eq!(replayed.selector, corrected.selector);
+            assert_eq!(replayed.model, corrected.model);
+            assert_eq!(replayed.provider_profile, corrected.provider_profile);
+            assert_eq!(replayed.secret_env, corrected.secret_env);
+            assert_eq!(replayed.gates.verify, corrected.gates.verify);
+            assert_eq!(
+                replayed.gates.private_verify,
+                corrected.gates.private_verify
+            );
+            assert_eq!(
+                replayed.gates.gate_execution_policy,
+                corrected.gates.gate_execution_policy
+            );
+            assert_eq!(
+                replayed.gates.gate_timeout_seconds,
+                corrected.gates.gate_timeout_seconds
+            );
+            assert_eq!(
+                replayed.gates.gate_environment,
+                corrected.gates.gate_environment
+            );
+            assert_eq!(
+                replayed.gates.gate_toolchains,
+                corrected.gates.gate_toolchains
+            );
+            assert_eq!(
+                replayed.gates.gate_toolchain_specs,
+                corrected.gates.gate_toolchain_specs
+            );
+            assert_eq!(replayed.max_concurrency, corrected.max_concurrency);
+            assert_eq!(replayed.max_duration, corrected.max_duration);
 
             let mut unknown = cook_batch_args();
             unknown.repo = home.path().join("unknown").to_string_lossy().to_string();

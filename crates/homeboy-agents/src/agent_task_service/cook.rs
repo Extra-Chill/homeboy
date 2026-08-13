@@ -4528,14 +4528,28 @@ where
                     promotion: None,
                     feedback: None,
                 });
-                let recovery = "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string();
+                let selection_required = error.details["selection_required"] == Value::Bool(true);
+                let recovery = if selection_required {
+                    agent_task_lifecycle::record_metadata_value(
+                        &run_id,
+                        "cook_selection_required",
+                        error.details.clone(),
+                    )?;
+                    "Cook found distinct canonical patch candidates. Select one of the exact commands in failure_context before promotion.".to_string()
+                } else {
+                    "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string()
+                };
                 agent_task_lifecycle::record_cook_controller_failure(
                     &run_id,
                     &bounded_error_diagnostic(&error),
                 )?;
                 return Ok(cook_report(CookReportInput {
                     cook_id,
-                    status: "policy_failure",
+                    status: if selection_required {
+                        "selection_required"
+                    } else {
+                        "policy_failure"
+                    },
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
