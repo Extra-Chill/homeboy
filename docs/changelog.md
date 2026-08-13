@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.342.0] - 2026-08-12
+
+### Added
+- expose recipe provider inventory
+
+### Fixed
+- trust provider-owned task workspace
+- scope reconcile progress to operation
+- report reconcile admission outcome
+- complete runner status test fixtures
+- reuse configured binary identity evidence
+- exclude shared asset roots
+
 ## [0.341.3] - 2026-08-12
 
 ### Changed
