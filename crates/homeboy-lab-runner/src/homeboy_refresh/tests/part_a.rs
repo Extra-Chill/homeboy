@@ -489,6 +489,17 @@ fn materialize_plan_rejects_implicit_git_ancestry_downgrades() {
         "/runner/ws/homeboy-clean/target/release/homeboy",
         false,
     );
+    assert_eq!(
+        script.matches("self identity").count(),
+        1,
+        "materialization probes identity once"
+    );
+    for legacy_sidecar in ["source_url", "checkout", "ref", "commit", "binary_sha256"] {
+        assert!(
+            !script.contains(&format!("$slot_dir/{legacy_sidecar}")),
+            "materialization does not write legacy {legacy_sidecar} sidecars"
+        );
+    }
 
     assert!(script.contains("merge-base --is-ancestor \"$target\" \"$current\""));
     assert!(script.contains("HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current"));
@@ -988,6 +999,171 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
             assert!(String::from_utf8_lossy(&corrupt.stderr).contains("slot hash mismatch"));
         }
     }
+}
+
+#[test]
+fn managed_slot_materialization_publishes_verified_select_authority() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let source = fixture.path().join("source");
+    let build = fixture.path().join("build");
+    let tools = fixture.path().join("tools");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::create_dir_all(&tools).expect("tool directory");
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.name", "Homeboy Test"],
+        vec!["config", "user.email", "homeboy@example.test"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&source)
+            .status()
+            .expect("initialize source")
+            .success());
+    }
+    std::fs::write(source.join("README.md"), "fixture\n").expect("fixture source");
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(&source)
+        .status()
+        .expect("stage source")
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "fixture"])
+        .current_dir(&source)
+        .status()
+        .expect("commit source")
+        .success());
+    let commit = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&source)
+            .output()
+            .expect("read commit")
+            .stdout,
+    )
+    .expect("commit is UTF-8")
+    .trim()
+    .to_string();
+    let cargo = tools.join("cargo");
+    std::fs::write(
+        &cargo,
+        "#!/bin/sh\nset -e\nwhile [ \"$1\" != \"--manifest-path\" ]; do shift; done\ndir=$(dirname \"$2\")\nmkdir -p \"$dir/target/release\"\nprintf '%s\\n' '#!/bin/sh' 'if [ \"$1 $2\" = \"self identity\" ]; then printf \"%s\\n\" \"{\\\"data\\\":{\\\"git_commit\\\":\\\"'\"$(git -C \"$dir\" rev-parse HEAD)\"'\\\",\\\"git_dirty\\\":false}}\"; fi' > \"$dir/target/release/homeboy\"\nchmod 0755 \"$dir/target/release/homeboy\"\n",
+    )
+    .expect("fake cargo");
+    assert!(Command::new("chmod")
+        .args(["0755", cargo.to_str().expect("cargo path")])
+        .status()
+        .expect("make cargo executable")
+        .success());
+    let binary = build.join("target/release/homeboy");
+    let script = materialize_script(
+        source.to_str().expect("source path"),
+        "HEAD",
+        build.to_str().expect("build path"),
+        binary.to_str().expect("binary path"),
+        false,
+    );
+    let mut materialize = fixture_build_shell(&script);
+    materialize.env(
+        "PATH",
+        format!("{}:{}", tools.display(), std::env::var("PATH").unwrap()),
+    );
+    let output = materialize.output().expect("materialize managed slot");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("materialize output");
+    let immutable = refreshed_binary_path(&ssh_bootstrap_plan(), &stdout).expect("immutable path");
+    let slot = Path::new(&immutable).parent().expect("slot");
+    assert!(slot.join("provenance").is_file());
+    for legacy_sidecar in ["source_url", "checkout", "ref", "commit", "binary_sha256"] {
+        assert!(
+            !slot.join(legacy_sidecar).exists(),
+            "materialization publishes no legacy {legacy_sidecar} sidecar"
+        );
+    }
+    let select_output = fixture_build_shell(&identity_probe_script(&immutable))
+        .output()
+        .expect("probe managed selection");
+    assert!(select_output.status.success());
+    let select_stdout = String::from_utf8(select_output.stdout).expect("select output");
+    let select_plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "select".to_string(),
+        source: None,
+        git_ref: None,
+        target_dir: None,
+        binary_path: immutable.clone(),
+        script: String::new(),
+        reconnect: false,
+        followup_commands: Vec::new(),
+    };
+    let identity = parse_identity(&select_stdout).expect("selected identity");
+    assert_eq!(identity_commit(&identity).as_deref(), Some(commit.as_str()));
+    let checkout = managed_slot_checkout(&select_plan, &select_stdout, &identity)
+        .expect("verified sidecar")
+        .expect("managed authority");
+    assert_eq!(checkout, build.display().to_string());
+
+    assert!(Command::new("git")
+        .args([
+            "remote",
+            "set-url",
+            "origin",
+            "https://attacker.example/homeboy.git"
+        ])
+        .current_dir(&build)
+        .status()
+        .expect("tamper checkout origin")
+        .success());
+    let tampered_checkout = fixture_build_shell(&identity_probe_script(&immutable))
+        .output()
+        .expect("probe tampered checkout");
+    let tampered_checkout_stdout =
+        String::from_utf8(tampered_checkout.stdout).expect("tampered checkout output");
+    let tampered_checkout_identity =
+        parse_identity(&tampered_checkout_stdout).expect("identity still reports");
+    assert_eq!(
+        managed_slot_checkout(
+            &select_plan,
+            &tampered_checkout_stdout,
+            &tampered_checkout_identity
+        )
+        .expect("fail closed"),
+        None
+    );
+    assert!(Command::new("git")
+        .args([
+            "remote",
+            "set-url",
+            "origin",
+            source.to_str().expect("source path"),
+        ])
+        .current_dir(&build)
+        .status()
+        .expect("restore checkout origin")
+        .success());
+    std::fs::write(
+        Path::new(&immutable)
+            .parent()
+            .expect("slot")
+            .join("provenance"),
+        "tampered\n",
+    )
+    .expect("tamper sidecar");
+    let tampered = fixture_build_shell(&identity_probe_script(&immutable))
+        .output()
+        .expect("probe tampered slot");
+    let tampered_stdout = String::from_utf8(tampered.stdout).expect("tampered output");
+    let tampered_identity = parse_identity(&tampered_stdout).expect("identity still reports");
+    assert_eq!(
+        managed_slot_checkout(&select_plan, &tampered_stdout, &tampered_identity)
+            .expect("fail closed"),
+        None
+    );
 }
 
 #[test]
@@ -1603,7 +1779,7 @@ fn fatal_ancestry_executor_output_retains_parent_actionable_refs() {
     };
 
     let probe =
-        runner_commits_are_ancestral_with(&plan, "candidate", "authority", false, |_, _| {
+        runner_commits_are_ancestral_with(&plan, None, "candidate", "authority", false, |_, _| {
             Ok((ancestry_exec_output(128), 128))
         })
         .expect("executor output is retained for classification");
@@ -1671,6 +1847,7 @@ fn remote_forward_upgrade_uses_runner_owned_ancestry_evidence() {
         |older, newer| {
             runner_commits_are_ancestral_with(
                 &plan,
+                None,
                 older,
                 newer,
                 false,
@@ -1726,6 +1903,7 @@ fn remote_true_downgrade_is_still_refused_from_runner_owned_evidence() {
         |older, newer| {
             runner_commits_are_ancestral_with(
                 &plan,
+                None,
                 older,
                 newer,
                 false,
@@ -1749,6 +1927,90 @@ fn remote_true_downgrade_is_still_refused_from_runner_owned_evidence() {
 
     assert_eq!(denied.details["field"], "allow_downgrade");
     assert!(denied.message.contains("refusing Homeboy runner downgrade"));
+}
+
+#[test]
+fn managed_select_authority_accepts_forward_and_equal_commits() {
+    let (fixture, old, new) = linear_commit_fixture();
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "select".to_string(),
+        source: None,
+        git_ref: None,
+        target_dir: None,
+        binary_path: "/runner/_homeboy_binaries/homeboy-hash/homeboy".to_string(),
+        script: String::new(),
+        reconnect: false,
+        followup_commands: Vec::new(),
+    };
+    let stdout = format!(
+        "HOMEBOY_REFRESH_MANAGED_SOURCE=https://example.test/homeboy.git\nHOMEBOY_REFRESH_MANAGED_CHECKOUT={}\nHOMEBOY_REFRESH_MANAGED_REF=main\nHOMEBOY_REFRESH_MANAGED_COMMIT={new}\n{{\"data\":{{\"git_commit\":\"{new}\"}}}}",
+        fixture.path().display(),
+    );
+    let candidate = parse_identity(&stdout).expect("managed binary identity");
+    let checkout = managed_slot_checkout(&plan, &stdout, &candidate)
+        .expect("managed metadata is valid")
+        .expect("managed metadata supplies checkout");
+
+    for authority in [&old, &new] {
+        assert!(validate_refresh_promotion(
+            &plan,
+            &candidate,
+            false,
+            &RefreshPromotionAuthorities {
+                controller: None,
+                active_daemon: Some(authority.to_string()),
+                configured_selected: None,
+            },
+            |older, newer| fixture_commits_are_ancestral(Path::new(&checkout), older, newer),
+        )
+        .expect("forward and equal managed selections are accepted")
+        .is_none());
+    }
+}
+
+#[test]
+fn managed_select_authority_rejects_true_downgrade_and_unknown_slots() {
+    let (fixture, old, new) = linear_commit_fixture();
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "select".to_string(),
+        source: None,
+        git_ref: None,
+        target_dir: None,
+        binary_path: "/arbitrary/homeboy".to_string(),
+        script: String::new(),
+        reconnect: false,
+        followup_commands: Vec::new(),
+    };
+    let unknown = r#"{"data":{"git_commit":"unknown"}}"#;
+    assert_eq!(
+        managed_slot_checkout(&plan, unknown, &parse_identity(unknown).expect("identity"))
+            .expect("unknown slots remain untrusted"),
+        None
+    );
+
+    let stdout = format!(
+        "HOMEBOY_REFRESH_MANAGED_CHECKOUT={}\nHOMEBOY_REFRESH_MANAGED_COMMIT={old}\n{{\"data\":{{\"git_commit\":\"{old}\"}}}}",
+        fixture.path().display(),
+    );
+    let candidate = parse_identity(&stdout).expect("managed binary identity");
+    let checkout = managed_slot_checkout(&plan, &stdout, &candidate)
+        .expect("managed metadata is valid")
+        .expect("managed metadata supplies checkout");
+    let error = validate_refresh_promotion(
+        &plan,
+        &candidate,
+        false,
+        &RefreshPromotionAuthorities {
+            controller: None,
+            active_daemon: Some(new),
+            configured_selected: None,
+        },
+        |older, newer| fixture_commits_are_ancestral(Path::new(&checkout), older, newer),
+    )
+    .expect_err("true managed downgrade stays rejected");
+    assert_eq!(error.details["field"], "allow_downgrade");
 }
 
 #[test]
