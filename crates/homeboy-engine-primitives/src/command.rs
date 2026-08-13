@@ -1230,6 +1230,7 @@ fn enable_child_subreaper() -> io::Result<()> {
             }
         })
         .as_ref()
+        .copied()
         .map_err(|error| io::Error::new(error.kind(), error.to_string()))
 }
 

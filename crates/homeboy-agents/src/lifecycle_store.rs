@@ -280,7 +280,9 @@ fn write_record_with_aggregate(
     // write boundary. Renew before persisting so the record carries the exact
     // store-issued epoch rather than an optimistic local timestamp.
     super::renew_record_workspace_owner(&mut record)?;
-    let committed = write_record_with_aggregate_without_workspace_authority(&record, aggregate)?;
+    let committed = homeboy_core::config::with_config_lock(|| {
+        write_record_with_aggregate_without_workspace_authority(&record, aggregate)
+    })?;
     super::workspace_authority::persist_terminal_from_record(&committed)
         .and_then(|_| super::release_terminal_record_workspace_owner(&committed))
 }
@@ -297,19 +299,27 @@ fn write_record_with_aggregate_without_workspace_authority(
         ));
     }
     let store = ObservationStore::open_initialized()?;
-    let metadata_json = merge_observation_metadata(
-        store
-            .get_run(&record.run_id)?
-            .map(|run| run.metadata_json)
-            .unwrap_or_else(|| json!({})),
-        observation_metadata(record, aggregate)?,
-    );
+    let existing_metadata = store
+        .get_run(&record.run_id)?
+        .map(|run| run.metadata_json)
+        .unwrap_or_else(|| json!({}));
+    let mut record = record.clone();
+    if record.metadata.get("cook_operation_claims").is_none() {
+        if let Some(claims) = existing_metadata
+            .pointer("/agent_task_run/metadata/cook_operation_claims")
+            .cloned()
+        {
+            record.metadata["cook_operation_claims"] = claims;
+        }
+    }
+    let metadata_json =
+        merge_observation_metadata(existing_metadata, observation_metadata(&record, aggregate)?);
     store.upsert_imported_run_preserving_terminal(&RunRecord {
         id: record.run_id.clone(),
         kind: "agent-task".to_string(),
-        component_id: plan_id_component(record),
+        component_id: plan_id_component(&record),
         started_at: record.submitted_at.clone(),
-        finished_at: terminal_finished_at(record),
+        finished_at: terminal_finished_at(&record),
         status: run_status(record.state).to_string(),
         command: Some("homeboy agent-task".to_string()),
         cwd: None,
