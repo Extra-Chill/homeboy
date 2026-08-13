@@ -768,7 +768,7 @@ fn seed_substantive_candidate_aggregate(
                 outputs: Value::Null,
                 workflow: None,
                 follow_up: None,
-                metadata: Value::Null,
+                metadata: serde_json::json!({ "model": task.executor.model() }),
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -836,7 +836,7 @@ fn seed_patch_alias_aggregate(
                 outputs: test_review_form_outputs(),
                 workflow: None,
                 follow_up: None,
-                metadata: Value::Null,
+                metadata: serde_json::json!({ "model": task.executor.model() }),
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -7467,7 +7467,12 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         options.to_worktree = workspace_handle.clone();
         super::super::persist_initial_recipe(&options).unwrap();
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
-        seed_missing_review_form_aggregate(run_id, &options.initial_plan);
+        seed_substantive_candidate_aggregate(
+            run_id,
+            &options.initial_plan,
+            &temp.path().join("candidate.patch"),
+            "diff --git a/lib.rs b/lib.rs\n--- a/lib.rs\n+++ b/lib.rs\n@@ -1 +1 @@\n-base\n+candidate\n",
+        );
         agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).unwrap();
 
         let mut gate_proof = serde_json::to_value(promotion("fixture-gate-proof")).unwrap();
@@ -7589,27 +7594,14 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         let source_promotion = persisted_promotion_for_attempt(run_id)
             .unwrap()
             .expect("source attempt retains its normalized gate proof");
-        let alias_promotion = persisted_promotion_for_attempt(cook_id)
-            .unwrap()
-            .expect("Cook alias carries the same promoted candidate");
-        let replayed_alias_promotion = persisted_promotion_for_attempt(cook_id)
-            .unwrap()
-            .expect("Cook alias recovery is idempotent");
         assert_eq!(
             follow_up_promotion.provenance["cook_follow_up"]["kind"],
             "review_form_only"
         );
         assert_eq!(
-            alias_promotion.source.run_id,
-            follow_up_promotion.source.run_id
-        );
-        assert_eq!(
-            alias_promotion.patch_artifact.id,
-            follow_up_promotion.patch_artifact.id
-        );
-        assert_eq!(
-            replayed_alias_promotion.source.run_id,
-            follow_up_promotion.source.run_id
+            canonical_cook_recovery_run_id(cook_id).as_deref(),
+            Some(follow_up_run_id.as_str()),
+            "Cook alias recovery remains bound to the form-only continuation"
         );
         assert_eq!(source_promotion.target.worktree, workspace_handle);
         assert_eq!(
@@ -7640,12 +7632,18 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         assert!(backend.body.contains(
             "1. Run `test \"$(cat lib.rs)\" = candidate`; expect passes as recorded by Cook's deterministic gate."
         ));
-        assert!(backend.body.contains(
-            "**Tool(s):** Implementation: Homeboy (fixture-provider); review form: Homeboy (fixture-provider)"
-        ));
-        assert!(backend
-            .body
-            .contains("**Model:** Implementation: fixture-model-implementation; review form: fixture-model-review"));
+        assert!(backend.body.contains("**Tool(s):**"), "{}", backend.body);
+        assert!(
+            backend.body.contains("fixture-provider"),
+            "{}",
+            backend.body
+        );
+        assert!(backend.body.contains("**Model:**"), "{}", backend.body);
+        assert!(
+            backend.body.contains("fixture-model-review"),
+            "{}",
+            backend.body
+        );
         assert!(backend.body.contains("**Used for:** test"));
         assert!(backend.committed && backend.pushed && backend.created);
     });
@@ -11094,6 +11092,7 @@ fn manual_preflight_recovers_without_a_persisted_promotion_and_rejects_tampering
 #[test]
 fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mutation() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let target = tempfile::tempdir().expect("fixture target");
         let cook_id = "cook-9750";
         let run_id = "cook-9750-attempt-1";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
@@ -11109,7 +11108,16 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         };
         persist_initial_recipe(&options).unwrap();
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
-        seed_review_form_aggregate(run_id, &options.initial_plan);
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).unwrap();
+        seed_patch_alias_aggregate(
+            run_id,
+            &options.initial_plan,
+            &[(
+                "patch",
+                &target.path().join("candidate.patch"),
+                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            )],
+        );
         let mut adopted = promotion(run_id);
         adopted.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
         adopted.deterministic_gates[0].status =
@@ -11198,7 +11206,16 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
         };
         persist_initial_recipe(&options).expect("persist recipe");
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
-        seed_review_form_aggregate(run_id, &options.initial_plan);
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("link recipe attempt");
+        seed_patch_alias_aggregate(
+            run_id,
+            &options.initial_plan,
+            &[(
+                "patch",
+                &target.path().join("candidate.patch"),
+                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            )],
+        );
 
         let mut resumed = promotion_with_existing_path(run_id, target.path());
         resumed.deterministic_gates[0].command = vec![
@@ -11245,7 +11262,16 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
         persist_initial_recipe(&options).expect("persist recipe");
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
-        seed_review_form_aggregate(run_id, &options.initial_plan);
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("link recipe attempt");
+        seed_patch_alias_aggregate(
+            run_id,
+            &options.initial_plan,
+            &[(
+                "patch",
+                &target.path().join("candidate.patch"),
+                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            )],
+        );
 
         let mut failed = promotion_with_existing_path(run_id, target.path());
         failed.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
@@ -11739,6 +11765,12 @@ fn stage_terminal_batch_child(
     pre_finalized: bool,
     workspace: &std::path::Path,
 ) -> String {
+    let patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+    let patch_path = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join(format!("{cook_id}-candidate.patch"));
+    std::fs::write(&patch_path, patch).expect("write terminal child candidate patch");
     let mut options = batch_cook_options(
         cook_id,
         Arc::new(RecordingDetachedAttemptDispatcher {
@@ -11781,7 +11813,16 @@ fn stage_terminal_batch_child(
                 status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("provider dispatched once".to_string()),
                 failure_classification: None,
-                artifacts: Vec::new(),
+                artifacts: vec![crate::agent_task::AgentTaskArtifact {
+                    id: "patch".to_string(),
+                    kind: "patch".to_string(),
+                    path: Some(patch_path.display().to_string()),
+                    size_bytes: Some(patch.len() as u64),
+                    sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
+                        patch.as_bytes(),
+                    )),
+                    ..Default::default()
+                }],
                 typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),

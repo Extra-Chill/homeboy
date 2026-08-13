@@ -1524,7 +1524,7 @@ fn is_reconcilable_matches_the_replaced_cli_bucketing_for_every_variant() {
 #[test]
 fn discovery_active_classifies_liveness_and_source() {
     with_isolated_home(|_| {
-        // Queued run: always classified active.
+        // A queued run without a live owner or submission lease is stale.
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-live-queued"))
             .expect("queued submitted");
 
@@ -1549,7 +1549,7 @@ fn discovery_active_classifies_liveness_and_source() {
             .iter()
             .find(|run| run.run_id == "run-live-queued")
             .expect("queued listed");
-        assert_eq!(queued.liveness, Some(AgentTaskLiveness::Active));
+        assert_eq!(queued.liveness, Some(AgentTaskLiveness::Stale));
         assert!(queued.source == "local" || queued.source.starts_with("runner:"));
 
         let stale = report
@@ -1562,12 +1562,12 @@ fn discovery_active_classifies_liveness_and_source() {
 
         // The reconcilable predicate travels with the classification, so a
         // consumer never has to map the four values itself (#W3-4).
-        assert_eq!(queued.liveness_reconcilable, Some(false));
+        assert_eq!(queued.liveness_reconcilable, Some(true));
         assert_eq!(stale.liveness_reconcilable, Some(true));
 
         let summary = report.liveness_summary.expect("active summary present");
-        assert!(summary.active >= 1);
-        assert_eq!(summary.stale, 1);
+        assert_eq!(summary.active, 0);
+        assert_eq!(summary.stale, 2);
         assert_eq!(
             summary.reconcilable,
             summary.stale + summary.suspect + summary.unreconciled

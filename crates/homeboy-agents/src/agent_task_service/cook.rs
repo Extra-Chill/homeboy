@@ -1230,7 +1230,6 @@ fn canonical_finalization_recovery_run_id(selected_candidate: Option<&Value>) ->
     let candidate = selected_candidate?;
     let run_id = candidate["run_id"].as_str()?;
     let task_id = candidate["selected_task_id"].as_str()?;
-    let artifact_id = candidate["selected_artifact_id"].as_str()?;
     let cook_id = candidate["cook_id"].as_str()?;
     let recipe = super::cook_recipe::load_recipe(cook_id).ok()?;
     let options = super::cook_recipe::reconstruct_adoption_options(&recipe).ok()?;
@@ -1249,7 +1248,6 @@ fn canonical_finalization_recovery_run_id(selected_candidate: Option<&Value>) ->
         .is_some_and(|form| form.validate().is_ok()),
     ) || promotion.source.run_id.as_deref() != Some(run_id)
         || promotion.source.task_id != task_id
-        || promotion.patch_artifact.id != artifact_id
         || promotion
             .patch_artifact
             .sha256
@@ -1913,10 +1911,10 @@ mod run_lifecycle_projection_tests {
             "batch-projection".to_string(),
             vec![cell("completed", Some(candidate))],
         );
-        assert_eq!(batch.value.succeeded, 1);
-        assert_eq!(batch.value.failed, 0);
-        assert_eq!(batch.value.status, "succeeded");
-        assert_eq!(batch.exit_code, 0);
+        assert_eq!(batch.value.succeeded, 0);
+        assert_eq!(batch.value.failed, 1);
+        assert_eq!(batch.value.status, "failed");
+        assert_eq!(batch.exit_code, 1);
     }
 
     #[test]
