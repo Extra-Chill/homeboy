@@ -93,7 +93,11 @@ pub fn registered_by_id(id: &str) -> Result<Option<Component>> {
     let projects = project::list().unwrap_or_default();
     let standalone_snapshot = project::StandaloneComponentConfigSnapshot::load();
     for project in &projects {
-        if project.components.iter().any(|attachment| attachment.id == id) {
+        if project
+            .components
+            .iter()
+            .any(|attachment| attachment.id == id)
+        {
             if let Ok(component) = project::resolve_project_component_with_standalone_snapshot(
                 project,
                 id,

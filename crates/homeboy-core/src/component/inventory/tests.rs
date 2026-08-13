@@ -458,10 +458,7 @@ fn targeted_lookup_skips_project_attachment_with_a_mismatched_portable_id() {
         .unwrap();
     }
     let _home = with_home_override(dir.path());
-    for (project_id, local_path) in [
-        ("mismatched", &mismatched_repo),
-        ("valid", &valid_repo),
-    ] {
+    for (project_id, local_path) in [("mismatched", &mismatched_repo), ("valid", &valid_repo)] {
         crate::project::save(&Project {
             id: project_id.to_string(),
             components: vec![ProjectComponentAttachment {
