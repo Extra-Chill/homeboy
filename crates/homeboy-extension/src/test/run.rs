@@ -3250,20 +3250,60 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
 
     /// Cap tests mutate the process-global HOMEBOY_MAX_CHANGED_TEST_FILES env
     /// var, so they serialize against each other (#12365).
+    ///
+    /// Poisoning is absorbed rather than propagated: a genuine assertion
+    /// failure in one cap test would otherwise poison the lock and convert
+    /// every sibling into a misleading `PoisonError` panic, hiding the one
+    /// real failure behind a cascade.
     static CHANGED_SCOPE_CAP_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn changed_scope_cap_env_guard() -> std::sync::MutexGuard<'static, ()> {
         CHANGED_SCOPE_CAP_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("changed scope cap env lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Sets HOMEBOY_MAX_CHANGED_TEST_FILES for a scope and always clears it on
+    /// drop, so a panicking assertion cannot leak the cap into another test.
+    struct ChangedScopeCapEnv;
+
+    impl ChangedScopeCapEnv {
+        fn set(value: &str) -> Self {
+            std::env::set_var(MAX_CHANGED_TEST_FILES_ENV, value);
+            Self
+        }
+
+        fn unset() -> Self {
+            std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
+            Self
+        }
+    }
+
+    impl Drop for ChangedScopeCapEnv {
+        fn drop(&mut self) {
+            std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
+        }
     }
 
     /// A fixture extension whose runner touches a marker in the component path
     /// so tests can assert whether the extension was invoked at all.
+    ///
+    /// The source workspace is its own git repository. `component_relative_changed_files`
+    /// strips the component's prefix within its enclosing repo, and the test
+    /// tempdir lives under `target/.test-tmp` — inside this very repository — so
+    /// a non-git fixture resolves a prefix of `target/.test-tmp/run.X/.tmpY`,
+    /// strips it from every changed path, and silently yields an empty
+    /// selection. That made an earlier revision of these tests vacuous: they
+    /// exercised the empty-scope early return, never the cap. `git init` makes
+    /// the component its own repo root, where the prefix is correctly `None`.
     #[cfg(unix)]
     fn changed_scope_cap_component(home: &Path, source: &Path) -> Component {
         use std::os::unix::fs::PermissionsExt;
+
+        run_git(source, &["init", "-q", "--initial-branch", "main"]);
+        run_git(source, &["config", "user.email", "homeboy@example.com"]);
+        run_git(source, &["config", "user.name", "Homeboy Test"]);
 
         let extension_dir = home.join(".config/homeboy/extensions/changed-scope-cap-fixture");
         std::fs::create_dir_all(&extension_dir).expect("extension directory");
@@ -3319,7 +3359,7 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 .map(|index| format!("tests/component_{index}.php"))
                 .collect::<Vec<_>>();
 
-            std::env::set_var(MAX_CHANGED_TEST_FILES_ENV, "3");
+            let _cap = ChangedScopeCapEnv::set("3");
             let result = run_main_test_workflow(
                 &component,
                 source.path(),
@@ -3327,7 +3367,6 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 &RunDir::create().expect("run directory"),
             )
             .expect("cap failure is a test result");
-            std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
 
             assert_eq!(result.status, "failed");
             assert_eq!(result.exit_code, 1);
@@ -3377,7 +3416,7 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 "tests/component_b.php".to_string(),
             ];
 
-            std::env::set_var(MAX_CHANGED_TEST_FILES_ENV, "2");
+            let _cap = ChangedScopeCapEnv::set("2");
             let result = run_main_test_workflow(
                 &component,
                 source.path(),
@@ -3385,7 +3424,6 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 &RunDir::create().expect("run directory"),
             )
             .expect("at-cap run executes");
-            std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
 
             assert_eq!(result.runner_exit_code, Some(0));
             assert!(
@@ -3418,7 +3456,7 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 .map(|index| format!("tests/component_{index}.php"))
                 .collect::<Vec<_>>();
 
-            std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
+            let _cap = ChangedScopeCapEnv::unset();
             let result = run_main_test_workflow(
                 &component,
                 source.path(),
@@ -3440,6 +3478,12 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 }),
                 "an unset cap must not emit the cap finding"
             );
+            // Pins the fixture itself: an empty selection would route this run
+            // through the no-tests-in-scope early return and make the assertions
+            // above vacuous rather than false.
+            let scope = result.test_scope.expect("scope retained");
+            assert_eq!(scope.selected_files, changed_files);
+            assert_eq!(scope.selected_count, 5);
         });
     }
 
@@ -3459,7 +3503,7 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
 
             for value in ["not-a-number", "0", "-5", ""] {
                 std::fs::remove_file(&marker).ok();
-                std::env::set_var(MAX_CHANGED_TEST_FILES_ENV, value);
+                let _cap = ChangedScopeCapEnv::set(value);
                 let result = run_main_test_workflow(
                     &component,
                     source.path(),
@@ -3467,7 +3511,6 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                     &RunDir::create().expect("run directory"),
                 )
                 .expect("ignored cap value still runs the runner");
-                std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
 
                 assert_eq!(
                     result.runner_exit_code,
@@ -3485,6 +3528,11 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                         })
                     }),
                     "cap value {value:?} must not emit the cap finding"
+                );
+                let scope = result.test_scope.expect("scope retained");
+                assert_eq!(
+                    scope.selected_count, 5,
+                    "cap value {value:?} must leave the selection intact"
                 );
             }
         });
@@ -3555,7 +3603,7 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
             ];
 
             let _guard = changed_scope_cap_env_guard();
-            std::env::set_var(MAX_CHANGED_TEST_FILES_ENV, "1");
+            let _cap = ChangedScopeCapEnv::set("1");
             let result = run_main_test_workflow(
                 &component,
                 source.path(),
@@ -3563,7 +3611,6 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 &RunDir::create().expect("run directory"),
             )
             .expect("inventory producer runs");
-            std::env::remove_var(MAX_CHANGED_TEST_FILES_ENV);
 
             assert!(
                 marker.exists(),
