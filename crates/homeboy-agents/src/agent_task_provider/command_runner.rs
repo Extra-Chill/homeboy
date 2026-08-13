@@ -134,7 +134,7 @@ struct ImmediateProviderFailure {
     fallback_action: String,
 }
 
-fn immediate_provider_failure(
+pub(super) fn immediate_provider_failure(
     provider: &AgentTaskExecutorProvider,
     outcome: &AgentTaskOutcome,
     elapsed: Duration,
