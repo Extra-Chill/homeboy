@@ -477,7 +477,7 @@ function resolveDatabaseService(configuration, environment) {
       throw new Error('wp_codebox_database_service.secret_env must map provider fields to environment variable names');
     }
     if (typeof environment[name] !== 'string' || (field !== 'password' && environment[name].trim() === '')) {
-      throw new Error(`wp_codebox_database_service secret environment variable is unavailable: ${name}`);
+      throw new Error(`wp_codebox_database_service secret environment variable is unavailable: ${name}. Export the configured variable, or refresh the installed WordPress extension/rig package with homeboy init; inspect the active install with homeboy extension show wordpress and readlink ~/.config/homeboy/extensions/wordpress.`);
     }
   }
   const secretEnv = [...new Set(Object.values(value.secret_env))];
