@@ -2298,3 +2298,82 @@ fn release_integrity_sweeper_guards_publications_the_pipeline_never_made() {
         "a failed un-publish must escalate with the manual command, never pass silently"
     );
 }
+
+/// Run the action-pin validator against a workflow fixture, with no network.
+///
+/// `PATH` is emptied of a real `gh` by pointing the script at a stub that always
+/// fails, so any case that reaches the per-pin loop is inconclusive rather than
+/// silently network-dependent. Both cases below refuse before that loop.
+fn action_pin(workflow_body: &str) -> (i32, String) {
+    let temp = tempfile::tempdir().expect("action-pin fixture dir");
+    let workflow = temp.path().join("workflow.yml");
+    std::fs::write(&workflow, workflow_body).expect("write workflow fixture");
+
+    let output = std::process::Command::new("bash")
+        .arg(".github/validate-action-pin.sh")
+        .env("ACTION_PIN_WORKFLOW", &workflow)
+        .env_remove("GITHUB_OUTPUT")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("action pin validator should run");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.code().unwrap_or(-1), combined)
+}
+
+/// The `nothing to verify` green must be an independently established zero.
+///
+/// It used to be decided by the same grep that does the verifying: an extractor
+/// that stopped matching reported zero pins, printed `nothing to verify`, and
+/// passed having checked nothing -- while `uses:` sat right there in the file.
+/// A gate whose job is to stop CI dying at startup cannot launder its own blind
+/// spot into a pass.
+#[test]
+fn action_pin_refuses_a_green_when_it_extracted_no_pins_from_a_file_that_has_them() {
+    // A reusable workflow that the SHA extractor cannot read.
+    let (code, out) = action_pin(
+        "jobs:\n  ci:\n    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2.11.21\n",
+    );
+    assert_ne!(
+        code, 0,
+        "a reusable-workflow reference the extractor cannot read must fail closed rather than \
+         report `nothing to verify`: {out}"
+    );
+    assert!(
+        out.contains("verified nothing"),
+        "the refusal must say what it could not establish: {out}"
+    );
+
+    // A genuinely empty population is still an honest zero.
+    let (code, out) = action_pin("jobs:\n  build:\n    runs-on: ubuntu-latest\n");
+    assert_eq!(
+        code, 0,
+        "a workflow with no reusable-workflow references has nothing to verify: {out}"
+    );
+}
+
+/// An absent workflow file is UNKNOWN, never `nothing to verify`.
+#[test]
+fn action_pin_fails_closed_on_a_missing_workflow_file() {
+    let temp = tempfile::tempdir().expect("action-pin fixture dir");
+    let missing = temp.path().join("does-not-exist.yml");
+
+    let output = std::process::Command::new("bash")
+        .arg(".github/validate-action-pin.sh")
+        .env("ACTION_PIN_WORKFLOW", &missing)
+        .env_remove("GITHUB_OUTPUT")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("action pin validator should run");
+
+    assert_ne!(
+        output.status.code().unwrap_or(-1),
+        0,
+        "an unreadable workflow must fail closed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

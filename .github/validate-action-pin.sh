@@ -33,8 +33,21 @@ fi
 
 mapfile -t pins < <(grep -oE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_.-]+@[0-9a-f]{40}' "${ci_workflow}" | sed 's/^uses: //')
 
+# Establish the population independently of the extractor above.
+#
+# "No pins found, nothing to verify" used to be decided by the same grep that
+# does the verifying, so a pattern that stopped matching reported a green having
+# checked nothing -- the #10706 shape exactly. Count reusable-workflow
+# references without caring how they are pinned, and require the two counts to
+# agree before an empty result may be read as an honest zero.
+references="$(grep -cE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/' "${ci_workflow}" || true)"
+
 if [ "${#pins[@]}" -eq 0 ]; then
-  echo "action-pin: no SHA-pinned reusable workflows in ${ci_workflow}; nothing to verify"
+  if [ "${references}" -gt 0 ]; then
+    echo "::error::action-pin: ${ci_workflow} references ${references} reusable workflow(s) but none is pinned to a 40-character commit SHA, so this gate would pass having verified nothing. Pin each one to \`git rev-parse <ref>^{commit}\`, or update the extractor in $0 if the \`uses:\` syntax changed." >&2
+    exit 1
+  fi
+  echo "action-pin: ${ci_workflow} references no reusable workflows; nothing to verify"
   exit 0
 fi
 

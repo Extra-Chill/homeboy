@@ -344,20 +344,21 @@ struct GateLayerSite {
 /// Sorted by `(file, decision)`. Keep it that way.
 const GATE_LAYER_SITES: &[GateLayerSite] = &[
     GateLayerSite {
-        file: ".github/detect-stranded-release.sh",
-        decision: "exit 0",
-        basis: MeasurementBasis::ExplicitlySkipped,
+        file: ".github/canonicalize-checksum-sidecars.sh",
+        decision: "exit 1",
+        basis: MeasurementBasis::Projection,
         renders_skip: false,
         fixture: None,
-        note: "NO FIXTURE: `finish` is the script's single exit and it always writes all four \
-               outputs, so a crash leaves them unset and release.yml's fallback supplies inert \
-               defaults. The one genuine no-measurement path -- `gh release list` failing -- \
-               already refuses to read its own failure as `nothing is published`, warns, and \
-               finishes empty (line 114). Its remaining soft spot is the empty `git tag --list` \
-               case: a shallow or tagless checkout is indistinguishable from a repo with no \
-               stranded tags, and both render `stranded-tag=`. That degrades to `no recovery`, \
-               never to a false release, so it is recorded rather than patched. Exercising it \
-               needs a fixture git repo plus a `gh` stub, which is why there is no fixture yet.",
+        note: "NO FIXTURE: both exits are refusals -- a sidecar carrying anything other than \
+               exactly one checksum record, and a record whose digest, name, or trailing content \
+               does not parse. A non-zero exit cannot manufacture a pass, so neither carries a \
+               measurement obligation of its own. The script's own green is not a decision this \
+               scan can see: it falls off the end of a `for` loop over `*.sha256`, and \
+               `shopt -s nullglob` means an empty asset directory rewrites nothing and exits 0. \
+               That emptiness is not laundered into a release, because \
+               `release-asset-completeness.sh` independently requires every declared sidecar to \
+               be present and non-empty before publication -- this script normalizes bytes, that \
+               one decides.",
     },
     GateLayerSite {
         file: ".github/release-asset-completeness.sh",
@@ -406,6 +407,49 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
                Measurement::assess to bash: units>0 measured, units==0 with an empty configured \
                population is an honest zero (warn, pass), units==0 against a non-empty population \
                is Contradicted and a hard error.",
+    },
+    GateLayerSite {
+        file: ".github/validate-action-pin.sh",
+        decision: "exit \"${status}\"",
+        basis: MeasurementBasis::PerUnitEvaluation,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: the per-pin verdict. `status` starts at 0 and each pin is classified \
+               individually against the GitHub API, so this exit is reached only after the loop \
+               ran over a population proven non-empty by the guard above. Only a positively \
+               identified tag object sets status=1; an unreadable ref warns and is reported \
+               `unverified` rather than valid, which is the deliberate soft spot -- a token \
+               without access to the pinned repo degrades every pin to unverified and still \
+               exits 0. That is recorded rather than patched because failing closed on an \
+               unreadable ref would make every fork PR unable to run CI. Exercising the loop \
+               needs a `gh` stub, which is why there is no fixture yet.",
+    },
+    GateLayerSite {
+        file: ".github/validate-action-pin.sh",
+        decision: "exit 0",
+        basis: MeasurementBasis::EmptyPopulation,
+        renders_skip: false,
+        fixture: Some("action_pin_refuses_a_green_when_it_extracted_no_pins_from_a_file_that_has_them"),
+        note: "The `nothing to verify` green. It used to be decided by the same grep that does \
+               the verifying: an extractor that stopped matching -- a reformatted `uses:` line, a \
+               changed pin syntax -- reported zero pins, printed `nothing to verify`, and passed \
+               having checked nothing. That is the #10706 shape in a gate whose whole job is to \
+               stop CI dying at startup. The population is now established independently, by \
+               counting reusable-workflow references without regard to how they are pinned. Zero \
+               references is an honest zero and still passes; references>0 with zero extracted \
+               pins is Contradicted and a hard error naming both counts.",
+    },
+    GateLayerSite {
+        file: ".github/validate-action-pin.sh",
+        decision: "exit 1",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: Some("action_pin_fails_closed_on_a_missing_workflow_file"),
+        note: "Two refusals share this decision: the workflow file is absent, and the \
+               Contradicted case above. A non-zero exit cannot manufacture a pass, so it carries \
+               no measurement obligation of its own; it is registered because the scan keys on \
+               every exit in a gate script and an unregistered one is indistinguishable from an \
+               unexamined one.",
     },
     GateLayerSite {
         file: ".github/validate-required-gates.sh",
@@ -823,8 +867,8 @@ fn gate_layer_decision(relative: &str, line: &str) -> Option<String> {
     }
 
     // Rule 2 applies to gate scripts only. Indentation is not consulted: the
-    // single exit in `detect-stranded-release.sh` lives inside its `finish`
-    // helper, and that is still the script's verdict.
+    // refusals in `canonicalize-checksum-sidecars.sh` live inside a `for` loop
+    // and a brace group, and they are still the script's verdict.
     if relative.ends_with(".sh") && trimmed.starts_with("exit ") {
         return Some(trimmed.trim_end_matches(';').to_string());
     }
@@ -1399,8 +1443,8 @@ fn the_gate_layer_matcher_distinguishes_a_verdict_from_data() {
         Some("exit \"${failed}\"")
     );
     assert_eq!(
-        gate_layer_decision(".github/detect-stranded-release.sh", "  exit 0").as_deref(),
-        Some("exit 0")
+        gate_layer_decision(".github/canonicalize-checksum-sidecars.sh", "    exit 1").as_deref(),
+        Some("exit 1")
     );
     // A workflow step's early exit is carried by the outputs it wrote.
     assert!(gate_layer_decision(".github/workflows/release.yml", "            exit 0").is_none());
