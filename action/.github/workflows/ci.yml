@@ -121,6 +121,10 @@ on:
         description: 'Optional number of deterministic Test shards. Values above one require the Homeboy test inventory contract.'
         type: string
         default: '1'
+      max-changed-test-files:
+        description: 'Optional cap on the number of changed-scope test files Homeboy may select for a Test phase. Positive integers enable the guard; empty disables it and leaves behaviour unchanged.'
+        type: string
+        default: ''
       cleanup-timeout-seconds:
         description: 'Maximum wall-clock time to terminate command descendants.'
         type: string
@@ -460,6 +464,8 @@ jobs:
       - name: Run candidate ${{ matrix.title }}
         id: phase
         continue-on-error: true
+        env:
+          HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}
         uses: ./.homeboy-action
         with:
           version: ${{ inputs.version }}
@@ -574,6 +580,8 @@ jobs:
         id: phase
         if: matrix.baseline == 'true'
         continue-on-error: true
+        env:
+          HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}
         uses: ./.homeboy-action
         with:
           version: ${{ inputs.version }}

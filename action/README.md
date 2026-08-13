@@ -45,6 +45,14 @@ the selected extension writes `homeboy-test-inventory.json` with schema
 `homeboy/test-inventory/v1`, stable test IDs, and optional `duration_ms` values.
 Each shard then receives a digest-bound `HOMEBOY_TEST_SHARD_MANIFEST`.
 
+Changed-scope resolution can map a tiny diff onto a huge test-file selection.
+Set `max-changed-test-files` to a positive integer to cap how many test files
+Homeboy may select before the Test phase runs; an oversized selection fails
+fast with a `changed_scope_selection_exceeds_cap` finding instead of consuming
+the test budget. The default leaves behaviour unchanged. The cap guards
+*selection size*, `test-timeout-seconds` guards *run time*, and `test-shards`
+partitions the selection to address both.
+
 ```yaml
 name: CI
 on: [pull_request]
@@ -234,6 +242,7 @@ Use these outputs to gate downstream jobs:
 | `observation-window` | No | `24h` | Duration window passed to best-effort `homeboy runs export --since` for the separate matrix-safe observations artifact. |
 | `execution-timeout-seconds` | No | `1800` | Per-command wall-clock budget. The action writes liveness notices and returns timeout evidence when the budget expires. |
 | `test-timeout-seconds` | No | inherited / `1500` | Homeboy test-child budget. Direct action calls preserve `HOMEBOY_TEST_TIMEOUT_SECONDS` when omitted; the reusable workflow defaults to `1500`. Must leave cleanup margin below `execution-timeout-seconds`. |
+| `max-changed-test-files` | No | *(disabled)* | Cap on the number of changed-scope test files Homeboy may select for a Test phase. Positive integers enable the guard and fail fast with `changed_scope_selection_exceeds_cap` when a diff maps to more files; empty leaves behaviour unchanged. Guards selection size, where `test-timeout-seconds` guards run time and `test-shards` partitions the selection. |
 | `cleanup-timeout-seconds` | No | `15` | Process-group teardown budget after a command finishes or times out. The action retains command logs and fails with diagnostics if cleanup cannot finish. |
 | `import-observations` | No | `false` | Download and best-effort import earlier `homeboy-observations-*` artifacts from the same workflow run before command execution. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
