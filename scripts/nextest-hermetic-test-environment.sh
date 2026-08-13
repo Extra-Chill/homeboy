@@ -26,19 +26,52 @@ unset HOMEBOY_RUNTIME_TMPDIR
 # failed all 7 of its cases that way, reporting a GitHub release lookup error
 # for a tag that never existed.
 #
-# The root lives under this workspace's `target/`, resolved from this script's
-# own location so it does not depend on the caller's working directory or on
-# the shape of the command being run.
+# The root is a system temp directory that is PROVEN executable, chosen by
+# actually running a script from it rather than assuming.
 #
-# `target/` is the right filesystem by construction: cargo builds test binaries
-# there and executes them from there, so if a test can run at all, that
-# filesystem can host an executable fixture. No probing and no assumption.
-#
-# One root per invocation. Cargo's runner is invoked per test binary, and under
-# nextest's process-per-test execution per test, so this is strictly more
-# isolation than the shared /tmp it replaces, not less.
-hermetic_script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-hermetic_tmp_parent="$(CDPATH= cd -- "$hermetic_script_dir/.." && pwd)/target/.test-tmp"
+# It must live outside the repository. `target/` is tempting -- cargo runs test
+# binaries from there, so it is exec-capable by construction -- but a temp
+# workspace nested inside a git checkout is not equivalent to one in /tmp: code
+# that walks up looking for a repository root escapes the temp directory and
+# finds the real one. That regressed
+# `from_spec_dispatch_defaults_replace_stale_cwd_in_snapshot_workspace`, which
+# resolved its isolated workspace to the homeboy checkout itself. `target/` is
+# kept only as a last resort, for a host where no system temp directory can
+# execute anything at all.
+hermetic_exec_probe() {
+    probe_dir="$1"
+    [ -d "$probe_dir" ] && [ -w "$probe_dir" ] || return 1
+    probe="${probe_dir}/.homeboy-exec-probe.$$"
+    printf '#!/bin/sh\nexit 0\n' > "$probe" 2>/dev/null || return 1
+    if chmod +x "$probe" 2>/dev/null && "$probe" 2>/dev/null; then
+        rm -f "$probe"
+        return 0
+    fi
+    rm -f "$probe"
+    return 1
+}
+
+hermetic_workspace_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+hermetic_tmp_parent=""
+for hermetic_candidate in "${TMPDIR:-/tmp}" /tmp /var/tmp /dev/shm; do
+    if hermetic_exec_probe "$hermetic_candidate"; then
+        hermetic_tmp_parent="$hermetic_candidate"
+        break
+    fi
+done
+hermetic_tmp_source=system
+if [ -z "$hermetic_tmp_parent" ]; then
+    # Nothing on this host can execute from a system temp directory. Fall back
+    # into the tree, which cargo has already proven executable, and accept that
+    # repository-root walks will see the checkout.
+    hermetic_tmp_parent="${hermetic_workspace_root}/target/.test-tmp"
+    hermetic_tmp_source=in_tree
+fi
+# Which root was chosen, so a test can assert the preference held rather than
+# hard-coding a location that is only correct on some hosts.
+HOMEBOY_TEST_TMP_SOURCE="$hermetic_tmp_source"
+export HOMEBOY_TEST_TMP_SOURCE
+hermetic_tmp_parent="${hermetic_tmp_parent}/.homeboy-test-tmp"
 if ! mkdir -p "$hermetic_tmp_parent"; then
     echo "hermetic test environment: cannot create the temp root at $hermetic_tmp_parent" >&2
     exit 1
@@ -74,7 +107,7 @@ exec perl -MPOSIX=setsid,WNOHANG -e '
         return if $ENV{HOMEBOY_TEST_KEEP_TMPDIR};
         my $tmpdir = $ENV{TMPDIR};
         # Only ever remove the directory this script created.
-        return unless defined $tmpdir && $tmpdir =~ m{/\.test-tmp/run\.[^/]+$};
+        return unless defined $tmpdir && $tmpdir =~ m{/\.homeboy-test-tmp/run\.[^/]+$};
         system("rm", "-rf", "--", $tmpdir);
     };
     my $cleanup = sub {
