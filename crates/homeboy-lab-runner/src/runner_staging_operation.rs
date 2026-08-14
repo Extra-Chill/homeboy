@@ -7,6 +7,7 @@
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
@@ -58,6 +59,7 @@ pub struct SourcePackageFailure {
 pub struct SourcePackageCheckVerdict {
     pub schema: String,
     pub valid: bool,
+    pub limits: SourcePackageLimits,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted: Option<SourcePackageAccepted>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +81,26 @@ pub struct SourcePackageAccepted {
 #[serde(deny_unknown_fields)]
 pub struct SourcePackagePartial {
     pub file_count: usize,
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub largest_entries: Vec<SourcePackageContributor>,
+}
+
+/// The fixed safety bounds applied by sealed source-artifact staging.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageLimits {
+    pub entry_limit: usize,
+    pub byte_limit: u64,
+    pub file_byte_limit: u64,
+    pub exclusion_limit: usize,
+}
+
+/// A bounded, deterministic sample of entries consuming the package budget.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageContributor {
+    pub path: String,
     pub bytes: u64,
 }
 
@@ -114,6 +136,7 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
                 verdict: SourcePackageCheckVerdict {
                     schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
                     valid: true,
+                    limits: source_package_limits(),
                     accepted: Some(SourcePackageAccepted {
                         package_format: transfer.package.format,
                         file_count,
@@ -132,11 +155,15 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
                 verdict: SourcePackageCheckVerdict {
                     schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
                     valid: false,
+                    limits: source_package_limits(),
                     accepted: None,
-                    partial: Some(SourcePackagePartial {
-                        file_count: 0,
-                        bytes: 0,
-                    }),
+                    partial: source_package_partial_from_error(&error).or(Some(
+                        SourcePackagePartial {
+                            file_count: 0,
+                            bytes: 0,
+                            largest_entries: Vec::new(),
+                        },
+                    )),
                     excluded: Vec::new(),
                     blocked: vec![SourcePackageFailure {
                         kind: "source_package".to_string(),
@@ -406,9 +433,13 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
             verdict: SourcePackageCheckVerdict {
                 schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
                 valid: failures.is_empty(),
+                limits: source_package_limits(),
                 accepted,
-                partial: (!failures.is_empty())
-                    .then_some(SourcePackagePartial { file_count, bytes }),
+                partial: (!failures.is_empty()).then_some(SourcePackagePartial {
+                    file_count,
+                    bytes,
+                    largest_entries: source_package_contributors(&payloads),
+                }),
                 excluded: exclusions,
                 blocked: failures,
             },
@@ -464,6 +495,100 @@ impl SourcePackagePayload {
             Self::Symlink { target } => target.len() as u64,
         }
     }
+}
+
+fn source_package_limits() -> SourcePackageLimits {
+    SourcePackageLimits {
+        entry_limit: MAX_SOURCE_PACKAGE_ENTRIES,
+        byte_limit: MAX_SOURCE_ARTIFACT_BYTES,
+        file_byte_limit: MAX_SOURCE_PACKAGE_FILE_BYTES,
+        exclusion_limit: MAX_SOURCE_PACKAGE_EXCLUSIONS,
+    }
+}
+
+fn source_package_contributors(
+    payloads: &BTreeMap<String, SourcePackagePayload>,
+) -> Vec<SourcePackageContributor> {
+    let mut entries = payloads
+        .iter()
+        .map(|(path, payload)| SourcePackageContributor {
+            path: path.clone(),
+            bytes: payload.size_bytes(),
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    entries.truncate(5);
+    entries
+}
+
+fn source_package_partial(
+    payloads: &BTreeMap<String, SourcePackagePayload>,
+) -> SourcePackagePartial {
+    SourcePackagePartial {
+        file_count: payloads.len(),
+        bytes: payloads
+            .values()
+            .map(SourcePackagePayload::size_bytes)
+            .sum(),
+        largest_entries: source_package_contributors(payloads),
+    }
+}
+
+fn source_package_partial_from_error(error: &Error) -> Option<SourcePackagePartial> {
+    serde_json::from_value(
+        error
+            .details
+            .get("source_package")?
+            .get("measured")?
+            .clone(),
+    )
+    .ok()
+}
+
+fn source_package_limit_error(
+    root: &Path,
+    payloads: &BTreeMap<String, SourcePackagePayload>,
+) -> Error {
+    let measured = source_package_partial(payloads);
+    let limits = source_package_limits();
+    let check_command = format!(
+        "homeboy source package check --path {}",
+        homeboy_core::engine::shell::quote_arg(&root.display().to_string())
+    );
+    let retry = "Retry the original Lab command after reducing the source package or selecting a Git-capable Lab route.";
+    let mut error = Error::validation_invalid_argument(
+        "source_path",
+        format!(
+            "source package exceeds configured bounds: measured {} entries / {} bytes; limits {} entries / {} bytes",
+            measured.file_count, measured.bytes, limits.entry_limit, limits.byte_limit,
+        ),
+        Some(root.display().to_string()),
+        Some(vec![
+            format!("Inspect the exact package budget and excluded paths: {check_command}"),
+            "Remove generated or vendored files from the source worktree before retrying; `.git` and untracked symlinks are excluded automatically.".to_string(),
+            retry.to_string(),
+        ]),
+    );
+    error.details["source_package"] = json!({
+        "schema": SOURCE_PACKAGE_CHECK_SCHEMA,
+        "measured": measured,
+        "limits": limits,
+        "excluded_path_policy": {
+            "excluded": [".git", "untracked_symlink"],
+            "tracked_symlinks": "included only when their relative target remains inside the source root"
+        },
+        "continuation": {
+            "preflight_command": check_command,
+            "retry": retry,
+            "scalable_transport": "Git workspace materialization is selected automatically for eligible clean repository worktrees."
+        }
+    });
+    error
 }
 
 fn source_package_format(payloads: &BTreeMap<String, SourcePackagePayload>) -> &'static str {
@@ -909,6 +1034,7 @@ impl SourceArtifactTransfer {
             }
             #[cfg(unix)]
             fn collect(
+                root: &Path,
                 directory: &std::fs::File,
                 relative_directory: &str,
                 tracked_links: &BTreeSet<String>,
@@ -974,11 +1100,20 @@ impl SourceArtifactTransfer {
                                     target: verdict.target,
                                 },
                             );
+                            if entries.len() > MAX_SOURCE_PACKAGE_ENTRIES
+                                || entries
+                                    .values()
+                                    .map(SourcePackagePayload::size_bytes)
+                                    .sum::<u64>()
+                                    > MAX_SOURCE_ARTIFACT_BYTES
+                            {
+                                return Err(source_package_limit_error(root, entries));
+                            }
                             continue;
                         }
                         libc::S_IFDIR => {
                             let child = source_directory::open_directory_at(directory, &name)?;
-                            collect(&child, &relative, tracked_links, entries, exclusions)?;
+                            collect(root, &child, &relative, tracked_links, entries, exclusions)?;
                         }
                         libc::S_IFREG => {
                             let bytes = source_directory::read_regular_file_at(directory, &name)?;
@@ -1013,12 +1148,7 @@ impl SourceArtifactTransfer {
                             .sum::<u64>()
                             > MAX_SOURCE_ARTIFACT_BYTES
                     {
-                        return Err(Error::validation_invalid_argument(
-                            "source_path",
-                            "source package exceeds configured entry or total size bounds",
-                            None,
-                            None,
-                        ));
+                        return Err(source_package_limit_error(root, entries));
                     }
                 }
                 Ok(())
@@ -1045,6 +1175,7 @@ impl SourceArtifactTransfer {
             let mut exclusions = Vec::new();
             #[cfg(unix)]
             collect(
+                root,
                 &root_directory,
                 "",
                 &tracked_links,
@@ -2196,9 +2327,93 @@ pub(crate) mod tests_support {
         assert_eq!(
             verdict.partial,
             Some(SourcePackagePartial {
-                file_count: 0,
+                file_count: MAX_SOURCE_PACKAGE_ENTRIES + 1,
                 bytes: 0,
+                largest_entries: vec![
+                    SourcePackageContributor {
+                        path: "a/0000".to_string(),
+                        bytes: 0,
+                    },
+                    SourcePackageContributor {
+                        path: "a/0001".to_string(),
+                        bytes: 0,
+                    },
+                    SourcePackageContributor {
+                        path: "a/0002".to_string(),
+                        bytes: 0,
+                    },
+                    SourcePackageContributor {
+                        path: "a/0003".to_string(),
+                        bytes: 0,
+                    },
+                    SourcePackageContributor {
+                        path: "a/0004".to_string(),
+                        bytes: 0,
+                    },
+                ],
             })
+        );
+    }
+
+    #[test]
+    fn source_package_entry_limit_reports_measured_values_limits_and_continuation() {
+        let source = tempfile::tempdir().expect("source");
+        for index in 0..=MAX_SOURCE_PACKAGE_ENTRIES {
+            std::fs::write(source.path().join(format!("{index:04}")), b"x").expect("file");
+        }
+
+        let error = SourceArtifactTransfer::from_directory("source-1", source.path())
+            .expect_err("entry limit");
+        assert!(error.message.contains("1025 entries / 1025 bytes"));
+        assert_eq!(
+            error.details["source_package"]["measured"]["file_count"],
+            MAX_SOURCE_PACKAGE_ENTRIES + 1
+        );
+        assert_eq!(
+            error.details["source_package"]["limits"]["entry_limit"],
+            MAX_SOURCE_PACKAGE_ENTRIES
+        );
+        assert!(
+            error.details["source_package"]["continuation"]["preflight_command"]
+                .as_str()
+                .expect("preflight command")
+                .contains("homeboy source package check --path")
+        );
+        let verdict = scan_source_package(source.path()).verdict;
+        assert_eq!(verdict.limits.entry_limit, MAX_SOURCE_PACKAGE_ENTRIES);
+        assert_eq!(
+            verdict.partial.expect("partial measurement").file_count,
+            MAX_SOURCE_PACKAGE_ENTRIES + 1
+        );
+    }
+
+    #[test]
+    fn source_package_byte_limit_reports_measured_values_limits_and_contributors() {
+        let source = tempfile::tempdir().expect("source");
+        for index in 0..4 {
+            std::fs::write(
+                source.path().join(format!("{index:04}")),
+                vec![b'x'; MAX_SOURCE_PACKAGE_FILE_BYTES as usize],
+            )
+            .expect("file");
+        }
+        std::fs::write(source.path().join("0004"), b"x").expect("overflow file");
+
+        let error = SourceArtifactTransfer::from_directory("source-1", source.path())
+            .expect_err("byte limit");
+        assert_eq!(
+            error.details["source_package"]["measured"]["bytes"],
+            MAX_SOURCE_ARTIFACT_BYTES + 1
+        );
+        assert_eq!(
+            error.details["source_package"]["limits"]["byte_limit"],
+            MAX_SOURCE_ARTIFACT_BYTES
+        );
+        assert_eq!(
+            error.details["source_package"]["measured"]["largest_entries"]
+                .as_array()
+                .expect("contributors")[0]["path"],
+            "0000"
         );
     }
 }
