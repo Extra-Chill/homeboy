@@ -885,6 +885,38 @@ impl ObservationStore {
             .map_err(sqlite_error("commit terminal run retention"))
     }
 
+    /// Discard a run whose observation could not be completed. Terminal runs
+    /// are deliberately preserved for retention instead.
+    pub fn discard_running_run(&self, run_id: &str) -> Result<bool> {
+        validate_required("run_id", run_id)?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(sqlite_error("begin running run rollback"))?;
+        let running: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE id = ?1 AND status = 'running')",
+                [run_id],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_error("read running run rollback eligibility"))?;
+        if !running {
+            return Ok(false);
+        }
+        for table in RUN_OWNED_CHILD_TABLES {
+            tx.execute(&format!("DELETE FROM {table} WHERE run_id = ?1"), [run_id])
+                .map_err(sqlite_error(format!("delete running run {table}")))?;
+        }
+        tx.execute(
+            "DELETE FROM runs WHERE id = ?1 AND status = 'running'",
+            [run_id],
+        )
+        .map_err(sqlite_error("delete running run"))?;
+        tx.commit()
+            .map_err(sqlite_error("commit running run rollback"))?;
+        Ok(true)
+    }
+
     pub fn list_runs_started_since(&self, started_at: &str) -> Result<Vec<RunRecord>> {
         validate_required("started_at", started_at)?;
         let mut statement = self

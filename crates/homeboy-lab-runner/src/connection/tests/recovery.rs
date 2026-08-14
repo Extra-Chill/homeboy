@@ -2060,6 +2060,9 @@ fn failed_connect_without_recovery_omits_recovery_evidence() {
         serialized["failure_evidence"]["recovery_command"],
         "homeboy runner connect runner"
     );
+    assert!(serialized["failure_evidence"]
+        .get("failure_evidence_schema_version")
+        .is_none());
 }
 
 #[test]
@@ -2345,7 +2348,7 @@ fn idle_stale_replacement_refuses_a_post_stop_owner_or_identity_change() {
                 daemon_recovery_capabilities: None,
             })
             .expect_err("concurrent stale daemon is refused");
-            assert!(error.contains("ownership changed"));
+            assert!(error.message.contains("ownership changed"));
         },
     );
 }
@@ -2372,7 +2375,9 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
                 daemon_recovery_capabilities: None,
             })
             .expect_err("stale replacement identity is refused");
-            assert!(error.contains("does not match configured runner binary"));
+            assert!(error
+                .message
+                .contains("does not match configured runner binary"));
         },
     );
 }

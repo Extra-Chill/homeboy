@@ -1,8 +1,12 @@
 use super::*;
 use crate::daemon_repair;
+use crate::session::RunnerConnectFailureEvidenceRef;
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
 use homeboy_lab_runner_contract::LabCapabilityVersion;
+use serde_json::json;
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -991,7 +995,24 @@ pub(super) struct RemoteDaemonEnsureRequest<'a> {
 
 pub(super) fn ensure_remote_daemon(
     request: RemoteDaemonEnsureRequest<'_>,
-) -> std::result::Result<RemoteDaemon, String> {
+) -> homeboy_core::Result<RemoteDaemon> {
+    ensure_remote_daemon_inner(request).map_err(|error| match error {
+        RemoteDaemonEnsureError::Other(message) => {
+            homeboy_core::Error::internal_unexpected(message)
+        }
+        RemoteDaemonEnsureError::EnsureRunning(failure) => {
+            let mut error = homeboy_core::Error::internal_unexpected(failure.message);
+            error.details = serde_json::to_value(&failure.evidence_ref)
+                .map(|reference| json!({ "failure_evidence_ref": reference }))
+                .unwrap_or(Value::Null);
+            error
+        }
+    })
+}
+
+fn ensure_remote_daemon_inner(
+    request: RemoteDaemonEnsureRequest<'_>,
+) -> std::result::Result<RemoteDaemon, RemoteDaemonEnsureError> {
     let RemoteDaemonEnsureRequest {
         client,
         homeboy,
@@ -1010,10 +1031,10 @@ pub(super) fn ensure_remote_daemon(
     probe_remote_daemon_endpoint(client, &mut status, Some(runner_id));
     if let Some(lease_id) = orphan_lease_id {
         if let Some(fence) = admission_fence {
-            return Err(format!(
+            return Err(RemoteDaemonEnsureError::Other(format!(
                 "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing orphan adoption before terminal job evidence is available",
                 fence.generation, fence.active_job_count,
-            ));
+            )));
         }
         if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
             && status
@@ -1022,14 +1043,19 @@ pub(super) fn ensure_remote_daemon(
                 .and_then(|daemon| daemon.lease_id.as_deref())
                 == Some(lease_id)
         {
-            return remote_daemon_adopt_orphan(client, homeboy, lease_id, confirmed_no_pid_job_ids);
+            return Ok(remote_daemon_adopt_orphan(
+                client,
+                homeboy,
+                lease_id,
+                confirmed_no_pid_job_ids,
+            )?);
         }
     }
     if !confirmed_no_pid_job_ids.is_empty() {
-        return Err(
+        return Err(RemoteDaemonEnsureError::Other(
             "--confirm-untracked-child-dead applies only when the remote daemon reports the exact requested lease as PID-dead"
                 .to_string(),
-        );
+        ));
     }
     // The real runner id, not a `<runner-id>` placeholder: this report now
     // carries an executable repair plan, and a plan naming a command that does
@@ -1064,7 +1090,7 @@ pub(super) fn ensure_remote_daemon(
                 replacement_operation_id,
                 registry_lock_held,
             )?;
-            remote_daemon_ensure_running(client, homeboy, replacement_operation_id)
+            remote_daemon_ensure_running(client, homeboy, runner_id, replacement_operation_id)
         }
         RemoteDaemonConnectAction::ReplaceIdleStale
         | RemoteDaemonConnectAction::ReplaceUnhealthyExactOwner => {
@@ -1091,8 +1117,13 @@ pub(super) fn ensure_remote_daemon(
                 .expect("replacement requires lease");
             remote_daemon_force_stop(client, homeboy, lease_id)?;
             let replacement =
-                remote_daemon_ensure_running(client, homeboy, replacement_operation_id)?;
-            verify_remote_daemon_replacement(client, homeboy, &replacement, configured_identity)
+                remote_daemon_ensure_running(client, homeboy, runner_id, replacement_operation_id)?;
+            Ok(verify_remote_daemon_replacement(
+                client,
+                homeboy,
+                &replacement,
+                configured_identity,
+            )?)
         }
     }
 }
@@ -1844,18 +1875,19 @@ pub(super) fn remote_daemon_active_jobs(data: &Value) -> usize {
         .unwrap_or(0)
 }
 
-pub(super) fn remote_daemon_ensure_running(
+fn remote_daemon_ensure_running(
     client: &SshClient,
     homeboy: &str,
+    runner_id: &str,
     replacement_operation_id: Option<&str>,
-) -> std::result::Result<RemoteDaemon, String> {
+) -> std::result::Result<RemoteDaemon, RemoteDaemonEnsureError> {
     let command = remote_daemon_ensure_running_command(homeboy, replacement_operation_id);
     let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
     if !output.success {
-        return Err(command_failure_message(
+        return Err(RemoteDaemonEnsureError::Other(command_failure_message(
             "remote daemon ensure-running failed",
             &output,
-        ));
+        )));
     }
     let envelope = parse_envelope(&output.stdout).map_err(|err| {
         format!(
@@ -1864,9 +1896,14 @@ pub(super) fn remote_daemon_ensure_running(
         )
     })?;
     if !envelope.success {
-        return Err(format!(
-            "remote daemon ensure-running failed: {}",
-            envelope.error.unwrap_or(Value::Null)
+        return Err(RemoteDaemonEnsureError::EnsureRunning(
+            summarize_ensure_running_failure(
+                runner_id,
+                &command,
+                envelope.error.as_ref().unwrap_or(&Value::Null),
+                &output.stderr,
+                None,
+            ),
         ));
     }
     let data = envelope
@@ -1890,6 +1927,275 @@ pub(super) fn remote_daemon_ensure_running(
         build_identity: None,
         inspected_freshness: None,
     })
+}
+
+const ENSURE_RUNNING_FAILURE_SCHEMA_VERSION: u8 = 1;
+pub(super) const MAX_CANDIDATE_EXEMPLAR_BYTES: usize = 256;
+pub(super) const MAX_CANDIDATE_EXEMPLARS: usize = 3;
+const MAX_BLOCKER_BYTES: usize = 256;
+const MAX_NEXT_ACTION_BYTES: usize = 256;
+// Includes every bounded field and the durable evidence URI, so truncation
+// cannot remove the reference from a rendered failure envelope.
+pub(super) const MAX_ENSURE_RUNNING_FAILURE_MESSAGE_BYTES: usize = 1400;
+
+#[derive(Debug, Clone)]
+pub(super) struct EnsureRunningFailure {
+    pub(super) message: String,
+    pub(super) evidence_ref: Option<RunnerConnectFailureEvidenceRef>,
+}
+
+enum RemoteDaemonEnsureError {
+    Other(String),
+    EnsureRunning(EnsureRunningFailure),
+}
+
+impl From<String> for RemoteDaemonEnsureError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+/// Keep control-plane output small while preserving the complete redacted
+/// remote envelope in the configured durable artifact root.
+pub(super) fn summarize_ensure_running_failure(
+    runner_id: &str,
+    command: &str,
+    error: &Value,
+    stderr: &str,
+    store: Option<&homeboy_core::observation::ObservationStore>,
+) -> EnsureRunningFailure {
+    let policy = homeboy_core::redaction::RedactionPolicy::default();
+    let error = policy.redact_json(error);
+    let details = error.get("details").unwrap_or(&Value::Null);
+    let classification = details
+        .get("classification")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("code").and_then(Value::as_str))
+        .unwrap_or("remote_daemon_ensure_running_failure");
+    let candidates = details
+        .get("candidates")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let candidate_count = details
+        .get("candidate_count")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(candidates.len());
+    let blocker = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("remote daemon ensure-running returned an error");
+    let next_action = details
+        .get("safe_next_action")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("hint").and_then(Value::as_str))
+        .unwrap_or("Retry the exact runner connect command after inspecting daemon status.");
+    let artifact_ref = store
+        .map(|store| {
+            persist_ensure_running_failure_evidence_in(store, runner_id, command, &error, stderr)
+        })
+        .unwrap_or_else(|| {
+            persist_ensure_running_failure_evidence(runner_id, command, &error, stderr)
+        })
+        .ok();
+    let candidates = bounded_candidate_exemplars(candidates);
+    let evidence = artifact_ref
+        .as_ref()
+        .map(|reference| reference.uri.as_str())
+        .unwrap_or("unavailable");
+    let message = format!(
+        "remote daemon ensure-running failed summary_v{} classification={} candidate_count={} blocker={} next_action={} candidates={} evidence_ref={}",
+        ENSURE_RUNNING_FAILURE_SCHEMA_VERSION,
+        truncate_utf8(classification, 96),
+        candidate_count,
+        truncate_utf8(blocker, MAX_BLOCKER_BYTES),
+        truncate_utf8(next_action, MAX_NEXT_ACTION_BYTES),
+        candidates, truncate_utf8(evidence, 256),
+    );
+    EnsureRunningFailure {
+        message: truncate_utf8(&message, MAX_ENSURE_RUNNING_FAILURE_MESSAGE_BYTES),
+        evidence_ref: artifact_ref,
+    }
+}
+
+pub(super) fn bounded_candidate_exemplars(candidates: &[Value]) -> String {
+    let mut seen = BTreeSet::new();
+    let mut exemplars = Vec::new();
+    let mut bytes = 0;
+    for candidate in candidates {
+        let rendered =
+            serde_json::to_string(candidate).unwrap_or_else(|_| "<unserializable>".to_string());
+        if !seen.insert(rendered.clone()) {
+            continue;
+        }
+        let separator = usize::from(!exemplars.is_empty());
+        if exemplars.len() == MAX_CANDIDATE_EXEMPLARS
+            || bytes + separator >= MAX_CANDIDATE_EXEMPLAR_BYTES - 2
+        {
+            break;
+        }
+        let available = MAX_CANDIDATE_EXEMPLAR_BYTES - 2 - bytes - separator;
+        let rendered = truncate_utf8(&rendered, available);
+        bytes += separator + rendered.len();
+        exemplars.push(rendered);
+    }
+    format!("[{}]", exemplars.join(","))
+}
+
+fn persist_ensure_running_failure_evidence(
+    runner_id: &str,
+    command: &str,
+    error: &Value,
+    stderr: &str,
+) -> homeboy_core::Result<RunnerConnectFailureEvidenceRef> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    persist_ensure_running_failure_evidence_in(&store, runner_id, command, error, stderr)
+}
+
+pub(super) fn persist_ensure_running_failure_evidence_in(
+    store: &homeboy_core::observation::ObservationStore,
+    runner_id: &str,
+    command: &str,
+    error: &Value,
+    stderr: &str,
+) -> homeboy_core::Result<RunnerConnectFailureEvidenceRef> {
+    let command = homeboy_core::redaction::redact_string(command);
+    let stderr = homeboy_core::redaction::redact_string(stderr);
+    let evidence = json!({
+        "schema_version": ENSURE_RUNNING_FAILURE_SCHEMA_VERSION,
+        "kind": "remote_daemon_ensure_running_failure",
+        "runner_id": runner_id,
+        "remote_command": command,
+        "remote_envelope": error,
+        "remote_stderr": stderr,
+    });
+    let file = tempfile::NamedTempFile::new().map_err(homeboy_core::Error::from)?;
+    serde_json::to_writer(file.as_file(), &evidence)?;
+    let run = store.start_run(
+        homeboy_core::observation::NewRunRecord::builder("runner_connect_failure")
+            .metadata(json!({
+                "runner_id": runner_id,
+                "controller_id": crate::connection::controller_id(),
+                "failure_kind": "remote_daemon_ensure_running",
+            }))
+            .build(),
+    )?;
+    let artifact = match store.record_artifact_with_metadata(
+        &run.id,
+        "remote_daemon_ensure_running_failure",
+        file.path(),
+        json!({ "failure_diagnostic": true, "failure_diagnostic_rank": 1 }),
+    ) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            terminalize_or_rollback_runner_connect_failure(store, &run)?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = store.finish_run(
+        &run.id,
+        homeboy_core::observation::RunStatus::Fail,
+        Some(run.metadata_json.clone()),
+    ) {
+        rollback_runner_connect_failure(store, &run.id)?;
+        return Err(error);
+    }
+    Ok(RunnerConnectFailureEvidenceRef {
+        schema_version: ENSURE_RUNNING_FAILURE_SCHEMA_VERSION,
+        run_id: run.id.clone(),
+        artifact_id: artifact.id.clone(),
+        uri: homeboy_artifact_ref_contract::artifact_uri(&run.id, &artifact.id),
+    })
+}
+
+fn terminalize_or_rollback_runner_connect_failure(
+    store: &homeboy_core::observation::ObservationStore,
+    run: &homeboy_core::observation::RunRecord,
+) -> homeboy_core::Result<()> {
+    if store
+        .finish_run(
+            &run.id,
+            homeboy_core::observation::RunStatus::Fail,
+            Some(run.metadata_json.clone()),
+        )
+        .is_ok()
+    {
+        return Ok(());
+    }
+    rollback_runner_connect_failure(store, &run.id)
+}
+
+fn rollback_runner_connect_failure(
+    store: &homeboy_core::observation::ObservationStore,
+    run_id: &str,
+) -> homeboy_core::Result<()> {
+    rollback_runner_connect_failure_with(
+        store,
+        run_id,
+        |store, run_id| store.discard_running_run(run_id),
+        |path| std::fs::remove_file(path),
+    )
+}
+
+pub(super) fn rollback_runner_connect_failure_with<Rollback, Delete>(
+    store: &homeboy_core::observation::ObservationStore,
+    run_id: &str,
+    rollback: Rollback,
+    mut delete: Delete,
+) -> homeboy_core::Result<()>
+where
+    Rollback:
+        FnOnce(&homeboy_core::observation::ObservationStore, &str) -> homeboy_core::Result<bool>,
+    Delete: FnMut(&Path) -> std::io::Result<()>,
+{
+    let artifacts = store.list_artifacts(run_id)?;
+    if !rollback(store, run_id)? {
+        return Err(homeboy_core::Error::internal_unexpected(format!(
+            "runner connect failure observation {run_id} was retained; preserving its artifact bytes"
+        )));
+    }
+    for artifact in artifacts {
+        if artifact.artifact_type == "file" {
+            // Move the now-unreferenced byte under the cleanup service's owned
+            // staging name before attempting removal. A failed delete remains
+            // discoverable by `orphaned-artifact-bytes` rather than leaking.
+            let path = Path::new(&artifact.path);
+            let staged_path =
+                path.with_file_name(format!(".artifact-{}.staging", uuid::Uuid::new_v4()));
+            std::fs::rename(path, &staged_path).map_err(|error| {
+                homeboy_core::Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "stage rolled-back runner connect artifact {} for owned cleanup",
+                        artifact.path
+                    )),
+                )
+            })?;
+            delete(&staged_path).map_err(|error| {
+                homeboy_core::Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "remove rolled-back runner connect artifact {}; retained at {} for orphaned-artifact-bytes cleanup",
+                        artifact.path,
+                        staged_path.display(),
+                    )),
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes.saturating_sub(3);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &value[..end])
 }
 
 pub(super) fn remote_daemon_ensure_running_command(

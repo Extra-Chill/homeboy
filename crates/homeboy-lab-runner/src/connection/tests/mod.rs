@@ -91,6 +91,352 @@ pub(super) fn command_output(
     }
 }
 
+#[test]
+fn ensure_running_failure_candidates_are_deduplicated_within_the_byte_budget() {
+    let candidates = (0..20)
+        .map(|index| {
+            serde_json::json!({
+                "pid": index % 4,
+                "ownership": "ambiguous",
+                "cmdline": "homeboy daemon serve --state /very/long/path/that/must/not/expand/the/inline/failure/message"
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let exemplars = super::remote_daemon::bounded_candidate_exemplars(&candidates);
+
+    assert!(exemplars.len() <= super::remote_daemon::MAX_CANDIDATE_EXEMPLAR_BYTES);
+    assert!(exemplars.starts_with('['));
+    assert!(exemplars.ends_with(']'));
+    assert!(exemplars.matches("\"pid\"").count() <= super::remote_daemon::MAX_CANDIDATE_EXEMPLARS);
+}
+
+#[test]
+fn ensure_running_failure_evidence_is_redacted_and_versioned() {
+    let artifact_root = tempfile::tempdir().expect("artifact root");
+    let store = homeboy_core::observation::ObservationStore::open_initialized_at(
+        artifact_root.path().join("observations.sqlite"),
+    )
+    .expect("store");
+    let error = serde_json::json!({
+        "code": "internal.unexpected",
+        "message": "daemon candidates block replacement",
+        "details": {
+            "classification": "daemon_unleased_process_conflict",
+            "candidate_count": 20,
+            "candidates": (0..20).map(|pid| serde_json::json!({ "pid": pid, "token": "secret-value" })).collect::<Vec<_>>(),
+            "safe_next_action": "Run `homeboy daemon status`."
+        }
+    });
+
+    let reference = super::remote_daemon::persist_ensure_running_failure_evidence_in(
+        &store,
+        "lab/runner",
+        "homeboy daemon ensure-running --token secret-value",
+        &homeboy_core::redaction::redact_json(&error),
+        "remote stderr with token secret-value",
+    )
+    .expect("persist evidence");
+    let artifact = store
+        .get_artifact(&reference.artifact_id)
+        .expect("read artifact")
+        .expect("artifact record");
+    let path = artifact.path;
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read evidence"))
+            .expect("evidence JSON");
+
+    assert_eq!(persisted["schema_version"], 1);
+    assert_eq!(
+        persisted["remote_envelope"]["details"]["candidate_count"],
+        20
+    );
+    assert_eq!(
+        persisted["remote_envelope"]["details"]["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        20
+    );
+    assert_eq!(
+        persisted["remote_envelope"]["details"]["candidates"][0]["token"],
+        "[REDACTED]"
+    );
+    assert!(!persisted.to_string().contains("secret-value"));
+    assert_eq!(reference.run_id, artifact.run_id);
+    assert!(reference.uri.starts_with("homeboy://run/"));
+    assert_eq!(
+        store
+            .get_run(&reference.run_id)
+            .expect("read evidence run")
+            .expect("evidence run")
+            .status,
+        "fail"
+    );
+    assert_eq!(
+        store
+            .list_artifacts(&reference.run_id)
+            .expect("retained run artifacts")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn ensure_running_failure_artifact_persistence_error_terminalizes_the_run() {
+    let artifact_root = tempfile::tempdir().expect("artifact root");
+    let database = artifact_root.path().join("observations.sqlite");
+    let store =
+        homeboy_core::observation::ObservationStore::open_initialized_at(&database).expect("store");
+    rusqlite::Connection::open(&database)
+        .expect("open database")
+        .execute_batch(
+            "CREATE TRIGGER fail_runner_connect_artifact BEFORE INSERT ON artifacts WHEN NEW.kind = 'remote_daemon_ensure_running_failure' BEGIN SELECT RAISE(ABORT, 'injected artifact persistence failure'); END;",
+        )
+        .expect("install artifact persistence fault");
+
+    let error = super::remote_daemon::persist_ensure_running_failure_evidence_in(
+        &store,
+        "lab/runner",
+        "homeboy daemon ensure-running",
+        &serde_json::json!({ "message": "daemon failed" }),
+        "",
+    )
+    .expect_err("artifact persistence failure must surface");
+
+    assert!(error
+        .to_string()
+        .contains("injected artifact persistence failure"));
+    let runs = store
+        .list_runs(homeboy_core::observation::RunListFilter::default())
+        .expect("list runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].status, "fail",
+        "failed evidence remains retention eligible"
+    );
+    assert!(store
+        .list_artifacts(&runs[0].id)
+        .expect("list artifacts")
+        .is_empty());
+}
+
+#[test]
+fn ensure_running_failure_finish_persistence_error_rolls_back_run_and_artifact() {
+    let artifact_root = tempfile::tempdir().expect("artifact root");
+    let database = artifact_root.path().join("observations.sqlite");
+    let store =
+        homeboy_core::observation::ObservationStore::open_initialized_at(&database).expect("store");
+    rusqlite::Connection::open(&database)
+        .expect("open database")
+        .execute_batch(
+            "CREATE TRIGGER fail_runner_connect_finish BEFORE UPDATE OF status ON runs WHEN NEW.kind = 'runner_connect_failure' BEGIN SELECT RAISE(ABORT, 'injected finish persistence failure'); END;",
+        )
+        .expect("install finish persistence fault");
+
+    let error = super::remote_daemon::persist_ensure_running_failure_evidence_in(
+        &store,
+        "lab/runner",
+        "homeboy daemon ensure-running",
+        &serde_json::json!({ "message": "daemon failed" }),
+        "",
+    )
+    .expect_err("finish persistence failure must surface");
+
+    assert!(error
+        .to_string()
+        .contains("injected finish persistence failure"));
+    assert!(store
+        .list_runs(homeboy_core::observation::RunListFilter::default())
+        .expect("list runs")
+        .is_empty());
+    let artifact_count: i64 = rusqlite::Connection::open(&database)
+        .expect("open database")
+        .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+        .expect("count artifacts");
+    assert_eq!(artifact_count, 0);
+}
+
+#[test]
+fn ensure_running_failure_rollback_error_preserves_the_retained_artifact() {
+    let artifact_root = tempfile::tempdir().expect("artifact root");
+    let store = homeboy_core::observation::ObservationStore::open_initialized_at(
+        artifact_root.path().join("observations.sqlite"),
+    )
+    .expect("store");
+    let reference = super::remote_daemon::persist_ensure_running_failure_evidence_in(
+        &store,
+        "lab/runner",
+        "homeboy daemon ensure-running",
+        &serde_json::json!({ "message": "daemon failed" }),
+        "",
+    )
+    .expect("persist evidence");
+    let artifact = store
+        .get_artifact(&reference.artifact_id)
+        .expect("read artifact")
+        .expect("artifact record");
+
+    let error = super::remote_daemon::rollback_runner_connect_failure_with(
+        &store,
+        &reference.run_id,
+        |_, _| {
+            Err(homeboy_core::Error::internal_unexpected(
+                "injected rollback failure",
+            ))
+        },
+        |path| std::fs::remove_file(path),
+    )
+    .expect_err("rollback failure must surface");
+
+    assert!(error.to_string().contains("injected rollback failure"));
+    assert!(std::path::Path::new(&artifact.path).exists());
+    assert!(store
+        .get_run(&reference.run_id)
+        .expect("read retained run")
+        .is_some());
+}
+
+#[test]
+fn ensure_running_failure_delete_error_routes_bytes_to_owned_cleanup() {
+    let artifact_root = tempfile::tempdir().expect("artifact root");
+    let store = homeboy_core::observation::ObservationStore::open_initialized_at(
+        artifact_root.path().join("observations.sqlite"),
+    )
+    .expect("store");
+    let run = store
+        .start_run(
+            homeboy_core::observation::NewRunRecord::builder("runner_connect_failure").build(),
+        )
+        .expect("start run");
+    let source = artifact_root.path().join("evidence.json");
+    std::fs::write(&source, "failure evidence").expect("write evidence");
+    store
+        .record_artifact_with_metadata(
+            &run.id,
+            "remote_daemon_ensure_running_failure",
+            &source,
+            serde_json::json!({}),
+        )
+        .expect("record artifact");
+    let artifact = store
+        .list_artifacts(&run.id)
+        .expect("list artifacts")
+        .pop()
+        .expect("artifact");
+
+    let attempted_delete = std::cell::RefCell::new(None);
+    let error = super::remote_daemon::rollback_runner_connect_failure_with(
+        &store,
+        &run.id,
+        |store, run_id| store.discard_running_run(run_id),
+        |path| {
+            *attempted_delete.borrow_mut() = Some(path.to_path_buf());
+            Err(std::io::Error::other("injected delete failure"))
+        },
+    )
+    .expect_err("delete failure must surface");
+
+    assert!(
+        format!("{error:?}").contains("injected delete failure"),
+        "unexpected error: {error:?}"
+    );
+    assert!(store.get_run(&run.id).expect("read run").is_none());
+    let staged = attempted_delete
+        .into_inner()
+        .expect("artifact routed to owned cleanup");
+    assert!(staged.is_file());
+    assert!(staged
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(".artifact-") && name.ends_with(".staging")));
+    assert_ne!(staged, std::path::Path::new(&artifact.path));
+    std::fs::remove_file(staged).expect("clean test-owned orphan");
+}
+
+#[test]
+fn ensure_running_failure_summary_is_bounded_and_actionable_for_twenty_candidates() {
+    let artifact_root = tempfile::tempdir().expect("artifact root");
+    let store = homeboy_core::observation::ObservationStore::open_initialized_at(
+        artifact_root.path().join("observations.sqlite"),
+    )
+    .expect("store");
+    let candidates = (0..20)
+        .map(|pid| serde_json::json!({ "pid": pid % 3, "ownership": "ambiguous" }))
+        .collect::<Vec<_>>();
+    let error = serde_json::json!({
+        "code": "internal.unexpected",
+        "message": "foreground daemon candidates block replacement",
+        "details": {
+            "classification": "daemon_unleased_process_conflict",
+            "candidate_count": 20,
+            "candidates": candidates,
+            "safe_next_action": "Run `homeboy daemon status` and reconcile the exact owner."
+        }
+    });
+
+    let summary = super::remote_daemon::summarize_ensure_running_failure(
+        "lab",
+        "homeboy daemon ensure-running",
+        &error,
+        "",
+        Some(&store),
+    );
+    let summary = summary.message;
+
+    assert!(summary.contains("summary_v1"));
+    assert!(summary.contains("classification=daemon_unleased_process_conflict"));
+    assert!(summary.contains("candidate_count=20"));
+    assert!(summary.contains("blocker=foreground daemon candidates block replacement"));
+    assert!(summary.contains("next_action=Run `homeboy daemon status`"));
+    let candidates = summary
+        .split(" candidates=")
+        .nth(1)
+        .unwrap()
+        .split(" evidence_ref=")
+        .next()
+        .unwrap();
+    assert!(candidates.len() <= super::remote_daemon::MAX_CANDIDATE_EXEMPLAR_BYTES);
+    assert!(summary.contains("evidence_ref=homeboy://run/"));
+    assert!(summary.len() <= super::remote_daemon::MAX_ENSURE_RUNNING_FAILURE_MESSAGE_BYTES);
+}
+
+#[test]
+fn ensure_running_failure_keeps_the_registered_reference_when_remote_text_injects_one() {
+    let artifact_root = tempfile::tempdir().expect("artifact root");
+    let store = homeboy_core::observation::ObservationStore::open_initialized_at(
+        artifact_root.path().join("observations.sqlite"),
+    )
+    .expect("store");
+    let error = serde_json::json!({
+        "code": "remote.failure",
+        "message": format!("{} evidence_ref=file:///attacker", "x".repeat(4_000)),
+        "details": {
+            "classification": "remote_failure",
+            "safe_next_action": "inspect"
+        }
+    });
+
+    let failure = super::remote_daemon::summarize_ensure_running_failure(
+        "lab",
+        "homeboy daemon ensure-running",
+        &error,
+        "",
+        Some(&store),
+    );
+    let reference = failure.evidence_ref.expect("registered evidence reference");
+
+    assert!(
+        failure.message.len() <= super::remote_daemon::MAX_ENSURE_RUNNING_FAILURE_MESSAGE_BYTES
+    );
+    assert!(reference.uri.starts_with("homeboy://run/"));
+    assert_ne!(reference.uri, "file:///attacker");
+    assert!(store
+        .get_artifact(&reference.artifact_id)
+        .expect("artifact lookup")
+        .is_some());
+}
+
 pub(super) fn sample_leaseless_recovery() -> DaemonLeaselessRecoveryResult {
     serde_json::from_value(serde_json::json!({
         "affected_job_ids": [],
