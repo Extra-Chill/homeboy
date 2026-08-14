@@ -232,7 +232,7 @@ def main():
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(inventory))
+    output.write_text(json.dumps(inventory, sort_keys=True, separators=(",", ":")))
     print(f"WordPress test inventory: {len(tests)} tests -> {output}", file=sys.stderr)
 
 

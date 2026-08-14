@@ -21,6 +21,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PRODUCER="${SCRIPT_DIR}/test-inventory.py"
+RUNNER="${SCRIPT_DIR}/test-runner.sh"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -33,6 +34,15 @@ plugin="${WORKDIR}/plugin"
 mkdir -p "${plugin}/tests/nested" "${plugin}/inc" "${plugin}/vendor/pkg/tests" "${plugin}/node_modules/x"
 printf '{}\n' > "${plugin}/composer.json"
 printf '<?php\n' > "${plugin}/inc/Runtime.php"
+
+runner_prelude="${WORKDIR}/runner-prelude.sh"
+cat > "$runner_prelude" <<'SH'
+homeboy_runner_init() {
+    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:?HOMEBOY_EXTENSION_PATH is required}"
+    COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:?HOMEBOY_COMPONENT_PATH is required}"
+    PLUGIN_PATH="$COMPONENT_PATH"
+}
+SH
 
 # Routable by the runner: host PHP smoke, JS smoke, shell smoke, node test, PHPUnit.
 printf '<?php\n' > "${plugin}/tests/alpha-smoke.php"
@@ -50,16 +60,18 @@ printf '<?php\n' > "${plugin}/vendor/pkg/tests/vendor-smoke.php"
 printf '// dep\n' > "${plugin}/node_modules/x/dep-smoke.js"
 
 run_producer() {
-    python3 "$PRODUCER" \
-        --project "$plugin" \
-        --extension-path "$EXTENSION_PATH" \
-        --runner wordpress \
-        --package fixture-plugin \
-        --output "$1" 2>/dev/null
+    HOMEBOY_COMPONENT_ID=fixture-plugin \
+    HOMEBOY_COMPONENT_PATH="$plugin" \
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+    HOMEBOY_TEST_INVENTORY_FILE="$1" \
+    HOMEBOY_TEST_INVENTORY_ONLY=1 \
+        bash "$RUNNER"
 }
 
-run_producer "${WORKDIR}/inventory.json" || fail "producer exited non-zero"
+run_producer "${WORKDIR}/inventory.json" > "${WORKDIR}/inventory.out" || fail "runner exited non-zero"
 inventory="${WORKDIR}/inventory.json"
+cmp -s "$inventory" "${WORKDIR}/inventory.out" || fail "runner stdout does not exactly match the inventory file"
 
 python3 - "$inventory" <<'PY' || fail "inventory contract assertions failed"
 import hashlib, json, sys
@@ -111,29 +123,30 @@ PY
 
 # Determinism: identical input must produce an identical document, or a shard
 # plan cannot be replayed.
-run_producer "${WORKDIR}/again.json" || fail "second producer run exited non-zero"
+run_producer "${WORKDIR}/again.json" > "${WORKDIR}/again.out" || fail "second runner run exited non-zero"
 cmp -s "$inventory" "${WORKDIR}/again.json" || fail "producer is not deterministic"
+cmp -s "${WORKDIR}/again.json" "${WORKDIR}/again.out" || fail "second runner stdout does not exactly match the inventory file"
 printf 'PASS: producer is deterministic across runs\n'
 
 before_ws="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace_fingerprint"])' "$inventory")"
 
 # A skipped directory must not move the workspace fingerprint.
 printf '<?php\n// noise\n' > "${plugin}/vendor/pkg/Ignored.php"
-run_producer "${WORKDIR}/skipped.json" || fail "producer failed after vendor write"
+run_producer "${WORKDIR}/skipped.json" > /dev/null || fail "producer failed after vendor write"
 after_skip="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace_fingerprint"])' "${WORKDIR}/skipped.json")"
 [ "$before_ws" = "$after_skip" ] || fail "vendor/ is skipped but changed the workspace fingerprint"
 printf 'PASS: skipped directories do not move the workspace fingerprint\n'
 
 # An undeclared extension must not move it either.
 printf 'notes\n' > "${plugin}/inc/notes.md"
-run_producer "${WORKDIR}/md.json" || fail "producer failed after markdown write"
+run_producer "${WORKDIR}/md.json" > /dev/null || fail "producer failed after markdown write"
 after_md="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace_fingerprint"])' "${WORKDIR}/md.json")"
 [ "$before_ws" = "$after_md" ] || fail "markdown is undeclared but changed the workspace fingerprint"
 printf 'PASS: undeclared extensions do not move the workspace fingerprint\n'
 
 # A declared source file must move it, or the fingerprint proves nothing.
 printf '<?php\n// changed\n' > "${plugin}/inc/Runtime.php"
-run_producer "${WORKDIR}/changed.json" || fail "producer failed after php edit"
+run_producer "${WORKDIR}/changed.json" > /dev/null || fail "producer failed after php edit"
 after_php="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace_fingerprint"])' "${WORKDIR}/changed.json")"
 [ "$before_ws" != "$after_php" ] || fail "a declared PHP source edit did not move the workspace fingerprint"
 printf 'PASS: declared source edits move the workspace fingerprint\n'
@@ -155,5 +168,22 @@ if python3 "$PRODUCER" --project "$plugin" --extension-path "$EXTENSION_PATH" \
     fail "producer accepted an undeclared runner"
 fi
 printf 'PASS: an undeclared runner is refused\n'
+
+# The runner must emit its document only after the producer has succeeded. A
+# failing producer leaves stdout empty and does not replace the requested file.
+printf 'existing inventory\n' > "${WORKDIR}/failed.json"
+if HOMEBOY_COMPONENT_ID=fixture-plugin \
+    HOMEBOY_COMPONENT_PATH="$plugin" \
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+    HOMEBOY_TEST_INVENTORY_FILE="${WORKDIR}/failed.json" \
+    HOMEBOY_TEST_INVENTORY_ONLY=1 \
+    HOMEBOY_WORDPRESS_INVENTORY_RUNNER=not-declared \
+        bash "$RUNNER" > "${WORKDIR}/failed.out" 2> "${WORKDIR}/failed.err"; then
+    fail "runner accepted an undeclared inventory runner"
+fi
+[ ! -s "${WORKDIR}/failed.out" ] || fail "failing runner emitted partial inventory JSON"
+[ "$(<"${WORKDIR}/failed.json")" = "existing inventory" ] || fail "failing runner replaced the requested inventory file"
+printf 'PASS: runner failure emits no inventory JSON and preserves the requested file\n'
 
 printf 'All WordPress test inventory checks passed.\n'

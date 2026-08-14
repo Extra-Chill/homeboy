@@ -68,12 +68,26 @@ if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = "1" ]; then
         echo "Error: WordPress test inventory producer is missing: ${INVENTORY_TOOL}" >&2
         exit 2
     fi
-    exec python3 "$INVENTORY_TOOL" \
+    inventory_data="$(mktemp)" || {
+        echo "Error: could not create temporary WordPress test inventory." >&2
+        exit 1
+    }
+    if ! python3 "$INVENTORY_TOOL" \
         --project "$PLUGIN_PATH" \
         --extension-path "$EXTENSION_PATH" \
         --runner "${HOMEBOY_WORDPRESS_INVENTORY_RUNNER:-wordpress}" \
         --package "${HOMEBOY_COMPONENT_ID:-wordpress}" \
-        --output "$HOMEBOY_TEST_INVENTORY_FILE"
+        --output "$inventory_data"; then
+        rm -f "$inventory_data"
+        exit 1
+    fi
+    if ! cp "$inventory_data" "$HOMEBOY_TEST_INVENTORY_FILE"; then
+        rm -f "$inventory_data"
+        exit 1
+    fi
+    cat "$inventory_data"
+    rm -f "$inventory_data"
+    exit 0
 fi
 
 # WordPress tests run through the selected runtime backend against real
