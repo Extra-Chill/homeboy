@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.12.0] - 2026-08-14
+
+### Added
+- expose the changed-scope test selection cap as a workflow input
+
 ## [2.11.26] - 2026-08-13
 
 ### Changed
