@@ -96,6 +96,15 @@ pub(crate) fn direct_runner_capability_admission(
     ))
 }
 
+pub(crate) fn capability_admission_has_blocking_drift(
+    admission: &LabCapabilityAdmission,
+    require_exact_runner_version: bool,
+) -> bool {
+    !admission.compatible
+        || (require_exact_runner_version
+            && admission.provenance.ancestry != LabRuntimeAncestry::ExactSource)
+}
+
 pub(super) fn hash_bound_runner_command_evidence(
     status: &RunnerStatusReport,
     homeboy: &str,
