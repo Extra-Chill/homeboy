@@ -1277,6 +1277,19 @@ pub(crate) fn register_local_workspace_owner(
     )
 }
 
+pub(crate) fn register_local_workspace_owner_in_store(
+    store: &WorkspaceClaimStore,
+    workspace: WorkspaceIdentity,
+    run_id: &str,
+) -> Result<WorkspaceOwnerLease> {
+    store.register_owner(
+        workspace,
+        run_id,
+        LOCAL_WORKSPACE_OWNER_LEASE_TTL_MS,
+        now_ms(),
+    )
+}
+
 pub(crate) fn renew_local_workspace_owner(
     lease: &WorkspaceOwnerLease,
 ) -> Result<WorkspaceOwnerLease> {
@@ -1287,8 +1300,22 @@ pub(crate) fn validate_local_workspace_owner(lease: &WorkspaceOwnerLease) -> Res
     store()?.validate_owner(lease, now_ms())
 }
 
+pub(crate) fn validate_local_workspace_owner_in_store(
+    store: &WorkspaceClaimStore,
+    lease: &WorkspaceOwnerLease,
+) -> Result<bool> {
+    store.validate_owner(lease, now_ms())
+}
+
 pub(crate) fn release_local_workspace_owner(lease: &WorkspaceOwnerLease) -> Result<()> {
     store()?.release_owner(lease, now_ms())
+}
+
+pub(crate) fn release_local_workspace_owner_in_store(
+    store: &WorkspaceClaimStore,
+    lease: &WorkspaceOwnerLease,
+) -> Result<()> {
+    store.release_owner(lease, now_ms())
 }
 
 pub(crate) fn renew_record_workspace_owner(record: &mut AgentTaskRunRecord) -> Result<()> {
@@ -1335,6 +1362,13 @@ pub(crate) fn ensure_record_workspace_owner(record: &mut AgentTaskRunRecord) -> 
 }
 
 pub(crate) fn require_record_workspace_owner(record: &AgentTaskRunRecord) -> Result<()> {
+    require_record_workspace_owner_in_store(&store()?, record)
+}
+
+pub(crate) fn require_record_workspace_owner_in_store(
+    store: &WorkspaceClaimStore,
+    record: &AgentTaskRunRecord,
+) -> Result<()> {
     let Some(identity) = record.workspace_identity.as_ref() else {
         return Ok(());
     };
@@ -1350,7 +1384,7 @@ pub(crate) fn require_record_workspace_owner(record: &AgentTaskRunRecord) -> Res
     if lease.workspace != *identity
         || lease.owner_id != record.run_id
         || lease.lifecycle_revision != record.workspace_lifecycle_revision
-        || !validate_local_workspace_owner(lease)?
+        || !validate_local_workspace_owner_in_store(store, lease)?
     {
         return Err(Error::validation_invalid_argument(
             "workspace_owner_lease",

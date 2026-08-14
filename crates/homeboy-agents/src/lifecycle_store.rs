@@ -84,6 +84,32 @@ impl AgentTaskLifecycleStore {
         self.roots.data().to_path_buf()
     }
 
+    pub(crate) fn workspace_claim_store(
+        &self,
+    ) -> homeboy_core::workspace_claim::WorkspaceClaimStore {
+        super::workspace_claims::workspace_claim_store_at(self.data_root())
+    }
+
+    /// Submit an exact run identity using this store's durable lifecycle roots.
+    /// The admission callback supplies runtime evidence without coupling tests to
+    /// the ambient controller runtime.
+    pub fn submit_plan_with_runtime_admission(
+        &self,
+        plan: &AgentTaskPlan,
+        run_id: &str,
+        admit_runtime: impl FnOnce(&str) -> Result<Value>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::submit_plan_with_runtime_admission_in_store(
+            self,
+            plan,
+            Some(run_id),
+            None,
+            None,
+            None,
+            admit_runtime,
+        )
+    }
+
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
         ObservationStore::open_initialized_at(self.observation_db_path())
     }
