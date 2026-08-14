@@ -1180,9 +1180,13 @@ fn composite_error(message: &str, failures: Vec<String>) -> Error {
 }
 
 fn store() -> Result<WorkspaceClaimStore> {
-    Ok(WorkspaceClaimStore::new(
-        paths::homeboy_data()?.join("agent-task-workspace-claims"),
-    ))
+    Ok(workspace_claim_store_at(paths::homeboy_data()?))
+}
+
+/// Construct the controller-local claim authority below an explicit lifecycle
+/// data root. Lifecycle commits use this rather than resolving ambient paths.
+pub(crate) fn workspace_claim_store_at(data_root: std::path::PathBuf) -> WorkspaceClaimStore {
+    WorkspaceClaimStore::new(data_root.join("agent-task-workspace-claims"))
 }
 
 /// Return the durable controller binding for a workspace-owning run. Callers
@@ -1288,13 +1292,20 @@ pub(crate) fn release_local_workspace_owner(lease: &WorkspaceOwnerLease) -> Resu
 }
 
 pub(crate) fn renew_record_workspace_owner(record: &mut AgentTaskRunRecord) -> Result<()> {
+    renew_record_workspace_owner_in_store(&store()?, record)
+}
+
+pub(crate) fn renew_record_workspace_owner_in_store(
+    store: &WorkspaceClaimStore,
+    record: &mut AgentTaskRunRecord,
+) -> Result<()> {
     if record.state.is_terminal() {
         return Ok(());
     }
     let Some(lease) = record.workspace_owner_lease.as_ref() else {
         return Ok(());
     };
-    let renewed = renew_local_workspace_owner(lease)?;
+    let renewed = store.renew_owner(lease, LOCAL_WORKSPACE_OWNER_LEASE_TTL_MS, now_ms())?;
     record.workspace_lifecycle_revision = renewed.lifecycle_revision;
     record.workspace_owner_lease = Some(renewed);
     Ok(())
@@ -1352,9 +1363,16 @@ pub(crate) fn require_record_workspace_owner(record: &AgentTaskRunRecord) -> Res
 }
 
 pub(crate) fn release_terminal_record_workspace_owner(record: &AgentTaskRunRecord) -> Result<()> {
+    release_terminal_record_workspace_owner_in_store(&store()?, record)
+}
+
+pub(crate) fn release_terminal_record_workspace_owner_in_store(
+    store: &WorkspaceClaimStore,
+    record: &AgentTaskRunRecord,
+) -> Result<()> {
     if record.state.is_terminal() {
         if let Some(lease) = record.workspace_owner_lease.as_ref() {
-            release_local_workspace_owner(lease)?;
+            store.release_owner(lease, now_ms())?;
         }
     }
     Ok(())

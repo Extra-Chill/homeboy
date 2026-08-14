@@ -1,7 +1,41 @@
 use std::sync::{Arc, Barrier};
 
 use super::{succeeded_aggregate, test_plan};
-use crate::agent_task_lifecycle::AgentTaskLifecycleStore;
+use crate::agent_task_lifecycle::{
+    records::schemas, AgentTaskLabHandoff, AgentTaskLabHandoffAuthority, AgentTaskLabHandoffState,
+    AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
+};
+use homeboy_core::run_lifecycle_record::{RunExecutionState, RunLifecycleRecord};
+use serde_json::json;
+
+fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentTaskRunRecord {
+    let plan = test_plan();
+    AgentTaskRunRecord {
+        schema: schemas::RUN.to_string(),
+        run_id: run_id.to_string(),
+        plan_id: plan.plan_id,
+        state: AgentTaskRunState::Queued,
+        submitted_at: "2026-08-13T00:00:00Z".to_string(),
+        updated_at: None,
+        plan_path: store.controller_plan_path(run_id).display().to_string(),
+        aggregate_path: None,
+        totals: None,
+        tasks: Vec::new(),
+        artifact_refs: Vec::new(),
+        provider_handles: Vec::new(),
+        latest_executor_evidence: None,
+        lifecycle: RunLifecycleRecord::with_execution_state(RunExecutionState::Queued),
+        lab_handoff: None,
+        candidate_adoption: None,
+        adoption_run_id: None,
+        acceptance: None,
+        workspace_identity: None,
+        workspace_lifecycle_revision: 0,
+        workspace_owner_lease: None,
+        workspace_claim: None,
+        metadata: json!({ "store_marker": marker }),
+    }
+}
 
 #[test]
 fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
@@ -105,4 +139,88 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
                 .expect("right lock");
         });
     });
+}
+
+#[test]
+fn lifecycle_stores_isolate_same_run_record_writes_in_parallel() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let run_id = "same-record";
+    let barrier = Arc::new(Barrier::new(2));
+
+    std::thread::scope(|scope| {
+        let left_store = left.clone();
+        let left_barrier = Arc::clone(&barrier);
+        scope.spawn(move || {
+            left_barrier.wait();
+            left_store
+                .write_record(&record(&left_store, run_id, "left"))
+                .expect("left record");
+        });
+        let right_store = right.clone();
+        let right_barrier = Arc::clone(&barrier);
+        scope.spawn(move || {
+            right_barrier.wait();
+            right_store
+                .write_record(&record(&right_store, run_id, "right"))
+                .expect("right record");
+        });
+    });
+
+    assert_eq!(
+        left.read_record(run_id).unwrap().metadata["store_marker"],
+        "left"
+    );
+    assert_eq!(
+        right.read_record_bounded(run_id).unwrap().metadata["store_marker"],
+        "right"
+    );
+    assert_ne!(left.observation_db_path(), right.observation_db_path());
+}
+
+#[test]
+fn terminal_record_authority_is_written_only_below_its_lifecycle_root() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let run_id = "same-terminal-record";
+    let mut terminal = record(&left, run_id, "terminal");
+    terminal.state = AgentTaskRunState::Succeeded;
+    terminal.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Succeeded);
+    terminal.lab_handoff = Some(AgentTaskLabHandoff {
+        state: AgentTaskLabHandoffState::Accepted,
+        authority: AgentTaskLabHandoffAuthority::RunnerDaemon,
+        runner_id: "runner-a".to_string(),
+        submission_key: None,
+        payload_fingerprint: None,
+        runner_job_id: Some("job-a".to_string()),
+        submitted_at: None,
+        acceptance_deadline_at: None,
+        accepted_at: Some("2026-08-13T00:00:01Z".to_string()),
+        expired_at: None,
+        workspace_identity: None,
+        workspace_lifecycle_revision: 0,
+        workspace_owner_lease: None,
+        workspace_claim: None,
+    });
+    terminal.metadata["remote_workspace"] = json!("/runner/workspace");
+
+    left.write_record(&terminal).expect("terminal record");
+
+    assert!(left_context
+        .data_dir()
+        .join("workspace-terminal-authority")
+        .join("by-run")
+        .read_dir()
+        .expect("left terminal index")
+        .next()
+        .is_some());
+    assert!(!right_context
+        .data_dir()
+        .join("workspace-terminal-authority")
+        .exists());
+    assert!(right.read_record(run_id).is_err());
 }

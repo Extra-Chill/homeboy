@@ -39,6 +39,112 @@ struct WorkspaceTerminalAuthorityRelease {
     state: String,
 }
 
+/// Terminal workspace authority rooted below one lifecycle store's data root.
+/// The layout remains private to this module.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceTerminalAuthorityStore {
+    root: PathBuf,
+    config_root: PathBuf,
+}
+
+impl WorkspaceTerminalAuthorityStore {
+    pub(crate) fn new(data_root: PathBuf, config_root: PathBuf) -> Self {
+        Self {
+            root: data_root.join("workspace-terminal-authority"),
+            config_root,
+        }
+    }
+
+    fn run_index_path(&self, run_id: &str) -> PathBuf {
+        let mut digest = Sha256::new();
+        digest.update(run_id.as_bytes());
+        self.root
+            .join("by-run")
+            .join(format!("{:x}.json", digest.finalize()))
+    }
+
+    fn receipt_path(&self, run_id: &str, runner_id: &str, remote_workspace: &str) -> PathBuf {
+        self.root.join(format!(
+            "{}.json",
+            authority_digest(run_id, runner_id, remote_workspace)
+        ))
+    }
+
+    fn release_path(&self, run_id: &str, runner_id: &str, remote_workspace: &str) -> PathBuf {
+        self.root.join(format!(
+            "{}.release.json",
+            authority_digest(run_id, runner_id, remote_workspace)
+        ))
+    }
+
+    pub(crate) fn persist_terminal_from_record(&self, record: &AgentTaskRunRecord) -> Result<()> {
+        if !record.state.is_terminal() {
+            return Ok(());
+        }
+        let Some(identity) = accepted_lab_runner_job_identity_from_record(record) else {
+            return Ok(());
+        };
+        let Some(remote_workspace) = record
+            .metadata
+            .get("remote_workspace")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return Ok(());
+        };
+        self.persist(WorkspaceTerminalAuthorityReceipt {
+            schema: WORKSPACE_TERMINAL_AUTHORITY_SCHEMA.to_string(),
+            run_id: record.run_id.clone(),
+            runner_id: identity.runner_id,
+            runner_job_id: identity.runner_job_id,
+            remote_workspace: remote_workspace.to_string(),
+        })
+    }
+
+    fn persist(&self, receipt: WorkspaceTerminalAuthorityReceipt) -> Result<()> {
+        let path = self.receipt_path(
+            &receipt.run_id,
+            &receipt.runner_id,
+            &receipt.remote_workspace,
+        );
+        let release_path = self.release_path(
+            &receipt.run_id,
+            &receipt.runner_id,
+            &receipt.remote_workspace,
+        );
+        homeboy_core::config::with_config_lock_at(&self.config_root, || {
+            if release_path.exists() {
+                read_release(
+                    &release_path,
+                    &receipt.run_id,
+                    &receipt.runner_id,
+                    &receipt.remote_workspace,
+                )?;
+                return Ok(());
+            }
+            if path.exists() {
+                let existing = read_receipt(&path)?;
+                if existing == receipt {
+                    return homeboy_core::engine::local_files::write_json_file_owner_only(
+                        &self.run_index_path(&receipt.run_id),
+                        &existing,
+                    );
+                }
+                return Err(Error::validation_invalid_argument(
+                    "workspace_terminal_authority",
+                    "workspace terminal authority receipt conflicts with existing immutable receipt",
+                    Some(path.display().to_string()), None,
+                ));
+            }
+            homeboy_core::engine::local_files::write_json_file_owner_only(&path, &receipt)?;
+            homeboy_core::engine::local_files::write_json_file_owner_only(
+                &self.run_index_path(&receipt.run_id),
+                &receipt,
+            )
+        })
+    }
+}
+
 fn authority_digest(run_id: &str, runner_id: &str, remote_workspace: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(run_id.as_bytes());
@@ -50,105 +156,42 @@ fn authority_digest(run_id: &str, runner_id: &str, remote_workspace: &str) -> St
 }
 
 fn run_index_path(run_id: &str) -> Result<PathBuf> {
-    let mut digest = Sha256::new();
-    digest.update(run_id.as_bytes());
-    Ok(paths::homeboy_data()?
-        .join("workspace-terminal-authority")
-        .join("by-run")
-        .join(format!("{:x}.json", digest.finalize())))
+    Ok(
+        WorkspaceTerminalAuthorityStore::new(paths::homeboy_data()?, paths::homeboy()?)
+            .run_index_path(run_id),
+    )
 }
 
 fn receipt_path(run_id: &str, runner_id: &str, remote_workspace: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
-        .join("workspace-terminal-authority")
-        .join(format!(
-            "{}.json",
-            authority_digest(run_id, runner_id, remote_workspace)
-        )))
+    Ok(
+        WorkspaceTerminalAuthorityStore::new(paths::homeboy_data()?, paths::homeboy()?)
+            .receipt_path(run_id, runner_id, remote_workspace),
+    )
 }
 
 fn release_path(run_id: &str, runner_id: &str, remote_workspace: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
-        .join("workspace-terminal-authority")
-        .join(format!(
-            "{}.release.json",
-            authority_digest(run_id, runner_id, remote_workspace)
-        )))
+    Ok(
+        WorkspaceTerminalAuthorityStore::new(paths::homeboy_data()?, paths::homeboy()?)
+            .release_path(run_id, runner_id, remote_workspace),
+    )
 }
 
 pub(crate) fn persist_terminal_from_record(record: &AgentTaskRunRecord) -> Result<()> {
-    if !record.state.is_terminal() {
-        return Ok(());
-    }
-    let Some(identity) = accepted_lab_runner_job_identity_from_record(record) else {
-        return Ok(());
-    };
-    let Some(remote_workspace) = record
-        .metadata
-        .get("remote_workspace")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(());
-    };
-    let receipt = WorkspaceTerminalAuthorityReceipt {
-        schema: WORKSPACE_TERMINAL_AUTHORITY_SCHEMA.to_string(),
-        run_id: record.run_id.clone(),
-        runner_id: identity.runner_id,
-        runner_job_id: identity.runner_job_id,
-        remote_workspace: remote_workspace.to_string(),
-    };
-    persist_workspace_terminal_authority(receipt)
+    WorkspaceTerminalAuthorityStore::new(paths::homeboy_data()?, paths::homeboy()?)
+        .persist_terminal_from_record(record)
 }
 
 fn persist_workspace_terminal_authority(receipt: WorkspaceTerminalAuthorityReceipt) -> Result<()> {
-    let path = receipt_path(
-        &receipt.run_id,
-        &receipt.runner_id,
-        &receipt.remote_workspace,
-    )?;
-    let release_path = release_path(
-        &receipt.run_id,
-        &receipt.runner_id,
-        &receipt.remote_workspace,
-    )?;
-    homeboy_core::config::with_config_lock(|| {
-        if release_path.exists() {
-            read_release(
-                &release_path,
-                &receipt.run_id,
-                &receipt.runner_id,
-                &receipt.remote_workspace,
-            )?;
-            return Ok(());
-        }
-        if path.exists() {
-            let existing: WorkspaceTerminalAuthorityReceipt =
-                serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
-                })?)
-                .map_err(|error| {
-                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
-                })?;
-            if existing == receipt {
-                return homeboy_core::engine::local_files::write_json_file_owner_only(
-                    &run_index_path(&receipt.run_id)?,
-                    &existing,
-                );
-            }
-            return Err(Error::validation_invalid_argument(
-                "workspace_terminal_authority",
-                "workspace terminal authority receipt conflicts with existing immutable receipt",
-                Some(path.display().to_string()),
-                None,
-            ));
-        }
-        homeboy_core::engine::local_files::write_json_file_owner_only(&path, &receipt)?;
-        homeboy_core::engine::local_files::write_json_file_owner_only(
-            &run_index_path(&receipt.run_id)?,
-            &receipt,
-        )
-    })
+    WorkspaceTerminalAuthorityStore::new(paths::homeboy_data()?, paths::homeboy()?).persist(receipt)
+}
+
+fn read_receipt(path: &std::path::Path) -> Result<WorkspaceTerminalAuthorityReceipt> {
+    serde_json::from_slice(
+        &std::fs::read(path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?,
+    )
+    .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
 }
 
 #[cfg(any(test, feature = "test-support"))]
