@@ -275,10 +275,13 @@ pub fn route_after_parse_with_provenance(
         return Err(error);
     }
 
-    // Non-local detached Cooks must pass runner selection before the launcher
-    // can acknowledge them. Lab-or-local may fall back here explicitly; auto
-    // without a runner remains subject to Cook's existing rejection below.
-    if inferred_runner_id.is_some() || cli.placement.allows_local_fallback() {
+    // Cooks must resolve provider ownership before the launcher can acknowledge
+    // or observe them. Auto without a runner is a local provider placement and
+    // needs the same daemon-owned supervision as explicit local execution.
+    if inferred_runner_id.is_some()
+        || cli.placement.allows_local_fallback()
+        || cli.placement == homeboy::cli_surface::Placement::Auto
+    {
         let provider_placement = if inferred_runner_id.is_some() {
             "lab"
         } else {

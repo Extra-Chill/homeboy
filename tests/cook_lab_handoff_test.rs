@@ -445,11 +445,11 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     let provider_started = context.root().join("fixture-provider-started");
     let mut client = context.controller_runtime_command(TestBinary::HomeboyFixture);
     client
+        // This test exercises automatic placement, not live host pressure.
+        .env("GITHUB_ACTIONS", "true")
         .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "20000")
         .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &provider_started)
         .args([
-            "--placement",
-            "local",
             "agent-task",
             "cook",
             "--run-id",
