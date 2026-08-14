@@ -100,6 +100,18 @@ impl CoordinatorHeartbeat {
                         *worker_error.lock().expect("heartbeat error lock") = Some(error.message);
                         break;
                     }
+                    if let Ok(record) = batch::read_batch_record(&batch_id) {
+                        eprintln!(
+                            "{{\"event\":\"coordinator_heartbeat\",\"phase\":{},\"children_total\":{},\"next_action\":{}}}",
+                            serde_json::to_string(&record.metadata["coordinator"]["stage"])
+                                .expect("coordinator stage serializes"),
+                            record.child_runs.len(),
+                            serde_json::to_string(&format!(
+                                "homeboy agent-task fanout status {batch_id}"
+                            ))
+                            .expect("status command serializes"),
+                        );
+                    }
                 }
             }
         });
@@ -1207,6 +1219,10 @@ fn persist_fanout_run_batch_record(plan: &BatchCookFanoutPlan) -> Result<()> {
 fn claim_fanout_run_batch_coordinator(plan: &BatchCookFanoutPlan) -> Result<String> {
     persist_fanout_run_batch_record(plan)?;
     if let Some(claim_id) = batch::claim_fanout_run_batch(&plan.fanout_id)? {
+        eprintln!(
+            "{{\"event\":\"coordinator_admission_claimed\",\"phase\":\"admitting\",\"children_total\":{},\"next_action\":\"homeboy agent-task fanout status {}\"}}",
+            plan.cooks.len(), plan.fanout_id,
+        );
         return Ok(claim_id);
     }
     Err(Error::validation_invalid_argument(
@@ -1218,12 +1234,24 @@ fn claim_fanout_run_batch_coordinator(plan: &BatchCookFanoutPlan) -> Result<Stri
 }
 
 fn record_batch_failure(plan: &BatchCookFanoutPlan, claim_id: &str, stage: &str, error: &Error) {
-    let _ = batch::record_fanout_run_batch_failure(
+    let recorded = batch::record_fanout_run_batch_failure(
         &plan.fanout_id,
         claim_id,
         stage,
         serde_json::json!({ "message": error.message, "details": error.details }),
     );
+    if recorded.is_ok() {
+        eprintln!(
+            "{{\"event\":\"coordinator_failed\",\"phase\":{},\"children_total\":{},\"next_action\":{}}}",
+            serde_json::to_string(stage).expect("stage serializes"),
+            plan.cooks.len(),
+            serde_json::to_string(&format!(
+                "homeboy agent-task fanout resume {}",
+                plan.fanout_id
+            ))
+            .expect("resume command serializes"),
+        );
+    }
 }
 
 fn run_batch_cook_fanout_plan_with_attempt_dispatcher(

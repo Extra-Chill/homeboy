@@ -283,9 +283,11 @@ fn claim_fanout_run_batch_in_store(
         let metadata = batch.metadata.as_object_mut().expect("metadata object");
         metadata.remove("terminal_failure");
         let claim_id = Uuid::new_v4().to_string();
+        let admission_deadline_at = (Utc::now() + chrono::Duration::seconds(COORDINATOR_LEASE_SECONDS))
+            .to_rfc3339();
         metadata.insert(
             "coordinator".to_string(),
-            json!({ "claim_id": claim_id, "stage": "admitting", "heartbeat_at": now_timestamp(), "lease_seconds": COORDINATOR_LEASE_SECONDS }),
+            json!({ "claim_id": claim_id, "stage": "admitting", "heartbeat_at": now_timestamp(), "admission_deadline_at": admission_deadline_at, "lease_seconds": COORDINATOR_LEASE_SECONDS }),
         );
         batch.state = AgentTaskBatchState::Admitting;
         batch.updated_at = Some(now_timestamp());
@@ -427,7 +429,64 @@ fn record_fanout_run_batch_failed_admissions_in_store<'a>(
 }
 
 pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
-    AgentTaskBatchStore::from_current_data_root()?.status(batch_id)
+    let store = AgentTaskBatchStore::from_current_data_root()?;
+    let _ = store.expire_stalled_fanout_admission(batch_id)?;
+    store.status(batch_id)
+}
+
+/// Expire a live coordinator only when its durable record proves it never
+/// advanced beyond pre-child admission. Detached supervision uses this to stop
+/// the stranded process as soon as the durable terminal blocker is written.
+pub fn expire_stalled_fanout_admission(batch_id: &str) -> Result<bool> {
+    AgentTaskBatchStore::from_current_data_root()?.expire_stalled_fanout_admission(batch_id)
+}
+
+/// Turn an accepted coordinator that never leaves admission into durable,
+/// actionable state. The admission deadline is independent of the heartbeat:
+/// a live process that is stuck before it can create a child must not renew its
+/// way into an indefinite `admitting` state.
+fn expire_stalled_fanout_admission_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+) -> Result<bool> {
+    store.with_batch_lock(batch_id, || {
+        let mut batch = store.read_batch(batch_id)?;
+        let coordinator = &batch.metadata["coordinator"];
+        let expired = batch.state == AgentTaskBatchState::Admitting
+            && coordinator["admission_deadline_at"]
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .is_some_and(|deadline| Utc::now() >= deadline.with_timezone(&Utc));
+        if !expired {
+            return Ok(false);
+        }
+        let stage = coordinator["stage"]
+            .as_str()
+            .unwrap_or("admitting")
+            .to_string();
+        let command = format!("homeboy agent-task fanout resume {batch_id}");
+        if !batch.metadata.is_object() {
+            batch.metadata = Value::Object(serde_json::Map::new());
+        }
+        batch.metadata.as_object_mut().expect("metadata object").insert(
+            "terminal_failure".to_string(),
+            json!({
+                "stage": stage,
+                "failure": {
+                    "code": "coordinator_admission_timeout",
+                    "message": format!("fanout coordinator did not advance beyond '{stage}' before its admission deadline"),
+                    "next_action": command,
+                }
+            }),
+        );
+        for child in &mut batch.child_runs {
+            child.state = AgentTaskRunState::Failed;
+        }
+        batch.state = AgentTaskBatchState::Failed;
+        batch.updated_at = Some(now_timestamp());
+        store.write_batch(&batch)?;
+        Ok(true)
+    })
 }
 
 fn status_in_store<S, P>(
@@ -1113,6 +1172,10 @@ impl AgentTaskBatchStore {
             agent_task_lifecycle::status,
             agent_task_lifecycle::terminal_artifact_projection_readiness,
         )
+    }
+
+    fn expire_stalled_fanout_admission(&self, batch_id: &str) -> Result<bool> {
+        expire_stalled_fanout_admission_in_store(self, batch_id)
     }
 
     fn status_with<S, P>(
@@ -2347,6 +2410,45 @@ mod tests {
                 .expect("reclaimed batch")
                 .state,
             AgentTaskBatchState::Admitting
+        );
+    }
+
+    #[test]
+    fn expired_admission_is_a_durable_terminal_blocker_with_a_recovery_command() {
+        let (_temp, store) = batch_store();
+        let children = vec![FanoutRunBatchChild {
+            task_id: "stuck".to_string(),
+            run_id: "stuck-run".to_string(),
+        }];
+        store
+            .persist_fanout_run_batch("stuck-wave", "stuck-wave", &children, json!({}))
+            .expect("persist");
+        store
+            .claim_fanout_run_batch("stuck-wave")
+            .expect("claim")
+            .expect("claim id");
+        store
+            .mutate_batch("stuck-wave", |batch| {
+                batch.metadata["coordinator"]["admission_deadline_at"] =
+                    json!("2000-01-01T00:00:00Z");
+                Ok(())
+            })
+            .expect("expire admission");
+
+        assert!(store
+            .expire_stalled_fanout_admission("stuck-wave")
+            .expect("terminalize stalled admission"));
+        let status = store.status("stuck-wave").expect("read failed batch");
+
+        assert_eq!(status.batch.state, AgentTaskBatchState::Failed);
+        assert_eq!(status.batch.child_runs[0].state, AgentTaskRunState::Failed);
+        assert_eq!(
+            status.batch.metadata["terminal_failure"]["failure"]["code"],
+            "coordinator_admission_timeout"
+        );
+        assert_eq!(
+            status.batch.metadata["terminal_failure"]["failure"]["next_action"],
+            "homeboy agent-task fanout resume stuck-wave"
         );
     }
 

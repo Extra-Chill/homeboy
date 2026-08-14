@@ -33,7 +33,7 @@
 //! rather than silently ignored: a flag that refuses is better than a flag that
 //! lies, which is the whole defect being fixed.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -459,7 +459,15 @@ fn spawn_detached_fanout(
             Some("resolve current executable for a detached local fanout".to_string()),
         )
     })?;
-    let log = std::fs::File::create(log_path).map_err(|error| {
+    let mut log = std::fs::File::create(log_path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
+    })?;
+    writeln!(
+        log,
+        "{{\"event\":\"coordinator_started\",\"phase\":\"launching\",\"fanout_id\":{fanout_id:?},\"next_action\":\"homeboy agent-task fanout status {fanout_id}\"}}"
+    )
+    .map_err(|error| Error::internal_io(error.to_string(), Some(log_path.display().to_string())))?;
+    log.flush().map_err(|error| {
         Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
     })?;
     let log_err = log.try_clone().map_err(|error| {
@@ -1054,5 +1062,21 @@ mod tests {
             envelope["commands"]["resume"],
             "homeboy agent-task fanout resume wave-7"
         );
+    }
+
+    #[test]
+    fn detached_coordinator_log_starts_with_a_statusable_lifecycle_event() {
+        let directory = tempfile::tempdir().expect("temporary log directory");
+        let log_path = directory.path().join("fanout.log");
+        let args = vec!["self".to_string()];
+
+        let mut child = spawn_detached_fanout(&args, "wave-log", &log_path, None)
+            .expect("spawn detached coordinator");
+        terminate_and_reap_detached_child(&mut child);
+        let log = std::fs::read_to_string(log_path).expect("read coordinator log");
+
+        assert!(log.contains("\"event\":\"coordinator_started\""), "{log}");
+        assert!(log.contains("\"phase\":\"launching\""), "{log}");
+        assert!(log.contains("fanout status wave-log"), "{log}");
     }
 }
