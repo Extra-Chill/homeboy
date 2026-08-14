@@ -183,6 +183,7 @@ fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 resolve: Some(vec![

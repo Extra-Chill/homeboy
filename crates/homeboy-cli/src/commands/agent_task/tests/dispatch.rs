@@ -917,6 +917,7 @@ fn invalid_cook_inputs_do_not_mutate_a_configured_provider_destination() {
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![
@@ -981,7 +982,7 @@ fn invalid_cook_inputs_do_not_mutate_a_configured_provider_destination() {
 
 #[cfg(unix)]
 #[test]
-fn cook_resolves_existing_provider_destination_without_creation_metadata() {
+fn cook_defers_existing_provider_destination_lookup_until_durable_admission() {
     use std::os::unix::fs::PermissionsExt;
 
     with_isolated_home(|_| {
@@ -1031,6 +1032,7 @@ fn cook_resolves_existing_provider_destination_without_creation_metadata() {
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
@@ -1066,11 +1068,10 @@ fn cook_resolves_existing_provider_destination_without_creation_metadata() {
         ]))
         .expect("repo-only Cook retains its requested repository expectation");
         let provision = super::super::run::provision_cook_destination(&args)
-            .expect("existing provider destination resolves without creation fields");
+            .expect("provider destination lookup is deferred until durable Cook admission");
 
-        assert_eq!(provision["action"], "existing");
-        assert_eq!(provision["provider"], "fixture");
-        assert_eq!(provision["path"], destination.display().to_string());
+        assert_eq!(provision["action"], "lookup_pending");
+        assert_eq!(provision["handle"], "fixture@existing");
     });
 }
 
@@ -1127,6 +1128,7 @@ fn cook_cwd_is_authoritative_when_provider_lookup_times_out() {
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 1,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string()]),
@@ -1284,7 +1286,7 @@ fn cook_rejects_an_inactive_managed_destination_before_provider_execution() {
 
 #[cfg(unix)]
 #[test]
-fn cook_rejects_immediately_resolved_provider_destination_from_another_repository() {
+fn cook_defers_foreign_provider_destination_validation_until_durable_admission() {
     use std::os::unix::fs::PermissionsExt;
 
     with_isolated_home(|_| {
@@ -1339,6 +1341,7 @@ fn cook_rejects_immediately_resolved_provider_destination_from_another_repositor
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
@@ -1372,18 +1375,16 @@ fn cook_rejects_immediately_resolved_provider_destination_from_another_repositor
             "--no-finalize".to_string(),
         ]))
         .expect("persist generic repo expectation");
-        let error = super::super::run::provision_cook_destination(&args)
-            .expect_err("foreign immediate provider checkout is rejected before plan creation");
-        assert!(error
-            .message
-            .contains("does not match the requested Cook repository"));
-        assert!(!error.message.contains("provider-secret"));
+        let provision = super::super::run::provision_cook_destination(&args)
+            .expect("provider destination validation is deferred until Cook is durable");
+        assert_eq!(provision["action"], "lookup_pending");
+        assert_eq!(provision["handle"], "fixture@foreign");
     });
 }
 
 #[cfg(unix)]
 #[test]
-fn cook_does_not_collapse_provider_lookup_failures_into_missing_destination_metadata() {
+fn cook_defers_provider_lookup_failures_until_durable_admission() {
     use std::os::unix::fs::PermissionsExt;
 
     with_isolated_home(|_| {
@@ -1412,6 +1413,7 @@ fn cook_does_not_collapse_provider_lookup_failures_into_missing_destination_meta
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string(), "resolve".to_string()]),
@@ -1444,12 +1446,9 @@ fn cook_does_not_collapse_provider_lookup_failures_into_missing_destination_meta
             "fixture@missing".to_string(),
             "--no-finalize".to_string(),
         ]);
-        let error = super::super::run::provision_cook_destination(&args)
-            .expect_err("provider lookup failure is not a missing destination");
-
-        assert!(error
-            .message
-            .contains("provider `fixture` resolve command failed"));
+        let provision = super::super::run::provision_cook_destination(&args)
+            .expect("provider lookup failure is deferred until Cook is durable");
+        assert_eq!(provision["action"], "lookup_pending");
         assert!(!ensured.exists(), "failed lookup must not run ensure");
     });
 }
