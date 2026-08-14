@@ -672,11 +672,171 @@ fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
         .spawn()
         .expect("process with daemon state environment");
 
-    let store = super::process_durable_store_path(process.id()).expect("procfs store path");
+    let store = super::process_durable_store_path(process.id(), true).expect("procfs store path");
     process.kill().expect("stop process");
     process.wait().expect("reap process");
 
     assert_eq!(store, state_dir.path().join("jobs.json"));
+}
+
+#[test]
+fn ambiguous_command_state_uses_explicit_process_store_without_home_fallback() {
+    let selected_state = tempfile::tempdir().expect("selected state directory");
+    let candidate_state = tempfile::tempdir().expect("candidate state directory");
+    let executable = std::env::current_exe().expect("current executable");
+    let line = format!(
+        "4243 {} {} daemon serve --state-dir /flattened/ambiguous trailing-ps-text",
+        executable.display(),
+        executable.display()
+    );
+    let selected_jobs = selected_state.path().join("jobs.json");
+    let mut candidate =
+        super::parse_daemon_process_candidate(&line, &selected_jobs, None).expect("candidate");
+    assert_eq!(candidate.durable_store_path, None);
+
+    let mut allow_home_seen = None;
+    super::recover_candidate_store_from_process_environment(
+        &mut candidate,
+        &selected_jobs,
+        Some(false),
+        |pid, allow_home| {
+            assert_eq!(pid, 4243);
+            allow_home_seen = Some(allow_home);
+            Some(candidate_state.path().join("jobs.json"))
+        },
+    );
+
+    assert_eq!(allow_home_seen, Some(false));
+    assert_eq!(
+        candidate.durable_store_path.as_deref(),
+        candidate_state.path().join("jobs.json").to_str()
+    );
+    assert_eq!(
+        candidate.ownership,
+        super::super::DaemonProcessOwnership::Unrelated
+    );
+}
+
+#[test]
+fn absent_command_state_allows_process_home_fallback_but_keeps_same_store_safe() {
+    let state = tempfile::tempdir().expect("state directory");
+    let executable = std::env::current_exe().expect("current executable");
+    let line = format!(
+        "4243 {} {} daemon serve --addr 127.0.0.1:0",
+        executable.display(),
+        executable.display()
+    );
+    let jobs = state.path().join("jobs.json");
+    let mut candidate =
+        super::parse_daemon_process_candidate(&line, &jobs, None).expect("candidate");
+
+    super::recover_candidate_store_from_process_environment(
+        &mut candidate,
+        &jobs,
+        Some(true),
+        |_, allow_home| {
+            assert!(allow_home);
+            Some(jobs.clone())
+        },
+    );
+
+    assert_eq!(
+        candidate.ownership,
+        super::super::DaemonProcessOwnership::Ambiguous,
+        "store evidence does not replace executable identity proof"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ambiguous_ps_state_dir_uses_only_explicit_procfs_state_identity() {
+    let selected_state = tempfile::tempdir().expect("selected state directory");
+    let candidate_state = tempfile::tempdir().expect("candidate state directory");
+    let mut process = Command::new("sh")
+        .args([
+            "-c",
+            "trap 'kill \"$child\" 2>/dev/null' TERM EXIT; sleep 30 & child=$!; wait \"$child\"",
+            "homeboy",
+            "daemon",
+            "serve",
+            "--addr",
+            "127.0.0.1:0",
+            "--startup-token",
+            "candidate-token",
+            "--state-dir",
+            "/flattened/ambiguous",
+            "trailing-ps-text",
+        ])
+        .env(crate::paths::DAEMON_STATE_DIR_ENV, candidate_state.path())
+        .spawn()
+        .expect("candidate process");
+
+    let candidates = super::daemon_process_candidates(&selected_state.path().join("jobs.json"))
+        .expect("candidate scan");
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.pid == process.id())
+        .expect("spawned candidate");
+    assert_eq!(
+        candidate.durable_store_path.as_deref(),
+        candidate_state.path().join("jobs.json").to_str()
+    );
+    assert_eq!(
+        candidate.ownership,
+        super::super::DaemonProcessOwnership::Unrelated
+    );
+
+    let candidates = super::daemon_process_candidates(&candidate_state.path().join("jobs.json"))
+        .expect("same-store candidate scan");
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.pid == process.id())
+        .expect("same-store candidate");
+    assert_eq!(
+        candidate.ownership,
+        super::super::DaemonProcessOwnership::Ambiguous,
+        "procfs store proof does not replace executable identity proof"
+    );
+
+    process.kill().expect("stop candidate process");
+    process.wait().expect("reap candidate process");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ambiguous_ps_state_dir_does_not_fall_back_to_procfs_home() {
+    let home = tempfile::tempdir().expect("candidate home");
+    let mut process = Command::new("sh")
+        .args([
+            "-c",
+            "trap 'kill \"$child\" 2>/dev/null' TERM EXIT; sleep 30 & child=$!; wait \"$child\"",
+            "homeboy",
+            "daemon",
+            "serve",
+            "--state-dir",
+            "/flattened/ambiguous",
+            "trailing-ps-text",
+        ])
+        .env_remove(crate::paths::DAEMON_STATE_DIR_ENV)
+        .env("HOME", home.path())
+        .spawn()
+        .expect("candidate process");
+
+    let candidates =
+        super::daemon_process_candidates(&home.path().join(".config/homeboy/daemon/jobs.json"))
+            .expect("candidate scan");
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.pid == process.id())
+        .expect("spawned candidate");
+    assert_eq!(candidate.durable_store_path, None);
+    assert_eq!(
+        candidate.ownership,
+        super::super::DaemonProcessOwnership::Ambiguous
+    );
+
+    process.kill().expect("stop candidate process");
+    process.wait().expect("reap candidate process");
 }
 
 #[test]

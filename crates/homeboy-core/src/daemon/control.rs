@@ -77,15 +77,17 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
         .lines()
         .filter_map(|line| parse_daemon_process_candidate(line, jobs_path, current_exe.as_deref()))
         .map(|mut candidate| {
-            if matches!(
-                command_state_dir(&candidate.cmdline),
-                CommandStateDir::Absent
-            ) {
-                if let Some(store) = process_durable_store_path(candidate.pid) {
-                    candidate.durable_store_path = Some(store.display().to_string());
-                    candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
-                }
-            }
+            let process_store_fallback = match command_state_dir(&candidate.cmdline) {
+                CommandStateDir::Proven(_) => None,
+                CommandStateDir::Ambiguous => Some(false),
+                CommandStateDir::Absent => Some(true),
+            };
+            recover_candidate_store_from_process_environment(
+                &mut candidate,
+                jobs_path,
+                process_store_fallback,
+                process_durable_store_path,
+            );
             if test_namespace && candidate.durable_store_path.as_deref() != jobs_path.to_str() {
                 candidate.ownership = DaemonProcessOwnership::Unrelated;
             }
@@ -522,11 +524,29 @@ fn classify_candidate_store(
     }
 }
 
+fn recover_candidate_store_from_process_environment(
+    candidate: &mut DaemonProcessCandidate,
+    jobs_path: &Path,
+    allow_home: Option<bool>,
+    resolve: impl FnOnce(u32, bool) -> Option<PathBuf>,
+) {
+    let Some(allow_home) = allow_home else {
+        return;
+    };
+    // Linux procfs preserves argv/environment boundaries that `ps` flattens.
+    // An explicit state-dir environment may therefore resolve ambiguous command
+    // text; HOME remains a fallback only when argv has no competing signal.
+    if let Some(store) = resolve(candidate.pid, allow_home) {
+        candidate.durable_store_path = Some(store.display().to_string());
+        candidate.ownership = classify_candidate_store(candidate, jobs_path, &store);
+    }
+}
+
 /// `Command::env` does not become argv. Linux exposes the authoritative
 /// inherited environment via procfs; other platforms retain an ambiguous,
 /// fail-closed candidate when argv lacks a durable-store identity.
 #[cfg(target_os = "linux")]
-fn process_durable_store_path(pid: u32) -> Option<PathBuf> {
+fn process_durable_store_path(pid: u32, allow_home: bool) -> Option<PathBuf> {
     let environment = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
     let assignment = |key: &str| {
         environment
@@ -534,18 +554,20 @@ fn process_durable_store_path(pid: u32) -> Option<PathBuf> {
             .find_map(|entry| entry.strip_prefix(format!("{key}=").as_bytes()))
             .and_then(|value| std::str::from_utf8(value).ok())
     };
-    assignment(crate::paths::DAEMON_STATE_DIR_ENV)
+    if let Some(state_dir) =
+        assignment(crate::paths::DAEMON_STATE_DIR_ENV).filter(|value| !value.is_empty())
+    {
+        return Some(durable_store_path(Path::new(state_dir)));
+    }
+    allow_home
+        .then(|| assignment("HOME"))
+        .flatten()
         .filter(|value| !value.is_empty())
-        .map(|value| durable_store_path(Path::new(value)))
-        .or_else(|| {
-            assignment("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|value| durable_store_path(&Path::new(value).join(".config/homeboy/daemon")))
-        })
+        .map(|value| durable_store_path(&Path::new(value).join(".config/homeboy/daemon")))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn process_durable_store_path(_pid: u32) -> Option<PathBuf> {
+fn process_durable_store_path(_pid: u32, _allow_home: bool) -> Option<PathBuf> {
     None
 }
 
