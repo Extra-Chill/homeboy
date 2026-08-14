@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.348.7] - 2026-08-14
+
+### Changed
+- isolate batch status fixtures
+- inject batch lifecycle stores
+- bind batch coordinator fixtures to store
+
+### Fixed
+- reuse hash-bound capability evidence
+- persist rotated candidate version
+- project inventory environment
+- parse ps environment after state dir
+
 ## [0.348.6] - 2026-08-14
 
 ### Fixed
