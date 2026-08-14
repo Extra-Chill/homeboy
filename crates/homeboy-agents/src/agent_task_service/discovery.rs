@@ -629,7 +629,7 @@ fn classify_liveness(
     // A detached Cook parent has no executable task or owner until its child
     // and supervisor are durably attached. It is an active admission record,
     // not stale queued work for the daemon reconciliation tick to cancel.
-    if agent_task_lifecycle::has_pending_detached_cook_handoff(record) {
+    if agent_task_lifecycle::detached_cook_admission_is_live(record, now) {
         return AgentTaskLiveness::Active;
     }
     if record.lab_handoff_validation_error().is_some() {

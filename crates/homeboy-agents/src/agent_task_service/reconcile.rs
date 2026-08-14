@@ -115,6 +115,9 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
 
         let expired_handoff =
             agent_task_lifecycle::has_expired_unaccepted_lab_handoff(&run.run_id)?;
+        let record = agent_task_lifecycle::exact_record(&run.run_id)?;
+        let expired_detached_admission =
+            agent_task_lifecycle::has_expired_detached_cook_admission(&record, chrono::Utc::now());
         if dry_run {
             runs.push(AgentTaskReconcileRun {
                 run_id: run.run_id,
@@ -133,7 +136,13 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             .stale_reason
             .clone()
             .unwrap_or_else(|| format!("reconciled stale-{} run", liveness.as_str()));
-        let result = if expired_handoff {
+        let result = if expired_detached_admission {
+            agent_task_lifecycle::expire_detached_cook_admission(&run.run_id).map(|_| {
+                agent_task_lifecycle::status(&run.run_id)
+                    .map(|record| record.state)
+                    .unwrap_or(authoritative_state)
+            })
+        } else if expired_handoff {
             // Handoff expiry answers whether it expired, not what state that
             // left behind; re-read the record for the post-mutation state.
             agent_task_lifecycle::expire_unaccepted_lab_handoff(&run.run_id).map(|_| {
@@ -461,6 +470,86 @@ mod tests {
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["admission_state"],
                 "pre_supervisor"
+            );
+        });
+    }
+
+    #[test]
+    fn expired_unattached_and_legacy_detached_admissions_terminalize() {
+        with_isolated_home(|_| {
+            for (cook_id, legacy) in [
+                ("expired-pre-supervisor", false),
+                ("expired-legacy-pending", true),
+            ] {
+                agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                    .expect("persist detached admission");
+                agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                    if legacy {
+                        record.metadata["detached_cook_handoff"]
+                            .as_object_mut()
+                            .expect("handoff metadata")
+                            .remove("admission_state");
+                        record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+                        record.metadata["detached_cook_handoff"]
+                            .as_object_mut()
+                            .expect("handoff metadata")
+                            .remove("admission_deadline_at");
+                    } else {
+                        record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
+                            serde_json::json!("2000-01-01T00:00:00+00:00");
+                    }
+                })
+                .expect("expire admission lease");
+            }
+
+            let report = reconcile_stale_active_runs(false).expect("reconcile expired admissions");
+
+            assert_eq!(report.reconciled, 2, "{report:#?}");
+            for cook_id in ["expired-pre-supervisor", "expired-legacy-pending"] {
+                let parent = agent_task_lifecycle::status(cook_id).expect("read terminal parent");
+                assert_eq!(
+                    parent.state,
+                    agent_task_lifecycle::AgentTaskRunState::Failed
+                );
+                assert_eq!(
+                    parent.metadata["detached_cook_handoff"]["admission_state"],
+                    "failed"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn attached_detached_admission_outlives_its_pre_supervisor_deadline() {
+        with_isolated_home(|_| {
+            let cook_id = "attached-detached-admission";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist detached admission");
+            agent_task_lifecycle::record_detached_cook_handoff_child(
+                cook_id,
+                1,
+                homeboy_core::process::ProcessStartIdentity::Macos {
+                    start_seconds: 1,
+                    start_microseconds: 1,
+                },
+            )
+            .expect("attach child identity");
+            agent_task_lifecycle::record_detached_cook_supervisor(cook_id, "supervisor-1")
+                .expect("attach supervisor");
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("expire old admission lease");
+
+            let report = reconcile_stale_active_runs(false).expect("reconcile attached admission");
+
+            assert!(report.runs.is_empty(), "{report:#?}");
+            assert_eq!(
+                agent_task_lifecycle::status(cook_id)
+                    .expect("read protected parent")
+                    .metadata["detached_cook_handoff"]["admission_state"],
+                "supervising"
             );
         });
     }

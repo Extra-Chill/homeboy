@@ -2,6 +2,8 @@ use super::acceptance_verifier::{
     validate_acceptance_requirement, validate_attestation, with_acceptance_verifier,
 };
 use super::*;
+
+const DETACHED_COOK_ADMISSION_LEASE_SECONDS: i64 = 30;
 use chrono::DateTime;
 use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeSet;
@@ -350,6 +352,9 @@ pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRun
     record.metadata["detached_cook_handoff"] = json!({
         "state": "pending",
         "admission_state": "pre_supervisor",
+        "admission_deadline_at": (chrono::Utc::now()
+            + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
+            .to_rfc3339(),
         "cook_id": cook_id,
         "cancellation_fence": { "state": "open" },
     });
@@ -612,6 +617,58 @@ fn complete_detached_cook_handoff_parent_in_store(
 pub fn has_pending_detached_cook_handoff(record: &AgentTaskRunRecord) -> bool {
     record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id
         && record.metadata["detached_cook_handoff"]["state"] == "pending"
+}
+
+pub fn detached_cook_admission_is_live(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if !has_pending_detached_cook_handoff(record) {
+        return false;
+    }
+    match record.metadata["detached_cook_handoff"]["admission_state"].as_str() {
+        Some("child_attached" | "supervising") => true,
+        Some("pre_supervisor") | None => {
+            detached_cook_admission_deadline(record).is_some_and(|deadline| deadline > now)
+        }
+        _ => false,
+    }
+}
+
+pub fn has_expired_detached_cook_admission(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    has_pending_detached_cook_handoff(record) && !detached_cook_admission_is_live(record, now)
+}
+
+pub fn expire_detached_cook_admission(cook_id: &str) -> Result<bool> {
+    let record = store::read_record(cook_id)?;
+    if !has_expired_detached_cook_admission(&record, chrono::Utc::now()) {
+        return Ok(false);
+    }
+    fail_detached_cook_handoff_parent(
+        cook_id,
+        "detached Cook admission lease expired before child or supervisor ownership attached",
+    )?;
+    Ok(true)
+}
+
+fn detached_cook_admission_deadline(
+    record: &AgentTaskRunRecord,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    record.metadata["detached_cook_handoff"]["admission_deadline_at"]
+        .as_str()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .or_else(|| {
+            chrono::DateTime::parse_from_rfc3339(&record.submitted_at)
+                .ok()
+                .map(|value| {
+                    value.with_timezone(&chrono::Utc)
+                        + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS)
+                })
+        })
 }
 
 /// Build the canonical decision for a run this controller is about to execute
