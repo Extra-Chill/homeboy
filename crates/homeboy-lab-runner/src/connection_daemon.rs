@@ -484,11 +484,49 @@ pub(super) fn daemon_http_runtime_stale_paths(
     Ok(daemon_runtime_stale_paths_from_body(&response.body))
 }
 
+pub(super) fn daemon_http_runtime_stale_paths_with_timeout(
+    local_url: &str,
+    timeout: Duration,
+) -> std::result::Result<Vec<RunnerStaleRuntimePath>, String> {
+    let response = daemon_http_body_at_with_timeout(local_url, "version", timeout)?;
+    Ok(daemon_runtime_stale_paths_from_body(&response.body))
+}
+
 pub(super) fn daemon_http_runtime_loaded_paths(
     local_url: &str,
 ) -> std::result::Result<BTreeMap<String, String>, String> {
     let response = daemon_http_body(local_url)?;
     Ok(daemon_runtime_loaded_paths_from_body(&response.body))
+}
+
+pub(super) fn daemon_http_runtime_loaded_paths_with_timeout(
+    local_url: &str,
+    timeout: Duration,
+) -> std::result::Result<BTreeMap<String, String>, String> {
+    let response = daemon_http_body_at_with_timeout(local_url, "version", timeout)?;
+    Ok(daemon_runtime_loaded_paths_from_body(&response.body))
+}
+
+pub(super) fn daemon_http_version_with_timeout(
+    local_url: &str,
+    timeout: Duration,
+) -> std::result::Result<String, String> {
+    let response = daemon_http_body_at_with_timeout(local_url, "version", timeout)?;
+    daemon_version_from_body(&response.body)
+        .map(str::to_string)
+        .ok_or_else(|| "remote daemon version response did not include a version".to_string())
+}
+
+pub(super) fn daemon_http_identity_with_timeout(
+    local_url: &str,
+    timeout: Duration,
+) -> std::result::Result<String, String> {
+    let response = daemon_http_body_at_with_timeout(local_url, "version", timeout)?;
+    daemon_identity_from_body(&response.body)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            "remote daemon version response did not include a build identity".to_string()
+        })
 }
 
 pub(super) fn daemon_http_freshness(
@@ -497,7 +535,29 @@ pub(super) fn daemon_http_freshness(
     expected_version: &str,
     expected_identity: &str,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
-    daemon_freshness_report(runner_id, local_url, expected_version, expected_identity)
+    daemon_http_freshness_with_timeout(
+        runner_id,
+        local_url,
+        expected_version,
+        expected_identity,
+        Duration::from_secs(2),
+    )
+}
+
+pub(super) fn daemon_http_freshness_with_timeout(
+    runner_id: &str,
+    local_url: &str,
+    expected_version: &str,
+    expected_identity: &str,
+    timeout: Duration,
+) -> std::result::Result<DaemonFreshnessReport, String> {
+    daemon_freshness_report(
+        runner_id,
+        local_url,
+        expected_version,
+        expected_identity,
+        timeout,
+    )
 }
 
 /// A direct-SSH session is live only when its loopback endpoint still serves
@@ -691,10 +751,12 @@ fn daemon_freshness_report(
     local_url: &str,
     expected_version: &str,
     expected_identity: &str,
+    timeout: Duration,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
     // Freshness, including the immutable executable hash, is a daemon health
     // contract. A version response is only an identity compatibility fallback.
-    let DaemonVersionResponse { body, raw_body } = daemon_http_body_at(local_url, "health")?;
+    let DaemonVersionResponse { body, raw_body } =
+        daemon_http_body_at_with_timeout(local_url, "health", timeout)?;
     if let Some(report) = daemon_freshness_from_body(&body) {
         if report.fresh
             && daemon_version_identity_mismatch(

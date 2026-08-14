@@ -10,6 +10,7 @@ pub fn report(
 ) -> RunnerDoctorOutput {
     let scoped = options.scope == RunnerDoctorScope::LabOffload;
     let (per_probe, overall) = probe_limits(options.scope);
+    let observation_deadline = std::time::Instant::now() + overall;
     let _probe_limits = client.scoped_probe_limits(per_probe, overall, "runner doctor");
     let ssh_execution = client.execute("printf ok");
     if !ssh_execution.success || ssh_execution.stdout.trim() != "ok" {
@@ -23,14 +24,18 @@ pub fn report(
         );
     }
 
-    // Lab admission uses the live status projection, including the daemon's
-    // typed freshness report. Doctor repair must make its decision from that
-    // same observation rather than treating a reachable endpoint as ready.
-    let persisted_status = if options.scope == RunnerDoctorScope::LabOffload {
-        runner::status(runner_id).ok()
+    // Lab doctor needs the same full admission observation as `runner status`:
+    // a persisted session alone has no active-job view and must fail closed.
+    // The snapshot captures the live status and its generation ledger together,
+    // while the Lab status probes retain their read-only bounds within doctor.
+    let admission_snapshot = if scoped {
+        runner::runner_admission_snapshot_until(runner_id, observation_deadline).ok()
     } else {
-        runner::diagnostic_status(runner_id).ok()
+        runner::persisted_status_until(runner_id, observation_deadline)
+            .and_then(runner::runner_admission_snapshot_for_status)
+            .ok()
     };
+    let persisted_status = admission_snapshot.as_ref().map(|snapshot| &snapshot.status);
     if options.scope == RunnerDoctorScope::LabOffload {
         match persisted_status.as_ref() {
             Some(status) if !status.connected => {
@@ -39,7 +44,9 @@ pub fn report(
                     runner,
                     server,
                     status.daemon_freshness.clone(),
-                    admission_summary(status),
+                    admission_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.summary.clone()),
                 );
             }
             None => {
@@ -375,10 +382,8 @@ pub fn report(
         checks,
         secret_env_migration: None,
         diagnostics,
-        daemon_recovery: persisted_status
-            .as_ref()
-            .and_then(|status| status.daemon_freshness.clone()),
-        admission_summary: persisted_status.as_ref().and_then(admission_summary),
+        daemon_recovery: persisted_status.and_then(|status| status.daemon_freshness.clone()),
+        admission_summary: admission_snapshot.map(|snapshot| snapshot.summary),
         repairs: Vec::new(),
     }
 }
@@ -474,20 +479,6 @@ pub(super) fn disconnected_report(
         admission_summary,
         repairs: Vec::new(),
     }
-}
-
-fn admission_summary(
-    status: &homeboy::runner::runners::RunnerStatusReport,
-) -> Option<homeboy::runner::runners::RunnerAdmissionSummary> {
-    let generations =
-        runner::runner_generation_inventory_for_session(&status.runner_id, status.session.as_ref())
-            .ok()?;
-    let owners = runner::runner_generation_job_owners_for_session(
-        &status.runner_id,
-        status.session.as_ref(),
-    )
-    .ok()?;
-    Some(status.admission_summary_with_generations(&generations, &owners, generations.len()))
 }
 
 fn default_artifact_root(client: &SshClient) -> String {

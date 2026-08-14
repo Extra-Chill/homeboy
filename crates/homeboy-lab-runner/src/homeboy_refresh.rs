@@ -1244,16 +1244,12 @@ fn disconnect_before_reconnect(
 /// process startup. This is intentionally shared with `runner status`'s status
 /// and generation projections so refresh cannot certify a state status rejects.
 fn refresh_readiness_postcondition(runner_id: &str) -> Result<HomeboyRefreshReadiness> {
-    let report = super::status(runner_id)?;
-    let generations =
-        super::runner_generation_inventory_for_session(runner_id, report.session.as_ref())?;
-    let owners =
-        super::runner_generation_job_owners_for_session(runner_id, report.session.as_ref())?;
+    let admission = super::runner_admission_snapshot(runner_id)?;
     Ok(refresh_readiness_from_status(
         runner_id,
-        &report,
-        &generations,
-        &owners,
+        &admission.status,
+        &admission.generation_inventory,
+        &admission.generation_owners,
     ))
 }
 

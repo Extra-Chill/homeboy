@@ -494,7 +494,6 @@ mod repair_dispatch {
 }
 
 mod repair_readiness {
-    use super::super::super::repair::daemon_admission_ready;
     use homeboy::runner::runners::{
         RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
     };
@@ -531,11 +530,11 @@ mod repair_readiness {
             Some("homeboy 0.329.1+98cc7876dd71".to_string()),
         );
 
-        assert!(!daemon_admission_ready(&status(Some(stale))));
+        assert!(!status(Some(stale)).admission_summary(0).accepting_jobs);
     }
 
     #[test]
     fn repair_success_postcondition_requires_open_admission() {
-        assert!(daemon_admission_ready(&status(None)));
+        assert!(status(None).admission_summary(0).accepting_jobs);
     }
 }
