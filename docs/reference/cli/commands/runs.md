@@ -29,7 +29,7 @@ Inspect persisted observation runs, artifacts, and typed evidence projections
 | `homeboy runs bench-compare` | Compare two persisted benchmark runs by exact run id |
 | `homeboy runs fuzz-compare` | Compare two persisted fuzz runs by exact run id |
 | `homeboy runs hotspots` | Aggregate hotspot rankings across persisted fuzz run artifacts |
-| `homeboy runs reconcile` | Mark orphaned running observation records stale |
+| `homeboy runs reconcile` | Reconcile running observation records. `--dry-run` previews the bounded observation-record scope; without it, only reported orphaned records are marked stale. Runner generations and durable agent-task records have their own reconcilers |
 | `homeboy runs watch` | Block and stream a run's status until it reaches a terminal state, exiting with a code that reflects pass/fail. Works for attached and detached/offloaded runs |
 | `homeboy runs cancel` | Cooperatively cancel a persisted foreground run before its next stage |
 | `homeboy runs show` | Show one persisted observation run |
@@ -183,11 +183,11 @@ Aggregate hotspot rankings across persisted fuzz run artifacts
 homeboy runs reconcile [OPTIONS]
 ```
 
-Mark orphaned running observation records stale
+Reconcile running observation records. `--dry-run` previews the bounded observation-record scope; without it, only reported orphaned records are marked stale. Runner generations and durable agent-task records have their own reconcilers
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--dry-run` | flag | Preview orphaned running records without mutating them |
+| `--dry-run` | flag | Preview orphaned running observation records without mutation. Omit this flag to mark only the reported orphaned records stale |
 | `--limit` | `<LIMIT>` | Maximum running records to inspect |
 
 ## `homeboy runs watch`

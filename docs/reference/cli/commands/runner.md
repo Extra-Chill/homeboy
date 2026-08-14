@@ -35,7 +35,7 @@ Manage local and SSH execution runners
 | `homeboy runner connect` | Connect to a runner by starting a loopback-only remote daemon and SSH tunnel |
 | `homeboy runner status` | Show persisted runner tunnel status |
 | `homeboy runner peer-sessions` | Inspect and safely remove persisted peer sessions whose local tunnels are proven dead |
-| `homeboy runner reconcile` | Reconcile persisted direct-runner generation state and retire verified drained daemons |
+| `homeboy runner reconcile` | Reconcile one runner's persisted daemon generations and retire verified drained daemons. Success means that runner accepts jobs with no unresolved generation projection; durable agent-task records and observation runs have separate reconcilers |
 | `homeboy runner disconnect` | Close a runner tunnel and remove its persisted session state |
 | `homeboy runner refresh-homeboy` | Build or select the Homeboy binary used for runner/Lab jobs |
 | `homeboy runner dev-sync` | Sync a controller-local Homeboy dev binary to the runner and select it for Lab jobs |
@@ -294,7 +294,7 @@ Inspect and safely remove persisted peer sessions whose local tunnels are proven
 homeboy runner reconcile <ID>
 ```
 
-Reconcile persisted direct-runner generation state and retire verified drained daemons
+Reconcile one runner's persisted daemon generations and retire verified drained daemons. Success means that runner accepts jobs with no unresolved generation projection; durable agent-task records and observation runs have separate reconcilers
 
 | Argument | Required | Description |
 | --- | --- | --- |

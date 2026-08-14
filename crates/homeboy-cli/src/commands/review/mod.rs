@@ -911,6 +911,7 @@ fn build_audit_args(
         },
         json_summary: args.summary,
         fixability: false,
+        full: false,
     }
 }
 

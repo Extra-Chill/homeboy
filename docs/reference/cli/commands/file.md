@@ -80,6 +80,7 @@ Write content to file (from stdin)
 
 | Option | Value | Description |
 | --- | --- | --- |
+| `--allow-empty` | flag | Permit an empty write, truncating the destination to zero bytes |
 | `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
 | `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 
