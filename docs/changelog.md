@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.348.2] - 2026-08-14
+
+### Changed
+- isolate backend policy selection
+- isolate artifact finalization roots
+- isolate secret source fixtures
+- use typed runtime discovery fixtures
+
 ## [0.348.1] - 2026-08-14
 
 ### Fixed
