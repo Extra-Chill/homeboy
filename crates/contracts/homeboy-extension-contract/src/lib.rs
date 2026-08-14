@@ -117,6 +117,7 @@ pub use manifest_artifact_cleanup::{
 };
 pub mod source_metadata_repair;
 pub mod test_drift;
+pub mod test_inventory_config;
 pub mod trace_config;
 pub mod trace_preview;
 pub mod trace_results;
@@ -143,4 +144,5 @@ pub use runner_contract::{
 };
 pub use runtime_helper::RuntimeHelperRequirement;
 pub use test_drift::TestDriftConfig;
+pub use test_inventory_config::{TestInventoryConfig, TestInventoryRunner};
 pub use version::{parse_extension_version, VersionConstraint};

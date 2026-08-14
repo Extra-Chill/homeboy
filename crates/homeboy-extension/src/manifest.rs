@@ -51,6 +51,9 @@ pub use homeboy_extension_contract::action_types::{ActionType, HttpMethod};
 
 /// Test mapping convention: how source files map to test files.
 pub use homeboy_extension_contract::test_drift::TestDriftConfig;
+pub use homeboy_extension_contract::test_inventory_config::{
+    TestInventoryConfig, TestInventoryRunner,
+};
 
 // ============================================================================
 // ExtensionManifest
