@@ -312,6 +312,7 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
 pub(crate) fn rotate_daemon_generation(
     runner_id: &str,
     candidate_homeboy: &str,
+    candidate_version: &str,
     candidate_identity: &str,
     candidate_generation: &str,
     candidate_binary_sha256: Option<&str>,
@@ -470,7 +471,7 @@ pub(crate) fn rotate_daemon_generation(
         proxy_forward: current.proxy_forward.clone(),
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id: daemon.lease_id,
-        homeboy_version: current.homeboy_version.clone(),
+        homeboy_version: candidate_version.to_string(),
         homeboy_build_identity: Some(candidate_identity.to_string()),
         connected_at: Utc::now().to_rfc3339(),
         worker_identity: None,

@@ -1767,6 +1767,17 @@ fn parse_identity_reads_final_pretty_json_after_command_output() {
 }
 
 #[test]
+fn rotation_candidate_identity_preserves_materialized_version_and_display() {
+    let identity = parse_identity(
+        r#"{"success":true,"data":{"version":"0.348.6","display":"homeboy 0.348.6+candidate"}}"#,
+    )
+    .expect("identity parses");
+    let candidate = rotation_candidate_identity(&identity).expect("candidate identity");
+
+    assert_eq!(candidate, ("0.348.6", "homeboy 0.348.6+candidate"));
+}
+
+#[test]
 fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transport() {
     let plan = HomeboyBinaryRefreshPlan {
         runner_id: "lab".to_string(),

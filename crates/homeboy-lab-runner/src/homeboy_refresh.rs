@@ -794,13 +794,8 @@ pub fn refresh_homeboy_binary(
             preserve_generations,
             options.force,
         ) {
-            let candidate_identity = identity
-                .get("data")
-                .unwrap_or(&identity)
-                .get("display")
-                .and_then(Value::as_str)
-                .unwrap_or("candidate")
-                .to_string();
+            let (candidate_version, candidate_identity) = rotation_candidate_identity(&identity)?;
+            let candidate_identity = candidate_identity.to_string();
             let candidate_binary_sha256 = materialized_binary_sha256(&exec_output.stdout);
             let candidate_generation =
                 refreshed_generation_key(&candidate_identity, candidate_binary_sha256.clone());
@@ -811,6 +806,7 @@ pub fn refresh_homeboy_binary(
             if let Err(error) = rotate_daemon_generation(
                 &plan.runner_id,
                 &selected_binary_path,
+                candidate_version,
                 &candidate_identity,
                 &candidate_generation,
                 candidate_binary_sha256.as_deref(),
@@ -2534,6 +2530,22 @@ fn refreshed_binary_path(plan: &HomeboyBinaryRefreshPlan, stdout: &str) -> Resul
 
 fn refreshed_generation_key(identity: &str, binary_sha256: Option<String>) -> String {
     binary_sha256.unwrap_or_else(|| identity.to_string())
+}
+
+fn rotation_candidate_identity(identity: &Value) -> Result<(&str, &str)> {
+    let data = identity.get("data").unwrap_or(identity);
+    let version = data
+        .get("version")
+        .and_then(Value::as_str)
+        .filter(|version| !version.trim().is_empty())
+        .ok_or_else(|| {
+            Error::internal_unexpected("materialized candidate identity did not report a version")
+        })?;
+    let display = data
+        .get("display")
+        .and_then(Value::as_str)
+        .unwrap_or("candidate");
+    Ok((version, display))
 }
 
 fn identity_probe_script(binary_path: &str) -> String {
