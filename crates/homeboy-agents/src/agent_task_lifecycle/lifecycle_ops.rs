@@ -427,6 +427,107 @@ pub fn record_detached_cook_supervisor(cook_id: &str, job_id: &str) -> Result<()
     Ok(())
 }
 
+/// Reserve the first attempt identity before its lifecycle record is submitted.
+///
+/// The record and Cook index are separate durable writes. This reservation keeps
+/// a supervisor that observes the child exit after the record write from
+/// terminalizing the handoff between those writes.
+pub fn reserve_detached_cook_handoff_materialization(
+    cook_id: &str,
+    attempt_run_id: &str,
+) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    reserve_detached_cook_handoff_materialization_in_store(
+        &lifecycle_store,
+        cook_id,
+        attempt_run_id,
+    )
+}
+
+/// Reserve a detached Cook's first attempt within its explicitly selected
+/// lifecycle roots.
+pub(crate) fn reserve_detached_cook_handoff_materialization_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    attempt_run_id: &str,
+) -> Result<()> {
+    let cook_id = sanitize_run_id(cook_id);
+    let attempt_run_id = sanitize_run_id(attempt_run_id);
+    if lifecycle_store.read_record(&cook_id).is_err() {
+        return Ok(());
+    }
+    let record = lifecycle_store.mutate_record(&cook_id, |record| {
+        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+            return false;
+        }
+        if let Some(existing) =
+            record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"].as_str()
+        {
+            return existing == attempt_run_id;
+        }
+        // A redirected parent has completed its one-time handoff. Later Cook
+        // retries are ordinary attempt materializations and need no reservation.
+        if record.metadata["detached_cook_handoff"]["state"] == "redirected" {
+            return true;
+        }
+        if record.state.is_terminal()
+            || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"]
+                == "cancelled"
+            || record.metadata["detached_cook_handoff"]["state"] != "pending"
+        {
+            return false;
+        }
+        let metadata = record.ensure_metadata_object();
+        metadata["detached_cook_handoff"]["materializing_attempt_run_id"] = json!(attempt_run_id);
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    let record = record.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cook_id",
+            "detached Cook handoff was cancelled or terminal before its attempt could materialize",
+            Some(cook_id.clone()),
+            None,
+        )
+    })?;
+    if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+        return Err(Error::validation_invalid_argument(
+            "cook_id",
+            "detached Cook handoff was cancelled or terminal before its attempt could materialize",
+            Some(cook_id),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Cancel a submitted first child when its reserved handoff parent was
+/// cancelled before the Cook index could be published. The reservation is the
+/// durable link that keeps this otherwise-unindexed record reachable.
+pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id: &str) -> Result<bool> {
+    let cook_id = sanitize_run_id(cook_id);
+    let Ok(parent) = store::read_record(&cook_id) else {
+        return Ok(false);
+    };
+    let handoff = &parent.metadata["detached_cook_handoff"];
+    let Some(attempt_run_id) = handoff["materializing_attempt_run_id"].as_str() else {
+        return Ok(false);
+    };
+    if handoff["cook_id"] != cook_id || parent.state != AgentTaskRunState::Cancelled {
+        return Ok(false);
+    }
+    let Ok(child) = store::read_record(attempt_run_id) else {
+        return Ok(false);
+    };
+    // The reservation makes an unindexed child reachable, but it does not give
+    // parent cancellation authority to overwrite a child that already finished.
+    if child.state.is_terminal() {
+        return Ok(false);
+    }
+    cancel_exact_run(attempt_run_id, Some("detached Cook handoff cancelled"))?;
+    Ok(true)
+}
+
 /// Terminalize a still-pending handoff parent once no child can materialize its
 /// first attempt. A redirected or terminal parent is authoritative evidence
 /// from a concurrent materialization or cancellation and is never rewritten.
@@ -440,6 +541,9 @@ pub fn fail_detached_cook_handoff_parent(
             || record.state.is_terminal()
             || record.metadata["detached_cook_handoff"]["state"] != "pending"
             || store::read_cook_index(&cook_id).is_ok()
+            || record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"]
+                .as_str()
+                .is_some_and(|run_id| store::read_record(run_id).is_ok())
         {
             return false;
         }
@@ -483,6 +587,10 @@ fn complete_detached_cook_handoff_parent_in_store(
             let metadata = record.ensure_metadata_object();
             metadata["detached_cook_handoff"]["state"] = json!("redirected");
             metadata["detached_cook_handoff"]["attempt_run_id"] = json!(attempt_run_id);
+            metadata["detached_cook_handoff"]
+                .as_object_mut()
+                .expect("handoff metadata object")
+                .remove("materializing_attempt_run_id");
             set_run_state(record, AgentTaskRunState::Succeeded);
             record.updated_at = Some(now_timestamp());
             true
@@ -3876,9 +3984,11 @@ fn record_cook_attempt_locked_in_store(
     let run_id = sanitize_run_id(run_id);
     if let Ok(parent) = lifecycle_store.read_record(&cook_id) {
         let handoff = &parent.metadata["detached_cook_handoff"];
+        let reserved_child = handoff["materializing_attempt_run_id"] == run_id;
         if handoff["cook_id"] == cook_id
-            && (parent.state.is_terminal()
-                || handoff["cancellation_fence"]["state"] == "cancelled"
+            && (((parent.state.is_terminal() && handoff["state"] != "redirected")
+                || handoff["cancellation_fence"]["state"] == "cancelled")
+                && !reserved_child
                 || (handoff["state"] != "pending" && handoff["state"] != "redirected"))
         {
             return Err(Error::validation_invalid_argument(

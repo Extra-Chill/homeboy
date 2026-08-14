@@ -1448,6 +1448,23 @@ fn discovery_active_filters_to_queued_and_running_runs() {
 }
 
 #[test]
+fn pending_detached_cook_handoff_is_discoverable_before_attempt_materialization() {
+    with_isolated_home(|_| {
+        let cook_id = "pending-detached-cook-handoff";
+        let parent = agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+            .expect("persist handoff parent before child materialization");
+
+        // The handoff parent is the durable operator handle while no provider
+        // attempt exists yet, so both discovery views must expose it.
+        assert!(parent.tasks.is_empty());
+        let active = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active discovery");
+        assert!(active.runs.iter().any(|run| run.run_id == cook_id));
+        let all = discover_runs(AgentTaskDiscoveryFilter::All).expect("all discovery");
+        assert!(all.runs.iter().any(|run| run.run_id == cook_id));
+    });
+}
+
+#[test]
 fn discovery_active_reads_runner_backed_record_without_reconciliation() {
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-runner-stale"))
