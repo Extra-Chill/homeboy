@@ -15,6 +15,8 @@ use homeboy_extension::test::{
     TestCommandOutput, TestFailure, TestRunWorkflowArgs,
 };
 use homeboy_extension::ExtensionCapability;
+#[cfg(test)]
+use homeboy_extension_contract::test_results::TestInventoryRejection;
 use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -429,6 +431,7 @@ fn finish_test_observation(
             "observation_status": workflow.status,
             "exit_code": workflow.exit_code,
             "test_counts": workflow.test_counts,
+            "test_inventory_rejection": workflow.test_inventory_rejection,
             "failure_count": workflow.findings.as_ref().map(Vec::len).unwrap_or(0),
             "coverage": workflow.coverage,
             "baseline_regression": workflow.baseline_comparison.as_ref().map(|comparison| comparison.regression),
@@ -1398,6 +1401,7 @@ mod tests {
                 runner_exit_code: None,
                 test_counts: None,
                 test_inventory: None,
+                test_inventory_rejection: None,
                 test_durations: None,
                 findings: None,
                 failure_analysis_input: None,
@@ -1490,6 +1494,7 @@ mod tests {
                 runner_exit_code: None,
                 test_counts: None,
                 test_inventory: None,
+                test_inventory_rejection: Some(TestInventoryRejection::RunnerFingerprintMismatch),
                 test_durations: None,
                 findings: None,
                 failure_analysis_input: Some(input),
@@ -1514,6 +1519,10 @@ mod tests {
             assert_eq!(run.status, "fail");
             assert_eq!(run.metadata_json["observation_status"], "failed");
             assert_eq!(run.metadata_json["exit_code"], 1);
+            assert_eq!(
+                run.metadata_json["test_inventory_rejection"],
+                "runner_fingerprint_mismatch"
+            );
             let findings = store
                 .list_findings(FindingListFilter {
                     run_id: Some(run_id.clone()),
@@ -1583,6 +1592,7 @@ mod tests {
                     runner_exit_code: None,
                     test_counts: Some(TestCounts::new(0, 0, 0, 0)),
                     test_inventory: None,
+                    test_inventory_rejection: None,
                     test_durations: None,
                     findings: None,
                     failure_analysis_input: None,
@@ -1663,6 +1673,7 @@ mod tests {
                 runner_exit_code: None,
                 test_counts: None,
                 test_inventory: None,
+                test_inventory_rejection: None,
                 test_durations: None,
                 findings: None,
                 failure_analysis_input: None,
@@ -1813,6 +1824,7 @@ mod tests {
                     runner_exit_code: Some(runner_exit_code),
                     test_counts: None,
                     test_inventory: None,
+                    test_inventory_rejection: None,
                     test_durations: None,
                     findings: None,
                     failure_analysis_input: None,
@@ -1880,6 +1892,7 @@ mod tests {
             runner_exit_code: None,
             test_counts: None,
             test_inventory: None,
+            test_inventory_rejection: None,
             test_durations: None,
             findings: None,
             failure_analysis_input: None,
@@ -1970,6 +1983,7 @@ mod tests {
                     runner_exit_code: None,
                     test_counts: None,
                     test_inventory: None,
+                    test_inventory_rejection: None,
                     test_durations: None,
                     findings: None,
                     failure_analysis_input: None,

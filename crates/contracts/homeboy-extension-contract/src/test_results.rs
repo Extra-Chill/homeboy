@@ -38,6 +38,10 @@ pub struct TestCommandOutput {
     /// execution counts only for that explicit mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_inventory: Option<TestInventoryOutput>,
+    /// Why an inventory-only run rejected child evidence. This is bounded
+    /// diagnostic metadata; it never relaxes the evidence contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_inventory_rejection: Option<TestInventoryRejection>,
     /// Duration facts for this phase. Deliberately separate from `findings`:
     /// those drive failure classification, and a slow test is not a failing
     /// test. `None` when nothing could be measured — never a zeroed block.
@@ -93,6 +97,8 @@ pub struct TestRunWorkflowResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_inventory: Option<TestInventoryOutput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_inventory_rejection: Option<TestInventoryRejection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_durations: Option<TestDurations>,
     pub findings: Option<Vec<HomeboyFinding>>,
     #[serde(skip)]
@@ -125,6 +131,65 @@ pub struct TestInventoryOutput {
     /// Why a changed-scope selection deliberately widened to this inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+}
+
+/// Stable, non-sensitive reason descriptor-bound inventory evidence was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestInventoryRejection {
+    BindingUnavailable,
+    RequestedPathRejected,
+    PreparationFailed,
+    ChildFileMissing,
+    ChildFileUnsafe,
+    ChildFileOversized,
+    ChildFileUnreadable,
+    ChildFileCleanupFailed,
+    InvalidJson,
+    InvalidSchema,
+    RunnerFingerprintMismatch,
+    WorkspaceFingerprintMismatch,
+    InventoryFingerprintMismatch,
+    InvalidTests,
+    InvalidPayload,
+    RevalidationFailed,
+    PublicationFailed,
+}
+
+impl TestInventoryRejection {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::BindingUnavailable => "test inventory binding could not be established",
+            Self::RequestedPathRejected => {
+                "test inventory requested an output path outside the fixed workspace output"
+            }
+            Self::PreparationFailed => "test inventory temporary evidence could not be prepared",
+            Self::ChildFileMissing => {
+                "test inventory producer did not write its descriptor-bound evidence file"
+            }
+            Self::ChildFileUnsafe => "test inventory evidence file was not a regular safe file",
+            Self::ChildFileOversized => {
+                "test inventory evidence exceeded the maximum permitted size"
+            }
+            Self::ChildFileUnreadable => "test inventory evidence could not be read completely",
+            Self::ChildFileCleanupFailed => "test inventory evidence could not be consumed safely",
+            Self::InvalidJson => "test inventory evidence was not valid JSON",
+            Self::InvalidSchema => "test inventory evidence did not use the supported schema",
+            Self::RunnerFingerprintMismatch => {
+                "test inventory runner provenance did not match the bound runner"
+            }
+            Self::WorkspaceFingerprintMismatch => {
+                "test inventory workspace provenance did not match the bound workspace"
+            }
+            Self::InventoryFingerprintMismatch => {
+                "test inventory fingerprint did not match its canonical payload"
+            }
+            Self::InvalidTests => "test inventory contained invalid or duplicate test entries",
+            Self::InvalidPayload => "test inventory payload violated the evidence contract",
+            Self::RevalidationFailed => "test inventory binding changed while the producer ran",
+            Self::PublicationFailed => "validated test inventory could not be published safely",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

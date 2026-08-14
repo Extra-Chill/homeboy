@@ -395,6 +395,7 @@ mod tests {
             failure: None,
             test_counts: None,
             test_inventory: None,
+            test_inventory_rejection: None,
             test_durations: None,
             findings: None,
             coverage: None,
