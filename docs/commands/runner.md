@@ -239,6 +239,7 @@ homeboy runner refresh-homeboy <runner-id> --ref main --reconnect
 homeboy runner refresh-homeboy <runner-id> --source https://github.com/Extra-Chill/homeboy.git --ref <branch-or-sha>
 homeboy runner refresh-homeboy <runner-id> --select /path/to/homeboy --reconnect
 homeboy runner refresh-homeboy <runner-id> --ref <branch-or-sha> --dry-run
+homeboy runner refresh-homeboy <runner-id> --ref <branch-or-sha> --full
 ```
 
 Builds or selects the Homeboy binary used by runner/Lab job execution without
@@ -272,6 +273,23 @@ runners retain their existing direct execution path.
 
 Refreshing back to a release changes only the selected `homeboy_path`; existing
 runner environment and resource provenance remain intact.
+
+By default, stdout is a bounded `runner.refresh_homeboy` operator projection.
+It includes the exit state, selected binary, phase summary, failure/readiness
+state, and durable refresh artifact refs without streaming the generated script
+or build transcript. Pass `--full` to emit the complete refresh result on stdout.
+Global `--output <path>` always writes the lossless command-result envelope,
+regardless of `--full`; use it when automation needs every response field.
+
+Every refresh attempt creates one terminal observation run. Its redacted
+materialization script and complete build/select transcript are persisted for
+both successful and failed execution; planning or execution errors persist their
+redacted error record. The default projection returns the run id and artifact
+URIs. Retrieve them with `homeboy runs artifacts <run-id>` or inspect the run
+with `homeboy runs evidence <run-id> --full`. Persisted artifacts follow the
+standard terminal-run retention window and can be inspected or cleaned through
+`homeboy runs artifact cleanup-persisted` and `homeboy cleanup --include
+persisted-run-artifacts`.
 
 ### `dev-sync`
 

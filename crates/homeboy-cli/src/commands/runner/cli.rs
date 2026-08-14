@@ -369,6 +369,11 @@ pub(super) enum RunnerCommand {
         /// Print the plan without executing it or changing runner config
         #[arg(long)]
         dry_run: bool,
+
+        /// Emit the complete refresh result. The default is a bounded summary;
+        /// durable plan and build-log artifacts remain available from its run ref.
+        #[arg(long)]
+        full: bool,
     },
     /// Sync a controller-local Homeboy dev binary to the runner and select it for Lab jobs
     DevSync {

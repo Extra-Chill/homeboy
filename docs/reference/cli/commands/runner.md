@@ -339,6 +339,7 @@ Build or select the Homeboy binary used for runner/Lab jobs
 | `--force` | flag | Interrupt active daemon jobs when reconnecting |
 | `--allow-downgrade` | flag | Permit replacing a newer managed runner build with an older Git revision |
 | `--dry-run` | flag | Print the plan without executing it or changing runner config |
+| `--full` | flag | Emit the complete refresh result. The default is a bounded summary; durable plan and build-log artifacts remain available from its run ref |
 
 ## `homeboy runner dev-sync`
 

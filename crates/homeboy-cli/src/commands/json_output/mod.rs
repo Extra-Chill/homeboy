@@ -14,6 +14,9 @@ const MAX_AUDIT_TIMING_SPANS: usize = 8;
 const MAX_AUDIT_SCOPE_REASONS: usize = 8;
 const MAX_AUDIT_PROJECTION_TEXT_BYTES: usize = 160;
 const MAX_AUDIT_PROJECTION_BYTES: usize = 4 * 1024;
+const MAX_REFRESH_PROJECTION_BYTES: usize = 8 * 1024;
+const MAX_REFRESH_TEXT_BYTES: usize = 256;
+const MAX_REFRESH_PHASES: usize = 12;
 
 /// Dispatch a command to its handler and map the structured result to JSON.
 pub fn run(
@@ -95,6 +98,9 @@ pub fn run_command_output(
                 agent_task_command_run(result.0, result.1, summary_kind, full)
             }
         }
+        Commands::Runner(args) if refresh_homeboy_uses_bounded_output(&args) => {
+            refresh_homeboy_command_run(args, output_file)
+        }
         Commands::Runner(args) => runner::run_command_output(args),
         Commands::Activity(args) => command_run_with_summary(
             dispatch(Commands::Activity(args), spec, placement),
@@ -163,6 +169,139 @@ pub fn run_command_output(
     };
 
     run.with_command(spec.name)
+}
+
+fn refresh_homeboy_uses_bounded_output(args: &runner::RunnerArgs) -> bool {
+    runner::refresh_homeboy_uses_bounded_output(args)
+}
+
+/// `refresh-homeboy` can generate a multi-megabyte materialization script or
+/// build transcript. Keep stdout safe for terminal and agent consumers while
+/// preserving the exact command envelope for `--output` and `--full`.
+fn refresh_homeboy_command_run(args: runner::RunnerArgs, output_file: Option<&str>) -> CommandRun {
+    let (output_file_result, exit_code) =
+        crate::commands::utils::response::map_cmd_result_to_json(runner::run(args));
+    let stdout_result = Ok(match &output_file_result {
+        Ok(payload) => bounded_refresh_projection(payload, exit_code, output_file),
+        Err(error) => bounded_refresh_error_projection(error, exit_code, output_file),
+    });
+    CommandRun::from_command_stdout_result("runner", stdout_result, exit_code)
+        .with_output_file_result(output_file_result)
+}
+
+fn bounded_refresh_projection(payload: &Value, exit_code: i32, output_file: Option<&str>) -> Value {
+    let artifacts = payload.get("artifacts").cloned().unwrap_or_else(|| serde_json::json!({
+        "output": output_file,
+        "command": "rerun with --full for the complete result; --output writes the lossless envelope",
+    }));
+    let projection = serde_json::json!({
+        "schema": "homeboy/runner-refresh-homeboy-bounded-output/v1",
+        "command": "runner.refresh_homeboy",
+        "exit_code": exit_code,
+        "runner_id": payload.get("runner_id").and_then(Value::as_str).map(bounded_refresh_text),
+        "dry_run": payload.get("dry_run").and_then(Value::as_bool),
+        "selected_binary_path": payload.get("selected_binary_path").and_then(Value::as_str).map(bounded_refresh_text),
+        "daemon_refreshed": payload.get("daemon_refreshed").and_then(Value::as_bool),
+        "reconnect_required": payload.get("reconnect_required").and_then(Value::as_bool),
+        "readiness": refresh_readiness_summary(payload.get("readiness")),
+        "phases": payload.get("phase_summary").and_then(Value::as_array).map(|phases| phases.iter().take(MAX_REFRESH_PHASES).map(|phase| serde_json::json!({
+            "name": phase.get("name").and_then(Value::as_str).map(bounded_refresh_text),
+            "status": phase.get("status").and_then(Value::as_str).map(bounded_refresh_text),
+            "exit_code": phase.get("exit_code").and_then(Value::as_i64),
+        })).collect::<Vec<_>>()).unwrap_or_default(),
+        "failure": refresh_failure_summary(payload.get("failure")),
+        "artifacts": artifacts,
+        "full_command": "homeboy runner refresh-homeboy <runner> --full",
+    });
+    bounded_refresh_envelope(projection, exit_code)
+}
+
+fn bounded_refresh_error_projection(
+    error: &homeboy::core::Error,
+    exit_code: i32,
+    output_file: Option<&str>,
+) -> Value {
+    bounded_refresh_envelope(
+        serde_json::json!({
+            "schema": "homeboy/runner-refresh-homeboy-bounded-output/v1",
+            "command": "runner.refresh_homeboy",
+            "exit_code": exit_code,
+            "error": {
+                "code": error.code.as_str(),
+                "message": bounded_refresh_text(&error.message),
+            },
+            "artifacts": error.details.get("artifacts").cloned().unwrap_or_else(|| serde_json::json!({
+                "output": output_file,
+                "command": "rerun with --full for the complete error; --output writes the lossless envelope",
+            })),
+            "full_command": "homeboy runner refresh-homeboy <runner> --full",
+        }),
+        exit_code,
+    )
+}
+
+/// Enforce the budget after command-envelope rendering, because lifted action
+/// metadata, diagnostics, and pretty JSON all add bytes beyond the projection.
+fn bounded_refresh_envelope(projection: Value, exit_code: i32) -> Value {
+    if refresh_envelope_bytes(&projection, exit_code)
+        .is_ok_and(|bytes| bytes <= MAX_REFRESH_PROJECTION_BYTES)
+    {
+        return projection;
+    }
+    let fallback = serde_json::json!({
+        "schema": "homeboy/runner-refresh-homeboy-bounded-output/v1",
+        "command": "runner.refresh_homeboy",
+        "exit_code": exit_code,
+        "full_command": "homeboy runner refresh-homeboy <runner> --full",
+    });
+    debug_assert!(refresh_envelope_bytes(&fallback, exit_code)
+        .is_ok_and(|bytes| bytes <= MAX_REFRESH_PROJECTION_BYTES));
+    fallback
+}
+
+fn refresh_envelope_bytes(payload: &Value, exit_code: i32) -> serde_json::Result<usize> {
+    let response = crate::commands::utils::response::cli_response_for_json_result_for_command(
+        &Ok(payload.clone()),
+        exit_code,
+        "runner",
+        None,
+    );
+    serde_json::to_string_pretty(&response).map(|rendered| rendered.len())
+}
+
+fn refresh_readiness_summary(readiness: Option<&Value>) -> Value {
+    let Some(readiness) = readiness else {
+        return Value::Null;
+    };
+    serde_json::json!({
+        "state": readiness.get("state").and_then(Value::as_str).map(bounded_refresh_text),
+        "accepting_jobs": readiness.get("accepting_jobs").and_then(Value::as_bool),
+        "daemon_fresh": readiness.get("daemon_fresh").and_then(Value::as_bool),
+        "continuation": readiness.get("continuation").and_then(Value::as_str).map(bounded_refresh_text),
+    })
+}
+
+fn refresh_failure_summary(failure: Option<&Value>) -> Value {
+    let Some(failure) = failure else {
+        return Value::Null;
+    };
+    serde_json::json!({
+        "exit_code": failure.get("exit_code").and_then(Value::as_i64),
+        "verification": failure.get("verification").and_then(Value::as_str).map(bounded_refresh_text),
+        "job_id": failure.get("job_id").and_then(Value::as_str).map(bounded_refresh_text),
+        "mirror_run_id": failure.get("mirror_run_id").and_then(Value::as_str).map(bounded_refresh_text),
+    })
+}
+
+fn bounded_refresh_text(value: &str) -> String {
+    if value.len() <= MAX_REFRESH_TEXT_BYTES {
+        return value.to_string();
+    }
+    let mut end = MAX_REFRESH_TEXT_BYTES - 3;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &value[..end])
 }
 
 fn changed_since_audit_uses_bounded_output(command: &Commands) -> bool {
@@ -713,6 +852,100 @@ mod tests {
         );
         let written: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(written["data"], payload);
+    }
+
+    #[test]
+    fn refresh_homeboy_output_file_is_lossless_while_stdout_is_hard_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("refresh.json");
+        let payload = serde_json::json!({
+            "runner_id": "lab",
+            "dry_run": true,
+            "selected_binary_path": "/runner/homeboy",
+            "daemon_refreshed": false,
+            "reconnect_required": true,
+            "phase_summary": (0..100).map(|_| serde_json::json!({ "name": "materialize", "status": "failed", "exit_code": 1 })).collect::<Vec<_>>(),
+            "failure": { "exit_code": 1, "stdout": "x".repeat(512 * 1024), "stderr": "y".repeat(512 * 1024) },
+            "plan": { "script": "z".repeat(512 * 1024) },
+            "artifacts": {
+                "run_id": "run-1",
+                "materialization_script": "homeboy://run/run-1/artifact/materialization-script-run-1",
+                "build_log": "homeboy://run/run-1/artifact/build-log-run-1"
+            }
+        });
+        let bounded = bounded_refresh_projection(&payload, 1, Some("refresh.json"));
+        let rendered = serde_json::to_vec(&bounded).expect("bounded projection serializes");
+        assert!(
+            refresh_envelope_bytes(&bounded, 1).expect("envelope serializes")
+                <= MAX_REFRESH_PROJECTION_BYTES
+        );
+        assert!(!String::from_utf8_lossy(&rendered).contains(&"x".repeat(512)));
+        assert_eq!(bounded["artifacts"]["run_id"], "run-1");
+
+        let run = CommandRun::from_command_stdout_result("runner", Ok(bounded), 1)
+            .with_output_file_result(Ok(payload.clone()));
+        super::super::output_runtime::write_output_file(
+            &run,
+            crate::command_contract::CommandOutputFileMode::GenericEnvelope,
+            Some(path.to_str().expect("utf8 path")),
+        );
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(written["data"], payload);
+    }
+
+    #[test]
+    fn refresh_homeboy_success_projection_keeps_the_final_envelope_bounded() {
+        let payload = serde_json::json!({
+            "runner_id": "lab",
+            "phase_summary": (0..100).map(|_| serde_json::json!({ "name": "materialize", "status": "succeeded", "exit_code": 0 })).collect::<Vec<_>>(),
+            "artifacts": { "run_id": "run-1", "materialization_script": "homeboy://run/run-1/artifact/materialization-script" },
+            "plan": { "script": "z".repeat(512 * 1024) },
+        });
+
+        let projection = bounded_refresh_projection(&payload, 0, None);
+        assert!(
+            refresh_envelope_bytes(&projection, 0).expect("envelope serializes")
+                <= MAX_REFRESH_PROJECTION_BYTES
+        );
+        assert_eq!(projection["artifacts"]["run_id"], "run-1");
+    }
+
+    #[test]
+    fn refresh_homeboy_error_projection_is_bounded_and_keeps_durable_artifacts() {
+        let mut error = homeboy::core::Error::validation_invalid_argument(
+            "target_dir",
+            "x".repeat(512 * 1024),
+            None,
+            None,
+        );
+        error.details["artifacts"] = serde_json::json!({
+            "run_id": "run-1",
+            "error_log": "homeboy://run/run-1/artifact/error-log-run-1",
+        });
+
+        let projection = bounded_refresh_error_projection(&error, 2, None);
+        assert!(
+            refresh_envelope_bytes(&projection, 2).expect("envelope serializes")
+                <= MAX_REFRESH_PROJECTION_BYTES
+        );
+        assert_eq!(projection["artifacts"]["run_id"], "run-1");
+        assert!(!serde_json::to_string(&projection)
+            .unwrap()
+            .contains(&"x".repeat(512)));
+    }
+
+    #[test]
+    fn refresh_homeboy_projection_drops_oversized_artifacts_to_fit_the_final_envelope() {
+        let payload = serde_json::json!({
+            "artifacts": { "run_id": "run-1", "build_log": "x".repeat(512 * 1024) },
+        });
+
+        let projection = bounded_refresh_projection(&payload, 1, None);
+        assert!(
+            refresh_envelope_bytes(&projection, 1).expect("envelope serializes")
+                <= MAX_REFRESH_PROJECTION_BYTES
+        );
+        assert!(projection.get("artifacts").is_none());
     }
 
     #[test]

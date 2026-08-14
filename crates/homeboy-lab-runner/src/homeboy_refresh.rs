@@ -118,6 +118,25 @@ pub struct HomeboyBinaryRefreshOutput {
     pub bootstrap_provenance: Option<HomeboyBootstrapProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback: Option<HomeboyBinaryRefreshRollback>,
+    /// Complete materialization/select transcript retained by the controller
+    /// artifact projection. It is intentionally excluded from response payloads.
+    #[serde(skip)]
+    pub build_transcript: Option<String>,
+    /// Controller-persisted, redacted durable records of the complete plan and
+    /// any captured build output. Added by the CLI presentation boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<HomeboyBinaryRefreshArtifacts>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomeboyBinaryRefreshArtifacts {
+    pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialization_script: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_log: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_log: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -441,6 +460,8 @@ pub fn refresh_homeboy_binary(
                 failure: None,
                 bootstrap_provenance: None,
                 rollback: None,
+                build_transcript: None,
+                artifacts: None,
                 plan,
             },
             0,
@@ -486,9 +507,11 @@ pub fn refresh_homeboy_binary(
                 followup_commands: plan.followup_commands.clone(),
                 readiness: Some(failed_refresh_readiness(&plan)),
                 reconnect_deferred: None,
-                failure: Some(refresh_failure(&plan, exec_output, exit_code)),
+                failure: Some(refresh_failure(&plan, exec_output.clone(), exit_code)),
                 bootstrap_provenance: None,
                 rollback: None,
+                build_transcript: Some(refresh_build_transcript(&exec_output)),
+                artifacts: None,
                 plan,
             },
             exit_code,
@@ -542,6 +565,8 @@ pub fn refresh_homeboy_binary(
                 failure: None,
                 bootstrap_provenance: None,
                 rollback: None,
+                build_transcript: Some(refresh_build_transcript(&exec_output)),
+                artifacts: None,
             },
             1,
         ));
@@ -734,6 +759,8 @@ pub fn refresh_homeboy_binary(
                     failure: Some(failure),
                     bootstrap_provenance: None,
                     rollback: None,
+                    build_transcript: Some(refresh_build_transcript(&exec_output)),
+                    artifacts: None,
                     plan,
                 },
                 1,
@@ -832,6 +859,8 @@ pub fn refresh_homeboy_binary(
                     failure: None,
                     bootstrap_provenance: None,
                     rollback: rollback.clone(),
+                    build_transcript: Some(refresh_build_transcript(&exec_output)),
+                    artifacts: None,
                 },
                 if converged { 0 } else { 1 },
             ));
@@ -876,6 +905,8 @@ pub fn refresh_homeboy_binary(
                         failure: None,
                         bootstrap_provenance: None,
                         rollback: rollback.clone(),
+                        build_transcript: Some(refresh_build_transcript(&exec_output)),
+                        artifacts: None,
                     },
                     1,
                 ));
@@ -951,6 +982,8 @@ pub fn refresh_homeboy_binary(
                             &updated_fields,
                         )),
                         rollback: rollback.clone(),
+                        build_transcript: Some(refresh_build_transcript(&exec_output)),
+                        artifacts: None,
                     },
                     1,
                 ));
@@ -1008,6 +1041,8 @@ pub fn refresh_homeboy_binary(
                         &updated_fields,
                     )),
                     rollback: rollback.clone(),
+                    build_transcript: Some(refresh_build_transcript(&exec_output)),
+                    artifacts: None,
                 },
                 reconnect_exit_code,
             ));
@@ -1078,6 +1113,8 @@ pub fn refresh_homeboy_binary(
                             &updated_fields,
                         )),
                         rollback: rollback.clone(),
+                        build_transcript: Some(refresh_build_transcript(&exec_output)),
+                        artifacts: None,
                     },
                     1,
                 ));
@@ -1145,6 +1182,8 @@ pub fn refresh_homeboy_binary(
                 config_fields_changed: updated_fields.clone(),
             }),
             rollback,
+            build_transcript: Some(refresh_build_transcript(&exec_output)),
+            artifacts: None,
         },
         if converged { 0 } else { 1 },
     ))
@@ -1901,6 +1940,13 @@ fn refresh_error_with_phase_summary(
         |_| serde_json::json!([{ "name": "refresh", "status": "failed", "required": true }]),
     );
     error
+}
+
+fn refresh_build_transcript(execution: &RunnerExecOutput) -> String {
+    format!(
+        "stdout:\n{}\n\nstderr:\n{}",
+        execution.stdout, execution.stderr
+    )
 }
 
 fn runner_commits_are_ancestral(

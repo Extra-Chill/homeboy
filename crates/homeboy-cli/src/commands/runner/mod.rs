@@ -35,6 +35,13 @@ pub fn is_compact_exec_stdout(args: &RunnerArgs) -> bool {
     args.compact_exec_stdout()
 }
 
+pub(crate) fn refresh_homeboy_uses_bounded_output(args: &RunnerArgs) -> bool {
+    matches!(
+        &args.command,
+        cli::RunnerCommand::RefreshHomeboy { full: false, .. }
+    ) && !homeboy::core::lab_routing::is_lab_offload_subprocess()
+}
+
 pub fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::CommandRun {
     match args.command {
         cli::RunnerCommand::Exec {
