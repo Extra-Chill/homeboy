@@ -45,6 +45,7 @@ export RESULTS='{"review lint":"fail","review test":"fail"}'
 export GITHUB_SERVER_URL="https://github.com"
 export GITHUB_REPOSITORY="Extra-Chill/homeboy-action"
 export GITHUB_RUN_ID="12345"
+export GITHUB_REPOSITORY="Extra-Chill/homeboy-action"
 export HOMEBOY_CLI_VERSION="homeboy 1.2.3"
 export HOMEBOY_EXTENSION_ID="nodejs"
 export HOMEBOY_EXTENSION_SOURCE="https://github.com/Extra-Chill/homeboy-extensions"
@@ -59,6 +60,7 @@ export SCOPE_BASE_REF="abc123base"
 export GITHUB_ENV="${ENV_FILE}"
 export GITHUB_STEP_SUMMARY="${SUMMARY_FILE}"
 export HOMEBOY_OBSERVATIONS_DIR="${TMPDIR}/observations"
+export GITHUB_ACTION_PATH="${ROOT}"
 
 bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
 
@@ -123,5 +125,25 @@ grep -F -- '- Baseline command: `homeboy review test wordpress --path /work --ch
 grep -F -- '- Baseline result: `fail` (exit `1`)' "${DIGEST_FILE}" >/dev/null
 grep -F -- '- Candidate result: `baseline_red`' "${DIGEST_FILE}" >/dev/null
 grep -F -- '- Artifact refs: `review-test.json`, `baseline-review-test.json`, `baseline-review-test.log`' "${DIGEST_FILE}" >/dev/null
+
+cp "${ROOT}/scripts/pr/comment/fixtures/timeout-recipe-byte-map.json" "${OUTPUT_DIR}/review-test.json"
+export RESULTS='{"review test":"timeout"}'
+export GITHUB_RUN_URL="https://github.com/Extra-Chill/homeboy-action/actions/runs/12345"
+export GITHUB_PR_URL="https://github.com/Extra-Chill/data-machine/pull/3192"
+export HOMEBOY_CI_RESULTS_ARTIFACT="homeboy-ci-results-timeout"
+export HOMEBOY_OBSERVATIONS_ARTIFACT="homeboy-observations-timeout"
+export HOMEBOY_TEST_TIMEOUT_SECONDS=1500
+
+bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
+
+grep -F "### Timeout triage" "${DIGEST_FILE}" >/dev/null
+grep -F 'elapsed/budget: `1500s / 1500s`' "${DIGEST_FILE}" >/dev/null
+grep -F 'Selected: `282`; counts: incomplete (test counts absent)' "${DIGEST_FILE}" >/dev/null
+grep -F 'homeboy review ci triage https://github.com/Extra-Chill/data-machine/pull/3192' "${DIGEST_FILE}" >/dev/null
+grep -F "homeboy runs import --from-gh-actions --component wordpress --repo Extra-Chill/homeboy-action --artifact-glob 'homeboy-observations-timeout' --run-id 12345" "${DIGEST_FILE}" >/dev/null
+if grep -Fq 'top-secret-token\|do-not-display\|ghp_abcdefghijklmnopqrstuvwxyz0123456789' "${DIGEST_FILE}"; then
+  echo "timeout digest exposed a secret or byte-map payload" >&2
+  exit 1
+fi
 
 echo "generate failure digest wrapper checks passed"

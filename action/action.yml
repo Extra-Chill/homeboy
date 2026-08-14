@@ -651,6 +651,12 @@ runs:
         RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
+        HOMEBOY_CI_RESULTS_ARTIFACT: ${{ steps.artifact-names.outputs.homeboy-ci-results }}
+        HOMEBOY_OBSERVATIONS_ARTIFACT: ${{ steps.artifact-names.outputs.homeboy-observations }}
+        GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        GITHUB_PR_URL: ${{ github.event.pull_request.html_url }}
+        HOMEBOY_TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds || env.HOMEBOY_TEST_TIMEOUT_SECONDS || '1500' }}
+        HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
       run: bash ${{ github.action_path }}/scripts/digest/generate-failure-digest.sh
 
     - name: Run release
@@ -754,6 +760,9 @@ runs:
         HOMEBOY_CI_RESULTS_ARTIFACT: ${{ steps.artifact-names.outputs.homeboy-ci-results }}
         HOMEBOY_OBSERVATIONS_ARTIFACT: ${{ steps.artifact-names.outputs.homeboy-observations }}
         GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        GITHUB_PR_URL: ${{ github.event.pull_request.html_url }}
+        HOMEBOY_TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds || env.HOMEBOY_TEST_TIMEOUT_SECONDS || '1500' }}
+        HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
       run: bash ${{ github.action_path }}/scripts/pr/post-pr-comment.sh
 
     # ── Phase 7: Auto-issue filing ──
