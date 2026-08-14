@@ -1532,7 +1532,9 @@ pub(crate) fn run_lab_offload_inner(
     }
     let blocking_runner_homeboy_drift = direct_capability_admission
         .as_ref()
-        .map(|admission| require_exact_runner_version || !admission.compatible)
+        .map(|admission| {
+            capability_admission_has_blocking_drift(admission, require_exact_runner_version)
+        })
         .unwrap_or_else(|| {
             lab_runner_homeboy_has_blocking_drift_against_configured_identity(
                 &runner_status,

@@ -659,6 +659,48 @@ fn exact_immutable_daemon_supplies_command_capabilities_when_the_second_probe_is
 }
 
 #[test]
+fn strict_capability_admission_accepts_only_compatible_exact_source() {
+    use homeboy_lab_runner_contract::{
+        LabCapabilityAdmission, LabCapabilityNegotiationProvenance, LabRuntimeAncestry,
+        LabRuntimeIdentity,
+    };
+
+    let identity = LabRuntimeIdentity {
+        build_identity: "homeboy 0.348.7+5ebb24a09bc5".to_string(),
+        source_revision: "5ebb24a09bc5".to_string(),
+        clean: true,
+    };
+    let admission = |compatible, ancestry| LabCapabilityAdmission {
+        compatible,
+        provenance: LabCapabilityNegotiationProvenance {
+            schema: "homeboy/lab-capability-negotiation/v1".to_string(),
+            controller_requirement: identity.clone(),
+            executed_runner_command: identity.clone(),
+            active_daemon: identity.clone(),
+            ancestry,
+            negotiated_capabilities: Vec::new(),
+            compatible,
+            rejection_reason: (!compatible).then(|| "incompatible".to_string()),
+        },
+    };
+
+    let exact = admission(true, LabRuntimeAncestry::ExactSource);
+    assert!(!capability_admission_has_blocking_drift(&exact, true));
+    assert!(!capability_admission_has_blocking_drift(&exact, false));
+
+    let newer = admission(true, LabRuntimeAncestry::VerifiedNewerDescendant);
+    assert!(capability_admission_has_blocking_drift(&newer, true));
+    assert!(!capability_admission_has_blocking_drift(&newer, false));
+
+    let incompatible = admission(false, LabRuntimeAncestry::ExactSource);
+    assert!(capability_admission_has_blocking_drift(&incompatible, true));
+    assert!(capability_admission_has_blocking_drift(
+        &incompatible,
+        false
+    ));
+}
+
+#[test]
 fn daemon_capabilities_do_not_substitute_for_a_conflicting_configured_identity() {
     let hash = "a".repeat(64);
     let identity = "homeboy 0.348.6+b83a29fa4dea";
