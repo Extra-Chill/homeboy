@@ -13,8 +13,11 @@ homeboy status --global
 
 `homeboy status` behaves differently depending on whether you pass a project:
 
-- **`homeboy status`** (no project) — a **git/workspace** summary of the
-  components in scope. The `ready_to_deploy` list is **git-state only**.
+- **`homeboy status`** (no project) — an inventory-free local snapshot. It
+  reports controller freshness and explicitly marks CWD/context, Git, runner,
+  and control-plane inventory as `not_checked`; it makes no claim that the CWD
+  is registered or unregistered. Use `homeboy status --full` for the complete
+  workspace/context report, or `homeboy status --all` for component inspection.
 - **`homeboy status <project>`** — a **target-accurate** dashboard that
   compares each component's installed-on-target version against its latest
   release tag and reports `current` / `outdated` / `pinned_current`.
@@ -30,6 +33,25 @@ unverified in this snapshot because proving it requires a runner-specific
 inspection; use `homeboy runner status --full` for that bounded remote work.
 When the local daemon is not admitting work, the snapshot returns
 `homeboy daemon recover` as the repair command (dry-run by default).
+
+The default snapshot emits named stderr progress for its controller-cache and
+compact-snapshot phases. It does not perform context, inventory, Git, or runner
+enrichment, so mounted or unavailable inventory storage cannot delay it. Use
+`--full`, `--all`, a registry scope, project status, or `--global` to opt into
+the corresponding detailed inspection. Component filters and `--refresh` need
+an explicit component scope or `--all`; unscoped use returns an actionable
+validation error rather than an empty snapshot. `--full`, `--all`, and registry
+scopes run context/inventory resolution in an isolated same-binary child. The
+parent reports named progress, caps both child output streams, and terminates
+the child process group at the shared 30-second deadline. A timed-out or failed
+probe returns a typed `partial` result that retains the parent controller facts,
+names the stopping phase, and includes a deterministic `replay_commands` entry.
+Once component inspection starts, Git and remote probes share that budget, with
+independent local-Git and fetch deadlines.
+
+`--full` is exclusively the context report. It rejects component filters and
+`--refresh` rather than silently ignoring them. Use `--all` or an explicit
+component scope for filtered or refreshed component inspection.
 
 ## `ready_to_deploy` is git-state only (read this)
 
@@ -142,7 +164,7 @@ themselves.
 - `--all` — show all components regardless of current directory context
 - `--global` — show the local, count-only control-plane snapshot from any CWD; no component remote fetches or runner probes
 - `--outdated` — (project mode) show only components whose installed-on-target version is behind the latest release
-- `--timings` — emit phase progress to stderr and include phase timings in JSON, useful when diagnosing slow status runs
+- `--timings` — include completed phase timings in JSON, useful when diagnosing slow status runs
 
 ## Scope selectors
 

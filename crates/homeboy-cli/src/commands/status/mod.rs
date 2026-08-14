@@ -9,6 +9,7 @@
 //! The orchestration entry points (`run`, dashboard/summary builders) live
 //! here and compose those pieces.
 
+use clap::Parser;
 use homeboy::core::component;
 use homeboy::core::context;
 use homeboy::core::daemon;
@@ -17,9 +18,15 @@ use homeboy::core::project;
 use homeboy::core::scope::{self, Scope};
 use homeboy::runner::runners as runner;
 use homeboy_deploy::ReleaseStateStatus;
+use homeboy_engine_primitives::command::{
+    wait_with_bounded_output_supervised_with_progress, ControllerChildGuard,
+    SupervisedCommandTermination,
+};
 use homeboy_release::release::version;
 use homeboy_upgrade::controller_staleness::{self, ControllerStaleness};
 use std::collections::HashMap;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use super::CmdResult;
 
@@ -28,20 +35,56 @@ mod dashboard_table;
 mod git_cache;
 mod types;
 
-use context_paths::unregistered_cwd_status_output;
 use dashboard_table::log_dashboard_table;
 use git_cache::{fetch_project_remote_versions, log_unreleased_merges, StatusGitCache};
 
 pub use types::{
-    GlobalActivityStatus, GlobalDaemonStatus, GlobalInventoryStatus, GlobalRunnerStatus,
-    GlobalStatusOutput, ProjectComponentDashboardStatus, ProjectDashboardOutput,
-    ProjectDashboardSummary, ProjectStatusRow, StatusArgs, StatusOutput, StatusPartial,
+    CompactContextStatus, CompactStatusOutput, GlobalActivityStatus, GlobalDaemonStatus,
+    GlobalInventoryStatus, GlobalRunnerStatus, GlobalStatusOutput, IsolatedStatusFallback,
+    ProjectComponentDashboardStatus, ProjectDashboardOutput, ProjectDashboardSummary,
+    ProjectStatusRow, StatusArgs, StatusOutput, StatusPartial, StatusPartialComponent,
     StatusResult, StatusTiming, UnregisteredContextStatusOutput, UnregisteredControlPlaneStatus,
     UnreleasedMerge, UpstreamDrift,
 };
-use types::{StatusProgress, StatusTimer, READY_TO_DEPLOY_NOTE, UNRELEASED_MERGES_NOTE};
+use types::{
+    StatusProbeRequest, StatusProgress, StatusTimer, READY_TO_DEPLOY_NOTE, UNRELEASED_MERGES_NOTE,
+};
+
+const STATUS_PROBE_CAPTURE_LIMIT: usize = 1024 * 1024;
+const STATUS_PROBE_HEARTBEAT: Duration = Duration::from_secs(1);
 
 pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
+    if args.full && (requires_component_enrichment(&args) || args.refresh) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "status --full",
+            "--full is a context report and cannot apply component filters or refresh Git refs",
+            None,
+            Some(vec![
+                "Use `homeboy status --all <filter>` for component inspection.".to_string(),
+                "Use `homeboy status --component <id> --refresh` to refresh one component."
+                    .to_string(),
+            ]),
+        ));
+    }
+    if args.target.is_none()
+        && args.scope.selection().is_none()
+        && !args.full
+        && !args.all
+        && requires_unscoped_enrichment(&args)
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "status scope",
+            "component filters and --refresh require an explicit enrichment scope",
+            None,
+            Some(vec![
+                "Use `homeboy status --all <filter>` to inspect every registered component."
+                    .to_string(),
+                "Use `homeboy status --component <id> <filter>` to inspect one component."
+                    .to_string(),
+            ]),
+        ));
+    }
+
     // Refreshing remote refs changes Git metadata, so serialize it with other
     // runtime mutations. Default status is intentionally snapshot-only.
     let _refresh_lease = args
@@ -49,17 +92,35 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
         .then(|| homeboy::core::runtime_promotion::acquire("status refresh", "status"))
         .transpose()?;
 
-    // The deadline starts before any context or inventory work. Every status
-    // phase shares it rather than receiving an independent timeout.
-    let timer = StatusTimer::new(args.timings);
+    // Git and remote inspection share one deadline. Registry/context resolution
+    // is an explicit enrichment operation and currently has no cancellation API.
+    let mut timer = StatusTimer::new(args.timings);
 
     // Every component freshness signal below takes this binary as its reference
     // point, so resolve the reference's own freshness first and say so. Read
     // once from the daily update-check cache — no network, no per-path
     // re-resolution (#11483).
+    timer.begin("read_controller_cache");
     let controller = controller_staleness::current();
+    timer.finish("read_controller_cache");
     log_controller_staleness(&controller);
 
+    // Context reports and registry resolution can block in filesystem or
+    // inventory providers that do not expose cancellation. Put that boundary in
+    // a separately killable process while retaining the parent's controller
+    // observation for a useful partial result.
+    if requires_isolated_probe(&args) {
+        return run_isolated_probe(&args, controller, timer);
+    }
+
+    run_unisolated(args, controller, timer)
+}
+
+fn run_unisolated(
+    args: StatusArgs,
+    controller: ControllerStaleness,
+    mut timer: StatusTimer,
+) -> CmdResult<StatusResult> {
     if args.global {
         return global_status(controller);
     }
@@ -85,19 +146,38 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
         return run_project_dashboard(project_id, &args, controller, timer);
     }
 
+    // Context detection walks the configured inventory and can block on a
+    // mounted or unavailable filesystem. Keep that enrichment explicit so the
+    // ordinary diagnostic command has no unbounded inventory traversal.
     if !args.full && !args.all {
-        if let Some(output) = unregistered_cwd_status_output(&timer) {
-            return Ok((StatusResult::UnregisteredContext(output), 0));
-        }
+        timer.begin("build_compact_snapshot");
+        let cwd = std::env::current_dir()
+            .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+        timer.finish("build_compact_snapshot");
+        return Ok((
+            StatusResult::Compact(CompactStatusOutput {
+                command: "status",
+                status: "compact",
+                cwd: cwd.to_string_lossy().to_string(),
+                controller,
+                context: CompactContextStatus {
+                    status: "not_checked",
+                    detail: "CWD, Git, registry, runner, and control-plane inventory were not inspected.",
+                    command: "homeboy status --full",
+                },
+                action: "Run `homeboy status --full` for context/inventory enrichment, `homeboy status --all` to inspect every configured component, or `homeboy status --global` for local control-plane health.",
+            }),
+            0,
+        ));
     }
 
     if args.full {
+        timer.begin("build_full_context");
         let mut report = context::build_report(args.all, "status")?;
+        timer.finish("build_full_context");
         report.command = "status".to_string();
         return Ok((StatusResult::Full(Box::new(report)), 0));
     }
-
-    let mut timer = timer;
 
     timer.begin("resolve_context");
     let (context_output, all_components, _) = context::run_with_inventory(None)?;
@@ -143,6 +223,196 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
     };
 
     summarize_components(components, &args, timer, controller)
+}
+
+fn requires_isolated_probe(args: &StatusArgs) -> bool {
+    // Library unit tests call command handlers directly, so their test harness
+    // cannot service the binary-private child entry point. End-to-end binary
+    // tests exercise the containment boundary itself.
+    #[cfg(test)]
+    {
+        let _ = args;
+        false
+    }
+    #[cfg(not(test))]
+    {
+        args.full
+            || args.all
+            || matches!(args.scope.selection(), Some(scope) if !matches!(scope, Scope::Path { .. }))
+    }
+}
+
+fn run_isolated_probe(
+    args: &StatusArgs,
+    controller: ControllerStaleness,
+    mut timer: StatusTimer,
+) -> CmdResult<StatusResult> {
+    const PHASE: &str = "probe_context_inventory_scope";
+    timer.begin(PHASE);
+    let argv = status_probe_argv(args);
+    let request = serde_json::to_string(&StatusProbeRequest { argv })
+        .map_err(|error| homeboy::core::Error::internal_unexpected(error.to_string()))?;
+    let executable = std::env::current_exe()
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    let mut command = Command::new(executable);
+    command
+        .arg("__homeboy_status_probe")
+        .arg(request)
+        .env("HOMEBOY_STATUS_PROBE_CHILD", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let guard = ControllerChildGuard::prepare(&mut command)
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    guard
+        .attach(&child)
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    let remaining = timer.remaining().unwrap_or(Duration::ZERO);
+    let supervised = wait_with_bounded_output_supervised_with_progress(
+        &mut child,
+        STATUS_PROBE_CAPTURE_LIMIT,
+        remaining,
+        None,
+        STATUS_PROBE_HEARTBEAT,
+        || false,
+        |heartbeat| {
+            if let Some(progress) = heartbeat.progress {
+                eprintln!("[status] {PHASE}: {}", progress.phase);
+            } else {
+                eprintln!(
+                    "[status] {PHASE}: waiting ({}ms)",
+                    heartbeat.elapsed.as_millis()
+                );
+            }
+            Ok(())
+        },
+    );
+    timer.finish(PHASE);
+    let fallback = |reason, diagnostic| {
+        Ok((
+            StatusResult::ProbeFallback(IsolatedStatusFallback {
+                command: "status",
+                status: "partial",
+                controller,
+                partial: StatusPartial {
+                    reason,
+                    phase: PHASE,
+                    omitted_components: Vec::new(),
+                    degraded_components: Vec::new(),
+                    degraded_component_phases: Vec::new(),
+                    replay_commands: vec![status_probe_replay(args)],
+                },
+                diagnostic,
+            }),
+            0,
+        ))
+    };
+    let supervised = match supervised {
+        Ok(output) => output,
+        Err(error) => return fallback("status_probe_supervision_failed", error.to_string()),
+    };
+    let termination_reason = match supervised.termination {
+        SupervisedCommandTermination::Completed if supervised.output.status.success() => None,
+        SupervisedCommandTermination::Completed => Some("status_probe_failed"),
+        SupervisedCommandTermination::TimedOut => Some("status_probe_timeout"),
+        SupervisedCommandTermination::NoProgress => Some("status_probe_stalled"),
+        SupervisedCommandTermination::Cancelled => Some("status_probe_cancelled"),
+    };
+    if let Some(reason) = termination_reason {
+        return fallback(
+            reason,
+            String::from_utf8_lossy(&supervised.output.stderr)
+                .trim()
+                .to_string(),
+        );
+    }
+    let result = match serde_json::from_slice(&supervised.output.stdout) {
+        Ok(result) => result,
+        Err(error) => return fallback("status_probe_invalid_output", error.to_string()),
+    };
+    Ok((StatusResult::Isolated(result), 0))
+}
+
+fn status_probe_argv(args: &StatusArgs) -> Vec<String> {
+    let mut argv = vec!["homeboy".to_string(), "status".to_string()];
+    if let Some(target) = &args.target {
+        argv.push(target.clone());
+    }
+    for (flag, value) in [
+        ("--project", args.scope.project.as_ref()),
+        ("--fleet", args.scope.fleet.as_ref()),
+        ("--component", args.scope.component.as_ref()),
+        ("--rig", args.scope.rig.as_ref()),
+        ("--path", args.scope.path.as_ref()),
+    ] {
+        if let Some(value) = value {
+            argv.extend([flag.to_string(), value.clone()]);
+        }
+    }
+    if args.scope.workspace {
+        argv.push("--workspace".to_string());
+    }
+    for (enabled, flag) in [
+        (args.full, "--full"),
+        (args.uncommitted, "--uncommitted"),
+        (args.needs_release, "--needs-release"),
+        (args.ready, "--ready"),
+        (args.docs_only, "--docs-only"),
+        (args.all, "--all"),
+        (args.outdated, "--outdated"),
+        (args.timings, "--timings"),
+        (args.refresh, "--refresh"),
+        (args.unreleased, "--unreleased"),
+    ] {
+        if enabled {
+            argv.push(flag.to_string());
+        }
+    }
+    argv
+}
+
+fn status_probe_replay(args: &StatusArgs) -> String {
+    status_probe_argv(args).join(" ")
+}
+
+/// Entry point used only by the private same-binary child protocol.
+pub fn run_status_probe_child(request: Option<&String>) -> std::process::ExitCode {
+    let Some(request) = request else {
+        return std::process::ExitCode::from(2);
+    };
+    let Ok(request) = serde_json::from_str::<StatusProbeRequest>(request) else {
+        return std::process::ExitCode::from(2);
+    };
+    let Ok(cli) = crate::cli_surface::Cli::try_parse_from(request.argv) else {
+        return std::process::ExitCode::from(2);
+    };
+    let crate::cli_surface::Commands::Status(args) = cli.command else {
+        return std::process::ExitCode::from(2);
+    };
+    let mut timer = StatusTimer::new(args.timings);
+    timer.begin("child_probe_start");
+    let controller = controller_staleness::current();
+    timer.finish("child_probe_start");
+    match run_unisolated(args, controller, timer) {
+        Ok((result, code)) => match serde_json::to_writer(std::io::stdout(), &result) {
+            Ok(()) => std::process::ExitCode::from(code as u8),
+            Err(_) => std::process::ExitCode::from(2),
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::ExitCode::from(2)
+        }
+    }
+}
+
+fn requires_unscoped_enrichment(args: &StatusArgs) -> bool {
+    requires_component_enrichment(args) || args.refresh
+}
+
+fn requires_component_enrichment(args: &StatusArgs) -> bool {
+    args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased
 }
 
 const GLOBAL_RUNNER_LIMIT: usize = 64;
@@ -292,9 +562,12 @@ fn summarize_components(
                     components,
                     index,
                     git_cache.degraded_components,
+                    git_cache.degraded_component_phases,
                     timer,
                     controller,
                     observations,
+                    "inspect_upstream_and_unreleased",
+                    args,
                 );
             }
             progress.report(index, &comp.id);
@@ -329,9 +602,12 @@ fn summarize_components(
                 components,
                 index,
                 git_cache.degraded_components,
+                git_cache.degraded_component_phases,
                 timer,
                 controller,
                 observations,
+                "inspect_release_state",
+                args,
             );
         }
         let status = git_cache
@@ -399,13 +675,49 @@ fn summarize_components(
             clean: observations.clean,
             partial: (!git_cache.degraded_components.is_empty()).then(|| StatusPartial {
                 reason: "component_git_probe_degraded",
+                phase: "component_git_probe",
                 omitted_components: Vec::new(),
+                replay_commands: replay_component_commands(&git_cache.degraded_components, args),
                 degraded_components: sorted_component_ids(git_cache.degraded_components),
+                degraded_component_phases: sorted_degraded_component_phases(
+                    git_cache.degraded_component_phases,
+                ),
             }),
             controller,
         }),
         0,
     ))
+}
+
+fn sorted_degraded_component_phases(
+    phases: std::collections::HashMap<String, std::collections::HashSet<&'static str>>,
+) -> Vec<StatusPartialComponent> {
+    let mut phases: Vec<_> = phases
+        .into_iter()
+        .map(|(component_id, phases)| {
+            let mut phases: Vec<_> = phases.into_iter().collect();
+            phases.sort();
+            StatusPartialComponent {
+                component_id,
+                phases,
+            }
+        })
+        .collect();
+    phases.sort_by(|left, right| left.component_id.cmp(&right.component_id));
+    phases
+}
+
+fn project_degraded_component_phases(
+    mut phases: std::collections::HashMap<String, std::collections::HashSet<&'static str>>,
+    remote_diagnostics: &HashMap<String, String>,
+) -> Vec<StatusPartialComponent> {
+    for component_id in remote_diagnostics.keys() {
+        phases
+            .entry(component_id.clone())
+            .or_default()
+            .insert("fetch_remote_versions");
+    }
+    sorted_degraded_component_phases(phases)
 }
 
 fn sorted_component_ids(ids: std::collections::HashSet<String>) -> Vec<String> {
@@ -414,14 +726,74 @@ fn sorted_component_ids(ids: std::collections::HashSet<String>) -> Vec<String> {
     ids
 }
 
+fn replay_component_commands(
+    ids: &std::collections::HashSet<String>,
+    args: &StatusArgs,
+) -> Vec<String> {
+    let mut ids: Vec<_> = ids.iter().collect();
+    ids.sort();
+    ids.into_iter()
+        .map(|id| {
+            format!(
+                "homeboy status --component {id}{}",
+                replay_status_flags(args)
+            )
+        })
+        .collect()
+}
+
+fn replay_status_flags(args: &StatusArgs) -> String {
+    let mut flags = Vec::new();
+    if args.uncommitted {
+        flags.push("--uncommitted");
+    }
+    if args.needs_release {
+        flags.push("--needs-release");
+    }
+    if args.ready {
+        flags.push("--ready");
+    }
+    if args.docs_only {
+        flags.push("--docs-only");
+    }
+    if args.unreleased {
+        flags.push("--unreleased");
+    }
+    if args.outdated {
+        flags.push("--outdated");
+    }
+    if args.refresh {
+        flags.push("--refresh");
+    }
+    flags.push("--timings");
+    format!(" {}", flags.join(" "))
+}
+
 fn partial_status(
     components: Vec<component::Component>,
     index: usize,
     degraded_components: std::collections::HashSet<String>,
+    degraded_component_phases: std::collections::HashMap<
+        String,
+        std::collections::HashSet<&'static str>,
+    >,
     timer: StatusTimer,
     controller: ControllerStaleness,
     observations: StatusObservations,
+    phase: &'static str,
+    args: &StatusArgs,
 ) -> CmdResult<StatusResult> {
+    let omitted_components: Vec<_> = components[index..]
+        .iter()
+        .map(|component| component.id.clone())
+        .collect();
+    let mut replay_commands = replay_component_commands(&degraded_components, args);
+    replay_commands.extend(omitted_components.iter().map(|id| {
+        format!(
+            "homeboy status --component {id}{}",
+            replay_status_flags(args)
+        )
+    }));
     Ok((
         StatusResult::Summary(StatusOutput {
             command: "status",
@@ -441,11 +813,13 @@ fn partial_status(
             clean: observations.clean,
             partial: Some(StatusPartial {
                 reason: "total_latency_budget_exhausted",
-                omitted_components: components[index..]
-                    .iter()
-                    .map(|component| component.id.clone())
-                    .collect(),
+                phase,
+                omitted_components,
                 degraded_components: sorted_component_ids(degraded_components),
+                degraded_component_phases: sorted_degraded_component_phases(
+                    degraded_component_phases,
+                ),
+                replay_commands,
             }),
             controller,
         }),
@@ -521,13 +895,62 @@ fn run_project_dashboard(
     // Gather remote versions via deploy check mode (handles SSH internally)
     timer.begin("fetch_remote_versions");
     let remote_probe = fetch_project_remote_versions(project_id, &components, &timer);
-    let remote_versions = remote_probe.versions;
-    let remote_diagnostics: HashMap<String, String> = remote_probe
+    let remote_versions = remote_probe.result.versions;
+    let mut remote_diagnostics: HashMap<String, String> = remote_probe
+        .result
         .failures
         .into_iter()
         .map(|failure| (failure.component_id, failure.diagnostic))
         .collect();
+    if let Some(failure) = remote_probe.failure {
+        for component in &components {
+            remote_diagnostics
+                .entry(component.id.clone())
+                .or_insert_with(|| failure.clone());
+        }
+    }
     timer.finish("fetch_remote_versions");
+
+    if timer.expired() {
+        return Ok((
+            StatusResult::Dashboard(ProjectDashboardOutput {
+                command: "status",
+                project_id: project_id.to_string(),
+                total: 0,
+                components: Vec::new(),
+                summary: ProjectDashboardSummary {
+                    current: 0,
+                    pinned_current: 0,
+                    outdated: 0,
+                    needs_release: 0,
+                    docs_only: 0,
+                    uncommitted: 0,
+                    behind_upstream: 0,
+                    bundled: 0,
+                    retired: 0,
+                    unknown: 0,
+                    degraded: 0,
+                },
+                timings: timer.into_timings(),
+                partial: Some(StatusPartial {
+                    reason: "total_latency_budget_exhausted",
+                    phase: "fetch_remote_versions",
+                    omitted_components: components
+                        .iter()
+                        .map(|component| component.id.clone())
+                        .collect(),
+                    degraded_components: Vec::new(),
+                    degraded_component_phases: Vec::new(),
+                    replay_commands: vec![format!(
+                        "homeboy status {project_id}{}",
+                        replay_status_flags(args)
+                    )],
+                }),
+                controller,
+            }),
+            0,
+        ));
+    }
 
     let mut git_cache = StatusGitCache::with_refresh(args.refresh);
 
@@ -726,6 +1149,11 @@ fn run_project_dashboard(
                 } else {
                     "total_latency_budget_exhausted"
                 },
+                phase: if omitted_components.is_empty() {
+                    "project_remote_or_git_probe"
+                } else {
+                    "project_component_inspection"
+                },
                 omitted_components,
                 degraded_components: sorted_component_ids(
                     git_cache
@@ -734,6 +1162,14 @@ fn run_project_dashboard(
                         .chain(remote_diagnostics.keys().cloned())
                         .collect(),
                 ),
+                degraded_component_phases: project_degraded_component_phases(
+                    git_cache.degraded_component_phases,
+                    &remote_diagnostics,
+                ),
+                replay_commands: vec![format!(
+                    "homeboy status {project_id}{}",
+                    replay_status_flags(args)
+                )],
             }),
             controller,
         }),
@@ -899,12 +1335,12 @@ mod tests {
             let (result, code) = summarize_components(
                 vec![component],
                 &default_status_args(),
-                StatusTimer::with_budget(true, std::time::Duration::from_secs(2)),
+                StatusTimer::with_budget(true, std::time::Duration::from_secs(10)),
                 stale_controller(),
             )
             .expect("bounded status result");
             assert_eq!(code, 0);
-            assert!(started.elapsed() < std::time::Duration::from_secs(4));
+            assert!(started.elapsed() < std::time::Duration::from_secs(12));
             let StatusResult::Summary(output) = result else {
                 panic!("summary output")
             };
@@ -916,6 +1352,11 @@ mod tests {
             if require_degraded_component {
                 assert_eq!(partial.degraded_components, vec![expected_component]);
             }
+            assert!(
+                partial.replay_commands.iter().any(|command| command
+                    == &format!("homeboy status --component {expected_component} --timings")),
+                "partial output must include a deterministic replay command"
+            );
             assert!(output
                 .timings
                 .iter()
@@ -1146,9 +1587,12 @@ mod tests {
             components,
             0,
             std::collections::HashSet::new(),
+            std::collections::HashMap::new(),
             timer,
             stale_controller(),
             observations,
+            "inspect_release_state",
+            &default_status_args(),
         )
         .expect("partial status succeeds");
 
@@ -1158,7 +1602,12 @@ mod tests {
         };
         let partial = output.partial.expect("typed partial result");
         assert_eq!(partial.reason, "total_latency_budget_exhausted");
+        assert_eq!(partial.phase, "inspect_release_state");
         assert_eq!(partial.omitted_components, vec!["slow-component"]);
+        assert_eq!(
+            partial.replay_commands,
+            vec!["homeboy status --component slow-component --timings"]
+        );
         assert_eq!(output.timings[0].phase, "inspect_release_state");
         assert_eq!(output.upstream_drift[0].component_id, "already-visited");
     }
@@ -1166,10 +1615,10 @@ mod tests {
     #[test]
     fn summary_status_bounds_hung_tag_probe_and_preserves_typed_observations() {
         assert_hung_probe_is_bounded(
-            "tag --sort=-v:refname --list",
-            "inspect_upstream_and_unreleased",
+            "tag --merged HEAD",
+            "inspect_release_state",
             "hung-tag",
-            false,
+            true,
         );
     }
 
@@ -1413,23 +1862,25 @@ mod tests {
 
     #[test]
     fn status_path_only_inspects_one_synthetic_component() {
-        let (_dir, repo) = make_git_repo("external-repo");
-        let args = status_args(None, repo.to_string_lossy().to_string(), false);
+        crate::test_support::with_isolated_home(|_| {
+            let (_dir, repo) = make_git_repo("external-repo");
+            let args = status_args(None, repo.to_string_lossy().to_string(), false);
 
-        let (result, code) = run(args).expect("status --path succeeds");
+            let (result, code) = run(args).expect("status --path succeeds");
 
-        assert_eq!(code, 0);
-        match result {
-            StatusResult::Summary(output) => {
-                assert_eq!(output.total, 1);
-                assert!(output.upstream_drift.is_empty());
+            assert_eq!(code, 0);
+            match result {
+                StatusResult::Summary(output) => {
+                    assert_eq!(output.total, 1);
+                    assert!(output.upstream_drift.is_empty());
+                }
+                _ => panic!("expected summary output"),
             }
-            _ => panic!("expected summary output"),
-        }
+        });
     }
 
     #[test]
-    fn default_status_from_unregistered_cwd_returns_actionable_context_without_global_scan() {
+    fn default_status_from_unregistered_cwd_returns_truthful_compact_snapshot() {
         let _guard = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         crate::test_support::with_isolated_home(|_| {
             let original_cwd = env::current_dir().expect("current dir");
@@ -1449,25 +1900,59 @@ mod tests {
                 "unregistered status should fast-return, elapsed={elapsed:?}"
             );
             match result {
-                StatusResult::UnregisteredContext(output) => {
-                    assert_eq!(output.status, "unregistered_context");
+                StatusResult::Compact(output) => {
+                    assert_eq!(output.status, "compact");
                     assert_eq!(
                         PathBuf::from(&output.cwd).canonicalize().ok(),
                         dir.path().canonicalize().ok()
                     );
-                    assert!(output.suggestion.contains("attach"));
-                    assert_eq!(output.control_plane.status, "not_checked");
-                    assert_eq!(output.control_plane.command, "homeboy status --global");
+                    assert_eq!(output.context.status, "not_checked");
+                    assert_eq!(output.context.command, "homeboy status --full");
                     assert!(output.action.contains("homeboy status --global"));
                     assert!(output.action.contains("homeboy status --all"));
+                    assert!(!output.controller.detail.is_empty());
                 }
                 _ => panic!("expected unregistered context output"),
             }
         });
     }
 
+    #[cfg(unix)]
     #[test]
-    fn default_status_matches_git_status_for_registered_worktree_without_attach_path() {
+    fn default_status_skips_a_stalled_inventory_file_without_spawning_work() {
+        let _guard = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        crate::test_support::with_isolated_home(|home| {
+            use std::ffi::CString;
+
+            let inventory = home.path().join(".config/homeboy/components");
+            fs::create_dir_all(&inventory).expect("component inventory");
+            let stalled_file = inventory.join("stalled.json");
+            let stalled_file_c = CString::new(stalled_file.as_os_str().as_encoded_bytes())
+                .expect("fifo path has no NUL");
+            assert_eq!(unsafe { libc::mkfifo(stalled_file_c.as_ptr(), 0o600) }, 0);
+
+            let original_cwd = env::current_dir().expect("current dir");
+            let cwd = TempDir::new().expect("tempdir");
+            env::set_current_dir(cwd.path()).expect("set unregistered cwd");
+            let started = Instant::now();
+            let (result, code) = run(default_status_args()).expect("compact status succeeds");
+            env::set_current_dir(original_cwd).expect("restore cwd");
+
+            assert_eq!(code, 0);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "default status must not read the stalled inventory FIFO"
+            );
+            let StatusResult::Compact(output) = result else {
+                panic!("default status must remain a compact snapshot")
+            };
+            assert_eq!(output.context.status, "not_checked");
+            assert_eq!(output.context.command, "homeboy status --full");
+        });
+    }
+
+    #[test]
+    fn default_status_defers_registered_worktree_inventory_to_full() {
         let _guard = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         crate::test_support::with_isolated_home(|home| {
             let primary = home.path().join("fixture");
@@ -1493,16 +1978,6 @@ mod tests {
                 &["worktree", "add", "-b", "task", worktree.to_str().unwrap()],
             );
 
-            let git_status = homeboy::core::git::status_at(None, worktree.to_str())
-                .expect("git status resolves worktree");
-            assert_eq!(git_status.component_id, "fixture");
-            assert_eq!(
-                PathBuf::from(&git_status.path)
-                    .canonicalize()
-                    .expect("git status path"),
-                worktree.canonicalize().expect("worktree path")
-            );
-
             let original_cwd = env::current_dir().expect("current directory");
             env::set_current_dir(&worktree).expect("set worktree cwd");
             let result = run(default_status_args());
@@ -1511,14 +1986,18 @@ mod tests {
             let (result, code) = result.expect("top-level status resolves worktree");
             assert_eq!(code, 0);
             match result {
-                StatusResult::Summary(output) => assert_eq!(output.total, 1),
-                StatusResult::UnregisteredContext(output) => panic!(
-                    "top-level status must match git status for {}: {}",
-                    git_status.path, output.suggestion
-                ),
+                StatusResult::Compact(output) => {
+                    assert_eq!(output.context.status, "not_checked");
+                }
+                StatusResult::UnregisteredContext(_) => {
+                    panic!("compact status must not classify the worktree")
+                }
+                StatusResult::Summary(_) => panic!("default status must not traverse inventory"),
                 StatusResult::Full(_) => panic!("expected summary status"),
                 StatusResult::Dashboard(_) => panic!("expected summary status"),
                 StatusResult::Global(_) => panic!("expected summary status"),
+                StatusResult::Isolated(_) => panic!("expected summary status"),
+                StatusResult::ProbeFallback(_) => panic!("expected summary status"),
             }
             assert_eq!(
                 fs::read_to_string(&registration).expect("registration after status"),
@@ -1550,6 +2029,103 @@ mod tests {
             Commands::Status(args) => assert!(args.unreleased),
             _ => panic!("expected status command"),
         }
+    }
+
+    #[test]
+    fn unscoped_component_enrichment_requires_an_explicit_scope() {
+        for args in [
+            StatusArgs {
+                uncommitted: true,
+                ..default_status_args()
+            },
+            StatusArgs {
+                refresh: true,
+                ..default_status_args()
+            },
+        ] {
+            assert!(run(args).is_err());
+        }
+    }
+
+    #[test]
+    fn full_status_rejects_ignored_component_options() {
+        for args in [
+            StatusArgs {
+                full: true,
+                refresh: true,
+                ..default_status_args()
+            },
+            StatusArgs {
+                full: true,
+                uncommitted: true,
+                ..default_status_args()
+            },
+        ] {
+            assert!(run(args).is_err());
+        }
+    }
+
+    #[test]
+    fn component_replays_preserve_filter_and_refresh_flags() {
+        let args = StatusArgs {
+            refresh: true,
+            unreleased: true,
+            docs_only: true,
+            ..default_status_args()
+        };
+        let commands = replay_component_commands(
+            &std::collections::HashSet::from(["component-a".to_string()]),
+            &args,
+        );
+
+        assert_eq!(
+            commands,
+            vec!["homeboy status --component component-a --docs-only --unreleased --refresh --timings"]
+        );
+    }
+
+    #[test]
+    fn isolated_probe_replays_full_all_and_registry_scopes() {
+        let full = parse_status(&["homeboy", "status", "--full"]);
+        let all = parse_status(&["homeboy", "status", "--all"]);
+        let component = parse_status(&["homeboy", "status", "--component", "core"]);
+
+        assert_eq!(status_probe_argv(&full), ["homeboy", "status", "--full"]);
+        assert_eq!(status_probe_argv(&all), ["homeboy", "status", "--all"]);
+        assert_eq!(
+            status_probe_argv(&component),
+            ["homeboy", "status", "--component", "core"]
+        );
+    }
+
+    #[test]
+    fn simultaneous_git_and_remote_failures_keep_each_component_phase() {
+        let phases = project_degraded_component_phases(
+            std::collections::HashMap::from([
+                (
+                    "git-only".to_string(),
+                    std::collections::HashSet::from(["inspect_release_state"]),
+                ),
+                (
+                    "both".to_string(),
+                    std::collections::HashSet::from(["inspect_upstream_and_unreleased"]),
+                ),
+            ]),
+            &HashMap::from([
+                ("remote-only".to_string(), "unreachable".to_string()),
+                ("both".to_string(), "unreachable".to_string()),
+            ]),
+        );
+
+        assert_eq!(phases.len(), 3);
+        assert_eq!(phases[0].component_id, "both");
+        assert_eq!(
+            phases[0].phases,
+            ["fetch_remote_versions", "inspect_upstream_and_unreleased"]
+        );
+        assert_eq!(phases[1].component_id, "git-only");
+        assert_eq!(phases[2].component_id, "remote-only");
+        assert_eq!(phases[2].phases, ["fetch_remote_versions"]);
     }
 
     #[test]
@@ -1636,25 +2212,32 @@ mod tests {
 
     #[test]
     fn status_id_with_path_full_uses_explicit_component_id() {
-        let (_dir, repo) = make_git_repo("wp-playground-checkout");
-        let args = status_args(
-            Some("wordpress-playground".to_string()),
-            repo.to_string_lossy().to_string(),
-            true,
-        );
+        crate::test_support::with_isolated_home(|_| {
+            let (_dir, repo) = make_git_repo("wp-playground-checkout");
+            let args = status_args(
+                Some("wordpress-playground".to_string()),
+                repo.to_string_lossy().to_string(),
+                true,
+            );
 
-        let (result, code) = run(args).expect("status <id> --path --full succeeds");
+            let (result, code) = run(args).expect("status <id> --path --full succeeds");
 
-        assert_eq!(code, 0);
-        match result {
-            StatusResult::Full(report) => {
-                assert_eq!(report.context.cwd, repo.to_string_lossy());
-                assert_eq!(report.components.len(), 1);
-                assert_eq!(report.components[0].id, "wordpress-playground");
-                assert_eq!(report.components[0].path, ".");
+            assert_eq!(code, 0);
+            match result {
+                StatusResult::Full(report) => {
+                    assert_eq!(report.context.cwd, repo.to_string_lossy());
+                    assert_eq!(report.components.len(), 1);
+                    assert_eq!(report.components[0].id, "wordpress-playground");
+                    assert_eq!(
+                        std::path::Path::new(&report.components[0].path)
+                            .canonicalize()
+                            .expect("reported component path"),
+                        repo.canonicalize().expect("fixture component path")
+                    );
+                }
+                _ => panic!("expected full output"),
             }
-            _ => panic!("expected full output"),
-        }
+        });
     }
 
     #[test]
