@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.348.1] - 2026-08-14
+
+### Fixed
+- accept both prose shapes in the AI review form
+
 ## [0.348.0] - 2026-08-14
 
 ### Added
