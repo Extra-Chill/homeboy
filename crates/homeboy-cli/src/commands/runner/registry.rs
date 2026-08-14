@@ -244,6 +244,7 @@ pub(super) struct RunnerConnectInput {
     pub(super) expected_live_pid: Option<u32>,
     pub(super) confirm_untracked_child_dead: Vec<uuid::Uuid>,
     pub(super) reconcile_leaseless_orphans: bool,
+    pub(super) reconcile_unleased_candidates: bool,
     pub(super) confirm_no_daemon_owner: bool,
     pub(super) recover_missing_lease_state: Option<String>,
     pub(super) recorded_pid: Option<u32>,
@@ -271,6 +272,7 @@ pub(super) fn validate_connect_input(input: &RunnerConnectInput) -> homeboy::cor
         expected_live_pid,
         confirm_untracked_child_dead,
         reconcile_leaseless_orphans,
+        reconcile_unleased_candidates,
         confirm_no_daemon_owner,
         recover_missing_lease_state,
         recorded_pid,
@@ -350,14 +352,23 @@ pub(super) fn validate_connect_input(input: &RunnerConnectInput) -> homeboy::cor
             None,
         ));
     }
+    if *reverse && *reconcile_unleased_candidates {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "reconcile_unleased_candidates",
+            "unleased candidate reconciliation only applies to direct SSH runner connections",
+            None,
+            None,
+        ));
+    }
     let recovery_mode_count = usize::from(adopt_orphan_lease.is_some())
         + usize::from(*reconcile_leaseless_orphans)
+        + usize::from(*reconcile_unleased_candidates)
         + usize::from(recover_missing_lease_state.is_some())
         + usize::from(adopt_live_lease.is_some());
     if recovery_mode_count > 1 {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "recovery_mode",
-            "--adopt-orphan-lease, --adopt-live-lease, --reconcile-leaseless-orphans, and --recover-missing-lease-state are mutually exclusive",
+            "--adopt-orphan-lease, --adopt-live-lease, --reconcile-leaseless-orphans, --reconcile-unleased-candidates, and --recover-missing-lease-state are mutually exclusive",
             None,
             None,
         ));
@@ -398,6 +409,7 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
         expected_live_pid,
         confirm_untracked_child_dead,
         reconcile_leaseless_orphans,
+        reconcile_unleased_candidates,
         confirm_no_daemon_owner: _deprecated_confirm_no_daemon_owner,
         recover_missing_lease_state,
         recorded_pid,
@@ -422,6 +434,9 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
         match (adopt_live_lease.as_deref(), expected_live_pid) {
             (Some(lease_id), Some(pid)) => {
                 runner::connect_with_live_lease_adoption(id, lease_id, pid)?
+            }
+            _ if reconcile_unleased_candidates => {
+                runner::connect_with_unleased_candidate_reconciliation(id)?
             }
             _ => runner::connect_with_orphan_adoption(
                 id,
@@ -539,6 +554,7 @@ mod tests {
             expected_live_pid: None,
             confirm_untracked_child_dead: Vec::new(),
             reconcile_leaseless_orphans: false,
+            reconcile_unleased_candidates: false,
             confirm_no_daemon_owner: false,
             recover_missing_lease_state: None,
             recorded_pid: None,
@@ -662,6 +678,23 @@ mod tests {
             ..input()
         })
         .expect_err("reverse recovery is unsupported");
+        assert!(error.message.contains("direct SSH"));
+    }
+
+    #[test]
+    fn candidate_reconciliation_is_a_direct_ssh_recovery_mode() {
+        validate_connect_input(&RunnerConnectInput {
+            reconcile_unleased_candidates: true,
+            ..input()
+        })
+        .expect("candidate reconciliation selects one direct SSH recovery mode");
+
+        let error = validate_connect_input(&RunnerConnectInput {
+            reverse: true,
+            reconcile_unleased_candidates: true,
+            ..input()
+        })
+        .expect_err("reverse candidate recovery has no direct remote lifecycle boundary");
         assert!(error.message.contains("direct SSH"));
     }
 

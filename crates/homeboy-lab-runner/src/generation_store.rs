@@ -770,6 +770,66 @@ pub(crate) fn record_replacement_operation_replay(
     })
 }
 
+/// Bind a mutation receipt exactly once. Candidate reconciliation includes its
+/// endpoint and operation ID in the command, so changing this record would turn
+/// response-loss recovery into a different destructive operation.
+pub(crate) fn record_immutable_replacement_operation_replay(
+    runner_id: &str,
+    kind: &str,
+    command: &str,
+) -> Result<()> {
+    with_registry_lock(runner_id, || {
+        let path = replacement_operation_path(runner_id)?;
+        let mut operation: ReplacementOperation =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+            })?)
+            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+        if let Some(existing) = operation.replay_command.as_deref() {
+            if operation.kind.as_deref() != Some(kind) || existing != command {
+                return Err(Error::internal_unexpected(
+                    "replacement operation is already bound to different immutable recovery coordinates",
+                ));
+            }
+            return Ok(());
+        }
+        operation.kind = Some(kind.to_string());
+        operation.replay_command = Some(command.to_string());
+        write_durable_json(&path, &operation)
+    })
+}
+
+/// An acknowledged `applied: false` reconciliation is terminal: the remote
+/// inspected the candidate set and declined to mutate it. Rotate the operation
+/// identity rather than replaying that stale observation on a later connect.
+pub(crate) fn terminalize_unleased_candidate_reconciliation(runner_id: &str) -> Result<()> {
+    with_registry_lock(runner_id, || {
+        let path = replacement_operation_path(runner_id)?;
+        let operation: ReplacementOperation =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+            })?)
+            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+        if operation.runner_id != runner_id
+            || operation.kind.as_deref() != Some("unleased-candidates")
+            || operation.replay_command.is_none()
+        {
+            return Err(Error::internal_unexpected(
+                "refusing to terminalize a replacement operation that is not an immutable unleased candidate reconciliation",
+            ));
+        }
+        write_durable_json(
+            &path,
+            &ReplacementOperation {
+                runner_id: runner_id.to_string(),
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                replay_command: None,
+                kind: None,
+            },
+        )
+    })
+}
+
 /// Update an operation journal while the caller holds this runner's registry
 /// lock through [`with_admission_fence`].
 pub(crate) fn record_replacement_operation_replay_locked(
@@ -2185,6 +2245,31 @@ mod tests {
             assert_eq!(
                 replacement_operation("runner-a").expect("new operation"),
                 next_operation
+            );
+        });
+    }
+
+    #[test]
+    fn failed_unleased_reconciliation_clears_the_replay_before_a_later_connect() {
+        test_support::with_isolated_home(|_| {
+            let first_operation = replacement_operation("runner-a").expect("operation");
+            record_immutable_replacement_operation_replay(
+                "runner-a",
+                "unleased-candidates",
+                "homeboy daemon reconcile-unleased-candidates --apply",
+            )
+            .expect("immutable reconciliation journal");
+
+            terminalize_unleased_candidate_reconciliation("runner-a")
+                .expect("acknowledged failed reconciliation is terminal");
+
+            assert!(replacement_operation_replay("runner-a")
+                .expect("read replay")
+                .is_none());
+            assert_ne!(
+                replacement_operation("runner-a").expect("later connect operation"),
+                first_operation,
+                "a later connect must use a new operation identity rather than replay"
             );
         });
     }

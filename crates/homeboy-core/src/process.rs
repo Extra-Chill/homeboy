@@ -5,6 +5,8 @@
 //! reach for `libc` directly.
 
 use crate::error::{Error, Result};
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +38,112 @@ pub(crate) const SIGNAL_KILL: libc::c_int = libc::SIGKILL;
 /// never delivered: [`signal_pid`] fails closed before the value is used.
 #[cfg(not(unix))]
 pub(crate) const SIGNAL_KILL: libc::c_int = 9;
+
+/// A kernel handle that remains bound to one process instance even if its
+/// numeric PID is later reused. Reconciliation must use this rather than a
+/// PID-only signal after it has established ownership evidence.
+#[derive(Debug)]
+#[allow(dead_code)] // The non-Linux fail-closed probe retains this type for platform tests.
+pub(crate) struct IdentityBoundProcess {
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+}
+
+impl IdentityBoundProcess {
+    /// Send a signal only to the process instance captured by this handle.
+    /// `false` means that exact instance exited before delivery.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn signal(&self, signal: libc::c_int) -> Result<bool> {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            if libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                std::os::fd::AsRawFd::as_raw_fd(&self.pidfd),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0u32,
+            ) == 0
+            {
+                return Ok(true);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(false);
+            }
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("send signal {signal} through pidfd")),
+            ));
+        }
+    }
+
+    /// Wait for this exact process instance to exit. A reused PID cannot make
+    /// this report a false survivor.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn wait_for_exit(&self, timeout: Duration) -> Result<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut pollfd = libc::pollfd {
+                fd: std::os::fd::AsRawFd::as_raw_fd(&self.pidfd),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout_ms = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+            let result = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+            if result >= 0 {
+                return Ok(result > 0);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                return Ok(false);
+            }
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("wait for pidfd exit".to_string()),
+            ));
+        }
+    }
+}
+
+/// Bind a signaling capability to the process currently named by `pid`.
+/// Linux pidfds preserve that binding across process exit and PID reuse. Other
+/// platforms have no equivalent in this implementation and must fail closed.
+#[allow(dead_code)] // Called by Linux reconciliation; non-Linux tests assert its refusal.
+pub(crate) fn bind_process_identity_for_signal(pid: u32) -> Result<IdentityBoundProcess> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(Error::validation_invalid_argument(
+            "pid",
+            "recorded process PID is invalid",
+            Some(pid.to_string()),
+            None,
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let fd = libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0u32) as libc::c_int;
+        if fd >= 0 {
+            return Ok(IdentityBoundProcess {
+                pidfd: OwnedFd::from_raw_fd(fd),
+            });
+        }
+        let error = std::io::Error::last_os_error();
+        return Err(Error::validation_invalid_argument(
+            "pid",
+            format!("cannot bind PID {pid} to a pidfd for race-safe reconciliation: {error}"),
+            Some(pid.to_string()),
+            None,
+        ));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(Error::validation_invalid_argument(
+            "pid",
+            "race-safe daemon reconciliation requires a platform identity-bound signaling handle; pidfd is unavailable on this platform",
+            Some(pid.to_string()),
+            None,
+        ))
+    }
+}
 
 /// Owns a process group and, on Linux, an inherited scope marker that survives
 /// descendants changing sessions or outliving their direct parent.
@@ -1524,6 +1632,56 @@ mod tests {
             environment,
             b"HOMEBOY_DAEMON_STARTUP_TOKEN=lease"
         ));
+    }
+
+    #[test]
+    fn pidfd_does_not_signal_a_replacement_after_the_bound_process_exits() {
+        let mut original = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn original process");
+        let process = bind_process_identity_for_signal(original.id())
+            .expect("bind original process to pidfd");
+
+        assert!(
+            process
+                .wait_for_exit(Duration::from_secs(1))
+                .expect("observe original exit"),
+            "the pidfd must observe its bound process exiting"
+        );
+        let mut replacement = Command::new("sh")
+            .args(["-c", "while :; do sleep 1; done"])
+            .spawn()
+            .expect("spawn replacement process");
+
+        // This models the reconciliation race: the original PID instance is
+        // gone before delivery and a replacement is already live. A pidfd
+        // cannot be retargeted to that replacement, even if the kernel reuses
+        // the numeric PID.
+        assert!(
+            !process
+                .signal(SIGNAL_TERMINATE)
+                .expect("signal exited pidfd instance"),
+            "an exited pidfd instance must not accept a signal"
+        );
+        assert!(pid_is_running(replacement.id()));
+
+        original.wait().expect("reap original process");
+        replacement.kill().expect("cleanup replacement process");
+        replacement.wait().expect("reap replacement process");
+    }
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod identity_bound_signal_tests {
+    use super::*;
+
+    #[test]
+    fn reconciliation_signaling_fails_closed_without_an_atomic_identity_handle() {
+        let error = bind_process_identity_for_signal(std::process::id())
+            .expect_err("unsupported platforms must reject PID-only reconciliation signaling");
+
+        assert!(error.message.contains("identity-bound signaling handle"));
     }
 }
 

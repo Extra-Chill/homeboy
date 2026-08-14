@@ -3271,7 +3271,7 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
         let result = run_cook(reconstructed, UnusedExecutor)
             .expect("durable Cook failure report before provider execution");
         assert_eq!(result.exit_code, 1);
-        assert_eq!(result.value.status, "durable_failure");
+        assert_eq!(result.value.status, "pre_execution_failure");
     });
 }
 
@@ -6289,14 +6289,14 @@ fn cook_persists_materialization_failure_without_provider_execution() {
         let result =
             run_cook(options, UnusedExecutor).expect("cook records materialization failure");
 
-        assert_eq!(result.value.status, "durable_failure");
-        assert!(result.value.attempts.is_empty());
+        assert_eq!(result.value.status, "pre_execution_failure");
+        assert_eq!(result.value.attempts.len(), 1);
         assert!(result.value.failure_context.is_some());
         assert!(super::super::recipe_exists(cook_id).expect("durable recipe lookup"));
         let record = agent_task_lifecycle::status(run_id).expect("persisted failed attempt");
         assert_eq!(
             record.state,
-            agent_task_lifecycle::AgentTaskRunState::Queued
+            agent_task_lifecycle::AgentTaskRunState::Failed
         );
         assert_eq!(
             result

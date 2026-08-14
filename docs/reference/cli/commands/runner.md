@@ -248,6 +248,7 @@ Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
 | `--expected-live-pid` | `<EXPECTED_LIVE_PID>` | Current remote daemon PID paired with --adopt-live-lease |
 | `--confirm-untracked-child-dead` | `<CONFIRM_UNTRACKED_CHILD_DEAD>` | Confirm one exact unresolved job has no live untracked child; repeat for each job |
 | `--reconcile-leaseless-orphans` | flag | Explicitly reconcile active jobs after proving the missing-lease remote store has no daemon owner |
+| `--reconcile-unleased-candidates` | flag | Explicitly apply the bounded remote daemon-candidate reconciliation |
 | `--confirm-no-daemon-owner` | flag | Deprecated no-op retained for one release; the runner fails closed on owner-lock, process, and listener probes |
 | `--recover-missing-lease-state` | `<RECOVER_MISSING_LEASE_STATE>` | Recover this exact lease after the remote daemon state record was lost |
 | `--recorded-pid` | `<RECORDED_PID>` | Recorded remote daemon PID paired with --recover-missing-lease-state |

@@ -14,8 +14,8 @@ use homeboy_core::api_jobs::{
     RemoteRunnerJobResult, RunnerJobSource,
 };
 use homeboy_core::daemon::{
-    DaemonFreshnessReport, DaemonLeaselessRecoveryResult, DaemonStaleReasonCode, DaemonStartResult,
-    DaemonStateLossRecoveryResult,
+    DaemonCandidateReconciliationResult, DaemonFreshnessReport, DaemonLeaselessRecoveryResult,
+    DaemonStaleReasonCode, DaemonStartResult, DaemonStateLossRecoveryResult,
 };
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
@@ -78,6 +78,7 @@ struct RemoteDaemonConnectOptions<'a> {
     orphan_lease_id: Option<&'a str>,
     confirmed_no_pid_job_ids: &'a [uuid::Uuid],
     reconcile_leaseless_orphans: bool,
+    reconcile_unleased_candidates: bool,
     missing_lease_id: Option<&'a str>,
     recorded_pid: Option<u32>,
     recorded_endpoint: Option<&'a str>,
@@ -296,6 +297,7 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
             orphan_lease_id: None,
             confirmed_no_pid_job_ids: &[],
             reconcile_leaseless_orphans: false,
+            reconcile_unleased_candidates: false,
             missing_lease_id: None,
             recorded_pid: None,
             recorded_endpoint: None,
@@ -603,9 +605,31 @@ pub fn connect_with_orphan_adoption(
             orphan_lease_id,
             confirmed_no_pid_job_ids,
             reconcile_leaseless_orphans,
+            reconcile_unleased_candidates: false,
             missing_lease_id,
             recorded_pid,
             recorded_endpoint,
+            live_lease_expectation: None,
+        },
+    )
+}
+
+/// Explicitly reconcile bounded, attributed unleased daemon candidates before
+/// connecting. The remote command owns preview/apply evidence and refuses any
+/// ambiguous same-store process.
+pub fn connect_with_unleased_candidate_reconciliation(
+    runner_id: &str,
+) -> Result<(RunnerConnectReport, i32)> {
+    connect_with_orphan_adoption_and_live_lease(
+        runner_id,
+        RemoteDaemonConnectOptions {
+            orphan_lease_id: None,
+            confirmed_no_pid_job_ids: &[],
+            reconcile_leaseless_orphans: false,
+            reconcile_unleased_candidates: true,
+            missing_lease_id: None,
+            recorded_pid: None,
+            recorded_endpoint: None,
             live_lease_expectation: None,
         },
     )
@@ -625,6 +649,7 @@ pub fn connect_with_live_lease_adoption(
             orphan_lease_id: None,
             confirmed_no_pid_job_ids: &[],
             reconcile_leaseless_orphans: false,
+            reconcile_unleased_candidates: false,
             missing_lease_id: None,
             recorded_pid: None,
             recorded_endpoint: None,
@@ -641,6 +666,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         orphan_lease_id,
         confirmed_no_pid_job_ids,
         reconcile_leaseless_orphans,
+        reconcile_unleased_candidates,
         missing_lease_id,
         recorded_pid,
         recorded_endpoint,
@@ -689,6 +715,26 @@ fn connect_with_orphan_adoption_and_live_lease(
     // for current runners. `None` (an older binary that never advertised the
     // field) keeps the scrape fallback at every negotiation site below.
     let daemon_recovery_capabilities = identity.daemon_recovery_capabilities.as_deref();
+    // Capability negotiation is a preflight, not a mutation. In particular, a
+    // non-Linux runner cannot expose pidfd-safe reconciliation and must not get
+    // a replay journal merely because this connect requested the action.
+    if reconcile_unleased_candidates {
+        if let Err(message) =
+            negotiate_unleased_candidate_reconciliation(daemon_recovery_capabilities, || {
+                client.execute_with_timeout(
+                    &remote_unleased_candidate_reconciliation_help_command(homeboy),
+                    REMOTE_LEASELESS_RECOVERY_PROBE_TIMEOUT,
+                )
+            })
+        {
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::RunnerCapabilityMissing,
+                message,
+            ));
+        }
+    }
     let Some(configured_build_identity) = identity.build_identity.clone() else {
         return Ok(failed_connect(
             runner_id,
@@ -825,6 +871,28 @@ fn connect_with_orphan_adoption_and_live_lease(
                     Some("parse pending replacement replay".to_string()),
                 )
             })?;
+            if kind == "unleased-candidates" {
+                if let Some(data) = envelope.data.as_ref() {
+                    if let Ok(recovery) =
+                        serde_json::from_value::<DaemonCandidateReconciliationResult>(data.clone())
+                    {
+                        if !recovery.applied {
+                            super::generation_store::terminalize_unleased_candidate_reconciliation(
+                                runner_id,
+                            )?;
+                            return Ok(failed_connect(
+                                runner_id,
+                                session_path,
+                                RunnerFailureKind::DaemonStartupFailure,
+                                format!(
+                                    "pending unleased candidate reconciliation remained fail-closed: {}",
+                                    recovery.evidence.join("; ")
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
             if !envelope.success {
                 if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
                     super::generation_store::retire_rejected_state_loss_replacement(
@@ -854,6 +922,43 @@ fn connect_with_orphan_adoption_and_live_lease(
                         &configured_build_identity,
                     ));
                     leaseless_recovery = Some(recovery);
+                }
+                "unleased-candidates" => {
+                    let recovery: DaemonCandidateReconciliationResult =
+                        serde_json::from_value(envelope.data.ok_or_else(|| {
+                            Error::internal_unexpected(
+                                "remote unleased candidate replay returned no receipt",
+                            )
+                        })?)
+                        .map_err(|error| {
+                            Error::internal_json(
+                                error.to_string(),
+                                Some("parse pending unleased candidate replay".to_string()),
+                            )
+                        })?;
+                    if !recovery.applied {
+                        super::generation_store::terminalize_unleased_candidate_reconciliation(
+                            runner_id,
+                        )?;
+                        return Ok(failed_connect(
+                            runner_id,
+                            session_path,
+                            RunnerFailureKind::DaemonStartupFailure,
+                            format!(
+                                "pending unleased candidate reconciliation remained fail-closed: {}",
+                                recovery.evidence.join("; ")
+                            ),
+                        ));
+                    }
+                    let replacement = recovery.replacement.ok_or_else(|| {
+                        Error::internal_unexpected(
+                            "remote unleased candidate replay returned no replacement",
+                        )
+                    })?;
+                    recovery_daemon = Some(remote_daemon_from_recovery(
+                        &replacement,
+                        &configured_build_identity,
+                    ));
                 }
                 "ensure-running" => {
                     let receipt: DaemonStartResult =
@@ -1090,6 +1195,103 @@ fn connect_with_orphan_adoption_and_live_lease(
         leaseless_recovery = Some(recovery);
     }
 
+    if recovery_daemon.is_none() && reconcile_unleased_candidates {
+        let recovery_addr = previous_session
+            .as_ref()
+            .and_then(|session| session.remote_daemon_address.as_deref())
+            .filter(|address| parse_loopback_daemon_addr(address).is_ok())
+            .unwrap_or("127.0.0.1:0");
+        let command = format!(
+            "{} daemon reconcile-unleased-candidates --apply --addr {} --replacement-operation-id {}",
+            shell::quote_arg(homeboy),
+            shell::quote_arg(recovery_addr),
+            shell::quote_arg(&replacement_operation_id),
+        );
+        super::generation_store::record_immutable_replacement_operation_replay(
+            runner_id,
+            "unleased-candidates",
+            &command,
+        )?;
+        let output = fenced_remote_mutation(
+            runner_id,
+            previous_session.as_ref(),
+            "reconcile_unleased_candidates",
+            &client,
+            &command,
+            REMOTE_LEASELESS_RECOVERY_TIMEOUT,
+        );
+        // A structured negative result is an acknowledged terminal outcome even
+        // when the remote command uses a nonzero exit status for it.
+        if let Some(recovery) = parse_envelope(&output.stdout)
+            .ok()
+            .and_then(|envelope| envelope.data)
+            .and_then(|data| {
+                serde_json::from_value::<DaemonCandidateReconciliationResult>(data).ok()
+            })
+            .filter(|recovery| !recovery.applied)
+        {
+            super::generation_store::terminalize_unleased_candidate_reconciliation(runner_id)?;
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::DaemonStartupFailure,
+                format!(
+                    "remote unleased candidate reconciliation remained fail-closed: {}",
+                    recovery.evidence.join("; ")
+                ),
+            ));
+        }
+        if !output.success {
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::DaemonStartupFailure,
+                command_failure_message("remote unleased candidate reconciliation failed", &output),
+            ));
+        }
+        let envelope = parse_envelope(&output.stdout).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse unleased candidate reconciliation".to_string()),
+            )
+        })?;
+        let recovery: DaemonCandidateReconciliationResult =
+            serde_json::from_value(envelope.data.ok_or_else(|| {
+                Error::internal_unexpected(
+                    "remote unleased candidate reconciliation returned no data",
+                )
+            })?)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("decode unleased candidate reconciliation".to_string()),
+                )
+            })?;
+        if !envelope.success || !recovery.applied {
+            if !recovery.applied {
+                super::generation_store::terminalize_unleased_candidate_reconciliation(runner_id)?;
+            }
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::DaemonStartupFailure,
+                format!(
+                    "remote unleased candidate reconciliation remained fail-closed: {}",
+                    recovery.evidence.join("; ")
+                ),
+            ));
+        }
+        let replacement = recovery.replacement.ok_or_else(|| {
+            Error::internal_unexpected(
+                "applied unleased candidate reconciliation returned no replacement",
+            )
+        })?;
+        recovery_daemon = Some(remote_daemon_from_recovery(
+            &replacement,
+            &configured_build_identity,
+        ));
+    }
+
     // The remote recovery response is the first point at which B's immutable
     // coordinates exist. Journal them before opening a tunnel so interruption
     // retries can authenticate B rather than touching the prior generation.
@@ -1296,6 +1498,40 @@ fn connect_with_orphan_adoption_and_live_lease(
         },
         0,
     ))
+}
+
+fn remote_unleased_candidate_reconciliation_help_command(homeboy: &str) -> String {
+    format!(
+        "{} daemon reconcile-unleased-candidates --help",
+        shell::quote_arg(homeboy),
+    )
+}
+
+fn negotiate_unleased_candidate_reconciliation<Probe>(
+    daemon_recovery_capabilities: Option<&[homeboy_lab_runner_contract::LabCapabilityVersion]>,
+    probe: Probe,
+) -> std::result::Result<(), String>
+where
+    Probe: FnOnce() -> homeboy_core::server::CommandOutput,
+{
+    let advertised = homeboy_lab_runner_contract::daemon_recovery_capability_negotiated(
+        daemon_recovery_capabilities,
+        homeboy_lab_runner_contract::DAEMON_RECOVERY_UNLEASED_CANDIDATES_CAPABILITY,
+        || {
+            let output = probe();
+            if !output.success {
+                return Err("remote Homeboy must be upgraded: unable to negotiate unleased candidate reconciliation before mutation".to_string());
+            }
+            let options = declared_long_options(&output.stdout);
+            Ok(options.contains("--apply")
+                && options.contains("--addr")
+                && options.contains("--replacement-operation-id"))
+        },
+    )?;
+    if !advertised {
+        return Err("remote Homeboy must be upgraded: daemon reconcile-unleased-candidates does not advertise the idempotent candidate-reconciliation capability".to_string());
+    }
+    Ok(())
 }
 
 fn remote_daemon_from_recovery(

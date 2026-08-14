@@ -1610,7 +1610,7 @@ fn terminal_phantom_reconciliation_refreshes_counts_and_exposes_bounded_evidence
                 }),
             ),
             (
-                "GET /version HTTP/1.1",
+                "GET /health HTTP/1.1",
                 serde_json::json!({
                     "version": "test",
                     "build_identity": { "display": "homeboy test+abc123" },
@@ -1712,34 +1712,36 @@ fn terminal_phantom_reconciliation_rejects_mismatched_count_and_ids() {
 
 #[test]
 fn routine_disconnect_probes_the_exact_live_daemon_tunnel_before_authoritative_stop() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let address = listener.local_addr().expect("address");
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("identity request");
-        let mut request = [0; 4096];
-        let length = stream.read(&mut request).expect("read identity request");
-        let request = String::from_utf8(request[..length].to_vec()).expect("request text");
-        assert!(request.starts_with("GET /lifecycle/identity?nonce="));
-        let nonce = request
-            .split("nonce=")
-            .nth(1)
-            .and_then(|value| value.split_whitespace().next())
-            .expect("identity nonce");
-        let body = format!(
-            r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v1","lease_id":"lease-live","pid":4242}}}}"#
-        );
-        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("identity response");
-    });
-    let mut session = direct_ssh_session("lease-live");
-    session.local_url = Some(format!("http://{address}"));
+    test_support::with_isolated_home(|_| {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("identity request");
+            let mut request = [0; 4096];
+            let length = stream.read(&mut request).expect("read identity request");
+            let request = String::from_utf8(request[..length].to_vec()).expect("request text");
+            assert!(request.starts_with("GET /lifecycle/identity?nonce="));
+            let nonce = request
+                .split("nonce=")
+                .nth(1)
+                .and_then(|value| value.split_whitespace().next())
+                .expect("identity nonce");
+            let body = format!(
+                r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v1","lease_id":"lease-live","pid":4242}}}}"#
+            );
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("identity response");
+        });
+        let mut session = direct_ssh_session("lease-live");
+        session.local_url = Some(format!("http://{address}"));
 
-    // This fixture owns only the loopback tunnel. The production disconnect
-    // also requires an authoritative SSH re-probe, which remains intentionally
-    // unavailable here.
-    let error = stop_transport_recovery::disconnect_remote_daemon(&session, false)
-        .expect_err("the fixture cannot authorize an SSH lifecycle mutation");
-    assert!(!error.contains("endpoint_identity_mismatch"));
-    server.join().expect("server");
+        // This fixture owns only the loopback tunnel. The production disconnect
+        // also requires an authoritative SSH re-probe, which remains intentionally
+        // unavailable here.
+        let error = stop_transport_recovery::disconnect_remote_daemon(&session, false)
+            .expect_err("the isolated fixture cannot authorize an SSH lifecycle mutation");
+        assert!(!error.contains("endpoint_identity_mismatch"));
+        server.join().expect("server");
+    });
 }
 
 #[test]
@@ -2040,7 +2042,7 @@ fn disconnected_generation_reconcile_action_passes_reconcile_preflight() {
                 .admission_summary_with_generations(&inventory, &[], inventory.len())
                 .next_action
                 .as_deref(),
-            Some("homeboy runner reconcile homeboy-lab")
+            Some("homeboy runner connect homeboy-lab")
         );
 
         let reconciled = reconcile_status("homeboy-lab")

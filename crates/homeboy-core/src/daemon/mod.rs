@@ -49,8 +49,9 @@ pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions,
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running,
     ensure_running_with_replacement_operation, fetch_artifact_to_path,
-    reconcile_dead_lease_orphans, reconcile_leaseless_orphans, recover_missing_child_identity,
-    recover_missing_lease_state, start_background, supervise, ArtifactFetchOutcome,
+    reconcile_dead_lease_orphans, reconcile_leaseless_orphans, reconcile_unleased_candidates,
+    recover_missing_child_identity, recover_missing_lease_state, start_background, supervise,
+    ArtifactFetchOutcome,
 };
 use daemon_lease::{daemon_state_identity, freshness_report_from_validation, validate_lease_file};
 use patch_capture::{capture_baseline, capture_patch_report};
@@ -496,6 +497,10 @@ pub struct DaemonTerminationEvidence {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonProcessCandidate {
     pub pid: u32,
+    /// Kernel-issued PID-instance identity captured with the process snapshot.
+    /// A later signal must reject PID reuse on every supported platform.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_start_identity: Option<crate::process::ProcessStartIdentity>,
     pub executable: String,
     pub cmdline: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -504,7 +509,26 @@ pub struct DaemonProcessCandidate {
     pub durable_store_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_identity: Option<String>,
+    /// Exact startup identity carried by the supervised daemon argv, when its
+    /// process command line preserves an unambiguous value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_token: Option<String>,
     pub ownership: DaemonProcessOwnership,
+}
+
+/// Read-only or explicitly-applied reconciliation of unleased daemon process
+/// candidates. The complete candidate evidence is returned in both modes so a
+/// controller never has to scrape prose to decide whether it may retry.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DaemonCandidateReconciliationResult {
+    pub applied: bool,
+    pub active_jobs: usize,
+    pub candidates: Vec<DaemonProcessCandidate>,
+    pub retired_pids: Vec<u32>,
+    pub blocked_pids: Vec<u32>,
+    pub evidence: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<DaemonStartResult>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -1645,10 +1669,12 @@ where
             body: json!({ "error": "method_not_allowed" }),
             artifact: None,
         },
-        ("POST", "/exec") => match enqueue_exec_job(body, job_store) {
-            Ok(body) => daemon_endpoint_response("jobs.exec", body),
-            Err(err) => error_response(400, err),
-        },
+        ("POST", "/exec") => {
+            match with_daemon_job_admission(|| enqueue_exec_job(body, job_store)) {
+                Ok(body) => daemon_endpoint_response("jobs.exec", body),
+                Err(err) => error_response(400, err),
+            }
+        }
         ("POST", "/workspace-claims/acquire") => match acquire_workspace_claim(body) {
             Ok(body) => daemon_endpoint_response("workspace_claim.acquire", body),
             Err(err) => error_response(400, err),
@@ -1681,10 +1707,12 @@ where
             Ok(body) => daemon_endpoint_response("workspace_owner.release", body),
             Err(err) => error_response(400, err),
         },
-        ("POST", "/controller/jobs") => match enqueue_controller_job(body, job_store) {
-            Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
-            Err(err) => error_response(400, err),
-        },
+        ("POST", "/controller/jobs") => {
+            match with_daemon_job_admission(|| enqueue_controller_job(body, job_store)) {
+                Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
+                Err(err) => error_response(400, err),
+            }
+        }
         ("POST", path) if path.starts_with("/controller/jobs/") && path.ends_with("/start") => {
             match start_controller_job(path, job_store) {
                 Ok(body) => daemon_endpoint_response("controller.jobs.start", body),
@@ -1697,10 +1725,12 @@ where
                 Err(err) => error_response(400, err),
             }
         }
-        ("POST", "/admissions") => match reserve_admission(body, job_store) {
-            Ok(body) => daemon_endpoint_response("admissions.reserve", body),
-            Err(err) => error_response(400, err),
-        },
+        ("POST", "/admissions") => {
+            match with_daemon_job_admission(|| reserve_admission(body, job_store)) {
+                Ok(body) => daemon_endpoint_response("admissions.reserve", body),
+                Err(err) => error_response(400, err),
+            }
+        }
         ("POST", path) if path.starts_with("/admissions/") && path.ends_with("/release") => {
             match release_admission(path, body, job_store) {
                 Ok(body) => daemon_endpoint_response("admissions.release", body),
@@ -1782,9 +1812,7 @@ where
             method_not_allowed()
         }
         ("POST", "/runner/sessions")
-        | ("POST", "/runner/jobs")
         | ("POST", "/runner/jobs/reconcile")
-        | ("POST", "/runner/jobs/claim")
         | ("POST", "/runner/workspace-claims/acquire")
         | ("POST", "/runner/workspace-claims/validate")
         | ("POST", "/runner/workspace-claims/release")
@@ -1796,6 +1824,9 @@ where
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         ("POST", "/runner/staging") | ("POST", "/runner/staging/capabilities") => {
+            remote_runner::route(method, path, body, job_store, &broker_auth)
+        }
+        ("POST", "/runner/jobs") | ("POST", "/runner/jobs/claim") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         ("GET", "/runner/sessions")
@@ -5605,6 +5636,95 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
     }
 }
 
+/// Prevent a recovery from observing idle work and then racing a new durable
+/// admission. Normal admissions take a shared lock; destructive recovery takes
+/// the exclusive side for its complete proof-and-signal interval.
+pub(super) fn acquire_daemon_job_admission_fence() -> Result<DaemonAdmissionFence> {
+    acquire_daemon_admission_lock(DaemonAdmissionLockMode::Exclusive).map(DaemonAdmissionFence)
+}
+
+pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
+    operation()
+}
+
+enum DaemonAdmissionLockMode {
+    Shared,
+    Exclusive,
+}
+
+fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> {
+    let state = state_path()?;
+    let parent = state
+        .parent()
+        .ok_or_else(|| Error::internal_unexpected("daemon state path has no parent directory"))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(parent.join("admission.lock"))
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open daemon admission lock".to_string()),
+            )
+        })?;
+    #[cfg(unix)]
+    if unsafe {
+        libc::flock(
+            std::os::fd::AsRawFd::as_raw_fd(&file),
+            match mode {
+                DaemonAdmissionLockMode::Shared => libc::LOCK_SH,
+                DaemonAdmissionLockMode::Exclusive => libc::LOCK_EX,
+            },
+        )
+    } != 0
+    {
+        return Err(Error::internal_io(
+            std::io::Error::last_os_error().to_string(),
+            Some("lock daemon admission".to_string()),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let flags = match mode {
+            DaemonAdmissionLockMode::Shared => 0,
+            DaemonAdmissionLockMode::Exclusive => LOCKFILE_EXCLUSIVE_LOCK,
+        };
+        if unsafe {
+            LockFileEx(
+                file.as_raw_handle(),
+                flags,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        } == 0
+        {
+            return Err(Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                Some("lock daemon admission".to_string()),
+            ));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = mode;
+    Ok(file)
+}
+
 /// Acquires a non-blocking exclusive advisory lock backed by the OS. Platforms
 /// without an implementation fail closed rather than treating a lock file as
 /// proof of mutual exclusion.
@@ -5676,6 +5796,32 @@ impl Drop for DaemonOwnerLock {
         #[cfg(unix)]
         unsafe {
             let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
+        }
+    }
+}
+
+pub(super) struct DaemonAdmissionFence(File);
+
+impl Drop for DaemonAdmissionFence {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.0), libc::LOCK_UN);
+        }
+        #[cfg(windows)]
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+
+            let mut overlapped: OVERLAPPED = std::mem::zeroed();
+            let _ = UnlockFileEx(
+                self.0.as_raw_handle(),
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            );
         }
     }
 }

@@ -491,6 +491,19 @@ mod repair_dispatch {
             DaemonRepairDispatch::ReconcileLeaselessOrphans
         );
     }
+
+    #[test]
+    fn candidate_reconciliation_dispatches_without_parsing_command_text() {
+        let step = DaemonRepairStep::text(
+            daemon_repair_codes::RUNNER_RECONCILE_UNLEASED_CANDIDATES,
+            "not an executable command",
+        );
+
+        assert_eq!(
+            dispatch_for(&step, None),
+            DaemonRepairDispatch::ReconcileUnleasedCandidates
+        );
+    }
 }
 
 mod repair_readiness {

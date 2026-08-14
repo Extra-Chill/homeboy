@@ -157,10 +157,12 @@ pub(in crate::daemon) fn route(
             Ok(body) => daemon_endpoint_response("runner.staging.capabilities", body),
             Err(err) => auth_or_bad_request(err),
         },
-        ("POST", "/runner/staging") => match stage(body, job_store, auth) {
-            Ok(body) => daemon_endpoint_response("runner.staging.submit", body),
-            Err(err) => auth_or_bad_request(err),
-        },
+        ("POST", "/runner/staging") => {
+            match super::with_daemon_job_admission(|| stage(body, job_store, auth)) {
+                Ok(body) => daemon_endpoint_response("runner.staging.submit", body),
+                Err(err) => auth_or_bad_request(err),
+            }
+        }
         ("GET", "/runner/workspace-claims/capabilities") => {
             match workspace_claim_capabilities(auth) {
                 Ok(body) => daemon_endpoint_response("runner.workspace_claims.capabilities", body),
@@ -205,10 +207,12 @@ pub(in crate::daemon) fn route(
             Ok(body) => daemon_endpoint_response("runner.sessions.register", body),
             Err(err) => auth_or_bad_request(err),
         },
-        ("POST", "/runner/jobs") => match enqueue(body, job_store, auth) {
-            Ok(body) => daemon_endpoint_response("runner.jobs.submit", body),
-            Err(err) => auth_or_bad_request(err),
-        },
+        ("POST", "/runner/jobs") => {
+            match super::with_daemon_job_admission(|| enqueue(body, job_store, auth)) {
+                Ok(body) => daemon_endpoint_response("runner.jobs.submit", body),
+                Err(err) => auth_or_bad_request(err),
+            }
+        }
         ("POST", "/runner/jobs/submissions/lookup") => match submission_lookup(body, job_store, auth) {
             Ok(body) => daemon_endpoint_response("runner.jobs.submissions.lookup", body),
             Err(err) => auth_or_bad_request(err),
@@ -217,10 +221,12 @@ pub(in crate::daemon) fn route(
             Ok(body) => daemon_endpoint_response("runner.jobs.reconcile", body),
             Err(err) => auth_or_bad_request(err),
         },
-        ("POST", "/runner/jobs/claim") => match claim(body, job_store, auth) {
-            Ok(body) => daemon_endpoint_response("runner.jobs.claim", body),
-            Err(err) => auth_or_bad_request(err),
-        },
+        ("POST", "/runner/jobs/claim") => {
+            match super::with_daemon_job_admission(|| claim(body, job_store, auth)) {
+                Ok(body) => daemon_endpoint_response("runner.jobs.claim", body),
+                Err(err) => auth_or_bad_request(err),
+            }
+        }
         ("GET", path) if path.starts_with("/runner/jobs/") => lookup(path, job_store, auth),
         ("POST", path) if path.starts_with("/runner/jobs/") => update(path, body, job_store, auth),
         _ => error_response(

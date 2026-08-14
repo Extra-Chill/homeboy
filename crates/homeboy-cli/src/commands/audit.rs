@@ -1169,6 +1169,7 @@ mod tests {
     #[test]
     fn audit_detects_outliers_in_convention_group() {
         with_isolated_audit_home(|home| {
+            crate::cli_runtime::register_startup_providers_before_reconcile();
             write_source_extension(home.path(), "source-fixture", "rs");
             let root = tmp_dir("audit-read-only");
             fs::create_dir_all(root.join("commands")).unwrap();

@@ -17,18 +17,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::execution_contract::encode_uri_component;
+#[cfg(target_os = "linux")]
 use crate::process::{
-    pid_has_ownership_token, pid_is_running, signal_pid, wait_for_pid_exit, SIGNAL_KILL,
-    SIGNAL_TERMINATE,
+    bind_process_identity_for_signal, process_identity_state_with_start_identity,
+    ProcessIdentityState,
+};
+use crate::process::{
+    pid_has_ownership_token, pid_is_running, process_start_identity, signal_pid, wait_for_pid_exit,
+    SIGNAL_KILL, SIGNAL_TERMINATE,
 };
 
+#[cfg(target_os = "linux")]
+use super::acquire_daemon_job_admission_fence;
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
     read_status, repair_legacy_lease_for_start, stop_unlocked, try_acquire_daemon_owner_lock,
-    DaemonExactOrphanRecoveryResult, DaemonLeaselessOrphanReconciliationResult,
-    DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonProcessCandidate,
-    DaemonProcessOwnership, DaemonStaleReasonCode, DaemonStartResult,
-    DaemonTerminationClassification, DaemonTerminationEvidence, DAEMON_STARTUP_TOKEN_ENV,
+    DaemonCandidateReconciliationResult, DaemonExactOrphanRecoveryResult,
+    DaemonLeaselessOrphanReconciliationResult, DaemonLeaselessRecoveryResult,
+    DaemonOrphanAdoptionResult, DaemonProcessCandidate, DaemonProcessOwnership,
+    DaemonStaleReasonCode, DaemonStartResult, DaemonTerminationClassification,
+    DaemonTerminationEvidence, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
@@ -309,6 +317,7 @@ fn parse_daemon_process_candidate(
     });
     let mut candidate = DaemonProcessCandidate {
         pid,
+        process_start_identity: process_start_identity(pid).ok().flatten(),
         executable: executable.clone(),
         cmdline: normalize_cmdline(&cmdline),
         bind_endpoint,
@@ -316,12 +325,83 @@ fn parse_daemon_process_candidate(
             .as_ref()
             .map(|path| path.display().to_string()),
         build_identity: executable_matches.then_some("current_executable".to_string()),
+        startup_token: command_value(&cmdline, "--startup-token"),
         ownership: DaemonProcessOwnership::Ambiguous,
     };
     if let Some(store) = durable_store_path {
         candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
     }
     Some(candidate)
+}
+
+/// Re-read every identity coordinate immediately before signaling. The initial
+/// process scan is only an observation; this fence is the authority to mutate.
+#[cfg(target_os = "linux")]
+fn candidate_is_unchanged_before_signal(
+    candidate: &DaemonProcessCandidate,
+    jobs_path: &Path,
+) -> bool {
+    let Some(identity) = candidate.process_start_identity.as_ref() else {
+        return false;
+    };
+    if process_identity_state_with_start_identity(candidate.pid, None, Some(identity))
+        != ProcessIdentityState::Live
+    {
+        return false;
+    }
+    let Ok(current) = daemon_process_candidates(jobs_path) else {
+        return false;
+    };
+    let Some(current) = current
+        .into_iter()
+        .find(|current| current.pid == candidate.pid)
+    else {
+        return false;
+    };
+    let endpoint_is_still_unreachable = current
+        .bind_endpoint
+        .as_deref()
+        .and_then(|endpoint| endpoint.parse::<SocketAddr>().ok())
+        .is_some_and(|endpoint| {
+            TcpStream::connect_timeout(&endpoint, Duration::from_millis(200)).is_err()
+        });
+    current.process_start_identity.as_ref() == Some(identity)
+        && current.executable == candidate.executable
+        && current.durable_store_path == candidate.durable_store_path
+        && current.bind_endpoint == candidate.bind_endpoint
+        && current.startup_token == candidate.startup_token
+        && current.ownership == DaemonProcessOwnership::Owning
+        && endpoint_is_still_unreachable
+}
+
+fn command_value(cmdline: &str, flag: &str) -> Option<String> {
+    let arguments = cmdline.split_whitespace().collect::<Vec<_>>();
+    let index = arguments.iter().position(|argument| *argument == flag)?;
+    let value = arguments.get(index + 1)?;
+    (!value.is_empty() && !value.contains(['\'', '"', '\\'])).then(|| (*value).to_string())
+}
+
+#[cfg(test)]
+mod candidate_argument_tests {
+    use super::command_value;
+
+    #[test]
+    fn startup_token_requires_an_unambiguous_argv_value() {
+        assert_eq!(
+            command_value(
+                "homeboy daemon serve --addr 127.0.0.1:7000 --startup-token token-1",
+                "--startup-token"
+            ),
+            Some("token-1".to_string())
+        );
+        assert_eq!(
+            command_value(
+                "homeboy daemon serve --startup-token 'token 1'",
+                "--startup-token"
+            ),
+            None
+        );
+    }
 }
 
 fn command_has_daemon_serve(cmdline: &str) -> bool {
@@ -1880,6 +1960,253 @@ pub fn reconcile_leaseless_orphans(
     result.affected_job_count = affected_job_count;
     result.retry_guidance = "Recorded job output and artifacts were retained. Retry eligible work through its original command or workflow.".to_string();
     Ok(result)
+}
+
+/// Preview or explicitly retire unleased daemon candidates before starting one
+/// replacement. This is deliberately separate from lease-less job recovery:
+/// candidate cleanup is valid only when the durable store has no active work.
+///
+/// A same-store process is never inferred to be disposable. It must prove the
+/// current executable, its exact supervised startup token, and an unreachable
+/// advertised endpoint before `apply` can signal it. Candidates for another
+/// durable store are retained as evidence but never signaled by this store.
+#[cfg(target_os = "linux")]
+pub fn reconcile_unleased_candidates(
+    addr: &str,
+    apply: bool,
+    replacement_operation_id: Option<&str>,
+) -> Result<DaemonCandidateReconciliationResult> {
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
+    let _admission_fence = apply.then(acquire_daemon_job_admission_fence).transpose()?;
+    let status = read_status()?;
+    // The replacement lease is the durable receipt for this operation. A lost
+    // SSH response replays the same operation ID and returns B without touching
+    // any process candidate again.
+    if let Some(operation_id) = replacement_operation_id.filter(|id| !id.trim().is_empty()) {
+        if let Some(state) = status
+            .state
+            .as_ref()
+            .filter(|state| state.startup_token == operation_id && pid_is_running(state.pid))
+        {
+            return Ok(DaemonCandidateReconciliationResult {
+                applied: true,
+                active_jobs: status.freshness.active_jobs,
+                candidates: status.process_candidates,
+                retired_pids: Vec::new(),
+                blocked_pids: Vec::new(),
+                evidence: vec![format!("replayed replacement operation {operation_id}")],
+                replacement: Some(DaemonStartResult {
+                    pid: state.pid,
+                    address: state.address.clone(),
+                    state_path: state.state_path.clone(),
+                    lease_id: state.lease_id.clone(),
+                }),
+            });
+        }
+    }
+    let candidates = status.process_candidates;
+    let mut evidence = candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "pid {} ownership={:?} store={} binary={} endpoint={} startup_token={}",
+                candidate.pid,
+                candidate.ownership,
+                candidate
+                    .durable_store_path
+                    .as_deref()
+                    .unwrap_or("unavailable"),
+                candidate.build_identity.as_deref().unwrap_or("unproven"),
+                candidate.bind_endpoint.as_deref().unwrap_or("unavailable"),
+                candidate.startup_token.as_deref().unwrap_or("unavailable"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut result = DaemonCandidateReconciliationResult {
+        applied: false,
+        active_jobs: status.freshness.active_jobs,
+        candidates,
+        retired_pids: Vec::new(),
+        blocked_pids: Vec::new(),
+        evidence: Vec::new(),
+        replacement: None,
+    };
+    if result.active_jobs != 0 {
+        result.blocked_pids = result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.pid)
+            .collect();
+        evidence.push(format!(
+            "{} active durable job(s) retain all candidate generations",
+            result.active_jobs
+        ));
+        result.evidence = evidence;
+        return Ok(result);
+    }
+
+    let jobs_path = crate::paths::daemon_jobs_file()?;
+    for candidate in &result.candidates {
+        match candidate.ownership {
+            DaemonProcessOwnership::Unrelated => evidence.push(format!(
+                "pid {} belongs to a different durable store and was excluded without signaling",
+                candidate.pid
+            )),
+            DaemonProcessOwnership::Ambiguous => {
+                result.blocked_pids.push(candidate.pid);
+                evidence.push(format!(
+                    "pid {} remains fail-closed: exact durable-store, binary, endpoint, and startup-token evidence is required for adoption or retirement",
+                    candidate.pid
+                ));
+            }
+            DaemonProcessOwnership::Owning => {
+                let endpoint_unreachable = candidate
+                    .bind_endpoint
+                    .as_deref()
+                    .and_then(|endpoint| endpoint.parse::<SocketAddr>().ok())
+                    .is_some_and(|endpoint| {
+                        TcpStream::connect_timeout(&endpoint, Duration::from_millis(200)).is_err()
+                    });
+                if candidate.build_identity.is_some()
+                    && candidate.process_start_identity.is_some()
+                    && candidate.startup_token.is_some()
+                    && endpoint_unreachable
+                {
+                    evidence.push(format!(
+                        "pid {} is a proven orphan candidate: same store, current binary, exact startup token, and unreachable endpoint",
+                        candidate.pid
+                    ));
+                } else {
+                    result.blocked_pids.push(candidate.pid);
+                    evidence.push(format!(
+                        "pid {} remains fail-closed: same-store candidate lacks exact orphan evidence for startup token, current binary, or unreachable endpoint",
+                        candidate.pid
+                    ));
+                }
+            }
+        }
+    }
+    if !apply || !result.blocked_pids.is_empty() {
+        result.evidence = evidence;
+        return Ok(result);
+    }
+
+    // A free owner lock is the final no-owner proof. An unreachable endpoint is
+    // not enough to signal a daemon that still owns this store.
+    let owner_lock = try_acquire_daemon_owner_lock()?;
+    if owner_lock.is_none() {
+        result.blocked_pids = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.ownership == DaemonProcessOwnership::Owning)
+            .map(|candidate| candidate.pid)
+            .collect();
+        evidence
+            .push("daemon owner lock is held; same-store candidates remain unsignaled".to_string());
+        result.evidence = evidence;
+        return Ok(result);
+    }
+    let owner_lock = owner_lock.expect("checked owner lock");
+
+    for candidate in &result.candidates {
+        if candidate.ownership != DaemonProcessOwnership::Owning {
+            continue;
+        }
+        let token = candidate.startup_token.as_deref().expect("proven token");
+        let active_jobs = super::JobStore::active_count_at_path(&jobs_path)?;
+        result.active_jobs = active_jobs;
+        if active_jobs != 0 {
+            result.blocked_pids.push(candidate.pid);
+            evidence.push(format!(
+                "pid {} was not signaled because {} durable job(s) became active",
+                candidate.pid, active_jobs
+            ));
+            continue;
+        }
+        // Open the pidfd before the final validation. If the candidate exits and
+        // its PID is reused after validation, the handle still targets only the
+        // original process instance.
+        let process = match bind_process_identity_for_signal(candidate.pid) {
+            Ok(process) => process,
+            Err(error) => {
+                result.blocked_pids.push(candidate.pid);
+                evidence.push(format!(
+                    "pid {} remains fail-closed: race-safe identity-bound signaling is unavailable: {}",
+                    candidate.pid, error.message
+                ));
+                continue;
+            }
+        };
+        if !candidate_is_unchanged_before_signal(candidate, &jobs_path) {
+            result.blocked_pids.push(candidate.pid);
+            evidence.push(format!(
+                "pid {} changed PID, start identity, executable, durable store, endpoint, or startup token before apply and was not signaled",
+                candidate.pid
+            ));
+            continue;
+        }
+        if !pid_has_ownership_token(candidate.pid, DAEMON_STARTUP_TOKEN_ENV, token)? {
+            result.blocked_pids.push(candidate.pid);
+            evidence.push(format!(
+                "pid {} changed startup-token environment ownership before apply and was not signaled",
+                candidate.pid
+            ));
+            continue;
+        }
+        let delivered = process.signal(SIGNAL_TERMINATE)?;
+        if !delivered || process.wait_for_exit(super::FORCE_STOP_WAIT)? {
+            result.retired_pids.push(candidate.pid);
+            evidence.push(format!("pid {} retired with pidfd SIGTERM", candidate.pid));
+        } else {
+            result.blocked_pids.push(candidate.pid);
+            evidence.push(format!(
+                "pid {} did not exit within the bounded SIGTERM window and was not escalated",
+                candidate.pid
+            ));
+        }
+    }
+    if result.blocked_pids.is_empty() {
+        drop(owner_lock);
+        let startup_token = replacement_operation_id.filter(|id| !id.trim().is_empty());
+        let replacement = match startup_token {
+            Some(operation_id) => {
+                start_or_return_live_unlocked_with_startup_token(addr, operation_id)?
+            }
+            None => start_or_return_live_unlocked(addr)?,
+        };
+        result.applied = true;
+        result.replacement = Some(replacement);
+    }
+    result.evidence = evidence;
+    Ok(result)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn reconcile_unleased_candidates(
+    _addr: &str,
+    _apply: bool,
+    _replacement_operation_id: Option<&str>,
+) -> Result<DaemonCandidateReconciliationResult> {
+    Err(Error::validation_invalid_argument(
+        "reconcile_unleased_candidates",
+        "unleased daemon candidate reconciliation requires Linux pidfd signaling",
+        None,
+        None,
+    ))
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod unleased_candidate_platform_tests {
+    use super::reconcile_unleased_candidates;
+
+    #[test]
+    fn reconciliation_preflight_is_unsupported_without_pidfd() {
+        let error = reconcile_unleased_candidates("127.0.0.1:0", true, Some("operation"))
+            .expect_err("non-Linux must reject candidate signaling before mutation");
+
+        assert!(error.message.contains("requires Linux pidfd"));
+    }
 }
 
 fn prove_no_daemon_owner(addr: &str) -> Result<Vec<String>> {

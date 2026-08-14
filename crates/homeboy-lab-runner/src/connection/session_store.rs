@@ -2007,6 +2007,7 @@ pub(super) fn failed_connect(
                 classification: match failure_kind {
                     RunnerFailureKind::SshFailure => "ssh".to_string(),
                     RunnerFailureKind::MissingRemoteHomeboy => "version".to_string(),
+                    RunnerFailureKind::RunnerCapabilityMissing => "runner_capability".to_string(),
                     RunnerFailureKind::DaemonStartupFailure => "daemon_startup".to_string(),
                     RunnerFailureKind::TunnelFailure => "tunnel".to_string(),
                 },
