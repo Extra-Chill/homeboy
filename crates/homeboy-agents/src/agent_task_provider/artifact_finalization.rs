@@ -30,6 +30,11 @@ pub(crate) struct ExecutorArtifactRootIdentity {
 
 impl ExecutorArtifactRootIdentity {
     pub(crate) fn capture(path: &Path) -> Result<Self> {
+        let finalized_root = homeboy_core::paths::artifact_root()?.join("executor-finalized");
+        Self::capture_with_finalized_root(path, finalized_root)
+    }
+
+    fn capture_with_finalized_root(path: &Path, finalized_root: PathBuf) -> Result<Self> {
         let metadata = fs::symlink_metadata(path).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
@@ -53,9 +58,6 @@ impl ExecutorArtifactRootIdentity {
                 )),
             )
         })?;
-        // Finalized evidence belongs to Homeboy's canonical artifact store, not
-        // beside the provider-writable executor directory.
-        let finalized_root = homeboy_core::paths::artifact_root()?.join("executor-finalized");
         let finalized_path = finalized_root.join(uuid::Uuid::new_v4().to_string());
         #[cfg(unix)]
         {
@@ -909,7 +911,14 @@ mod tests {
     use crate::agent_task::{
         AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
     };
-    use homeboy_core::test_support::with_isolated_home;
+
+    fn capture(root: &Path, temp: &Path) -> ExecutorArtifactRootIdentity {
+        ExecutorArtifactRootIdentity::capture_with_finalized_root(
+            root,
+            temp.join("executor-finalized"),
+        )
+        .expect("capture root")
+    }
 
     fn outcome(path: impl Into<String>) -> AgentTaskOutcome {
         AgentTaskOutcome {
@@ -946,35 +955,29 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn finalization_persists_opened_bytes_in_canonical_store_with_hash_parity() {
-        with_isolated_home(|home| {
-            let root_path = home.path().join("executor");
-            fs::create_dir(&root_path).expect("executor root");
-            let source = root_path.join("result.patch");
-            fs::write(&source, b"verified patch bytes").expect("source");
-            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
-            let mut value = outcome("result.patch");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root_path = temp.path().join("executor");
+        fs::create_dir(&root_path).expect("executor root");
+        let source = root_path.join("result.patch");
+        fs::write(&source, b"verified patch bytes").expect("source");
+        let root = capture(&root_path, temp.path());
+        let mut value = outcome("result.patch");
 
-            finalize_provider_file_artifacts(&mut value, &root).expect("finalize");
+        finalize_provider_file_artifacts(&mut value, &root).expect("finalize");
 
-            let artifact = &value.artifacts[0];
-            let persisted = Path::new(artifact.path.as_deref().expect("persisted path"));
-            assert!(
-                persisted.starts_with(homeboy_core::paths::artifact_root().expect("store root"))
-            );
-            assert_eq!(
-                fs::read(persisted).expect("persisted bytes"),
-                b"verified patch bytes"
-            );
-            assert_eq!(artifact.size_bytes, Some(20));
-            assert_eq!(artifact.mime.as_deref(), Some("text/x-patch"));
-            assert_eq!(
-                artifact.sha256,
-                Some(
-                    homeboy_core::artifact_metadata::sha256_file(persisted)
-                        .expect("persisted hash")
-                )
-            );
-        });
+        let artifact = &value.artifacts[0];
+        let persisted = Path::new(artifact.path.as_deref().expect("persisted path"));
+        assert!(persisted.starts_with(&root.finalized_root));
+        assert_eq!(
+            fs::read(persisted).expect("persisted bytes"),
+            b"verified patch bytes"
+        );
+        assert_eq!(artifact.size_bytes, Some(20));
+        assert_eq!(artifact.mime.as_deref(), Some("text/x-patch"));
+        assert_eq!(
+            artifact.sha256,
+            Some(homeboy_core::artifact_metadata::sha256_file(persisted).expect("persisted hash"))
+        );
     }
 
     #[cfg(unix)]
@@ -982,95 +985,93 @@ mod tests {
     fn finalization_deduplicates_identical_bytes_while_preserving_typed_aliases() {
         use std::os::unix::fs::MetadataExt;
 
-        with_isolated_home(|home| {
-            let root_path = home.path().join("executor");
-            fs::create_dir(&root_path).expect("executor root");
-            fs::write(root_path.join("transcript.log"), b"shared runtime evidence")
-                .expect("transcript");
-            fs::write(root_path.join("runtime.log"), b"shared runtime evidence")
-                .expect("runtime stdout");
-            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
-            let mut value = outcome("transcript.log");
-            value.artifacts[0].id = "transcript".to_string();
-            value.artifacts[0].kind = "transcript".to_string();
-            value.artifacts.push(AgentTaskArtifact {
-                id: "runtime-stdout".to_string(),
-                kind: "provider-runtime-stdout".to_string(),
-                path: Some("runtime.log".to_string()),
-                ..value.artifacts[0].clone()
-            });
-            value
-                .typed_artifacts
-                .push(crate::agent_task::AgentTaskTypedArtifact {
-                    name: "transcript".to_string(),
-                    artifact_type: Some("transcript".to_string()),
-                    artifact_schema: None,
-                    payload: serde_json::Value::Null,
-                    artifact: Some(value.artifacts[0].clone()),
-                    metadata: serde_json::Value::Null,
-                });
-            value
-                .typed_artifacts
-                .push(crate::agent_task::AgentTaskTypedArtifact {
-                    name: "runtime_stdout".to_string(),
-                    artifact_type: Some("provider-runtime-stdout".to_string()),
-                    artifact_schema: None,
-                    payload: serde_json::Value::Null,
-                    artifact: Some(value.artifacts[1].clone()),
-                    metadata: serde_json::Value::Null,
-                });
-
-            finalize_provider_file_artifacts(&mut value, &root).expect("finalize");
-
-            let transcript =
-                Path::new(value.artifacts[0].path.as_deref().expect("transcript path"));
-            let runtime = Path::new(value.artifacts[1].path.as_deref().expect("runtime path"));
-            assert_ne!(
-                transcript, runtime,
-                "each logical artifact retains its alias"
-            );
-            assert_eq!(
-                fs::metadata(transcript).expect("transcript metadata").ino(),
-                fs::metadata(runtime).expect("runtime metadata").ino()
-            );
-            let blob = root.finalized_root.join("blobs").join(
-                value.artifacts[0]
-                    .sha256
-                    .as_deref()
-                    .expect("transcript digest"),
-            );
-            assert_eq!(
-                fs::metadata(transcript).expect("transcript metadata").ino(),
-                fs::metadata(&blob).expect("canonical blob metadata").ino(),
-                "logical aliases resolve to the digest-addressed canonical bytes"
-            );
-            assert_eq!(
-                value.typed_artifacts[0]
-                    .artifact
-                    .as_ref()
-                    .expect("typed transcript")
-                    .path
-                    .as_deref(),
-                value.artifacts[0].path.as_deref()
-            );
-            assert_eq!(
-                value.typed_artifacts[1]
-                    .artifact
-                    .as_ref()
-                    .expect("typed runtime")
-                    .path
-                    .as_deref(),
-                value.artifacts[1].path.as_deref()
-            );
-            assert_eq!(
-                fs::read(transcript).expect("resolve transcript alias"),
-                b"shared runtime evidence"
-            );
-            assert_eq!(
-                fs::read(runtime).expect("resolve runtime alias"),
-                b"shared runtime evidence"
-            );
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root_path = temp.path().join("executor");
+        fs::create_dir(&root_path).expect("executor root");
+        fs::write(root_path.join("transcript.log"), b"shared runtime evidence")
+            .expect("transcript");
+        fs::write(root_path.join("runtime.log"), b"shared runtime evidence")
+            .expect("runtime stdout");
+        let root = capture(&root_path, temp.path());
+        let mut value = outcome("transcript.log");
+        value.artifacts[0].id = "transcript".to_string();
+        value.artifacts[0].kind = "transcript".to_string();
+        value.artifacts.push(AgentTaskArtifact {
+            id: "runtime-stdout".to_string(),
+            kind: "provider-runtime-stdout".to_string(),
+            path: Some("runtime.log".to_string()),
+            ..value.artifacts[0].clone()
         });
+        value
+            .typed_artifacts
+            .push(crate::agent_task::AgentTaskTypedArtifact {
+                name: "transcript".to_string(),
+                artifact_type: Some("transcript".to_string()),
+                artifact_schema: None,
+                payload: serde_json::Value::Null,
+                artifact: Some(value.artifacts[0].clone()),
+                metadata: serde_json::Value::Null,
+            });
+        value
+            .typed_artifacts
+            .push(crate::agent_task::AgentTaskTypedArtifact {
+                name: "runtime_stdout".to_string(),
+                artifact_type: Some("provider-runtime-stdout".to_string()),
+                artifact_schema: None,
+                payload: serde_json::Value::Null,
+                artifact: Some(value.artifacts[1].clone()),
+                metadata: serde_json::Value::Null,
+            });
+
+        finalize_provider_file_artifacts(&mut value, &root).expect("finalize");
+
+        let transcript = Path::new(value.artifacts[0].path.as_deref().expect("transcript path"));
+        let runtime = Path::new(value.artifacts[1].path.as_deref().expect("runtime path"));
+        assert_ne!(
+            transcript, runtime,
+            "each logical artifact retains its alias"
+        );
+        assert_eq!(
+            fs::metadata(transcript).expect("transcript metadata").ino(),
+            fs::metadata(runtime).expect("runtime metadata").ino()
+        );
+        let blob = root.finalized_root.join("blobs").join(
+            value.artifacts[0]
+                .sha256
+                .as_deref()
+                .expect("transcript digest"),
+        );
+        assert_eq!(
+            fs::metadata(transcript).expect("transcript metadata").ino(),
+            fs::metadata(&blob).expect("canonical blob metadata").ino(),
+            "logical aliases resolve to the digest-addressed canonical bytes"
+        );
+        assert_eq!(
+            value.typed_artifacts[0]
+                .artifact
+                .as_ref()
+                .expect("typed transcript")
+                .path
+                .as_deref(),
+            value.artifacts[0].path.as_deref()
+        );
+        assert_eq!(
+            value.typed_artifacts[1]
+                .artifact
+                .as_ref()
+                .expect("typed runtime")
+                .path
+                .as_deref(),
+            value.artifacts[1].path.as_deref()
+        );
+        assert_eq!(
+            fs::read(transcript).expect("resolve transcript alias"),
+            b"shared runtime evidence"
+        );
+        assert_eq!(
+            fs::read(runtime).expect("resolve runtime alias"),
+            b"shared runtime evidence"
+        );
     }
 
     #[cfg(unix)]
@@ -1078,146 +1079,137 @@ mod tests {
     fn finalization_keeps_distinct_content_in_separate_blobs() {
         use std::os::unix::fs::MetadataExt;
 
-        with_isolated_home(|home| {
-            let root_path = home.path().join("executor");
-            fs::create_dir(&root_path).expect("executor root");
-            fs::write(root_path.join("transcript.log"), b"transcript evidence")
-                .expect("transcript");
-            fs::write(root_path.join("runtime.log"), b"runtime stdout").expect("runtime stdout");
-            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
-            let mut value = outcome("transcript.log");
-            value.artifacts.push(AgentTaskArtifact {
-                id: "runtime-stdout".to_string(),
-                kind: "provider-runtime-stdout".to_string(),
-                path: Some("runtime.log".to_string()),
-                ..value.artifacts[0].clone()
-            });
-
-            finalize_provider_file_artifacts(&mut value, &root).expect("finalize");
-
-            let transcript =
-                Path::new(value.artifacts[0].path.as_deref().expect("transcript path"));
-            let runtime = Path::new(value.artifacts[1].path.as_deref().expect("runtime path"));
-            assert_ne!(
-                fs::metadata(transcript).expect("transcript metadata").ino(),
-                fs::metadata(runtime).expect("runtime metadata").ino()
-            );
-            assert_ne!(value.artifacts[0].sha256, value.artifacts[1].sha256);
-            assert!(root
-                .finalized_root
-                .join("blobs")
-                .join(
-                    value.artifacts[0]
-                        .sha256
-                        .as_deref()
-                        .expect("transcript digest")
-                )
-                .is_file());
-            assert!(root
-                .finalized_root
-                .join("blobs")
-                .join(
-                    value.artifacts[1]
-                        .sha256
-                        .as_deref()
-                        .expect("runtime digest")
-                )
-                .is_file());
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root_path = temp.path().join("executor");
+        fs::create_dir(&root_path).expect("executor root");
+        fs::write(root_path.join("transcript.log"), b"transcript evidence").expect("transcript");
+        fs::write(root_path.join("runtime.log"), b"runtime stdout").expect("runtime stdout");
+        let root = capture(&root_path, temp.path());
+        let mut value = outcome("transcript.log");
+        value.artifacts.push(AgentTaskArtifact {
+            id: "runtime-stdout".to_string(),
+            kind: "provider-runtime-stdout".to_string(),
+            path: Some("runtime.log".to_string()),
+            ..value.artifacts[0].clone()
         });
+
+        finalize_provider_file_artifacts(&mut value, &root).expect("finalize");
+
+        let transcript = Path::new(value.artifacts[0].path.as_deref().expect("transcript path"));
+        let runtime = Path::new(value.artifacts[1].path.as_deref().expect("runtime path"));
+        assert_ne!(
+            fs::metadata(transcript).expect("transcript metadata").ino(),
+            fs::metadata(runtime).expect("runtime metadata").ino()
+        );
+        assert_ne!(value.artifacts[0].sha256, value.artifacts[1].sha256);
+        assert!(root
+            .finalized_root
+            .join("blobs")
+            .join(
+                value.artifacts[0]
+                    .sha256
+                    .as_deref()
+                    .expect("transcript digest")
+            )
+            .is_file());
+        assert!(root
+            .finalized_root
+            .join("blobs")
+            .join(
+                value.artifacts[1]
+                    .sha256
+                    .as_deref()
+                    .expect("runtime digest")
+            )
+            .is_file());
     }
 
     #[cfg(any(unix, windows))]
     #[test]
     fn finalization_rejects_replaced_executor_root() {
-        with_isolated_home(|home| {
-            let root_path = home.path().join("executor");
-            fs::create_dir(&root_path).expect("executor root");
-            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
-            fs::rename(&root_path, home.path().join("executor-original")).expect("replace root");
-            fs::create_dir(&root_path).expect("replacement root");
-            fs::write(root_path.join("result.patch"), b"replacement").expect("source");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root_path = temp.path().join("executor");
+        fs::create_dir(&root_path).expect("executor root");
+        let root = capture(&root_path, temp.path());
+        fs::rename(&root_path, temp.path().join("executor-original")).expect("replace root");
+        fs::create_dir(&root_path).expect("replacement root");
+        fs::write(root_path.join("result.patch"), b"replacement").expect("source");
 
-            assert!(finalize_provider_file_artifacts(&mut outcome("result.patch"), &root).is_err());
-        });
+        assert!(finalize_provider_file_artifacts(&mut outcome("result.patch"), &root).is_err());
     }
 
     #[cfg(unix)]
     #[test]
     fn finalization_rejects_nested_symlink_before_opening_leaf() {
-        with_isolated_home(|home| {
-            let root_path = home.path().join("executor");
-            let outside = home.path().join("outside");
-            fs::create_dir(&root_path).expect("executor root");
-            fs::create_dir(&outside).expect("outside root");
-            fs::write(outside.join("result.patch"), b"outside").expect("source");
-            std::os::unix::fs::symlink(&outside, root_path.join("nested")).expect("symlink");
-            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root_path = temp.path().join("executor");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root_path).expect("executor root");
+        fs::create_dir(&outside).expect("outside root");
+        fs::write(outside.join("result.patch"), b"outside").expect("source");
+        std::os::unix::fs::symlink(&outside, root_path.join("nested")).expect("symlink");
+        let root = capture(&root_path, temp.path());
 
-            assert!(
-                finalize_provider_file_artifacts(&mut outcome("nested/result.patch"), &root)
-                    .is_err()
-            );
-        });
+        assert!(
+            finalize_provider_file_artifacts(&mut outcome("nested/result.patch"), &root).is_err()
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn finalization_rejects_symlink_leaf() {
-        with_isolated_home(|home| {
-            let root_path = home.path().join("executor");
-            fs::create_dir(&root_path).expect("executor root");
-            let outside = home.path().join("outside.patch");
-            fs::write(&outside, b"outside").expect("source");
-            std::os::unix::fs::symlink(&outside, root_path.join("result.patch")).expect("symlink");
-            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root_path = temp.path().join("executor");
+        fs::create_dir(&root_path).expect("executor root");
+        let outside = temp.path().join("outside.patch");
+        fs::write(&outside, b"outside").expect("source");
+        std::os::unix::fs::symlink(&outside, root_path.join("result.patch")).expect("symlink");
+        let root = capture(&root_path, temp.path());
 
-            assert!(finalize_provider_file_artifacts(&mut outcome("result.patch"), &root).is_err());
-        });
+        assert!(finalize_provider_file_artifacts(&mut outcome("result.patch"), &root).is_err());
     }
 
     #[cfg(any(unix, windows))]
     #[test]
     fn external_patch_remains_visible_without_becoming_an_aggregate_apply_candidate() {
-        with_isolated_home(|home| {
-            let root_path = home.path().join("executor");
-            let external = home.path().join("external.patch");
-            fs::create_dir(&root_path).expect("executor root");
-            fs::write(&external, b"diff --git a/a b/a\n").expect("external patch");
-            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
-            let mut value = outcome(external.display().to_string());
-            value.artifacts[0].size_bytes = Some(128);
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root_path = temp.path().join("executor");
+        let external = temp.path().join("external.patch");
+        fs::create_dir(&root_path).expect("executor root");
+        fs::write(&external, b"diff --git a/a b/a\n").expect("external patch");
+        let root = capture(&root_path, temp.path());
+        let mut value = outcome(external.display().to_string());
+        value.artifacts[0].size_bytes = Some(128);
 
-            finalize_provider_file_artifacts(&mut value, &root).expect("review-only finalization");
+        finalize_provider_file_artifacts(&mut value, &root).expect("review-only finalization");
 
-            let report = crate::agent_task_aggregate::AgentTaskAggregateReport::from(&[value][..]);
-            assert_eq!(report.artifact_inventory.len(), 1);
-            assert!(report.apply_candidates.is_empty());
-            assert_eq!(report.summary.review_candidates, 1);
-        });
+        let report = crate::agent_task_aggregate::AgentTaskAggregateReport::from(&[value][..]);
+        assert_eq!(report.artifact_inventory.len(), 1);
+        assert!(report.apply_candidates.is_empty());
+        assert_eq!(report.summary.review_candidates, 1);
     }
 
     #[cfg(any(unix, windows))]
     #[test]
     fn finalization_rejects_open_descriptor_that_no_longer_matches_canonical_path() {
-        with_isolated_home(|home| {
-            let root_path = home.path().join("executor");
-            fs::create_dir(&root_path).expect("executor root");
-            let candidate = root_path.join("result.patch");
-            fs::write(&candidate, b"original").expect("source");
-            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
-            let input = open_regular_file_no_follow(&candidate).expect("open source");
-            let replacement = root_path.join("replacement.patch");
-            fs::write(&replacement, b"replacement").expect("replacement");
-            fs::rename(&replacement, &candidate).expect("replace leaf");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root_path = temp.path().join("executor");
+        fs::create_dir(&root_path).expect("executor root");
+        let candidate = root_path.join("result.patch");
+        fs::write(&candidate, b"original").expect("source");
+        let root = capture(&root_path, temp.path());
+        let input = open_regular_file_no_follow(&candidate).expect("open source");
+        let replacement = root_path.join("replacement.patch");
+        fs::write(&replacement, b"replacement").expect("replacement");
+        fs::rename(&replacement, &candidate).expect("replace leaf");
 
-            assert!(verify_open_file_canonical_identity(
-                &root,
-                &candidate,
-                &input,
-                Path::new("result.patch")
-            )
-            .is_err());
-        });
+        assert!(verify_open_file_canonical_identity(
+            &root,
+            &candidate,
+            &input,
+            Path::new("result.patch")
+        )
+        .is_err());
     }
 
     #[test]
@@ -1239,26 +1231,24 @@ mod tests {
     fn finalization_rejects_nested_junction_escape() {
         use std::process::Command;
 
-        with_isolated_home(|home| {
-            let root_path = home.path().join("executor");
-            let outside = home.path().join("outside");
-            let junction = root_path.join("nested");
-            fs::create_dir(&root_path).expect("executor root");
-            fs::create_dir(&outside).expect("outside root");
-            fs::write(outside.join("result.patch"), b"outside").expect("source");
-            let status = Command::new("cmd")
-                .args(["/C", "mklink", "/J"])
-                .arg(&junction)
-                .arg(&outside)
-                .status()
-                .expect("create junction");
-            assert!(status.success(), "create junction");
-            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root_path = temp.path().join("executor");
+        let outside = temp.path().join("outside");
+        let junction = root_path.join("nested");
+        fs::create_dir(&root_path).expect("executor root");
+        fs::create_dir(&outside).expect("outside root");
+        fs::write(outside.join("result.patch"), b"outside").expect("source");
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .status()
+            .expect("create junction");
+        assert!(status.success(), "create junction");
+        let root = capture(&root_path, temp.path());
 
-            assert!(
-                finalize_provider_file_artifacts(&mut outcome("nested/result.patch"), &root)
-                    .is_err()
-            );
-        });
+        assert!(
+            finalize_provider_file_artifacts(&mut outcome("nested/result.patch"), &root).is_err()
+        );
     }
 }
