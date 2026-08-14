@@ -463,6 +463,7 @@ where
     let mut projection_pending_child_runs = Vec::new();
     let mut resumable_child_runs = Vec::new();
     let mut timed_out_child_runs = HashSet::new();
+    let mut observation_fresh = true;
     for child in &mut batch.child_runs {
         if terminal_preflight_or_admission_failure(&batch.metadata, &child.run_id) {
             continue;
@@ -493,6 +494,9 @@ where
                 }
             }
             Err(error) => {
+                if error.code == ErrorCode::ObservationStoreBusy {
+                    observation_fresh = false;
+                }
                 if !child.state.is_terminal() {
                     unavailable_child_runs.push(child_issue(
                         child,
@@ -545,7 +549,7 @@ where
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
         status: state.outcome_status().to_string(),
-        observation_fresh: unavailable_child_runs.is_empty(),
+        observation_fresh,
         dependency_graph,
         next_actions,
         commands,
@@ -1611,6 +1615,42 @@ mod tests {
             .next_actions
             .iter()
             .any(|action| action.contains("partial results only")));
+    }
+
+    #[test]
+    fn terminal_child_busy_observation_keeps_terminal_state_but_marks_staleness() {
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
+        let plan = AgentTaskPlan::new("fanout/terminal-busy", vec![request("a")]);
+        submit_batch(&batch_store, &lifecycle_store, &plan, "batch/terminal-busy");
+        rewrite_record(&lifecycle_store, "batch_terminal-busy-a", |record| {
+            record.state = AgentTaskRunState::Succeeded;
+        });
+        let mut batch = batch_store
+            .read_batch("batch/terminal-busy")
+            .expect("durable batch");
+        batch.child_runs[0].state = AgentTaskRunState::Succeeded;
+        batch_store
+            .write_batch(&batch)
+            .expect("persist terminal batch state");
+
+        let report = batch_store
+            .status_with(
+                "batch/terminal-busy",
+                |_| {
+                    Err(Error::observation_store_busy(
+                        "test.sqlite",
+                        "read terminal child",
+                        750,
+                    ))
+                },
+                |_| Ok(None),
+            )
+            .expect("fanout status falls back to terminal durable state");
+
+        assert_eq!(report.batch.state, AgentTaskBatchState::Succeeded);
+        assert_eq!(report.totals.succeeded, 1);
+        assert!(!report.observation_fresh);
+        assert!(report.unavailable_child_runs.is_empty());
     }
 
     #[test]
