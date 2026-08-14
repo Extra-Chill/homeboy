@@ -9,6 +9,9 @@ use std::time::Duration;
 use super::CmdResult;
 
 #[derive(Args)]
+#[command(
+    after_help = "Persisted artifact and file transfers use `homeboy file`:\n  homeboy file copy ./artifact.tar.gz prod:/var/tmp/artifact.tar.gz\n  homeboy file copy prod:/var/tmp/result.json ./result.json\n  homeboy file sync ./artifacts prod:/var/tmp/artifacts"
+)]
 pub struct SshArgs {
     /// Target ID (project or server; project wins when ambiguous)
     pub target: Option<String>,
@@ -39,7 +42,9 @@ pub struct SshArgs {
     /// Write only the remote command's stdout to local stdout (and its stderr to
     /// local stderr), exiting with the remote exit code. Ideal for piping a
     /// remote export straight into a file. Combine with `--output <path>` to also
-    /// persist the structured envelope. Requires a non-interactive command.
+    /// persist the structured envelope. For a persisted remote artifact rather
+    /// than stdout, use `homeboy file copy` or `homeboy file sync`. Requires a
+    /// non-interactive command.
     #[arg(long)]
     pub raw: bool,
 

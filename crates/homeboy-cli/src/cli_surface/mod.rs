@@ -1401,6 +1401,17 @@ mod tests {
     }
 
     #[test]
+    fn ssh_help_routes_persisted_artifacts_to_file_commands() {
+        let help = scoped_help(&["ssh"]);
+
+        assert!(help.contains("Persisted artifact and file transfers use `homeboy file`"));
+        assert!(help.contains("homeboy file copy ./artifact.tar.gz prod:/var/tmp/artifact.tar.gz"));
+        assert!(help.contains("homeboy file copy prod:/var/tmp/result.json ./result.json"));
+        assert!(help.contains("homeboy file sync ./artifacts prod:/var/tmp/artifacts"));
+        assert!(help.contains("For a persisted remote artifact rather than stdout"));
+    }
+
+    #[test]
     fn reconciliation_help_names_each_state_plane_and_mutation_boundary() {
         let runs = scoped_help(&["runs", "reconcile"]);
         assert!(runs.contains("observation records"));
