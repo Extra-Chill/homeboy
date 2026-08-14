@@ -37,13 +37,16 @@ const artifactRoot = args[args.indexOf('--artifacts') + 1];
 const runtime = path.join(artifactRoot, 'runtime-fixture');
 fs.mkdirSync(path.join(runtime, 'files'), { recursive: true });
 fs.writeFileSync(path.join(artifactRoot, 'latest-runtime.json'), JSON.stringify({ paths: { runtimeDirectory: 'runtime-fixture' } }));
-fs.writeFileSync(path.join(runtime, 'files', 'test-results.json'), JSON.stringify({
+const fixture = JSON.parse(process.env.RECIPE_RUN_FIXTURE || '{}');
+fs.writeFileSync(path.join(runtime, 'files', 'test-results.json'), JSON.stringify(fixture.testResults || {
   schema: 'wp-codebox/test-results/v1',
   status: 'skipped',
   summary: { total: 0, passed: 0, failed: 0, skipped: 0, unknown: 0 },
   suites: [],
 }));
-const fixture = JSON.parse(process.env.RECIPE_RUN_FIXTURE || '{}');
+if (typeof fixture.phpunitOutput === 'string') {
+  fs.writeFileSync(path.join(runtime, 'files', 'phpunit-output.log'), fixture.phpunitOutput);
+}
 if (typeof fixture.stageLog === 'string') {
   fs.mkdirSync(path.join(runtime, 'files', 'phpunit'), { recursive: true });
   fs.writeFileSync(path.join(runtime, 'files', 'phpunit', '.pg-test-result.txt'), fixture.stageLog);
@@ -68,6 +71,7 @@ async function runScenario(name, fixture) {
       HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts,
       HOMEBOY_INVOCATION_ARTIFACT_DIR: invocationArtifacts,
       HOMEBOY_SETTINGS_JSON: '{}',
+      FIXTURE_SECRET_TOKEN: fixture.secretValue || '',
     },
     encoding: 'utf8',
     maxBuffer: 2 * 1024 * 1024,
@@ -135,6 +139,86 @@ try {
   const results = JSON.parse(await readFile(path.join(setupOnly.publishedFiles, 'test-results.json'), 'utf8'));
   assert.equal(results.status, 'failed');
   assert.ok(results.evidenceReferences.some((entry) => entry.kind === 'recipe-run-steps' && entry.uri === 'artifact://files/recipe-run-steps.json'));
+
+  // PHPUnit can execute inside the sandbox without appearing as a top-level
+  // recipe execution. Preserve its authoritative artifact instead of replacing
+  // the failure trace with a false no-execution banner.
+  const structuredFailure = await runScenario('structured-failure', {
+    executions: setupOnlyFixture.executions,
+    phpunitOutput: 'There was 1 failure:\n1) SampleTest::test_failure\nsecret=fixture-phpunit-secret\nFailed asserting that false is true.\nTests: 23, Assertions: 40, Failures: 1.\n',
+    secretValue: 'fixture-phpunit-secret',
+    stageLog: 'PLUGIN_DETECTED sample-plugin/sample-plugin.php\nSCOPED_TEST_FILES requested=1 matched=1\nDISCOVERY: found=1\n',
+    testResults: {
+      schema: 'wp-codebox/test-results/v1',
+      status: 'failed',
+      summary: { total: 23, passed: 22, failed: 1, skipped: 0, unknown: 0 },
+      suites: [],
+      rawLogReferences: [{ path: 'files/phpunit-output.log', kind: 'phpunit-output' }],
+    },
+  });
+  assert.equal(structuredFailure.run.status, 1, structuredFailure.run.stderr);
+  const structuredOutput = await readFile(path.join(structuredFailure.publishedFiles, 'phpunit-output.log'), 'utf8');
+  assert.match(structuredOutput, /SampleTest::test_failure/);
+  assert.doesNotMatch(structuredOutput, /NO_PHPUNIT_EXECUTION/);
+  assert.doesNotMatch(structuredOutput, /fixture-phpunit-secret/);
+  assert.match(structuredOutput, /secret=\[REDACTED\]/);
+  const structuredDiagnosis = JSON.parse(await readFile(path.join(structuredFailure.publishedFiles, 'phpunit-execution-diagnosis.json'), 'utf8'));
+  assert.equal(structuredDiagnosis.executed_tests, 23);
+  assert.equal(structuredDiagnosis.cause, 'tests_executed');
+
+  const staleOutput = await runScenario('stale-output', {
+    executions: setupOnlyFixture.executions,
+    phpunitOutput: 'OK (99 tests, 99 assertions)\n',
+  });
+  const staleRetainedOutput = await readFile(path.join(staleOutput.publishedFiles, 'phpunit-output.log'), 'utf8');
+  assert.match(staleRetainedOutput, /NO_PHPUNIT_EXECUTION/);
+  assert.doesNotMatch(staleRetainedOutput, /OK \(99 tests/);
+
+  const bootstrapFailure = await runScenario('bootstrap-failure-with-stale-output', {
+    executions: setupOnlyFixture.executions,
+    phpunitOutput: 'OK (99 tests, 99 assertions)\n',
+    stageLog: 'STAGE_FAIL:activation: plugin activation failed\n',
+    testResults: {
+      schema: 'wp-codebox/test-results/v1',
+      status: 'passed',
+      summary: { total: 99, passed: 99, failed: 0, skipped: 0, unknown: 0 },
+      suites: [],
+    },
+  });
+  const bootstrapOutput = await readFile(path.join(bootstrapFailure.publishedFiles, 'phpunit-output.log'), 'utf8');
+  assert.doesNotMatch(bootstrapOutput, /OK \(99 tests/);
+  const bootstrapResults = JSON.parse(await readFile(path.join(bootstrapFailure.publishedFiles, 'test-results.json'), 'utf8'));
+  assert.equal(bootstrapResults.status, 'failed');
+  assert.equal(bootstrapResults.summary.total, 0);
+
+  const structuredWithoutRawOutput = await runScenario('structured-without-raw-output', {
+    executions: [],
+    testResults: {
+      schema: 'wp-codebox/test-results/v1',
+      status: 'failed',
+      summary: { total: 3, passed: 2, failed: 1, skipped: 0, unknown: 0 },
+      suites: [],
+    },
+  });
+  const unavailableOutput = await readFile(path.join(structuredWithoutRawOutput.publishedFiles, 'phpunit-output.log'), 'utf8');
+  assert.match(unavailableOutput, /WP_CODEBOX_PHPUNIT_OUTPUT: UNAVAILABLE/);
+  assert.doesNotMatch(unavailableOutput, /NO_PHPUNIT_EXECUTION/);
+
+  const stalePositiveOutput = await runScenario('stale-positive-output', {
+    executions: setupOnlyFixture.executions,
+    phpunitOutput: 'OK (99 tests, 99 assertions)\n',
+    testResults: {
+      schema: 'wp-codebox/test-results/v1',
+      status: 'failed',
+      summary: { total: 3, passed: 2, failed: 1, skipped: 0, unknown: 0 },
+      suites: [],
+    },
+  });
+  const stalePositiveRetained = await readFile(path.join(stalePositiveOutput.publishedFiles, 'phpunit-output.log'), 'utf8');
+  assert.doesNotMatch(stalePositiveRetained, /OK \(99 tests/);
+  const stalePositiveResults = JSON.parse(await readFile(path.join(stalePositiveOutput.publishedFiles, 'test-results.json'), 'utf8'));
+  assert.equal(stalePositiveResults.summary.total, 3);
+  assert.equal(stalePositiveResults.summary.failed, 1);
 
   // A recipe step that exited non-zero names the step and its exit code ahead
   // of the generic missing-PHPUnit cause.
