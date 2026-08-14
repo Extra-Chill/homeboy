@@ -6,11 +6,12 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
-    scratch_scoped_command, snapshot_archive_command, snapshot_install_command,
-    snapshot_materialization_command, snapshot_overlay_install_command, synthetic_checkout_value,
-    workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
-    workspace_content_hash_v1, workspace_content_manifest_for_policy,
-    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    register_after_snapshot_directory_discovery_hook, scratch_scoped_command,
+    snapshot_archive_command, snapshot_install_command, snapshot_materialization_command,
+    snapshot_overlay_install_command, synthetic_checkout_value, workspace_content_hash,
+    workspace_content_hash_algorithm, workspace_content_hash_for_policy, workspace_content_hash_v1,
+    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -731,6 +732,54 @@ fn generic_snapshot_copy_allows_source_owned_runner_workspace_path() {
             .expect("copied metadata"),
         "source-owned generic snapshot content\n"
     );
+}
+
+#[test]
+fn workspace_content_hash_skips_runner_metadata_removed_after_discovery() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    fs::write(workspace.path().join("source.txt"), "source\n").expect("source file");
+    let metadata = workspace.path().join(".homeboy");
+    fs::create_dir_all(&metadata).expect("runner metadata directory");
+    fs::write(metadata.join("runner-workspace.json"), "{}\n").expect("runner metadata");
+    let expected = workspace_content_hash(workspace.path(), &[]).expect("baseline hash");
+
+    let metadata_to_remove = metadata.clone();
+    {
+        let _hook = register_after_snapshot_directory_discovery_hook(
+            metadata.canonicalize().expect("canonical metadata path"),
+            move || {
+                fs::remove_dir_all(&metadata_to_remove)
+                    .expect("remove runner metadata during traversal");
+            },
+        );
+        assert_eq!(
+            workspace_content_hash(workspace.path(), &[])
+                .expect("metadata cache miss is reconciled"),
+            expected,
+            "runner-owned metadata must not make an active snapshot claimant fail"
+        );
+    }
+
+    fs::create_dir_all(&metadata).expect("restore runner metadata directory");
+    fs::write(metadata.join("runner-workspace.json"), "{}\n").expect("restore runner metadata");
+    let expected_v1 =
+        workspace_content_hash_v1(workspace.path(), &[]).expect("legacy baseline hash");
+    let metadata_to_remove = metadata.clone();
+    {
+        let _hook = register_after_snapshot_directory_discovery_hook(
+            metadata.canonicalize().expect("canonical metadata path"),
+            move || {
+                fs::remove_dir_all(&metadata_to_remove)
+                    .expect("remove runner metadata during legacy traversal");
+            },
+        );
+        assert_eq!(
+            workspace_content_hash_v1(workspace.path(), &[])
+                .expect("legacy metadata cache miss is reconciled"),
+            expected_v1,
+            "legacy verification must tolerate the same runner metadata race"
+        );
+    }
 }
 
 #[test]
