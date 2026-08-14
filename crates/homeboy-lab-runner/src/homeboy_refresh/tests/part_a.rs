@@ -2,10 +2,11 @@
 
 use super::*;
 use crate::{
-    RunnerActiveJobState, RunnerExecMode, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStatusReport,
+    RunnerActiveJobState, RunnerAdmissionSnapshot, RunnerExecMode, RunnerSessionState,
+    RunnerStaleDaemonWarning, RunnerStatusReport,
 };
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
+use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy_core::test_support;
 
 /// Environment variables that redirect Cargo's output directory. A nested Cargo
@@ -1698,6 +1699,97 @@ fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transpor
             .expect("preflight")
             .required_commands,
         vec!["bash", "git", "cargo"]
+    );
+}
+
+fn stale_daemon_admission_snapshot(
+    active_job_count: usize,
+    lease_id: Option<&str>,
+    pid: Option<u32>,
+) -> RunnerAdmissionSnapshot {
+    let mut status = refreshed_daemon_status(true, Some("homeboy 0.1.0+stale"));
+    status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+        "lab",
+        "old".to_string(),
+        "current".to_string(),
+        None,
+        Some("current".to_string()),
+    ));
+    status.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+        restartable: true,
+        lease_id: lease_id.map(str::to_string),
+        pid,
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: active_job_count,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    status.active_job_count = active_job_count;
+    status.active_job_state = RunnerActiveJobState::Available;
+    RunnerAdmissionSnapshot::from_status_and_generations(status, Vec::new(), Vec::new())
+}
+
+#[test]
+fn refresh_routing_preserves_disconnected_ssh_execution_and_fences_unsafe_stale_daemons() {
+    let runner = crate::Runner {
+        id: "lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: None,
+        workspace_root: None,
+        settings: Default::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: Default::default(),
+    };
+    let disconnected = RunnerAdmissionSnapshot::from_status_and_generations(
+        refreshed_daemon_status(false, None),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let route = refresh_execution_route(&runner, &disconnected)
+        .expect("disconnected SSH refresh retains diagnostic execution");
+    let options = refresh_execution_options(
+        &ssh_bootstrap_plan(),
+        vec!["bash".to_string()],
+        route.uses_diagnostic_ssh(),
+    );
+    assert!(options.allow_diagnostic_ssh);
+
+    let unsafe_stale = stale_daemon_admission_snapshot(1, Some("lease-current"), Some(1));
+    let error = refresh_execution_route(&runner, &unsafe_stale)
+        .expect_err("connected stale daemon with active work remains fenced");
+    assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    assert!(error.message.contains("permits daemon rotation"));
+
+    let ambiguous_stale = stale_daemon_admission_snapshot(0, None, None);
+    assert!(refresh_execution_route(&runner, &ambiguous_stale).is_err());
+}
+
+#[test]
+fn diagnostic_ssh_bootstrap_preflight_requires_remote_materialization_tools() {
+    let options = refresh_execution_options(
+        &ssh_bootstrap_plan(),
+        vec!["bash".to_string(), "git".to_string(), "cargo".to_string()],
+        true,
+    );
+
+    assert_eq!(
+        options
+            .capability_preflight
+            .expect("diagnostic SSH capability preflight")
+            .required_commands,
+        ["bash", "git", "cargo"],
+        "diagnostic SSH must probe the remote shell before materialization"
     );
 }
 
