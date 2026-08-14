@@ -33,7 +33,10 @@ pub const MAX_SOURCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_ENTRIES: usize = 1024;
 pub const MAX_SOURCE_PACKAGE_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_EXCLUSIONS: usize = 1024;
+/// Legacy result schema accepted for persisted source-package checks.
 pub const SOURCE_PACKAGE_CHECK_SCHEMA: &str = "homeboy/source-package-check/v1";
+pub const SOURCE_PACKAGE_CHECK_SCHEMA_V2: &str = "homeboy/source-package-check/v2";
+const SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA: &str = "homeboy/source-package-limit-diagnostic/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -59,7 +62,9 @@ pub struct SourcePackageFailure {
 pub struct SourcePackageCheckVerdict {
     pub schema: String,
     pub valid: bool,
-    pub limits: SourcePackageLimits,
+    /// Present for v2 results. V1 records did not declare aggregate limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<SourcePackageLimits>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted: Option<SourcePackageAccepted>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,9 +139,9 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
                 .sum();
             return SourcePackageScan {
                 verdict: SourcePackageCheckVerdict {
-                    schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
+                    schema: SOURCE_PACKAGE_CHECK_SCHEMA_V2.to_string(),
                     valid: true,
-                    limits: source_package_limits(),
+                    limits: Some(source_package_limits()),
                     accepted: Some(SourcePackageAccepted {
                         package_format: transfer.package.format,
                         file_count,
@@ -153,9 +158,9 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
         Err(error) => {
             return SourcePackageScan {
                 verdict: SourcePackageCheckVerdict {
-                    schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
+                    schema: SOURCE_PACKAGE_CHECK_SCHEMA_V2.to_string(),
                     valid: false,
-                    limits: source_package_limits(),
+                    limits: Some(source_package_limits()),
                     accepted: None,
                     partial: source_package_partial_from_error(&error).or(Some(
                         SourcePackagePartial {
@@ -431,9 +436,9 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
         });
         SourcePackageScan {
             verdict: SourcePackageCheckVerdict {
-                schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
+                schema: SOURCE_PACKAGE_CHECK_SCHEMA_V2.to_string(),
                 valid: failures.is_empty(),
-                limits: source_package_limits(),
+                limits: Some(source_package_limits()),
                 accepted,
                 partial: (!failures.is_empty()).then_some(SourcePackagePartial {
                     file_count,
@@ -575,7 +580,7 @@ fn source_package_limit_error(
         ]),
     );
     error.details["source_package"] = json!({
-        "schema": SOURCE_PACKAGE_CHECK_SCHEMA,
+        "schema": SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA,
         "measured": measured,
         "limits": limits,
         "excluded_path_policy": {
@@ -2380,7 +2385,10 @@ pub(crate) mod tests_support {
                 .contains("homeboy source package check --path")
         );
         let verdict = scan_source_package(source.path()).verdict;
-        assert_eq!(verdict.limits.entry_limit, MAX_SOURCE_PACKAGE_ENTRIES);
+        assert_eq!(
+            verdict.limits.expect("v2 limits").entry_limit,
+            MAX_SOURCE_PACKAGE_ENTRIES
+        );
         assert_eq!(
             verdict.partial.expect("partial measurement").file_count,
             MAX_SOURCE_PACKAGE_ENTRIES + 1
@@ -2414,6 +2422,45 @@ pub(crate) mod tests_support {
                 .as_array()
                 .expect("contributors")[0]["path"],
             "0000"
+        );
+    }
+
+    #[test]
+    fn source_package_check_v1_round_trips_without_v2_limits() {
+        let legacy = json!({
+            "schema": SOURCE_PACKAGE_CHECK_SCHEMA,
+            "valid": false,
+            "partial": {"file_count": 3, "bytes": 12},
+            "excluded": [],
+            "blocked": []
+        });
+
+        let verdict: SourcePackageCheckVerdict =
+            serde_json::from_value(legacy).expect("deserialize v1 check");
+        assert_eq!(verdict.schema, SOURCE_PACKAGE_CHECK_SCHEMA);
+        assert!(verdict.limits.is_none());
+        let serialized = serde_json::to_value(&verdict).expect("serialize v1 check");
+        assert!(serialized.get("limits").is_none());
+        assert_eq!(
+            serialized["partial"]["largest_entries"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn source_package_check_v2_round_trips_with_limits() {
+        let verdict = scan_source_package(tempfile::tempdir().expect("source").path()).verdict;
+        assert_eq!(verdict.schema, SOURCE_PACKAGE_CHECK_SCHEMA_V2);
+        assert_eq!(
+            verdict.limits.as_ref().expect("v2 limits").byte_limit,
+            MAX_SOURCE_ARTIFACT_BYTES
+        );
+        assert_eq!(
+            serde_json::from_value::<SourcePackageCheckVerdict>(
+                serde_json::to_value(&verdict).expect("serialize v2 check")
+            )
+            .expect("deserialize v2 check"),
+            verdict
         );
     }
 }

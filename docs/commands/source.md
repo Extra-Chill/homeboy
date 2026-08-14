@@ -11,13 +11,13 @@ The command is read-only. It does not create a run, runner job, workspace,
 artifact, connection, or source transfer.
 
 It returns the standard JSON envelope. `data.source_package` has schema
-`homeboy/source-package-check/v1` and reports the scanner's configured `limits`
+`homeboy/source-package-check/v2` and reports the scanner's configured `limits`
 plus its `accepted`, `excluded`, and `blocked` result sets. An accepted result
 includes the exact package format, file count, bytes, and deterministic digest
 that staging uses. A blocked result instead includes `partial` measured counts,
 bytes, and the five largest contributing entries without a package identity. It
 exits with status 1, which makes it suitable for shell and orchestration
-preflight.
+preflight. Homeboy continues to read persisted v1 checks, which omit `limits`.
 
 Package format and link handling are scanner-owned. The command reports the exact
 v1 or v2 accepted, excluded, and blocked outcome supplied by the shared staging
