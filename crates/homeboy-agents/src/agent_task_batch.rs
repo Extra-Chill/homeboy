@@ -452,7 +452,24 @@ fn expire_stalled_fanout_admission_in_store(
     store.with_batch_lock(batch_id, || {
         let mut batch = store.read_batch(batch_id)?;
         let coordinator = &batch.metadata["coordinator"];
+        let heartbeat_stale = coordinator["heartbeat_at"]
+            .as_str()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|heartbeat| {
+                Utc::now() - heartbeat.with_timezone(&Utc)
+                    > chrono::Duration::seconds(COORDINATOR_LEASE_SECONDS)
+            });
+        let child_started = batch.child_runs.iter().any(|child| {
+            child.state != AgentTaskRunState::Queued
+                || batch.metadata["child_finalizations"]
+                    .get(&child.run_id)
+                    .is_some()
+                || agent_task_lifecycle::run_record_exists(&child.run_id).unwrap_or(true)
+        });
         let expired = batch.state == AgentTaskBatchState::Admitting
+            && coordinator["stage"].as_str() == Some("admitting")
+            && heartbeat_stale
+            && !child_started
             && coordinator["admission_deadline_at"]
                 .as_str()
                 .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
@@ -503,6 +520,14 @@ where
     if batch.metadata["terminal_failure"].is_object() {
         batch.state = AgentTaskBatchState::Failed;
         let commands = commands(&batch.batch_id);
+        let admission_blocker = batch.metadata["terminal_failure"].clone();
+        let mut next_actions = vec![commands.status.clone(), commands.artifacts.clone()];
+        if let Some(command) = admission_blocker
+            .pointer("/failure/next_action")
+            .and_then(Value::as_str)
+        {
+            next_actions.insert(0, command.to_string());
+        }
         return Ok(AgentTaskBatchStatusReport {
             schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
             status: "failed".to_string(),
@@ -510,11 +535,12 @@ where
             totals: totals_for_children(&batch.child_runs),
             batch,
             unavailable_child_runs: Vec::new(),
+            admission_blocker: Some(admission_blocker),
             projection_pending_child_runs: Vec::new(),
             resumable_child_runs: Vec::new(),
             resumable: false,
             dependency_graph: None,
-            next_actions: vec![commands.status.clone(), commands.artifacts.clone()],
+            next_actions,
             commands,
         });
     }
@@ -615,6 +641,7 @@ where
         batch,
         totals,
         unavailable_child_runs,
+        admission_blocker: None,
         projection_pending_child_runs,
         resumable_child_runs,
         resumable,
@@ -2431,6 +2458,7 @@ mod tests {
             .mutate_batch("stuck-wave", |batch| {
                 batch.metadata["coordinator"]["admission_deadline_at"] =
                     json!("2000-01-01T00:00:00Z");
+                batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
                 Ok(())
             })
             .expect("expire admission");
@@ -2449,6 +2477,89 @@ mod tests {
         assert_eq!(
             status.batch.metadata["terminal_failure"]["failure"]["next_action"],
             "homeboy agent-task fanout resume stuck-wave"
+        );
+    }
+
+    #[test]
+    fn expired_admission_with_a_fresh_heartbeat_or_started_child_is_not_terminated() {
+        let (_temp, store) = batch_store();
+        let children = vec![FanoutRunBatchChild {
+            task_id: "live".to_string(),
+            run_id: "live-run".to_string(),
+        }];
+        for (batch_id, started) in [("live-wave", false), ("started-wave", true)] {
+            store
+                .persist_fanout_run_batch(batch_id, batch_id, &children, json!({}))
+                .expect("persist");
+            store
+                .claim_fanout_run_batch(batch_id)
+                .expect("claim")
+                .expect("claim id");
+            store
+                .mutate_batch(batch_id, |batch| {
+                    batch.metadata["coordinator"]["admission_deadline_at"] =
+                        json!("2000-01-01T00:00:00Z");
+                    if started {
+                        batch.metadata["coordinator"]["heartbeat_at"] =
+                            json!("2000-01-01T00:00:00Z");
+                        batch.child_runs[0].state = AgentTaskRunState::Running;
+                    }
+                    Ok(())
+                })
+                .expect("set durable progress");
+
+            assert!(
+                !store
+                    .expire_stalled_fanout_admission(batch_id)
+                    .expect("observe active admission"),
+                "{batch_id} must retain its active coordinator"
+            );
+            assert_eq!(
+                store.read_batch(batch_id).expect("batch").state,
+                AgentTaskBatchState::Admitting
+            );
+        }
+    }
+
+    #[test]
+    fn status_projects_the_exact_returned_admission_blocker() {
+        let (_temp, store) = batch_store();
+        let children = vec![FanoutRunBatchChild {
+            task_id: "source".to_string(),
+            run_id: "source-run".to_string(),
+        }];
+        store
+            .persist_fanout_run_batch("source-wave", "source-wave", &children, json!({}))
+            .expect("persist");
+        let claim_id = store
+            .claim_fanout_run_batch("source-wave")
+            .expect("claim")
+            .expect("claim id");
+        store
+            .record_fanout_run_batch_failure(
+                "source-wave",
+                &claim_id,
+                "source_staging",
+                json!({
+                    "code": "source_package_too_large",
+                    "message": "source package exceeds configured entry or total size bounds",
+                    "next_action": "homeboy agent-task fanout resume source-wave",
+                }),
+            )
+            .expect("record source blocker");
+
+        let status = store.status("source-wave").expect("project blocker");
+        assert_eq!(
+            status.admission_blocker.as_ref().unwrap()["stage"],
+            "source_staging"
+        );
+        assert_eq!(
+            status.admission_blocker.as_ref().unwrap()["failure"]["code"],
+            "source_package_too_large"
+        );
+        assert_eq!(
+            status.next_actions[0],
+            "homeboy agent-task fanout resume source-wave"
         );
     }
 
