@@ -1879,6 +1879,93 @@ esac
     });
 }
 
+/// #12449: an explicit candidate reconciliation is the operator-selected
+/// authority for an unleased conflict. A pending ensure-running replay must be
+/// durably superseded rather than reproducing that conflict first.
+#[cfg(unix)]
+#[test]
+fn explicit_candidate_reconciliation_supersedes_pending_ensure_running_replay() {
+    test_support::with_isolated_home(|home| {
+        let daemon = home.path().join("remote-homeboy");
+        let ensure_running = home.path().join("ensure-running");
+        let reconciliation_argv = home.path().join("reconciliation-argv");
+        std::fs::write(
+            &daemon,
+            format!(
+                r#"#!/bin/sh
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.348.2","display":"homeboy 0.348.2+test","daemon_recovery_capabilities":[{{"id":"daemon-recovery-unleased-candidates","version":1}}]}}}}'
+    ;;
+  "daemon ensure-running")
+    printf '%s' 'executed' > "{ensure_running}"
+    exit 98
+    ;;
+  "daemon reconcile-unleased-candidates")
+    printf '%s\n' "$@" > "{reconciliation_argv}"
+    printf '%s\n' '{{"success":true,"data":{{"applied":true,"active_jobs":0,"candidates":[],"retired_pids":[],"blocked_pids":[],"evidence":["reconciled"],"replacement":{{"pid":4242,"address":"127.0.0.1:9","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}}}'
+    ;;
+esac
+"#,
+                ensure_running = ensure_running.display(),
+                reconciliation_argv = reconciliation_argv.display(),
+            ),
+        )
+        .expect("write remote Homeboy shim");
+        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+        server::create(
+            &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
+                .to_string(),
+            false,
+        )
+        .expect("create local server");
+        crate::create(
+            &serde_json::json!({
+                "id": "local-runner",
+                "kind": "ssh",
+                "homeboy_path": daemon,
+            })
+            .to_string(),
+            false,
+        )
+        .expect("enable local runner");
+
+        let operation_id = crate::generation_store::replacement_operation("local-runner")
+            .expect("replacement operation");
+        crate::generation_store::record_replacement_operation_replay(
+            "local-runner",
+            "ensure-running",
+            "obsolete-homeboy daemon ensure-running --replacement-operation-id old",
+        )
+        .expect("pending ensure-running replay");
+
+        let (result, exit_code) = connect_with_unleased_candidate_reconciliation("local-runner")
+            .expect("candidate reconciliation result");
+        assert_eq!(
+            exit_code, 20,
+            "the unreachable test endpoint fails later health"
+        );
+        assert!(result.failure_kind.is_some());
+        assert!(
+            !ensure_running.exists(),
+            "explicit reconciliation must not execute pending ensure-running"
+        );
+        let reconciliation_argv =
+            std::fs::read_to_string(reconciliation_argv).expect("reconciliation argv");
+        assert!(reconciliation_argv.contains("reconcile-unleased-candidates"));
+        assert!(reconciliation_argv.contains("--apply"));
+        assert!(reconciliation_argv.contains(&operation_id));
+        assert_eq!(
+            crate::generation_store::replacement_operation_replay("local-runner")
+                .expect("replacement replay")
+                .map(|(kind, _)| kind),
+            Some("unleased-candidates".to_string())
+        );
+    });
+}
+
 #[test]
 fn state_loss_recovery_delegation_uses_the_canonical_exact_contract() {
     let command = remote_state_loss_recovery_command(

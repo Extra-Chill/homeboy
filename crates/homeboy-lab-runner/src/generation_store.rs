@@ -74,6 +74,13 @@ fn rejected_replacement_path(runner_id: &str) -> Result<PathBuf> {
         .join(format!("{}.json", uuid::Uuid::new_v4())))
 }
 
+fn superseded_replacement_path(runner_id: &str) -> Result<PathBuf> {
+    Ok(paths::runner_sessions_dir()?
+        .join(runner_id)
+        .join("superseded-replacements")
+        .join(format!("{}.json", uuid::Uuid::new_v4())))
+}
+
 fn admission_reservation_path(runner_id: &str) -> Result<PathBuf> {
     Ok(paths::runner_sessions_dir()?
         .join(runner_id)
@@ -113,6 +120,18 @@ struct RejectedReplacementEvidence<'a> {
     timed_out: bool,
     stdout: &'a str,
     stderr: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct SupersededReplacementEvidence<'a> {
+    schema: &'static str,
+    runner_id: &'a str,
+    operation_id: &'a str,
+    previous_kind: &'a str,
+    previous_replay_command: &'a str,
+    replacement_kind: &'a str,
+    replacement_replay_command: &'a str,
+    superseded_at: String,
 }
 
 pub(crate) fn write_durable_json<T: serde::Serialize>(
@@ -794,6 +813,55 @@ pub(crate) fn record_immutable_replacement_operation_replay(
             return Ok(());
         }
         operation.kind = Some(kind.to_string());
+        operation.replay_command = Some(command.to_string());
+        write_durable_json(&path, &operation)
+    })
+}
+
+/// Bind candidate reconciliation to the current replacement identity. An
+/// explicit operator recovery may supersede only `ensure-running`: that command
+/// can create one of the candidates reconciliation is responsible for, and
+/// replaying it first would reproduce the conflict the operator selected this
+/// recovery to resolve.
+pub(crate) fn record_unleased_candidate_reconciliation_replay(
+    runner_id: &str,
+    command: &str,
+) -> Result<()> {
+    with_registry_lock(runner_id, || {
+        let path = replacement_operation_path(runner_id)?;
+        let mut operation: ReplacementOperation =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+            })?)
+            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+        match (
+            operation.kind.as_deref(),
+            operation.replay_command.as_deref(),
+        ) {
+            (Some("unleased-candidates"), Some(existing)) if existing == command => return Ok(()),
+            (Some("ensure-running"), Some(previous_command)) => {
+                write_durable_json(
+                    &superseded_replacement_path(runner_id)?,
+                    &SupersededReplacementEvidence {
+                        schema: "homeboy/runner-replacement-operation-supersession/v1",
+                        runner_id,
+                        operation_id: &operation.operation_id,
+                        previous_kind: "ensure-running",
+                        previous_replay_command: previous_command,
+                        replacement_kind: "unleased-candidates",
+                        replacement_replay_command: command,
+                        superseded_at: Utc::now().to_rfc3339(),
+                    },
+                )?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(Error::internal_unexpected(
+                    "replacement operation cannot transition to unleased candidate reconciliation",
+                ));
+            }
+        }
+        operation.kind = Some("unleased-candidates".to_string());
         operation.replay_command = Some(command.to_string());
         write_durable_json(&path, &operation)
     })
@@ -2246,6 +2314,53 @@ mod tests {
                 replacement_operation("runner-a").expect("new operation"),
                 next_operation
             );
+        });
+    }
+
+    #[test]
+    fn explicit_candidate_reconciliation_supersedes_ensure_running_with_evidence() {
+        test_support::with_isolated_home(|_| {
+            let operation_id = replacement_operation("runner-a").expect("operation");
+            record_replacement_operation_replay(
+                "runner-a",
+                "ensure-running",
+                "homeboy daemon ensure-running --replacement-operation-id operation-a",
+            )
+            .expect("ensure-running replay");
+
+            let reconciliation = "homeboy daemon reconcile-unleased-candidates --apply --replacement-operation-id operation-a";
+            record_unleased_candidate_reconciliation_replay("runner-a", reconciliation)
+                .expect("explicit reconciliation supersedes ensure-running");
+            record_unleased_candidate_reconciliation_replay("runner-a", reconciliation)
+                .expect("same reconciliation replay is idempotent");
+
+            assert_eq!(
+                replacement_operation("runner-a").expect("preserved operation"),
+                operation_id
+            );
+            assert_eq!(
+                replacement_operation_replay("runner-a").expect("replacement replay"),
+                Some((
+                    "unleased-candidates".to_string(),
+                    reconciliation.to_string()
+                ))
+            );
+            let evidence_dir = paths::runner_sessions_dir()
+                .expect("runner sessions")
+                .join("runner-a")
+                .join("superseded-replacements");
+            let evidence = std::fs::read_dir(evidence_dir)
+                .expect("supersession evidence")
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .expect("evidence entries");
+            assert_eq!(evidence.len(), 1, "idempotent replay writes one transition");
+            let evidence: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(evidence[0].path()).expect("read supersession evidence"),
+            )
+            .expect("supersession evidence JSON");
+            assert_eq!(evidence["operation_id"], operation_id);
+            assert_eq!(evidence["previous_kind"], "ensure-running");
+            assert_eq!(evidence["replacement_kind"], "unleased-candidates");
         });
     }
 

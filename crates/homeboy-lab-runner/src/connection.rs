@@ -811,9 +811,14 @@ fn connect_with_orphan_adoption_and_live_lease(
     // boundary but did not durably receive B's coordinates. Replay it before
     // inspecting A or selecting any ordinary replacement path.
     if recovery_daemon.is_none() {
-        if let Some((kind, command)) =
-            super::generation_store::replacement_operation_replay(runner_id)?
-        {
+        let replay = super::generation_store::replacement_operation_replay(runner_id)?;
+        // Explicit candidate reconciliation is the authority selected to
+        // resolve an unleased process conflict. Replaying a prior
+        // ensure-running command first can only reproduce that conflict; the
+        // reconciliation block below durably records the typed supersession.
+        let replay =
+            replay.filter(|(kind, _)| !(reconcile_unleased_candidates && kind == "ensure-running"));
+        if let Some((kind, command)) = replay {
             let command = if kind == "ensure-running" {
                 if let Err(error) = negotiate_ensure_running_operation_id(
                     &client,
@@ -1207,10 +1212,8 @@ fn connect_with_orphan_adoption_and_live_lease(
             shell::quote_arg(recovery_addr),
             shell::quote_arg(&replacement_operation_id),
         );
-        super::generation_store::record_immutable_replacement_operation_replay(
-            runner_id,
-            "unleased-candidates",
-            &command,
+        super::generation_store::record_unleased_candidate_reconciliation_replay(
+            runner_id, &command,
         )?;
         let output = fenced_remote_mutation(
             runner_id,
