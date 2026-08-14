@@ -46,7 +46,7 @@ use serde_json::Value;
 /// a ceiling, not a target: lower it whenever suppressions are retired, and
 /// never raise it. Raising this number is the one edit this test exists to make
 /// someone argue for in review.
-const AUDIT_BASELINE_CEILING: usize = 1130;
+const AUDIT_BASELINE_CEILING: usize = 1129;
 
 fn baseline_fingerprints() -> Vec<String> {
     let config: Value =
