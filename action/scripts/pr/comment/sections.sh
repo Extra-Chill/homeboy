@@ -4,6 +4,7 @@ set -euo pipefail
 
 source "${GITHUB_ACTION_PATH}/scripts/scope/context.sh"
 source "${GITHUB_ACTION_PATH}/scripts/pr/comment/lib.sh"
+source "${GITHUB_ACTION_PATH}/scripts/pr/comment/timeout-triage.sh"
 
 commands_use_review_report() {
   local normalized
@@ -216,6 +217,10 @@ append_split_command_section() {
     append_json_hints "${json_file}"
   else
     SECTION_BODY+="> :warning: Structured output for \`${command}\` was not found. Check the action logs for details."$'\n'
+  fi
+
+  if [ "${status}" = "timeout" ]; then
+    append_timeout_triage "${command}" "${json_file}"
   fi
 
   case "${command}" in

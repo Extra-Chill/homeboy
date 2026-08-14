@@ -526,6 +526,7 @@ jobs:
           [ -n "${results}" ] || results='{}'
           jq -cn --arg phase candidate --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg checkout_sha "${CANDIDATE_SHA}" --arg command "${COMMAND}" --arg component "${COMPONENT}" --arg action_revision "${action_revision}" --arg cli_revision "${CLI_REVISION}" --arg binary_sha256 "${BINARY_SHA256}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > differential-phase/candidate/manifest.json
           cp -R homeboy-ci-results differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
+          cp -R homeboy-observations differential-phase/candidate/homeboy-observations 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-observations
 
       - name: Upload candidate phase evidence
         if: always()
@@ -1068,7 +1069,11 @@ jobs:
           COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key || matrix.section_key }}
           COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title || matrix.section_title }}
           HOMEBOY_CI_RESULTS_ARTIFACT: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          HOMEBOY_OBSERVATIONS_ARTIFACT: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_PR_URL: ${{ github.event.pull_request.html_url }}
+          HOMEBOY_TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds }}
+          HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
         run: bash .homeboy-action/scripts/pr/post-pr-comment.sh
 
   policy:

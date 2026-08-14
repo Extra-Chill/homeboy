@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/../core/lib.sh"
+source "${SCRIPT_DIR}/../pr/comment/timeout-triage.sh"
 
 OUTPUT_DIR="${HOMEBOY_CI_RESULTS_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
 RESULTS_JSON="${RESULTS:-"{}"}"
@@ -120,6 +121,26 @@ append_terminal_diagnostics() {
   } >> "${digest_file}"
 }
 
+append_timeout_triage_to_digest() {
+  local digest_file="$1" command json_file
+  local timeout_body=""
+
+  while IFS= read -r command; do
+    [ -n "${command}" ] || continue
+    json_file="${OUTPUT_DIR}/$(command_result_filename "${command}")"
+    [ -f "${json_file}" ] || json_file=""
+    SECTION_BODY=""
+    append_timeout_triage "${command}" "${json_file}"
+    timeout_body+="${SECTION_BODY}"
+  done < <(jq -r 'to_entries[] | select(.value == "timeout") | .key' <<< "${RESULTS_JSON}" 2>/dev/null || true)
+
+  [ -n "${timeout_body}" ] || return 0
+  {
+    printf '\n### Timeout triage\n\n'
+    printf '%s' "${timeout_body}"
+  } >> "${digest_file}"
+}
+
 if [ -z "${OUTPUT_DIR}" ] || [ ! -d "${OUTPUT_DIR}" ]; then
   echo "No output directory available; skipping failure digest"
   exit 0
@@ -171,6 +192,7 @@ fi
 append_local_reproduction_commands "${DIGEST_FILE}"
 append_differential_evidence "${DIGEST_FILE}"
 append_terminal_diagnostics "${DIGEST_FILE}"
+append_timeout_triage_to_digest "${DIGEST_FILE}"
 
 if [ -n "${GITHUB_ENV:-}" ]; then
   echo "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" >> "${GITHUB_ENV}"
