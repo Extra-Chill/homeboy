@@ -1,0 +1,21 @@
+# GitHub-executed consumer contract for the reusable CI workflow. This calls the
+# revision under test, not the already-published v2 tag, so release validates
+# the promotion candidate before it moves v2.
+name: Reusable Workflow Consumer Contract
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  homeboy:
+    uses: ./.github/workflows/ci.yml
+    with:
+      contract-probe: true
+    secrets: inherit

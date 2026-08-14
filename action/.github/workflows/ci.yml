@@ -169,6 +169,10 @@ on:
         description: 'homeboy-action ref used by this workflow.'
         type: string
         default: 'v2'
+      contract-probe:
+        description: 'Run only the bounded consumer-contract probe.'
+        type: boolean
+        default: false
     secrets:
       HOMEBOY_APP_ID:
         required: false
@@ -191,10 +195,18 @@ permissions:
   issues: write
 
 jobs:
+  contract-probe:
+    name: Consumer contract
+    if: inputs.contract-probe
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Reusable workflow caller contract accepted.'
+
   binary:
     name: Prepare candidate Homeboy binary
     # needs plan solely for needs.plan.outputs.action-sha; plan is pure bash.
     needs: plan
+    if: '!inputs.contract-probe'
     runs-on: ubuntu-latest
     outputs:
       cargo-cache-key: ${{ steps.cargo-cache-key.outputs.key }}
@@ -266,6 +278,7 @@ jobs:
 
   plan:
     name: Plan
+    if: '!inputs.contract-probe'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -419,7 +432,7 @@ jobs:
   candidate:
     name: Candidate ${{ matrix.title }}
     needs: [binary, plan]
-    if: ${{ always() && needs.binary.result == 'success' }}
+    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -545,7 +558,7 @@ jobs:
   baseline:
     name: Baseline ${{ matrix.title }}
     needs: [binary, plan]
-    if: ${{ always() && needs.binary.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
+    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -635,7 +648,7 @@ jobs:
   candidate-test-plan:
     name: Plan candidate Test shards
     needs: [binary, plan]
-    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
+    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
     outputs:
       test-matrix: ${{ steps.plan.outputs.matrix }}
@@ -782,7 +795,7 @@ jobs:
   candidate-test-shards:
     name: Candidate Test shard ${{ matrix.shard_id }}
     needs: [binary, plan, candidate-test-plan]
-    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && needs.candidate-test-plan.result == 'success' }}
+    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && needs.candidate-test-plan.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -896,7 +909,7 @@ jobs:
   candidate-test-result:
     name: Aggregate candidate Test shards
     needs: [candidate-test-shards, candidate-test-plan, plan]
-    if: ${{ always() && needs.candidate-test-plan.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
+    if: ${{ !inputs.contract-probe && always() && needs.candidate-test-plan.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -954,7 +967,7 @@ jobs:
     # never uploaded, and the resulting `Artifact not found` failed the job. A
     # cancellation was therefore published as a red `Test` check carrying no test
     # verdict at all (Extra-Chill/homeboy#10997).
-    if: ${{ !cancelled() && needs.plan.outputs.test-shards-enabled == 'true' }}
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -1005,7 +1018,7 @@ jobs:
     # This is the sole verdict and retains the established required-check name.
     name: ${{ matrix.title }}
     needs: [candidate, baseline, plan]
-    if: ${{ always() }}
+    if: ${{ !inputs.contract-probe && always() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1074,7 +1087,7 @@ jobs:
   policy:
     name: PR Policy
     needs: [reconcile, reconcile-test-shards, plan]
-    if: ${{ always() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (inputs.test-shards == '1' || needs.reconcile-test-shards.result == 'success') }}
+    if: ${{ !inputs.contract-probe && always() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (inputs.test-shards == '1' || needs.reconcile-test-shards.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

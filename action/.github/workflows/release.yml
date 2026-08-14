@@ -103,12 +103,19 @@ jobs:
     if: needs.check.outputs.should-release == 'true'
     uses: ./.github/workflows/self-test.yml
 
+  consumer-contract:
+    name: Consumer contract
+    needs: check
+    if: needs.check.outputs.should-release == 'true'
+    uses: ./.github/workflows/consumer-contract.yml
+
   # ── Step 3: Release ──
   release:
     name: Release
     needs:
       - check
       - self-test
+      - consumer-contract
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     steps:
