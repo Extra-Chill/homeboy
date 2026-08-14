@@ -1,4 +1,4 @@
-use homeboy::core::observation::{ActiveObservation, NewRunRecord, RunStatus};
+use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy::core::server::RunnerSettings;
 use homeboy::runner::runners::{
     self as runner, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, RunnerExecOutput,
@@ -1019,7 +1019,8 @@ fn persist_refresh_artifacts(
 ) -> homeboy::core::Result<runner::HomeboyBinaryRefreshArtifacts> {
     use std::io::Write;
 
-    let observation = ActiveObservation::start(
+    let store = ObservationStore::open_initialized()?;
+    let run = store.start_run(
         NewRunRecord::builder("runner_refresh_homeboy")
             .component_id(output.runner_id.clone())
             .command("homeboy runner refresh-homeboy")
@@ -1027,6 +1028,7 @@ fn persist_refresh_artifacts(
             .metadata(serde_json::json!({ "dry_run": output.dry_run }))
             .build(),
     )?;
+    let run_id = run.id;
     let store_artifact = |kind: &str, content: &str| -> homeboy::core::Result<String> {
         let mut file = tempfile::NamedTempFile::new().map_err(|error| {
             homeboy::core::Error::internal_io(error.to_string(), Some(format!("create {kind}")))
@@ -1038,18 +1040,15 @@ fn persist_refresh_artifacts(
         file.as_file().sync_all().map_err(|error| {
             homeboy::core::Error::internal_io(error.to_string(), Some(format!("sync {kind}")))
         })?;
-        let artifact_id = format!("{kind}-{}", observation.run_id());
-        observation.store().record_artifact_with_id(
-            observation.run_id(),
+        let artifact_id = format!("{kind}-{run_id}");
+        store.record_artifact_with_id(
+            &run_id,
             kind,
             file.path(),
             &artifact_id,
             serde_json::json!({ "schema": "homeboy/runner-refresh-artifact/v1", "redacted": true }),
         )?;
-        Ok(format!(
-            "homeboy://run/{}/artifact/{artifact_id}",
-            observation.run_id()
-        ))
+        Ok(format!("homeboy://run/{run_id}/artifact/{artifact_id}"))
     };
     let materialization_script = Some(store_artifact(
         "materialization-script",
@@ -1071,9 +1070,13 @@ fn persist_refresh_artifacts(
     } else {
         RunStatus::Error
     };
-    observation.finish(status, Some(serde_json::json!({ "exit_code": exit_code })));
+    let _ = store.finish_run(
+        &run_id,
+        status,
+        Some(serde_json::json!({ "exit_code": exit_code })),
+    );
     Ok(runner::HomeboyBinaryRefreshArtifacts {
-        run_id: observation.run_id().to_string(),
+        run_id,
         materialization_script,
         build_log,
         error_log: None,
@@ -1086,7 +1089,8 @@ fn persist_refresh_error_artifacts(
 ) -> homeboy::core::Result<runner::HomeboyBinaryRefreshArtifacts> {
     use std::io::Write;
 
-    let observation = ActiveObservation::start(
+    let store = ObservationStore::open_initialized()?;
+    let run = store.start_run(
         NewRunRecord::builder("runner_refresh_homeboy")
             .component_id(runner_id)
             .command("homeboy runner refresh-homeboy")
@@ -1094,6 +1098,7 @@ fn persist_refresh_error_artifacts(
             .metadata(serde_json::json!({ "outcome": "error" }))
             .build(),
     )?;
+    let run_id = run.id;
     let mut file = tempfile::NamedTempFile::new().map_err(|source| {
         homeboy::core::Error::internal_io(
             source.to_string(),
@@ -1126,23 +1131,21 @@ fn persist_refresh_error_artifacts(
             Some("sync refresh error log".to_string()),
         )
     })?;
-    let artifact_id = format!("error-log-{}", observation.run_id());
-    observation.store().record_artifact_with_id(
-        observation.run_id(),
+    let artifact_id = format!("error-log-{run_id}");
+    store.record_artifact_with_id(
+        &run_id,
         "error-log",
         file.path(),
         &artifact_id,
         serde_json::json!({ "schema": "homeboy/runner-refresh-artifact/v1", "redacted": true }),
     )?;
-    observation.finish(RunStatus::Error, None);
+    let _ = store.finish_run(&run_id, RunStatus::Error, None);
+    let error_log = format!("homeboy://run/{run_id}/artifact/{artifact_id}");
     Ok(runner::HomeboyBinaryRefreshArtifacts {
-        run_id: observation.run_id().to_string(),
+        run_id,
         materialization_script: None,
         build_log: None,
-        error_log: Some(format!(
-            "homeboy://run/{}/artifact/{artifact_id}",
-            observation.run_id()
-        )),
+        error_log: Some(error_log),
     })
 }
 
