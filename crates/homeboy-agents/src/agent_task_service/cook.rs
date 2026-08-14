@@ -4467,6 +4467,7 @@ where
                 }
                 failed_dispatch_plan = Some(dispatch_plan.clone());
                 if let Some(dispatcher) = &options.attempt_dispatcher {
+                    admit_explicit_cook_workspace_before_provider(&options, &run_id)?;
                     dispatcher.dispatch_attempt(
                         dispatch_plan,
                         &run_id,
@@ -4474,6 +4475,7 @@ where
                     )
                 } else {
                     validate_cook_workspace(&options)?;
+                    admit_explicit_cook_workspace_before_provider(&options, &run_id)?;
                     let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
                     let heartbeat_run_id = run_id.clone();
                     let heartbeat_cook_id = cook_id.clone();
@@ -5646,7 +5648,11 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
                 ));
             }
         }
-        trusted_initial_cook_workspace(options, source)?.unwrap_or_else(|| source.to_path_buf())
+        if cook_uses_explicit_cwd_workspace(options) {
+            source.to_path_buf()
+        } else {
+            trusted_initial_cook_workspace(options, source)?.unwrap_or_else(|| source.to_path_buf())
+        }
     } else if std::path::Path::new(&options.to_worktree).is_dir() {
         std::path::Path::new(&options.to_worktree).to_path_buf()
     } else if let Some(record) =
@@ -5868,10 +5874,125 @@ fn trusted_initial_cook_workspace(
 
 fn preflight_initial_cook_workspace_provider(options: &AgentTaskCookServiceOptions) -> Result<()> {
     if let Some(source) = options.source_worktree_path.as_deref() {
+        if cook_uses_explicit_cwd_workspace(options) {
+            return Ok(());
+        }
         trusted_initial_cook_workspace(options, source)?;
         return Ok(());
     }
     crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)
+}
+
+fn cook_uses_explicit_cwd_workspace(options: &AgentTaskCookServiceOptions) -> bool {
+    options.initial_plan.tasks.first().is_some_and(|task| {
+        task.metadata
+            .pointer("/worktree_provision/kind")
+            .and_then(Value::as_str)
+            == Some("explicit_cwd")
+    })
+}
+
+fn admit_explicit_cook_workspace_before_provider(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+) -> Result<()> {
+    if !cook_uses_explicit_cwd_workspace(options) || cook_has_provider_execution(&options.cook_id)?
+    {
+        return Ok(());
+    }
+    let source = options.source_worktree_path.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace",
+            "explicit Cook workspace is missing its source path",
+            Some(options.to_worktree.clone()),
+            None,
+        )
+    })?;
+    let source = std::fs::canonicalize(source).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(source.display().to_string()))
+    })?;
+    let ignored_evidence = explicit_cook_evidence_paths(options, &source);
+    let status = homeboy_core::git::run_git(
+        &source,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        "verify explicitly targeted Cook checkout cleanliness",
+    )?;
+    let dirty_paths = status
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.strip_prefix("?? ").unwrap_or(entry))
+        .filter(|path| !ignored_evidence.iter().any(|evidence| evidence == path))
+        .collect::<Vec<_>>();
+    if !dirty_paths.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "explicit Cook checkout must be clean before its first provider execution",
+            Some(options.to_worktree.clone()),
+            None,
+        ));
+    }
+    if agent_task_lifecycle::run_record_exists(run_id)? {
+        agent_task_lifecycle::record_metadata_value(
+            run_id,
+            "explicit_cwd_cleanliness_admission",
+            serde_json::json!({
+                "schema": "homeboy/cook-explicit-cwd-cleanliness/v1",
+                "workspace": source,
+                "ignored_projected_evidence": ignored_evidence,
+                "provider_executions_before_admission": 0,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+/// A consumed provider execution is the durable boundary after which provider
+/// candidate changes are expected to remain in the explicit checkout.
+fn cook_has_provider_execution(cook_id: &str) -> Result<bool> {
+    if !agent_task_lifecycle::cook_index_exists(cook_id)? {
+        return Ok(false);
+    }
+    for attempt in agent_task_lifecycle::cook_index(cook_id)?.attempts {
+        if agent_task_lifecycle::exact_record(&attempt.run_id)
+            .ok()
+            .and_then(|record| {
+                record.metadata["provider_executions_consumed"]
+                    .as_u64()
+                    .or_else(|| {
+                        record.metadata["provider_executions"]
+                            .as_array()
+                            .map(|executions| executions.len() as u64)
+                    })
+            })
+            .is_some_and(|executions| executions > 0)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Evidence is projected by the controller before Cook dispatches. Admit only
+/// the exact durable projection paths, never an entire controller directory.
+fn explicit_cook_evidence_paths(
+    options: &AgentTaskCookServiceOptions,
+    workspace: &Path,
+) -> Vec<String> {
+    options
+        .initial_plan
+        .tasks
+        .iter()
+        .flat_map(|task| {
+            task.executor.config["evidence_inputs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|evidence| evidence["path"].as_str())
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter_map(|path| path.strip_prefix(workspace).ok().map(Path::to_path_buf))
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
 }
 
 fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
