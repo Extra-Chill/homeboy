@@ -25,6 +25,7 @@ homeboy ssh list
 - `[ID]`: project ID or server ID (project wins when both exist).
 - `--as-server`: force interpretation as a server ID.
 - `--user <USER>`: override the SSH user instead of the server's configured user.
+- `--cwd <REMOTE_PATH>`: start in this remote directory. It overrides a project's configured base path and applies to project and server targets.
 - `[COMMAND...]` (optional): command to execute (omit for interactive shell).
   - Recommended form: `homeboy ssh <id> -- <command...>` (supports multiple args cleanly)
   - Put all Homeboy flags/options **before** `--` (everything after `--` is treated as part of the remote command)
@@ -60,6 +61,15 @@ Note: `action` is produced by the tagged enum output (`SshOutput`).
 The connect action uses an interactive SSH session and does not print the JSON envelope (it is treated as passthrough output).
 
 When a command is provided, it is executed non-interactively and Homeboy captures stdout/stderr into the JSON response.
+
+Project targets use their configured base path by default. Use `--cwd` to override that path or to select a working directory for a server target. This applies to interactive sessions, structured commands, and `--raw` commands:
+
+```sh
+homeboy ssh sandbox --cwd /home/wpcom/public_html -- php bin/example.php
+homeboy ssh sandbox --cwd /home/wpcom/public_html
+```
+
+Structured command responses include `requested_cwd` and `effective_cwd`, so callers can distinguish an explicit override from the resolved project base path.
 
 Piped stdin is streamed byte-for-byte to the remote command, including binary data. Homeboy closes remote stdin after local EOF and reports a nonzero result if the local stream cannot be delivered. This supports normal Unix composition without staging an intermediate file:
 
