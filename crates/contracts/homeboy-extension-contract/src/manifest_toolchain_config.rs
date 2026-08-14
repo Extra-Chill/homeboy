@@ -1,7 +1,7 @@
 //! Extension manifest capability/config types (deploy, build, test, lint, cli,
 //! database, discovery, requirements, source-snapshot).
 
-use crate::{TestDriftConfig, TestPassthroughFilter};
+use crate::{TestDriftConfig, TestInventoryConfig, TestPassthroughFilter};
 use homeboy_engine_primitives::output_parse::ParseSpec;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -305,6 +305,12 @@ pub struct TestConfig {
     /// Source/test selection contract used by changed-test and drift workflows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drift: Option<TestDriftConfig>,
+
+    /// Extension-declared inputs for the `homeboy/test-inventory/v1` contract.
+    /// Omitting this preserves the Cargo-derived defaults, so Rust extensions
+    /// need no manifest change. (#12394)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<TestInventoryConfig>,
 
     /// Manifest-driven routing for changed-test selections before invoking the
     /// extension test runner.

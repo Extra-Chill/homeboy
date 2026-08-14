@@ -33,6 +33,8 @@ use std::path::Path;
 use std::time::Duration;
 
 #[cfg(unix)]
+use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -144,13 +146,108 @@ fn test_inventory_mode(ci_env: &[(String, String)]) -> bool {
         .any(|(key, value)| key == TEST_INVENTORY_ONLY_ENV && value == "1")
 }
 
+/// Resolved inputs for the inventory binding.
+///
+/// Every one of these was Cargo-derived and unreachable for other toolchains
+/// before #12394. `InventoryProfile::cargo()` reproduces that behaviour exactly,
+/// and is what an extension without a `test.inventory` block still gets.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InventoryProfile {
+    /// Marker files identifying the workspace root, searched upward. Empty
+    /// means "ask Cargo", which is the historical behaviour.
+    root_markers: Vec<String>,
+    fingerprint_names: Vec<String>,
+    fingerprint_extensions: Vec<String>,
+    fingerprint_skip_dirs: Vec<String>,
+    /// Runner id -> argv reporting that runner's version.
+    runner_commands: BTreeMap<String, Vec<String>>,
+}
+
+#[cfg(unix)]
+impl InventoryProfile {
+    fn cargo() -> Self {
+        Self {
+            root_markers: Vec::new(),
+            fingerprint_names: vec!["Cargo.toml".to_string(), "Cargo.lock".to_string()],
+            fingerprint_extensions: vec!["rs".to_string()],
+            fingerprint_skip_dirs: vec![".git".to_string(), "target".to_string()],
+            runner_commands: BTreeMap::from([
+                (
+                    "cargo".to_string(),
+                    vec!["cargo".to_string(), "--version".to_string()],
+                ),
+                (
+                    "nextest".to_string(),
+                    vec![
+                        "cargo".to_string(),
+                        "nextest".to_string(),
+                        "--version".to_string(),
+                    ],
+                ),
+            ]),
+        }
+    }
+
+    /// Build a profile from an extension manifest, falling back to Cargo when
+    /// the extension declares nothing.
+    ///
+    /// A declared config that selects no fingerprint files, or names no usable
+    /// runner, is refused rather than silently degraded: an inventory bound to
+    /// a constant fingerprint would compare equal across unrelated workspaces.
+    fn resolve(config: Option<&crate::TestInventoryConfig>) -> Option<Self> {
+        let Some(config) = config else {
+            return Some(Self::cargo());
+        };
+        if !config.selects_files() {
+            return None;
+        }
+        let runner_commands: BTreeMap<String, Vec<String>> = config
+            .runners
+            .iter()
+            .filter(|runner| runner.is_executable())
+            .map(|runner| (runner.id.clone(), runner.version_command.clone()))
+            .collect();
+        if runner_commands.is_empty() {
+            return None;
+        }
+        Some(Self {
+            root_markers: config.root_markers.clone(),
+            fingerprint_names: config.fingerprint_names.clone(),
+            fingerprint_extensions: config.fingerprint_extensions.clone(),
+            fingerprint_skip_dirs: config.fingerprint_skip_dirs.clone(),
+            runner_commands,
+        })
+    }
+
+    fn selects(&self, path: &Path) -> bool {
+        let name = path.file_name().and_then(|name| name.to_str());
+        if name.is_some_and(|name| self.fingerprint_names.iter().any(|want| want == name)) {
+            return true;
+        }
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                self.fingerprint_extensions
+                    .iter()
+                    .any(|want| want == extension)
+            })
+    }
+
+    fn skips_dir(&self, name: &std::ffi::OsStr) -> bool {
+        name.to_str()
+            .is_some_and(|name| self.fingerprint_skip_dirs.iter().any(|skip| skip == name))
+    }
+}
+
 #[cfg(unix)]
 #[derive(Debug)]
 struct TestInventoryBinding {
     child_path: PathBuf,
     workspace_fingerprint: String,
-    cargo_runner_fingerprint: Option<String>,
-    nextest_runner_fingerprint: Option<String>,
+    /// Runner id -> fingerprint, for every runner the profile could identify.
+    runner_fingerprints: BTreeMap<String, String>,
+    profile: InventoryProfile,
     project_root: std::fs::File,
     run_dir: std::fs::File,
     run_dir_device: u64,
@@ -162,11 +259,12 @@ fn test_inventory_binding(
     ci_env: &[(String, String)],
     source_path: &Path,
     run_dir: &RunDir,
+    profile: &InventoryProfile,
 ) -> Option<TestInventoryBinding> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     let child_path = run_dir.path().join(TEST_INVENTORY_FILE);
-    let workspace_root = cargo_workspace_root(source_path)?;
+    let workspace_root = inventory_workspace_root(source_path, profile)?;
     requested_test_inventory_path(ci_env, &workspace_root)?;
     let project_root = std::fs::OpenOptions::new()
         .read(true)
@@ -184,16 +282,48 @@ fn test_inventory_binding(
     }
     Some(TestInventoryBinding {
         child_path,
-        workspace_fingerprint: workspace_fingerprint(&workspace_root)?,
-        // Inventory producers select one runner. Record each independently so
+        workspace_fingerprint: workspace_fingerprint(&workspace_root, profile)?,
+        // Inventory producers select one runner. Record each independently so a
         // Cargo inventory remains valid on systems without cargo-nextest.
-        cargo_runner_fingerprint: runner_fingerprint(&workspace_root, "cargo"),
-        nextest_runner_fingerprint: runner_fingerprint(&workspace_root, "nextest"),
+        runner_fingerprints: profile
+            .runner_commands
+            .keys()
+            .filter_map(|runner| {
+                Some((
+                    runner.clone(),
+                    runner_fingerprint(&workspace_root, runner, profile)?,
+                ))
+            })
+            .collect(),
+        profile: profile.clone(),
         run_dir_device: metadata.dev(),
         run_dir_inode: metadata.ino(),
         project_root,
         run_dir,
     })
+}
+
+/// Resolve the workspace root an inventory is bound to.
+///
+/// With no declared markers this asks Cargo, preserving the original
+/// behaviour. With markers it walks upward from the component source path for
+/// the first ancestor holding one, which needs no toolchain subprocess.
+#[cfg(unix)]
+fn inventory_workspace_root(source_path: &Path, profile: &InventoryProfile) -> Option<PathBuf> {
+    if profile.root_markers.is_empty() {
+        return cargo_workspace_root(source_path);
+    }
+    let start = source_path.canonicalize().ok()?;
+    for ancestor in start.ancestors() {
+        if profile
+            .root_markers
+            .iter()
+            .any(|marker| ancestor.join(marker).exists())
+        {
+            return ancestor.canonicalize().ok();
+        }
+    }
+    Some(start)
 }
 
 #[cfg(unix)]
@@ -231,13 +361,14 @@ fn cargo_workspace_root(source_path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn runner_fingerprint(workspace_root: &Path, runner: &str) -> Option<String> {
-    let args = if runner == "nextest" {
-        vec!["nextest", "--version"]
-    } else {
-        vec!["--version"]
-    };
-    let output = Command::new("cargo")
+fn runner_fingerprint(
+    workspace_root: &Path,
+    runner: &str,
+    profile: &InventoryProfile,
+) -> Option<String> {
+    let argv = profile.runner_commands.get(runner)?;
+    let (program, args) = argv.split_first()?;
+    let output = Command::new(program)
         .args(args)
         .current_dir(workspace_root)
         .output()
@@ -254,30 +385,30 @@ fn runner_fingerprint_from_version(runner: &str, version: &str) -> String {
 }
 
 #[cfg(unix)]
-fn workspace_fingerprint(root: &Path) -> Option<String> {
-    fn collect(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Option<()> {
+fn workspace_fingerprint(root: &Path, profile: &InventoryProfile) -> Option<String> {
+    fn collect(
+        root: &Path,
+        directory: &Path,
+        profile: &InventoryProfile,
+        files: &mut Vec<PathBuf>,
+    ) -> Option<()> {
         for entry in std::fs::read_dir(directory).ok()? {
             let entry = entry.ok()?;
             let path = entry.path();
             let file_type = entry.file_type().ok()?;
             if file_type.is_dir() {
-                if !matches!(entry.file_name().to_str(), Some(".git" | "target")) {
-                    collect(root, &path, files)?;
+                if !profile.skips_dir(&entry.file_name()) {
+                    collect(root, &path, profile, files)?;
                 }
-            } else if path.is_file() {
-                let name = entry.file_name();
-                if matches!(name.to_str(), Some("Cargo.toml" | "Cargo.lock"))
-                    || path.extension().is_some_and(|extension| extension == "rs")
-                {
-                    files.push(path.strip_prefix(root).ok()?.to_path_buf());
-                }
+            } else if path.is_file() && profile.selects(&path) {
+                files.push(path.strip_prefix(root).ok()?.to_path_buf());
             }
         }
         Some(())
     }
 
     let mut files = Vec::new();
-    collect(root, root, &mut files)?;
+    collect(root, root, profile, &mut files)?;
     files.sort();
     let mut content = String::new();
     for relative in files {
@@ -315,21 +446,20 @@ fn revalidate_test_inventory_binding(
     if metadata.dev() != binding.run_dir_device || metadata.ino() != binding.run_dir_inode {
         return false;
     }
-    let Some(workspace_root) = cargo_workspace_root(source_path) else {
+    let Some(workspace_root) = inventory_workspace_root(source_path, &binding.profile) else {
         return false;
     };
-    workspace_fingerprint(&workspace_root) == Some(binding.workspace_fingerprint.clone())
-        && runner_fingerprint(&workspace_root, runner)
+    workspace_fingerprint(&workspace_root, &binding.profile)
+        == Some(binding.workspace_fingerprint.clone())
+        && runner_fingerprint(&workspace_root, runner, &binding.profile)
             == expected_runner_fingerprint(binding, runner)
 }
 
+/// An inventory may only name a runner the binding actually fingerprinted, so
+/// an unknown or undeclared runner id is rejected rather than trusted.
 #[cfg(unix)]
 fn expected_runner_fingerprint(binding: &TestInventoryBinding, runner: &str) -> Option<String> {
-    match runner {
-        "cargo" => binding.cargo_runner_fingerprint.clone(),
-        "nextest" => binding.nextest_runner_fingerprint.clone(),
-        _ => None,
-    }
+    binding.runner_fingerprints.get(runner).cloned()
 }
 
 #[cfg(unix)]
@@ -1027,9 +1157,14 @@ fn run_main_test_workflow_inner(
     #[cfg(unix)]
     let inventory_binding = inventory_mode
         .then(|| {
-            test_context
-                .as_ref()
-                .and_then(|_| test_inventory_binding(&args.ci_env, source_path, run_dir))
+            test_context.as_ref().and_then(|_| {
+                let profile = InventoryProfile::resolve(
+                    test_config
+                        .as_ref()
+                        .and_then(|test| test.inventory.as_ref()),
+                )?;
+                test_inventory_binding(&args.ci_env, source_path, run_dir, &profile)
+            })
         })
         .flatten()
         .filter(prepare_test_inventory);
@@ -2925,8 +3060,9 @@ mod tests {
                 "arbitrary provenance",
                 valid_inventory_document(&binding, "test", "executed").replacen(
                     binding
-                        .nextest_runner_fingerprint
-                        .as_deref()
+                        .runner_fingerprints
+                        .get("nextest")
+                        .map(String::as_str)
                         .expect("nextest fingerprint"),
                     &"c".repeat(64),
                     1,
@@ -3690,11 +3826,12 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
         let mut inventory: TestInventoryEvidence =
             serde_json::from_str(&inventory_document(&binding, vec![test]))
                 .expect("parse inventory");
-        binding.nextest_runner_fingerprint = None;
+        binding.runner_fingerprints.remove("nextest");
         inventory.runner = "cargo".to_string();
         inventory.runner_fingerprint = binding
-            .cargo_runner_fingerprint
-            .clone()
+            .runner_fingerprints
+            .get("cargo")
+            .cloned()
             .expect("cargo fingerprint");
         inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
             &canonical_inventory_json(&inventory),
@@ -3718,7 +3855,7 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
         let root =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_inventory_fingerprint");
         assert_eq!(
-            workspace_fingerprint(&root).expect("fingerprint fixture"),
+            workspace_fingerprint(&root, &InventoryProfile::cargo()).expect("fingerprint fixture"),
             "3ff128fc5701066e7fc0324c88cd18ec1bc6b1ea5aa8390b1661da891e106712"
         );
         assert_eq!(
@@ -3800,7 +3937,7 @@ print(hashlib.sha256(content.encode()).hexdigest())
             "the Python producer golden fingerprint must remain stable"
         );
         assert_eq!(
-            workspace_fingerprint(root),
+            workspace_fingerprint(root, &InventoryProfile::cargo()),
             Some(producer_fingerprint),
             "the Rust verifier must match Path.read_text() universal-newline semantics"
         );
@@ -3816,7 +3953,7 @@ print(hashlib.sha256(content.encode()).hexdigest())
             "Path.read_text() must reject invalid UTF-8 fingerprint input"
         );
         assert_eq!(
-            workspace_fingerprint(root),
+            workspace_fingerprint(root, &InventoryProfile::cargo()),
             None,
             "the Rust verifier must fail closed when the Python producer cannot decode a file"
         );
@@ -3999,7 +4136,7 @@ print(hashlib.sha256(content.encode()).hexdigest())
     }
 
     #[cfg(unix)]
-    fn test_inventory_binding_for_test(run_dir: &Path) -> TestInventoryBinding {
+    pub(super) fn test_inventory_binding_for_test(run_dir: &Path) -> TestInventoryBinding {
         test_inventory_binding_for_test_in(run_dir, run_dir)
     }
 
@@ -4021,8 +4158,11 @@ print(hashlib.sha256(content.encode()).hexdigest())
         TestInventoryBinding {
             child_path: run_dir.join(TEST_INVENTORY_FILE),
             workspace_fingerprint: "b".repeat(64),
-            cargo_runner_fingerprint: Some("a".repeat(64)),
-            nextest_runner_fingerprint: Some("a".repeat(64)),
+            runner_fingerprints: BTreeMap::from([
+                ("cargo".to_string(), "a".repeat(64)),
+                ("nextest".to_string(), "a".repeat(64)),
+            ]),
+            profile: InventoryProfile::cargo(),
             project_root: std::fs::File::open(&project_root).expect("open project root"),
             run_dir: descriptor,
             run_dir_device: metadata.dev(),
@@ -4053,8 +4193,9 @@ print(hashlib.sha256(content.encode()).hexdigest())
             schema: TEST_INVENTORY_SCHEMA.to_string(),
             runner: "nextest".to_string(),
             runner_fingerprint: binding
-                .nextest_runner_fingerprint
-                .clone()
+                .runner_fingerprints
+                .get("nextest")
+                .cloned()
                 .expect("nextest fingerprint"),
             workspace_fingerprint: binding.workspace_fingerprint.clone(),
             tests,
@@ -4611,5 +4752,163 @@ printf 'not json\n'
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.component, "fixture");
         assert!(result.summary.is_some());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod inventory_profile_tests {
+    use super::*;
+    use crate::{TestInventoryConfig, TestInventoryRunner};
+
+    fn wordpress_config() -> TestInventoryConfig {
+        TestInventoryConfig {
+            root_markers: vec!["composer.json".to_string()],
+            fingerprint_names: vec!["composer.json".to_string(), "composer.lock".to_string()],
+            fingerprint_extensions: vec!["php".to_string()],
+            fingerprint_skip_dirs: vec![".git".to_string(), "vendor".to_string()],
+            runners: vec![TestInventoryRunner {
+                id: "wordpress".to_string(),
+                version_command: vec!["php".to_string(), "--version".to_string()],
+            }],
+        }
+    }
+
+    /// An extension that declares nothing keeps the exact Cargo-derived
+    /// behaviour, so Rust needs no manifest change and cannot regress. (#12394)
+    #[test]
+    fn absent_config_resolves_to_the_cargo_profile() {
+        let profile = InventoryProfile::resolve(None).expect("cargo default");
+        assert_eq!(profile, InventoryProfile::cargo());
+        assert!(
+            profile.root_markers.is_empty(),
+            "empty markers is what routes root resolution back through cargo metadata"
+        );
+        assert!(profile.selects(Path::new("crates/foo/src/lib.rs")));
+        assert!(profile.selects(Path::new("Cargo.toml")));
+        assert!(profile.selects(Path::new("Cargo.lock")));
+        assert!(!profile.selects(Path::new("README.md")));
+        assert!(profile.skips_dir(std::ffi::OsStr::new("target")));
+        assert!(profile.skips_dir(std::ffi::OsStr::new(".git")));
+        assert_eq!(
+            profile.runner_commands.keys().collect::<Vec<_>>(),
+            vec!["cargo", "nextest"]
+        );
+    }
+
+    /// A declared config drives selection, and a PHP workspace is fingerprinted
+    /// by its own files rather than by Rust ones it does not have.
+    #[test]
+    fn declared_config_selects_its_own_files() {
+        let profile = InventoryProfile::resolve(Some(&wordpress_config())).expect("profile");
+        assert!(profile.selects(Path::new("inc/Abilities/SystemAbilities.php")));
+        assert!(profile.selects(Path::new("composer.lock")));
+        assert!(!profile.selects(Path::new("src/lib.rs")));
+        assert!(profile.skips_dir(std::ffi::OsStr::new("vendor")));
+        assert!(!profile.skips_dir(std::ffi::OsStr::new("inc")));
+    }
+
+    /// A fingerprint over zero files hashes the empty string for every
+    /// workspace, making unrelated checkouts compare equal. Refuse to bind
+    /// rather than bind to a constant.
+    #[test]
+    fn config_selecting_no_files_is_refused() {
+        let mut config = wordpress_config();
+        config.fingerprint_names.clear();
+        config.fingerprint_extensions.clear();
+        assert!(InventoryProfile::resolve(Some(&config)).is_none());
+    }
+
+    /// A runner with no executable cannot be fingerprinted, so a config that
+    /// declares only such runners cannot bind an inventory.
+    #[test]
+    fn config_without_a_usable_runner_is_refused() {
+        let mut config = wordpress_config();
+        config.runners = vec![TestInventoryRunner {
+            id: "broken".to_string(),
+            version_command: vec![],
+        }];
+        assert!(InventoryProfile::resolve(Some(&config)).is_none());
+    }
+
+    /// Root resolution walks upward to the marker, so a component nested inside
+    /// a larger checkout still binds to its own root without `cargo metadata`.
+    #[test]
+    fn declared_markers_resolve_the_root_without_cargo() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().canonicalize().expect("canonical");
+        let nested = root.join("inc/Core/Bootstrap");
+        std::fs::create_dir_all(&nested).expect("nested dirs");
+        std::fs::write(root.join("composer.json"), "{}").expect("marker");
+
+        let profile = InventoryProfile::resolve(Some(&wordpress_config())).expect("profile");
+        assert_eq!(
+            inventory_workspace_root(&nested, &profile),
+            Some(root.clone())
+        );
+    }
+
+    /// Without a marker anywhere above it, the component path is its own root
+    /// rather than an unrelated ancestor.
+    #[test]
+    fn missing_marker_falls_back_to_the_component_path() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().canonicalize().expect("canonical");
+        let nested = root.join("inc");
+        std::fs::create_dir_all(&nested).expect("nested dirs");
+
+        let mut config = wordpress_config();
+        config.root_markers = vec!["definitely-absent-marker".to_string()];
+        let profile = InventoryProfile::resolve(Some(&config)).expect("profile");
+        assert_eq!(inventory_workspace_root(&nested, &profile), Some(nested));
+    }
+
+    /// The fingerprint must actually respond to the declared file set: two
+    /// checkouts differing only in a selected file must not compare equal.
+    #[test]
+    fn declared_fingerprint_covers_the_declared_files() {
+        let profile = InventoryProfile::resolve(Some(&wordpress_config())).expect("profile");
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().canonicalize().expect("canonical");
+        std::fs::create_dir_all(root.join("inc")).expect("inc");
+        std::fs::create_dir_all(root.join("vendor")).expect("vendor");
+        std::fs::write(root.join("inc/Plugin.php"), "<?php\necho 1;\n").expect("php");
+        std::fs::write(root.join("composer.json"), "{}").expect("composer");
+
+        let before = workspace_fingerprint(&root, &profile).expect("fingerprint");
+
+        // A skipped directory must not move the fingerprint.
+        std::fs::write(root.join("vendor/Ignored.php"), "<?php\necho 2;\n").expect("vendor php");
+        assert_eq!(
+            workspace_fingerprint(&root, &profile),
+            Some(before.clone()),
+            "vendor/ is skipped, so it cannot change the fingerprint"
+        );
+
+        // An unselected extension must not move it either.
+        std::fs::write(root.join("inc/notes.md"), "notes\n").expect("md");
+        assert_eq!(
+            workspace_fingerprint(&root, &profile),
+            Some(before.clone()),
+            "markdown is not a declared fingerprint input"
+        );
+
+        // A selected file must.
+        std::fs::write(root.join("inc/Plugin.php"), "<?php\necho 3;\n").expect("php edit");
+        assert_ne!(
+            workspace_fingerprint(&root, &profile),
+            Some(before),
+            "a declared PHP source file must be covered by the fingerprint"
+        );
+    }
+
+    /// An inventory may only claim a runner the binding fingerprinted.
+    #[test]
+    fn expected_runner_fingerprint_rejects_an_undeclared_runner() {
+        let run = RunDir::create().expect("run dir");
+        let binding = super::tests::test_inventory_binding_for_test(run.path());
+        assert!(expected_runner_fingerprint(&binding, "cargo").is_some());
+        assert!(expected_runner_fingerprint(&binding, "nextest").is_some());
+        assert!(expected_runner_fingerprint(&binding, "wordpress").is_none());
+        assert!(expected_runner_fingerprint(&binding, "").is_none());
     }
 }

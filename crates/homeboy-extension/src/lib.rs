@@ -130,12 +130,12 @@ pub use manifest::{
     RuntimeConfig, RuntimeRequirementsConfig, ScriptsConfig, SelectOption, SettingConfig,
     SinceTagConfig, SourceSnapshotConfig, StructuredSidecarDeclaration,
     TestChangedFileExclusiveEnv, TestChangedFileRouting, TestChangedFileRoutingStrategy,
-    TestConfig, TestDriftConfig, TestMappingConfig, TestNoTestsApplicablePolicy,
-    TestPassthroughFilter, TestPassthroughFilterStrategy, TestSecretEnvProjection,
-    TestSettingStringPredicate, TestVacuityPolicy, TraceBrowserArtifactMapConfig,
-    TraceBrowserEvidenceAdapterConfig, TraceBrowserMetricAliasConfig,
-    TraceBrowserSummaryAliasConfig, TraceConfig, VersionPatternConfig,
-    DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA, EXTENSION_CONTRACT_PRODUCER_SCHEMA,
+    TestConfig, TestDriftConfig, TestInventoryConfig, TestInventoryRunner, TestMappingConfig,
+    TestNoTestsApplicablePolicy, TestPassthroughFilter, TestPassthroughFilterStrategy,
+    TestSecretEnvProjection, TestSettingStringPredicate, TestVacuityPolicy,
+    TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
+    TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
+    VersionPatternConfig, DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA, EXTENSION_CONTRACT_PRODUCER_SCHEMA,
     EXTENSION_MATERIALIZATION_SOURCE_SCHEMA, NOTIFICATION_TRANSPORT_SCHEMA,
 };
 pub use recipe_run::{
