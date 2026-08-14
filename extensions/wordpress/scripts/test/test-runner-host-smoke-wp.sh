@@ -41,6 +41,7 @@ TARGET_SMOKE_FILE="${HOMEBOY_WORDPRESS_HOST_SMOKE_FILE:-}"
 TARGET_SMOKE_FILES="${HOMEBOY_WORDPRESS_HOST_SMOKE_FILES:-}"
 HOST_SMOKE_TIMEOUT_SECONDS="${HOMEBOY_WORDPRESS_HOST_SMOKE_TIMEOUT_SECONDS:-120}"
 HOST_SMOKE_EXCERPT_BYTES="${HOMEBOY_WORDPRESS_HOST_SMOKE_EXCERPT_BYTES:-65536}"
+WP_CODEBOX_TIMEOUT_DIAGNOSTICS="${SCRIPT_DIR}/../lib/wp-codebox-timeout-diagnostics.mjs"
 
 homeboy_wordpress_host_smoke_abs() {
     local raw_path="$1"
@@ -152,13 +153,14 @@ run_one_smoke() {
     local smoke_file="$1"
     local rel_path="${smoke_file#"${PLUGIN_PATH}/"}"
     local sandbox_smoke_path="/wordpress/wp-content/plugins/${PLUGIN_SLUG}/${rel_path}"
-    local wrapper_file recipe_file output_file stderr_file artifacts_dir status started_at elapsed
+    local wrapper_file recipe_file output_file stderr_file termination_file artifacts_dir status started_at elapsed
 
     artifacts_dir="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-smoke-artifacts.XXXXXX")"
     wrapper_file="${artifacts_dir}/wrapper.php"
     recipe_file="${artifacts_dir}/recipe.json"
     output_file="${artifacts_dir}/recipe-run.json"
     stderr_file="${artifacts_dir}/wp-codebox.stderr"
+    termination_file="${artifacts_dir}/termination.json"
 
     homeboy_wordpress_smoke_wrapper "$sandbox_smoke_path" > "$wrapper_file"
     echo "HOST_SMOKE_PROGRESS:${rel_path}:phase=wrapper-created artifacts=${artifacts_dir}"
@@ -178,7 +180,7 @@ run_one_smoke() {
     set +e
     started_at="$(date +%s)"
     echo "HOST_SMOKE_PROGRESS:${rel_path}:phase=wp-codebox-recipe-run timeout=${HOST_SMOKE_TIMEOUT_SECONDS}s artifacts=${artifacts_dir}"
-    homeboy_wordpress_smoke_run_with_timeout "$output_file" "$stderr_file" \
+    homeboy_wordpress_smoke_run_with_timeout "$output_file" "$stderr_file" "$termination_file" \
         "${WP_CODEBOX_COMMAND[@]}" recipe-run --recipe "$recipe_file" --artifacts "$artifacts_dir" --json
     status=$?
     elapsed=$(( $(date +%s) - started_at ))
@@ -187,7 +189,7 @@ run_one_smoke() {
 
     if [ "$status" -eq 124 ]; then
         echo "HOST_SMOKE_TIMEOUT:${rel_path}:phase=wp-codebox-recipe-run elapsed=${elapsed}s timeout=${HOST_SMOKE_TIMEOUT_SECONDS}s artifacts=${artifacts_dir}"
-        homeboy_wordpress_smoke_print_failure_output "$rel_path" "$output_file" "$stderr_file" "$artifacts_dir"
+        node "$WP_CODEBOX_TIMEOUT_DIAGNOSTICS" wp-codebox-recipe-run "$elapsed" "$HOST_SMOKE_TIMEOUT_SECONDS" "$rel_path" "$termination_file" "$output_file" "$stderr_file" "$artifacts_dir"
         return 124
     fi
 
@@ -207,28 +209,56 @@ run_one_smoke() {
 homeboy_wordpress_smoke_run_with_timeout() {
     local output_file="$1"
     local stderr_file="$2"
-    shift 2
+    local termination_file="$3"
+    shift 3
 
     node -e '
         const fs = require("node:fs");
-        const { spawnSync } = require("node:child_process");
-        const [timeoutSeconds, stdoutFile, stderrFile, ...command] = process.argv.slice(1);
-        const result = spawnSync(command[0], command.slice(1), {
-            encoding: "utf8",
-            maxBuffer: 50 * 1024 * 1024,
-            timeout: Number(timeoutSeconds) * 1000,
+        const { spawn } = require("node:child_process");
+        const { pathToFileURL } = require("node:url");
+        const [timeoutSeconds, stdoutFile, stderrFile, terminationFile, redactorModule, ...command] = process.argv.slice(1);
+        (async () => {
+        const { createTimeoutLineRedactor } = await import(pathToFileURL(redactorModule));
+        const stdout = fs.createWriteStream(stdoutFile);
+        const stderr = fs.createWriteStream(stderrFile);
+        const stdoutRedactor = createTimeoutLineRedactor();
+        const stderrRedactor = createTimeoutLineRedactor();
+        const child = spawn(command[0], command.slice(1), { stdio: ["ignore", "pipe", "pipe"], detached: true });
+        let timedOut = false;
+        let childError;
+        let timeoutClosed = false;
+        let killEscalated = false;
+        const killGroup = (signal) => {
+            try { process.kill(-child.pid, signal); }
+            catch (error) { if (error.code !== "ESRCH") { try { child.kill(signal); } catch {} } }
+        };
+        const timer = setTimeout(() => {
+            timedOut = true;
+            killGroup("SIGTERM");
+            // This begins at timeout, not at leader close: descendants can hold
+            // inherited pipes open after their parent exits.
+            setTimeout(() => {
+                killEscalated = true;
+                killGroup("SIGKILL");
+                if (timeoutClosed) process.exit(124);
+            }, 5000);
+        }, Number(timeoutSeconds) * 1000);
+        child.stdout.on("data", (chunk) => stdout.write(stdoutRedactor.write(chunk)));
+        child.stderr.on("data", (chunk) => stderr.write(stderrRedactor.write(chunk)));
+        child.on("error", (error) => { childError = error; });
+        child.on("close", (code, signal) => {
+            clearTimeout(timer);
+            stdout.end(stdoutRedactor.end());
+            stderr.end(stderrRedactor.end());
+            Promise.all([new Promise((done) => stdout.on("finish", done)), new Promise((done) => stderr.on("finish", done))]).then(() => {
+                fs.writeFileSync(terminationFile, JSON.stringify({ result: timedOut ? "timeout" : "exited", signal: signal || undefined, code }));
+                if (timedOut) { timeoutClosed = true; if (killEscalated) process.exit(124); return; }
+                if (childError) { fs.appendFileSync(stderrFile, `${childError.message}\n`); process.exit(1); }
+                process.exit(code === null ? 1 : code);
+            });
         });
-        fs.writeFileSync(stdoutFile, result.stdout || "");
-        fs.writeFileSync(stderrFile, result.stderr || "");
-        if (result.error && result.error.code === "ETIMEDOUT") {
-            process.exit(124);
-        }
-        if (result.error) {
-            fs.appendFileSync(stderrFile, `${result.error.message}\n`);
-            process.exit(1);
-        }
-        process.exit(result.status === null ? 1 : result.status);
-    ' "$HOST_SMOKE_TIMEOUT_SECONDS" "$output_file" "$stderr_file" "$@"
+        })().catch((error) => { fs.appendFileSync(stderrFile, `${error.message}\n`); process.exit(1); });
+    ' "$HOST_SMOKE_TIMEOUT_SECONDS" "$output_file" "$stderr_file" "$termination_file" "$WP_CODEBOX_TIMEOUT_DIAGNOSTICS" "$@"
 }
 
 homeboy_wordpress_smoke_print_failure_output() {
