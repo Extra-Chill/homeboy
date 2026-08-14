@@ -47,6 +47,7 @@ pub struct ExtensionRunner {
     /// conflict — strictly more expressive). See SettingArgs docstring.
     settings_json_overrides: Vec<(String, serde_json::Value)>,
     env_vars: Vec<(String, String)>,
+    env_removals: Vec<String>,
     secret_env_names: Vec<String>,
     test_secret_env_projections: Vec<TestSecretEnvProjection>,
     env_provider_extensions: Vec<String>,
@@ -88,6 +89,7 @@ impl ExtensionRunner {
             settings_overrides: Vec::new(),
             settings_json_overrides: Vec::new(),
             env_vars: Vec::new(),
+            env_removals: Vec::new(),
             secret_env_names: Vec::new(),
             test_secret_env_projections: Vec::new(),
             env_provider_extensions: Vec::new(),
@@ -132,6 +134,26 @@ impl ExtensionRunner {
     pub fn env(mut self, key: &str, value: &str) -> Self {
         self.env_vars.push((key.to_string(), value.to_string()));
         self
+    }
+
+    /// Remove an inherited environment variable from the extension child.
+    pub(crate) fn env_remove(mut self, key: &str) -> Self {
+        debug_assert!(
+            key.bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric()),
+            "environment variable names must be shell-safe"
+        );
+        self.env_removals.push(key.to_string());
+        self
+    }
+
+    /// Remove an inherited environment variable if condition is true.
+    pub(crate) fn env_remove_if(self, condition: bool, key: &str) -> Self {
+        if condition {
+            self.env_remove(key)
+        } else {
+            self
+        }
     }
 
     /// Declare secret identities that Homeboy must resolve for this local
@@ -492,13 +514,22 @@ impl ExtensionRunner {
         env_vars: &[(String, String)],
         contains_secrets: bool,
     ) -> Result<CommandOutput> {
+        let command_override = (!self.env_removals.is_empty()).then(|| {
+            format!(
+                "unset {}; {}",
+                shell::quote_args(&self.env_removals),
+                self.command_string(extension_path)
+            )
+        });
         super::execution::execute_capability_script(
             extension_path,
             &self.execution_context.script_path,
             &self.script_args,
             env_vars,
             self.working_dir.as_deref(),
-            self.command_override.as_deref(),
+            command_override
+                .as_deref()
+                .or(self.command_override.as_deref()),
             super::execution::CapabilityScriptOptions {
                 // Streaming an arbitrary child stream cannot guarantee exact
                 // value redaction. Secret-bearing children are captured first,
