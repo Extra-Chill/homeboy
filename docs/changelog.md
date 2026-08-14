@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.348.3] - 2026-08-14
+
+### Changed
+- avoid replay fixture deadlock
+- bind harvest artifacts to scratch
+- bind prompt store root
+- isolate policy sources
+- bind scheduler storage roots
+
+### Fixed
+- converge disconnected refresh reconnect
+- bound connect failure evidence
+- rebind replacement replay identity
+- preserve cross-platform admission fencing
+- reconcile unleased candidates safely
+
 ## [0.348.2] - 2026-08-14
 
 ### Changed
