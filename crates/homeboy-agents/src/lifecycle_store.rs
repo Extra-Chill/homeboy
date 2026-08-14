@@ -129,7 +129,7 @@ impl AgentTaskLifecycleStore {
     }
 
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
-        ObservationStore::open_initialized_at(self.observation_db_path())
+        ObservationStore::open_initialized_for_lifecycle_at(self.observation_db_path())
     }
 
     pub fn open_observation_readonly(&self) -> Result<ObservationStore> {
@@ -712,7 +712,7 @@ pub(super) fn inject_raw_record_metadata_for_corruption_test(
     run_id: &str,
     inject: impl FnOnce(&mut Value),
 ) -> Result<()> {
-    let store = ObservationStore::open_initialized()?;
+    let store = ObservationStore::open_initialized_for_lifecycle()?;
     let mut run = store.get_run(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
@@ -975,7 +975,7 @@ pub(super) fn update_cook_index(
 }
 
 pub(super) fn record_exists(run_id: &str) -> Result<bool> {
-    Ok(ObservationStore::open_initialized()?
+    Ok(ObservationStore::open_initialized_for_lifecycle()?
         .get_run(run_id)?
         .is_some())
 }
@@ -1029,7 +1029,7 @@ fn validate_cook_index_attempt_in_store(
 }
 
 pub(super) fn record_lacks_typed_metadata(run_id: &str) -> Result<bool> {
-    Ok(ObservationStore::open_initialized()?
+    Ok(ObservationStore::open_initialized_for_lifecycle()?
         .get_run(run_id)?
         .is_some_and(|run| run.metadata_json.get("agent_task_run").is_none()))
 }
@@ -1050,7 +1050,7 @@ const RETRY_SUCCESSOR_SCAN_LIMIT: usize = 256;
 /// retry. The page is therefore read with an explicit truncation signal and a
 /// truncated lineage fails loudly rather than answering wrongly (#11177).
 pub(super) fn read_retry_successors(source_run_id: &str) -> Result<Vec<AgentTaskRunRecord>> {
-    let page = ObservationStore::open_initialized()?.list_runs_by_retry_of_page(
+    let page = ObservationStore::open_initialized_for_lifecycle()?.list_runs_by_retry_of_page(
         "agent-task",
         source_run_id,
         RETRY_SUCCESSOR_SCAN_LIMIT,

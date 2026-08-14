@@ -456,9 +456,12 @@ pub fn refresh_homeboy_binary(
 
     let runner = load(&plan.runner_id)?;
     let previous_homeboy_path = runner.settings.homeboy_path.clone();
-    let connection_status = super::status(&plan.runner_id)?;
-    let disconnected_ssh = runner.kind == RunnerKind::Ssh && !connection_status.connected;
-    let exec_options = refresh_execution_options(&plan, required_commands, disconnected_ssh);
+    let admission = super::runner_admission_snapshot(&plan.runner_id)?;
+    let connection_status = admission.status.clone();
+    let execution_route = refresh_execution_route(&runner, &admission)?;
+    let diagnostic_ssh_bootstrap = execution_route.uses_diagnostic_ssh();
+    let exec_options =
+        refresh_execution_options(&plan, required_commands, diagnostic_ssh_bootstrap);
     let (exec_output, exit_code) = exec_with_status_snapshot(
         &plan.runner_id,
         exec_options,
@@ -563,7 +566,7 @@ pub fn refresh_homeboy_binary(
     // persisted after the candidate has been verified, whether or not this
     // invocation also replaces the active daemon.
     let ancestry_failure = RefCell::new(None);
-    let bootstrap = if disconnected_ssh {
+    let bootstrap = if diagnostic_ssh_bootstrap {
         ssh_bootstrap_promote_with(
             &plan,
             || Ok(exec_output.stdout.clone()),
@@ -581,7 +584,7 @@ pub fn refresh_homeboy_binary(
                             ancestry_checkout.as_deref(),
                             older,
                             newer,
-                            disconnected_ssh,
+                            diagnostic_ssh_bootstrap,
                             &connection_status,
                         );
                         match result {
@@ -637,7 +640,7 @@ pub fn refresh_homeboy_binary(
                         ancestry_checkout.as_deref(),
                         older,
                         newer,
-                        disconnected_ssh,
+                        diagnostic_ssh_bootstrap,
                         &connection_status,
                     );
                     match result {
@@ -942,7 +945,7 @@ pub fn refresh_homeboy_binary(
                             error.message,
                         )),
                         bootstrap_provenance: Some(refresh_bootstrap_provenance(
-                            disconnected_ssh,
+                            diagnostic_ssh_bootstrap,
                             &plan,
                             &bootstrap,
                             &identity,
@@ -999,7 +1002,7 @@ pub fn refresh_homeboy_binary(
                         daemon_identity_verification.err().as_deref(),
                     )),
                     bootstrap_provenance: Some(refresh_bootstrap_provenance(
-                        disconnected_ssh,
+                        diagnostic_ssh_bootstrap,
                         &plan,
                         &bootstrap,
                         &identity,
@@ -1057,7 +1060,7 @@ pub fn refresh_homeboy_binary(
                             Some(readiness_error.message.as_str()),
                         )),
                         bootstrap_provenance: Some(refresh_bootstrap_provenance(
-                            disconnected_ssh,
+                            diagnostic_ssh_bootstrap,
                             &plan,
                             &bootstrap,
                             &identity,
@@ -1112,7 +1115,7 @@ pub fn refresh_homeboy_binary(
             reconnect_deferred: None,
             failure: None,
             bootstrap_provenance: Some(HomeboyBootstrapProvenance {
-                transport: if disconnected_ssh {
+                transport: if diagnostic_ssh_bootstrap {
                     "ssh_bootstrap"
                 } else {
                     "daemon"
@@ -1126,7 +1129,7 @@ pub fn refresh_homeboy_binary(
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 binary_identity: identity,
-                timeout_ms: disconnected_ssh
+                timeout_ms: diagnostic_ssh_bootstrap
                     .then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT.as_millis()),
                 config_fields_changed: updated_fields.clone(),
             }),
@@ -1605,6 +1608,48 @@ fn refresh_execution_options(
         timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
         ..Default::default()
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshExecutionRoute {
+    Daemon,
+    DiagnosticSsh,
+}
+
+impl RefreshExecutionRoute {
+    fn uses_diagnostic_ssh(self) -> bool {
+        self == Self::DiagnosticSsh
+    }
+}
+
+/// A disconnected SSH runner has no daemon to rotate, so retain its diagnostic
+/// refresh route. A connected incompatible daemon may use that route only when
+/// the shared admission projection proves rotation is safe.
+fn refresh_execution_route(
+    runner: &super::Runner,
+    admission: &super::RunnerAdmissionSnapshot,
+) -> Result<RefreshExecutionRoute> {
+    if runner.kind != RunnerKind::Ssh {
+        return Ok(RefreshExecutionRoute::Daemon);
+    }
+    if !admission.summary.connected {
+        return Ok(RefreshExecutionRoute::DiagnosticSsh);
+    }
+    if admission.summary.daemon_compatible {
+        return Ok(RefreshExecutionRoute::Daemon);
+    }
+    if admission.summary.safe_to_rotate {
+        return Ok(RefreshExecutionRoute::DiagnosticSsh);
+    }
+    Err(Error::validation_invalid_argument(
+        "reconnect",
+        format!(
+            "runner `{}` cannot bootstrap over diagnostic SSH until its authoritative admission snapshot permits daemon rotation",
+            runner.id
+        ),
+        Some(runner.id.clone()),
+        admission.summary.next_action.clone().map(|action| vec![action]),
+    ))
 }
 
 #[derive(Debug, Clone)]

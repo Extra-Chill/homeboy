@@ -418,9 +418,19 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
     // store running in rollback-journal mode with materially different
     // concurrency behaviour and nobody told, so the next "database is locked"
     // report has no way to reach its own cause.
+    // Journal tuning is optional maintenance, so it must not consume the
+    // lifecycle connection's normal busy budget before migrations or callers.
+    connection
+        .busy_timeout(Duration::ZERO)
+        .map_err(sqlite_error(
+            "bound observation journal maintenance timeout",
+        ))?;
     for warning in apply_journal_pragmas(&connection) {
         warn_pragma_once(&warning);
     }
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(sqlite_error("restore observation store busy timeout"))?;
     enforce_foreign_keys(&connection)?;
     Ok(connection)
 }
@@ -520,6 +530,22 @@ pub(crate) fn open_bounded_writer_connection(path: &Path) -> Result<Connection> 
         .busy_timeout(WRITE_TIMEOUT)
         .map_err(sqlite_error(
             "configure bounded observation scheduler store",
+        ))?;
+    enforce_foreign_keys(&connection)?;
+    Ok(connection)
+}
+
+/// Open a connection for best-effort store maintenance. It bypasses the normal
+/// five-second busy handler so its explicit bounded retry is the whole wait.
+pub(crate) fn open_maintenance_connection(path: &Path) -> Result<Connection> {
+    let connection = Connection::open(path).map_err(sqlite_error(format!(
+        "open observation maintenance store {}",
+        path.display()
+    )))?;
+    connection
+        .busy_timeout(Duration::ZERO)
+        .map_err(sqlite_error(
+            "configure observation maintenance busy timeout",
         ))?;
     enforce_foreign_keys(&connection)?;
     Ok(connection)

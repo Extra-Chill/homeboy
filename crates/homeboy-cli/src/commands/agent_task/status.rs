@@ -5887,7 +5887,17 @@ mod tests {
             "homeboy agent-task review agent-task-durable-patch"
         );
         assert_eq!(full["liveness"], compact["liveness"]);
-        assert!(full_rendered.contains("Subject state: succeeded"));
+        // The summary labels the SUBJECT's lifecycle state as `Status:`, which is
+        // the contract `status_summary_labels_the_subject_lifecycle_state` pins
+        // by rendering every state including `failed`. There is no
+        // `Subject state:` line and there never was -- that label appears
+        // nowhere in the renderer, so this assertion could not pass on any
+        // revision. `subject_state` is the JSON envelope field added by
+        // bbc90c2b7; the human summary carries the same value under `Status:`.
+        assert!(
+            full_rendered.contains("Status: succeeded"),
+            "{full_rendered}"
+        );
         assert!(full_rendered.contains("Patch candidates: 1 non-empty / 0 empty"));
         assert!(full_rendered.contains("Changed files: 7"));
         assert!(!full_rendered.contains("no_patch_produced"));
@@ -5923,7 +5933,12 @@ mod tests {
         assert_eq!(status["execution_states"]["gate"]["state"], "failed");
         assert_eq!(status["cook"]["publication"], "blocked");
         assert_eq!(subject_exit_code(&status, true), 1);
-        assert!(rendered.contains("Subject state: gate_failed"));
+        // `Status:` is the subject's lifecycle state, not the status query's
+        // outcome -- see the note in
+        // `default_status_projects_durable_patch_candidate_for_rendering_and_actions`.
+        // A terminal gate failure must surface here even though the provider
+        // succeeded, which is the whole point of this test.
+        assert!(rendered.contains("Status: gate_failed"), "{rendered}");
         assert!(rendered.contains("Candidate state: promoted_gate_failed"));
         assert!(rendered.contains("Cook: gate_failed (publication blocked)"));
         assert!(rendered.contains("Next: homeboy agent-task diagnose cook-attempt-1 --full"));

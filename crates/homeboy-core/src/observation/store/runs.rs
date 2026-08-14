@@ -54,7 +54,26 @@ impl ObservationStore {
     }
 
     pub fn open_initialized_at(path: impl Into<PathBuf>) -> Result<Self> {
-        let path = path.into();
+        Self::open_initialized_at_with_maintenance(path.into(), true)
+    }
+
+    /// Open a store for lifecycle and retry state transitions.
+    ///
+    /// Schema initialization remains synchronous, but report-only artifact
+    /// maintenance is deferred to a later normal open. This keeps durable retry
+    /// identity available while another process owns SQLite's writer lock.
+    pub fn open_initialized_for_lifecycle() -> Result<Self> {
+        Self::open_initialized_for_lifecycle_at(database_path()?)
+    }
+
+    pub fn open_initialized_for_lifecycle_at(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::open_initialized_at_with_maintenance(path.into(), false)
+    }
+
+    fn open_initialized_at_with_maintenance(
+        path: PathBuf,
+        maintain_artifacts: bool,
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
                 Error::internal_io(
@@ -71,8 +90,14 @@ impl ObservationStore {
             path,
             readonly: false,
         };
-        store.backfill_artifact_handles()?;
-        store.reconcile_unfinished_artifact_publications()?;
+        if maintain_artifacts {
+            // Evidence projections expose opaque handles and failure ranks, so
+            // they only receive a store after bounded maintenance completes.
+            // Failure is returned to the caller and the next normal open
+            // deterministically retries; no detached work can be lost.
+            store.reconcile_unfinished_artifact_publications_with_retry(|| {})?;
+            store.backfill_artifact_handles_with_retry(|| {})?;
+        }
         Ok(store)
     }
 

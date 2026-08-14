@@ -2124,7 +2124,10 @@ fn daemon_operation_lock_recovers_after_owner_exits_without_drop() {
         .with_file_name("operation-lock-holder.release");
     let mut child = Command::new(std::env::current_exe().expect("current test executable"))
         .arg("--exact")
-        .arg("daemon::daemon_test::daemon_operation_lock_recovers_after_owner_exits_without_drop")
+        .arg(crate::test_support::harness_test_name(
+            module_path!(),
+            "daemon_operation_lock_recovers_after_owner_exits_without_drop",
+        ))
         .arg("--nocapture")
         .env(HOLDER_ENV, "1")
         .spawn()
