@@ -90,10 +90,25 @@ pub struct DeployArgs {
     )]
     pub release_set: Option<String>,
     /// Deploy an exact Git ref resolved from the declared component repository
+    ///
+    /// `--version` is deliberately NOT in the conflict set (#10648). The two
+    /// answer different questions: `--ref` selects immutable *source*, and
+    /// `--version` asserts the *content* of what that source builds. Recovering
+    /// a bad deploy needs both -- "deploy exactly this commit, and refuse before
+    /// touching the remote unless the package it produces embeds exactly this
+    /// version" -- and forcing a choice meant picking between source identity
+    /// and artifact identity, or writing a release-set manifest for a
+    /// one-component repair.
+    ///
+    /// They only looked mutually exclusive because `--version` doubles as a tag
+    /// selector. It cannot do that here: `resolve_deploy_tags` is already gated
+    /// on `!config.has_requested_refs()`, so with a ref requested the version
+    /// reaches `PreparedDeployArtifact::validate` as a pure assertion and never
+    /// selects anything.
     #[arg(
         long = "ref",
         value_name = "GIT_REF_OR_SHA",
-        conflicts_with_all = ["head", "tagged", "version", "outdated", "behind_upstream", "check"]
+        conflicts_with_all = ["head", "tagged", "outdated", "behind_upstream", "check"]
     )]
     pub requested_ref: Option<String>,
     /// Force local tag-based build/deploy, ignoring reusable release assets

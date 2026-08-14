@@ -331,12 +331,23 @@ fn deploy_parser_accepts_explicit_source_safety_overrides() {
     assert!(args.allow_downgrade);
 }
 
+/// `--version` is deliberately absent from this list (#10648).
+///
+/// It was here because `--version` doubles as a tag selector on the
+/// non-ref path, so it looked like one more way of choosing source. It is not:
+/// with a ref requested, `resolve_deploy_tags` is skipped entirely and the
+/// version reaches `PreparedDeployArtifact::validate` as an assertion about the
+/// package's contents. Selecting a commit and asserting what it builds are
+/// different questions, and recovery needs to ask both at once --
+/// `exact_ref_deploy_accepts_an_independent_expected_version` covers that.
+///
+/// Everything still listed here genuinely competes with `--ref` for source
+/// selection and must stay refused.
 #[test]
 fn deploy_ref_rejects_every_other_source_selector() {
     for conflicting in [
         vec!["--head"],
         vec!["--tagged"],
-        vec!["--version", "1.2.3"],
         vec!["--outdated"],
         vec!["--behind-upstream"],
         vec!["--check"],
@@ -474,4 +485,29 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
     };
     customize(&mut args);
     args
+}
+
+/// `--ref` selects immutable source; `--version` asserts what that source
+/// builds. Recovery needs both at once (#10648).
+#[test]
+fn exact_ref_deploy_accepts_an_independent_expected_version() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "deploy",
+        "--project",
+        "project-a",
+        "--component",
+        "component-a",
+        "--ref",
+        "v0.170.8",
+        "--version",
+        "0.170.8",
+    ])
+    .expect("--ref and --version answer different questions and must combine");
+
+    let Commands::Deploy(args) = cli.command else {
+        panic!("expected deploy command");
+    };
+    assert_eq!(args.requested_ref.as_deref(), Some("v0.170.8"));
+    assert_eq!(args.version.as_deref(), Some("0.170.8"));
 }
