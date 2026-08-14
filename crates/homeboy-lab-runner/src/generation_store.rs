@@ -2274,6 +2274,42 @@ mod tests {
         });
     }
 
+    #[test]
+    fn legacy_replacement_journal_remains_replayable_after_rebinding() {
+        test_support::with_isolated_home(|_| {
+            let path = replacement_operation_path("runner-a").expect("journal path");
+            write_durable_json(
+                &path,
+                &serde_json::json!({
+                    "runner_id": "runner-a",
+                    "operation_id": "legacy-operation",
+                }),
+            )
+            .expect("write legacy journal");
+
+            assert_eq!(
+                replacement_operation("runner-a").expect("read operation"),
+                "legacy-operation"
+            );
+            assert!(replacement_operation_replay("runner-a")
+                .expect("read legacy replay")
+                .is_none());
+            record_replacement_operation_replay(
+                "runner-a",
+                "ensure-running",
+                "/selected/homeboy daemon ensure-running --replacement-operation-id legacy-operation --addr 127.0.0.1:0",
+            )
+            .expect("rebind legacy journal");
+            assert_eq!(
+                replacement_operation_replay("runner-a").expect("read rebound replay"),
+                Some((
+                    "ensure-running".to_string(),
+                    "/selected/homeboy daemon ensure-running --replacement-operation-id legacy-operation --addr 127.0.0.1:0".to_string(),
+                ))
+            );
+        });
+    }
+
     #[derive(Default)]
     struct FakeEndpointOperations {
         active_jobs: RefCell<std::collections::BTreeMap<String, usize>>,

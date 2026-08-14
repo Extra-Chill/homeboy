@@ -392,6 +392,56 @@ fn daemon_process_attribution_matches_explicit_state_directory_store() {
 }
 
 #[test]
+fn daemon_process_attribution_classifies_multiple_quoted_generation_state_directory_stores() {
+    let home = tempfile::tempdir().expect("home");
+    let generation_root = tempfile::tempdir().expect("generation root");
+    let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
+    let executable = std::env::current_exe().expect("current executable");
+
+    for (generation, quote) in [("generation-a", '\''), ("generation-b", '"')] {
+        let state_dir = generation_root.path().join(generation);
+        let line = format!(
+            "4243 {} HOME={} HOMEBOY_DAEMON_STATE_DIR={quote}{}{quote} {} daemon serve --addr 127.0.0.1:7421",
+            executable.display(),
+            home.path().display(),
+            state_dir.display(),
+            executable.display(),
+        );
+        let candidate = super::parse_daemon_process_candidate(&line, &jobs, Some(&executable))
+            .expect("candidate");
+        assert_eq!(
+            candidate.ownership,
+            super::super::DaemonProcessOwnership::Unrelated,
+            "{line}"
+        );
+        assert_eq!(
+            candidate.durable_store_path.as_deref(),
+            state_dir.join("jobs.json").to_str()
+        );
+    }
+}
+
+#[test]
+fn daemon_process_attribution_keeps_quoted_same_store_ambiguous_without_binary_proof() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let jobs = state_dir.path().join("jobs.json");
+    let executable = std::env::current_exe().expect("current executable");
+    let line = format!(
+        "4243 {} HOMEBOY_DAEMON_STATE_DIR=\"{}\" {} daemon serve --addr 127.0.0.1:7421",
+        executable.display(),
+        state_dir.path().display(),
+        executable.display(),
+    );
+
+    let candidate = super::parse_daemon_process_candidate(&line, &jobs, None).expect("candidate");
+    assert_eq!(
+        candidate.ownership,
+        super::super::DaemonProcessOwnership::Ambiguous
+    );
+    assert_eq!(candidate.durable_store_path.as_deref(), jobs.to_str());
+}
+
+#[test]
 fn daemon_process_attribution_keeps_whitespace_environment_assignments_ambiguous() {
     let root = tempfile::tempdir().expect("state root");
     let state_dir = root.path().join("state directory");

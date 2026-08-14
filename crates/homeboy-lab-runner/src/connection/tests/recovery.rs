@@ -1663,6 +1663,11 @@ esac
         assert!(second.connected);
         assert_eq!(second.remote_daemon_pid, Some(4242));
         assert_eq!(
+            second.homeboy_build_identity.as_deref(),
+            Some("homeboy 0.284.0+test"),
+            "the replay report names the identity verified from the selected binary"
+        );
+        assert_eq!(
             std::fs::read_to_string(&generation_count).expect("generation count"),
             "1"
         );
@@ -1763,7 +1768,7 @@ case "$1 $2" in
   "daemon ensure-running")
     if [ "$3" = "--help" ]; then
       printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
-    else
+   else
       printf '%s\n' "$@" > "{selected_argv}"
       printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
     fi
@@ -1841,6 +1846,20 @@ esac
         );
         assert!(second.connected);
         assert_eq!(second.remote_daemon_pid, Some(4242));
+        assert_eq!(
+            second.homeboy_build_identity.as_deref(),
+            Some("homeboy 0.284.0+test"),
+            "the report must name the identity verified from the promoted executable"
+        );
+        assert_eq!(
+            crate::load("local-runner")
+                .expect("load promoted runner")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            selected_daemon.to_str(),
+            "the promoted runner must retain the selected executable path"
+        );
         assert_eq!(
             std::fs::read_to_string(&generation_count).expect("B only start count"),
             "1",
