@@ -148,11 +148,15 @@ phase_run() {
         elapsed="$(( $(date +%s) - started ))"
         if phase_annotations_verbose; then
           printf '::notice title=Homeboy phase heartbeat::%s running for %ss; run %s.\n' "${phase}" "${elapsed}" "$(phase_run_ref)"
+        else
+          printf 'Homeboy phase heartbeat::%s running for %ss; run %s.\n' "${phase}" "${elapsed}" "$(phase_run_ref)"
         fi
         if [ "${elapsed}" -ge "${budget_seconds}" ] && [ "${over_budget}" = false ]; then
           over_budget=true
           if phase_annotations_verbose; then
             printf '::warning title=Homeboy phase budget exceeded::%s exceeded its %ss budget; owner: %s. Reproduce: %s\n' "${phase}" "${budget_seconds}" "$(phase_owner "${phase}")" "$(phase_reproduction_command)"
+          else
+            printf 'Homeboy phase budget exceeded::%s exceeded its %ss budget; owner: %s. Reproduce: %s\n' "${phase}" "${budget_seconds}" "$(phase_owner "${phase}")" "$(phase_reproduction_command)"
           fi
         fi
       fi

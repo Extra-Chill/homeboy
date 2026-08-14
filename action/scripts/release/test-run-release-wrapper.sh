@@ -534,6 +534,8 @@ if ! jq -e 'select(.phase == "release_planning" and .event == "completed" and .s
 fi
 assert_contains 'phase heartbeat::release_planning running' "${PLANNING_OUTPUT}" "release planning emits periodic heartbeat evidence"
 assert_contains 'phase budget exceeded::release_planning exceeded its 1s budget; owner: Homeboy release subsystem' "${PLANNING_OUTPUT}" "release planning emits an owning budget warning"
+assert_not_contains '::notice title=Homeboy phase heartbeat::release_planning' "${PLANNING_OUTPUT}" "bounded release heartbeats are plain log evidence"
+assert_not_contains '::warning title=Homeboy phase budget exceeded::release_planning' "${PLANNING_OUTPUT}" "bounded release budget evidence is not an annotation"
 assert_contains 'Retained homeboy release planning log' "${PLANNING_OUTPUT}" "release planning prints bounded retained logs"
 assert_output_line 'released=false' "${OUTPUT_FILE}" "liveness wrapper preserves dry-run release output"
 assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "liveness wrapper preserves planned tag output"

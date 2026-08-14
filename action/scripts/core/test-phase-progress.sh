@@ -53,6 +53,20 @@ if ! grep -q 'Three slowest phases' "${TMP_DIR}/summary"; then
   exit 1
 fi
 
+HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TMP_DIR}/bounded-liveness-phases.jsonl" \
+HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS=1 \
+HOMEBOY_ACTION_PHASE_BUDGET_SECONDS=1 \
+bash "${PROGRESS}" run command_execution -- bash -c 'sleep 2' >"${TMP_DIR}/bounded-liveness.log" 2>&1
+if ! grep -q '^Homeboy phase heartbeat::command_execution running' "${TMP_DIR}/bounded-liveness.log" \
+  || ! grep -q '^Homeboy phase budget exceeded::command_execution exceeded its 1s budget; owner: Homeboy command runner' "${TMP_DIR}/bounded-liveness.log"; then
+  printf 'FAIL: bounded mode did not retain plain liveness progress\n'
+  exit 1
+fi
+if grep -q '^::' "${TMP_DIR}/bounded-liveness.log"; then
+  printf 'FAIL: bounded liveness progress was emitted as a GitHub annotation\n'
+  exit 1
+fi
+
 HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TMP_DIR}/bounded-phases.jsonl" \
 bash "${PROGRESS}" run command_execution -- bash -c 'exit 1' >"${TMP_DIR}/bounded.log" 2>&1 || true
 HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TMP_DIR}/bounded-phases.jsonl" \
@@ -70,4 +84,4 @@ if [ "$(jq -s '[.[] | select(.phase == "command_execution" and .status == "faile
   printf 'FAIL: bounded mode did not retain complete failed phase progress\n'
   exit 1
 fi
-printf 'PASS: phase progress preserves verbose diagnostics and bounds default annotations\n'
+printf 'PASS: phase progress preserves verbose annotations, plain liveness, and bounded default failures\n'
