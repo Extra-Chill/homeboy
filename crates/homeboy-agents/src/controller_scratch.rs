@@ -2113,6 +2113,29 @@ mod tests {
     use super::*;
     use std::process::Command;
 
+    fn allocate_at(
+        data_root: &Path,
+        run_id: &str,
+        plan_id: &str,
+        task_id: &str,
+        attempt: u32,
+    ) -> ControllerScratchAllocation {
+        allocate_attempt_at_roots(
+            run_id,
+            plan_id,
+            task_id,
+            attempt,
+            data_root.join("controller-scratch/attempts"),
+            data_root.join("controller-scratch/resources.json"),
+        )
+        .expect("allocate scratch")
+    }
+
+    fn read_index_at(data_root: &Path) -> ControllerScratchIndex {
+        read_index_at_unlocked(&data_root.join("controller-scratch/resources.json"))
+            .expect("scratch index")
+    }
+
     fn resource(path: &Path, root: &Path) -> ControllerScratchResource {
         ControllerScratchResource {
             path: path.display().to_string(),
@@ -2270,29 +2293,28 @@ mod tests {
 
     #[test]
     fn allocation_is_unique_contained_and_durably_indexed() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let first = allocate_attempt("run-1", "plan-1", "task-1", 1).expect("first");
-            let second = allocate_attempt("run-1", "plan-1", "task-1", 2).expect("second");
-            let index = read_index().expect("index");
+        let data_root = tempfile::tempdir().expect("data root");
+        let first = allocate_at(data_root.path(), "run-1", "plan-1", "task-1", 1);
+        let second = allocate_at(data_root.path(), "run-1", "plan-1", "task-1", 2);
+        let index = read_index_at(data_root.path());
 
-            assert_ne!(first.path, second.path);
-            assert!(first.path.is_dir());
-            assert!(second.path.is_dir());
-            let resource = index
-                .resources
-                .iter()
-                .find(|resource| resource.lease_id == first.lease_id)
-                .expect("first resource");
-            assert!(Path::new(&resource.path).starts_with(&resource.root_bound));
-            assert_eq!(resource.run_id, "run-1");
-            assert_eq!(resource.plan_id, "plan-1");
-            assert_eq!(resource.task_id, "task-1");
-            assert_eq!(resource.attempt, 1);
-            assert_eq!(resource.lifecycle_state, "active");
-            assert_eq!(resource.owner_pid, std::process::id());
-            assert!(resource.reconstructable);
-            assert!(!resource.created_at.is_empty());
-        });
+        assert_ne!(first.path, second.path);
+        assert!(first.path.is_dir());
+        assert!(second.path.is_dir());
+        let resource = index
+            .resources
+            .iter()
+            .find(|resource| resource.lease_id == first.lease_id)
+            .expect("first resource");
+        assert!(Path::new(&resource.path).starts_with(&resource.root_bound));
+        assert_eq!(resource.run_id, "run-1");
+        assert_eq!(resource.plan_id, "plan-1");
+        assert_eq!(resource.task_id, "task-1");
+        assert_eq!(resource.attempt, 1);
+        assert_eq!(resource.lifecycle_state, "active");
+        assert_eq!(resource.owner_pid, std::process::id());
+        assert!(resource.reconstructable);
+        assert!(!resource.created_at.is_empty());
     }
 
     #[test]
@@ -2334,142 +2356,137 @@ mod tests {
 
     #[test]
     fn allocation_quarantines_a_malformed_index_and_registers_a_fresh_lease() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let index_path = index_path().expect("index path");
-            fs::create_dir_all(index_path.parent().expect("index parent")).expect("index parent");
-            fs::write(&index_path, "{ stale").expect("malformed index");
+        let data_root = tempfile::tempdir().expect("data root");
+        let index_path = data_root.path().join("controller-scratch/resources.json");
+        fs::create_dir_all(index_path.parent().expect("index parent")).expect("index parent");
+        fs::write(&index_path, "{ stale").expect("malformed index");
 
-            let allocation = allocate_attempt("run-1", "plan-1", "task-1", 2)
-                .expect("allocation recovers malformed index");
-            let index = read_index().expect("replacement index");
+        let allocation = allocate_at(data_root.path(), "run-1", "plan-1", "task-1", 2);
+        let index = read_index_at(data_root.path());
 
-            assert_eq!(index.resources.len(), 1);
-            assert_eq!(index.resources[0].lease_id, allocation.lease_id);
-            let quarantined = fs::read_dir(index_path.parent().expect("index parent"))
-                .expect("index directory")
-                .filter_map(|entry| entry.ok())
-                .map(|entry| entry.file_name().to_string_lossy().to_string())
-                .filter(|name| name.starts_with("resources.json.corrupt-"))
-                .collect::<Vec<_>>();
-            assert_eq!(quarantined.len(), 1);
-        });
+        assert_eq!(index.resources.len(), 1);
+        assert_eq!(index.resources[0].lease_id, allocation.lease_id);
+        let quarantined = fs::read_dir(index_path.parent().expect("index parent"))
+            .expect("index directory")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with("resources.json.corrupt-"))
+            .collect::<Vec<_>>();
+        assert_eq!(quarantined.len(), 1);
     }
 
     #[test]
     fn allocation_salvages_valid_leases_from_a_typed_incompatible_resource() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let index_path = index_path().expect("index path");
-            fs::create_dir_all(index_path.parent().expect("index parent")).expect("index parent");
-            let valid = resource(Path::new("/scratch/valid"), Path::new("/scratch"));
-            fs::write(
-                &index_path,
-                serde_json::json!({
-                    "schema": CONTROLLER_SCRATCH_SCHEMA,
-                    "resources": [
-                        valid,
-                        { "path": 42 }
-                    ]
-                })
-                .to_string(),
-            )
-            .expect("typed incompatible index");
+        let data_root = tempfile::tempdir().expect("data root");
+        let index_path = data_root.path().join("controller-scratch/resources.json");
+        fs::create_dir_all(index_path.parent().expect("index parent")).expect("index parent");
+        let valid = resource(Path::new("/scratch/valid"), Path::new("/scratch"));
+        fs::write(
+            &index_path,
+            serde_json::json!({
+                "schema": CONTROLLER_SCRATCH_SCHEMA,
+                "resources": [
+                    valid,
+                    { "path": 42 }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("typed incompatible index");
 
-            let allocation = allocate_attempt("run-1", "plan-1", "task-1", 2)
-                .expect("allocation salvages compatible leases");
-            let index = read_index().expect("replacement index");
+        let allocation = allocate_at(data_root.path(), "run-1", "plan-1", "task-1", 2);
+        let index = read_index_at(data_root.path());
 
-            assert_eq!(index.resources.len(), 2);
-            assert!(index
-                .resources
-                .iter()
-                .any(|resource| resource.lease_id == "test-lease"));
-            assert!(index
-                .resources
-                .iter()
-                .any(|resource| resource.lease_id == allocation.lease_id));
-            let preserved = fs::read_dir(index_path.parent().expect("index parent"))
-                .expect("index directory")
-                .filter_map(|entry| entry.ok())
-                .map(|entry| entry.file_name().to_string_lossy().to_string())
-                .filter(|name| name.starts_with("resources.json.incompatible-"))
-                .collect::<Vec<_>>();
-            assert_eq!(preserved.len(), 1);
-        });
+        assert_eq!(index.resources.len(), 2);
+        assert!(index
+            .resources
+            .iter()
+            .any(|resource| resource.lease_id == "test-lease"));
+        assert!(index
+            .resources
+            .iter()
+            .any(|resource| resource.lease_id == allocation.lease_id));
+        let preserved = fs::read_dir(index_path.parent().expect("index parent"))
+            .expect("index directory")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with("resources.json.incompatible-"))
+            .collect::<Vec<_>>();
+        assert_eq!(preserved.len(), 1);
     }
 
     #[test]
     fn concurrent_allocation_and_release_preserves_every_lease() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            const WORKERS: usize = 8;
-            const ALLOCATIONS_PER_WORKER: usize = 12;
-            let handles: Vec<_> = (0..WORKERS)
-                .map(|worker| {
-                    std::thread::spawn(move || {
-                        for attempt in 1..=ALLOCATIONS_PER_WORKER {
-                            let allocation = allocate_attempt(
-                                &format!("run-{worker}"),
-                                "parallel-plan",
-                                &format!("task-{worker}"),
-                                attempt as u32,
-                            )
-                            .expect("allocate");
-                            release_attempt(&allocation, "completed", serde_json::json!({}))
-                                .expect("release");
-                        }
-                    })
+        const WORKERS: usize = 8;
+        const ALLOCATIONS_PER_WORKER: usize = 12;
+        let data_root = tempfile::tempdir().expect("data root");
+        let data_root = std::sync::Arc::new(data_root.path().to_path_buf());
+        let handles: Vec<_> = (0..WORKERS)
+            .map(|worker| {
+                let data_root = data_root.clone();
+                std::thread::spawn(move || {
+                    for attempt in 1..=ALLOCATIONS_PER_WORKER {
+                        let allocation = allocate_at(
+                            &data_root,
+                            &format!("run-{worker}"),
+                            "parallel-plan",
+                            &format!("task-{worker}"),
+                            attempt as u32,
+                        );
+                        release_attempt(&allocation, "completed", serde_json::json!({}))
+                            .expect("release");
+                    }
                 })
-                .collect();
-            for handle in handles {
-                handle.join().expect("worker");
-            }
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("worker");
+        }
 
-            let index = read_index().expect("parse index after concurrent updates");
-            assert_eq!(index.resources.len(), WORKERS * ALLOCATIONS_PER_WORKER);
-            assert!(index
-                .resources
-                .iter()
-                .all(|resource| resource.lifecycle_state == "released"));
-            assert!(index
-                .resources
-                .iter()
-                .all(|resource| resource.finalized_at.is_some()));
-        });
+        let index = read_index_at(&data_root);
+        assert_eq!(index.resources.len(), WORKERS * ALLOCATIONS_PER_WORKER);
+        assert!(index
+            .resources
+            .iter()
+            .all(|resource| resource.lifecycle_state == "released"));
+        assert!(index
+            .resources
+            .iter()
+            .all(|resource| resource.finalized_at.is_some()));
     }
 
     #[test]
     fn release_is_idempotent_and_preserves_first_terminal_evidence() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let allocation = allocate_attempt("run-1", "plan-1", "task-1", 1).expect("allocate");
-            release_attempt(
-                &allocation,
-                "provider_failure",
-                serde_json::json!({ "artifact": "first" }),
-            )
-            .expect("first release");
-            release_attempt(
-                &allocation,
-                "cancelled",
-                serde_json::json!({ "artifact": "second" }),
-            )
-            .expect("replayed release");
+        let data_root = tempfile::tempdir().expect("data root");
+        let allocation = allocate_at(data_root.path(), "run-1", "plan-1", "task-1", 1);
+        release_attempt(
+            &allocation,
+            "provider_failure",
+            serde_json::json!({ "artifact": "first" }),
+        )
+        .expect("first release");
+        release_attempt(
+            &allocation,
+            "cancelled",
+            serde_json::json!({ "artifact": "second" }),
+        )
+        .expect("replayed release");
 
-            let resource = read_index()
-                .expect("index")
-                .resources
-                .into_iter()
-                .find(|resource| resource.lease_id == allocation.lease_id)
-                .expect("resource");
-            assert_eq!(resource.lifecycle_state, "released");
-            assert_eq!(
-                resource.terminal_reason.as_deref(),
-                Some("provider_failure")
-            );
-            assert_eq!(
-                resource.terminal_evidence,
-                Some(serde_json::json!({ "artifact": "first" }))
-            );
-            assert!(resource.finalized_at.is_some());
-        });
+        let resource = read_index_at(data_root.path())
+            .resources
+            .into_iter()
+            .find(|resource| resource.lease_id == allocation.lease_id)
+            .expect("resource");
+        assert_eq!(resource.lifecycle_state, "released");
+        assert_eq!(
+            resource.terminal_reason.as_deref(),
+            Some("provider_failure")
+        );
+        assert_eq!(
+            resource.terminal_evidence,
+            Some(serde_json::json!({ "artifact": "first" }))
+        );
+        assert!(resource.finalized_at.is_some());
     }
 
     #[test]
@@ -2703,84 +2720,78 @@ mod tests {
 
     #[test]
     fn ignored_untracked_workspace_state_fails_closed_during_recovery() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let allocation =
-                allocate_attempt("ignored-run", "scheduler-plan", "task", 1).expect("allocate");
-            let workspace = allocation.path.join("workspace");
-            fs::create_dir(&workspace).expect("workspace");
-            run_git(&workspace, &["init", "-b", "main"]);
-            fs::write(workspace.join(".gitignore"), "local-source\n").expect("ignore rule");
-            fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
-            run_git(&workspace, &["add", "."]);
-            run_git(
-                &workspace,
-                &[
-                    "-c",
-                    "user.name=Homeboy",
-                    "-c",
-                    "user.email=homeboy@example.test",
-                    "commit",
-                    "-m",
-                    "base",
-                ],
-            );
-            fs::write(workspace.join("local-source"), "preserve\n").expect("local source");
+        let data_root = tempfile::tempdir().expect("data root");
+        let allocation = allocate_at(data_root.path(), "ignored-run", "scheduler-plan", "task", 1);
+        let workspace = allocation.path.join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        run_git(&workspace, &["init", "-b", "main"]);
+        fs::write(workspace.join(".gitignore"), "local-source\n").expect("ignore rule");
+        fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+        run_git(&workspace, &["add", "."]);
+        run_git(
+            &workspace,
+            &[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "base",
+            ],
+        );
+        fs::write(workspace.join("local-source"), "preserve\n").expect("local source");
 
-            let resource = read_index()
-                .expect("index")
-                .resources
-                .into_iter()
-                .find(|resource| resource.lease_id == allocation.lease_id)
-                .expect("resource");
-            let recovery = recover_authoritative_workspace_inner(&resource).expect("recover");
+        let resource = read_index_at(data_root.path())
+            .resources
+            .into_iter()
+            .find(|resource| resource.lease_id == allocation.lease_id)
+            .expect("resource");
+        let recovery = recover_authoritative_workspace_inner(&resource).expect("recover");
 
-            assert_eq!(recovery["state"], "untracked_changes_retained");
-        });
+        assert_eq!(recovery["state"], "untracked_changes_retained");
     }
 
     #[test]
     fn submodule_workspaces_remain_retained() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let submodule = root.path().join("submodule");
-            fs::create_dir(&submodule).expect("submodule source");
-            run_git(&submodule, &["init", "-b", "main"]);
-            fs::write(submodule.join("source.txt"), "source\n").expect("submodule source file");
-            run_git(&submodule, &["add", "."]);
-            run_git(
-                &submodule,
-                &[
-                    "-c",
-                    "user.name=Homeboy",
-                    "-c",
-                    "user.email=homeboy@example.test",
-                    "commit",
-                    "-m",
-                    "submodule",
-                ],
-            );
-            let scratch = root.path().join("scratch");
-            fs::create_dir(&scratch).expect("scratch");
-            run_git(&scratch, &["init", "-b", "main"]);
-            run_git(
-                &scratch,
-                &[
-                    "-c",
-                    "protocol.file.allow=always",
-                    "submodule",
-                    "add",
-                    submodule.to_str().expect("submodule path"),
-                    "vendor/submodule",
-                ],
-            );
-            let mut resource = resource(&scratch, root.path());
-            resource.plan_id.clear();
+        let root = tempfile::tempdir().expect("root");
+        let submodule = root.path().join("submodule");
+        fs::create_dir(&submodule).expect("submodule source");
+        run_git(&submodule, &["init", "-b", "main"]);
+        fs::write(submodule.join("source.txt"), "source\n").expect("submodule source file");
+        run_git(&submodule, &["add", "."]);
+        run_git(
+            &submodule,
+            &[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "submodule",
+            ],
+        );
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        run_git(&scratch, &["init", "-b", "main"]);
+        run_git(
+            &scratch,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                submodule.to_str().expect("submodule path"),
+                "vendor/submodule",
+            ],
+        );
+        let mut resource = resource(&scratch, root.path());
+        resource.plan_id.clear();
 
-            let recovery =
-                recover_authoritative_workspace_inner(&resource).expect("inspect workspace");
+        let recovery = recover_authoritative_workspace_inner(&resource).expect("inspect workspace");
 
-            assert_eq!(recovery["state"], "submodules_retained");
-        });
+        assert_eq!(recovery["state"], "submodules_retained");
     }
 
     #[test]
@@ -2821,26 +2832,23 @@ mod tests {
 
     #[test]
     fn finalizing_a_run_starts_interrupted_scratch_retention() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let allocation =
-                allocate_attempt("terminal-run", "plan", "task", 1).expect("scratch allocation");
+        let data_root = tempfile::tempdir().expect("data root");
+        let allocation = allocate_at(data_root.path(), "terminal-run", "plan", "task", 1);
 
-            finalize_run("terminal-run").expect("finalize scratch");
+        finalize_run_at(data_root.path(), "terminal-run").expect("finalize scratch");
 
-            let resource = read_index()
-                .expect("index")
-                .resources
-                .into_iter()
-                .find(|resource| resource.lease_id == allocation.lease_id)
-                .expect("resource");
-            assert_eq!(resource.lifecycle_state, "interrupted");
-            assert!(resource.finalized_at.is_some());
-            assert!(resource.interrupted_at.is_some());
-            assert_eq!(
-                resource.terminal_reason.as_deref(),
-                Some("owning_run_terminalized")
-            );
-        });
+        let resource = read_index_at(data_root.path())
+            .resources
+            .into_iter()
+            .find(|resource| resource.lease_id == allocation.lease_id)
+            .expect("resource");
+        assert_eq!(resource.lifecycle_state, "interrupted");
+        assert!(resource.finalized_at.is_some());
+        assert!(resource.interrupted_at.is_some());
+        assert_eq!(
+            resource.terminal_reason.as_deref(),
+            Some("owning_run_terminalized")
+        );
     }
 
     #[test]
