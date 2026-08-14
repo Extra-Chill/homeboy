@@ -160,6 +160,197 @@ pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
 
+/// Resolve the same pre-provisioning Cook inputs used by execution. This path
+/// intentionally never calls `provision_cook_destination` or a durable service.
+pub(crate) fn preview_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
+    args.gates.snapshot_file_inputs()?;
+    let args = resolve_cook_destination(args)?;
+    validate_cook_request(&args)?;
+    let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
+        args.to_worktree
+            .as_deref()
+            .map(Path::new)
+            .filter(|path| path.is_dir())
+    });
+    let gate_contract_validation = validate_gate_contracts(
+        args.gates
+            .verify
+            .iter()
+            .chain(&args.gates.private_verify)
+            .cloned(),
+        gate_workspace,
+        &crate::cli_runtime::current_augmented_command_contract(),
+    )?;
+    preflight_cook_provider_credentials(&args)?;
+
+    // `lookup_pending` is the resolver's established representation for a
+    // destination whose path is intentionally unavailable before provisioning.
+    let mut plan = compile_cook_plan(&args, serde_json::json!({ "action": "lookup_pending" }))?;
+    resolve_cook_execution_budget(&args, &mut plan)?;
+    plan.metadata["gate_contract_validation"] = serde_json::to_value(gate_contract_validation)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+
+    let executor = plan
+        .tasks
+        .first()
+        .map(|task| serde_json::to_value(&task.executor).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
+    let replay_argv = cook_preview_replay_argv(&args);
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "mutates": false,
+            "resolved": {
+                "repository": args.dispatch.repo,
+                "worktree": args.to_worktree,
+                "base": args.base,
+                "head": args.head,
+                "placement": "none (preview)",
+                "provider": executor,
+                "gates": {
+                    "public": args.gates.verify.len(),
+                    "private": args.gates.private_verify.len(),
+                },
+                "retry_budget": plan.metadata["cook_retry_policy"],
+                "publication": {
+                    "finalize": !args.no_finalize,
+                    "draft": args.draft_pr,
+                    "ai_tool": args.ai_tool,
+                },
+            },
+            "replay_argv": replay_argv,
+        }),
+        0,
+    ))
+}
+
+fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
+    let process_argv = std::env::args().collect::<Vec<_>>();
+    if process_argv
+        .windows(2)
+        .any(|parts| parts == ["agent-task", "cook"])
+        && process_argv.iter().any(|part| part == "--preview")
+    {
+        return std::iter::once("homeboy".to_string())
+            .chain(
+                process_argv
+                    .into_iter()
+                    .skip(1)
+                    .filter(|part| part != "--preview"),
+            )
+            .collect();
+    }
+
+    // Unit callers do not have the original process argv. Keep their fallback
+    // useful for embedding while the CLI path above preserves every supplied
+    // advanced flag exactly.
+    let mut argv = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+    ];
+    if let Some(prompt) = &args.dispatch.prompt {
+        argv.extend(["--prompt".to_string(), prompt.clone()]);
+    }
+    if let Some(goal) = &args.goal {
+        argv.extend(["--goal".to_string(), goal.clone()]);
+    }
+    if let Some(repo) = &args.dispatch.repo {
+        argv.extend(["--repo".to_string(), repo.clone()]);
+    }
+    if let Some(task_url) = &args.dispatch.task_url {
+        argv.extend(["--task-url".to_string(), task_url.clone()]);
+    }
+    if let Some(worktree) = &args.to_worktree {
+        argv.extend(["--to-worktree".to_string(), worktree.clone()]);
+    }
+    for gate in &args.gates.verify {
+        argv.extend(["--verify".to_string(), gate.clone()]);
+    }
+    argv.extend(["--base".to_string(), args.base.clone()]);
+    if let Some(head) = &args.head {
+        argv.extend(["--head".to_string(), head.clone()]);
+    }
+    if args.no_finalize {
+        argv.push("--no-finalize".to_string());
+    }
+    if args.draft_pr {
+        argv.push("--draft-pr".to_string());
+    }
+    argv
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::cli_surface::{Cli, Commands};
+    use clap::Parser;
+
+    fn cook(argv: &[&str]) -> AgentTaskCookArgs {
+        let cli = Cli::try_parse_from(argv).expect("parse Cook preview");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+        *cook
+    }
+
+    #[test]
+    fn preview_reports_destination_blockers_without_creating_homeboy_state() {
+        crate::test_support::with_isolated_home(|home| {
+            let before = std::fs::read_dir(home).expect("read isolated home").count();
+            let error = preview_cook(cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "implement the issue",
+                "--no-finalize",
+            ]))
+            .expect_err("missing destination must block preview");
+
+            assert_eq!(
+                error.code,
+                homeboy::core::ErrorCode::ValidationMissingArgument
+            );
+            assert_eq!(
+                error.details["args"],
+                serde_json::json!(["--repo <repo> is required when --to-worktree is omitted"])
+            );
+            assert_eq!(
+                std::fs::read_dir(home).expect("read isolated home").count(),
+                before,
+                "preview must not create Homeboy state"
+            );
+        });
+    }
+
+    #[test]
+    fn preview_replay_argv_is_executable_cook_argv_without_preview() {
+        let args = cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--preview",
+            "--prompt",
+            "implement the issue",
+            "--repo",
+            "homeboy",
+            "--task-url",
+            "https://github.com/Extra-Chill/homeboy/issues/12478",
+            "--verify",
+            "cargo test -p homeboy-cli",
+        ]);
+        let resolved = resolve_cook_destination(args).expect("resolve issue destination");
+        let replay = cook_preview_replay_argv(&resolved);
+        assert!(!replay.iter().any(|part| part == "--preview"), "{replay:?}");
+        Cli::try_parse_from(&replay).expect("replay argv parses as Cook");
+    }
+}
+
 /// Resume a Cook from its immutable recipe rather than asking the operator to
 /// replay prompt, provider, gate, workspace, or disclosure arguments.
 pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
