@@ -15,6 +15,11 @@ use homeboy_release::release::version;
 
 use super::types::{StatusTimer, UnreleasedMerge, UpstreamDrift};
 
+pub(super) struct ProjectRemoteVersionProbe {
+    pub(super) result: deploy::RemoteVersionProbeResult,
+    pub(super) failure: Option<String>,
+}
+
 #[derive(Default)]
 pub(super) struct StatusGitCache {
     refresh: bool,
@@ -24,6 +29,7 @@ pub(super) struct StatusGitCache {
     baselines: HashMap<String, Option<git::BaselineInfo>>,
     origin_branches: HashMap<String, Option<String>>,
     pub(super) degraded_components: HashSet<String>,
+    pub(super) degraded_component_phases: HashMap<String, HashSet<&'static str>>,
 }
 
 impl StatusGitCache {
@@ -54,7 +60,7 @@ impl StatusGitCache {
             self.fetch_origin_tags_for(path, timer);
             let drift = get_upstream_drift(component, timer);
             if drift.is_none() {
-                self.degraded_components.insert(component.id.clone());
+                self.mark_degraded(component, "inspect_upstream_and_unreleased");
             }
             self.upstream_drift.insert(cache_key.clone(), drift);
         }
@@ -79,7 +85,7 @@ impl StatusGitCache {
                 .baseline_for(component, timer)
                 .and_then(|baseline| release_state_for_baseline(component, baseline, timer));
             if state.is_none() {
-                self.degraded_components.insert(component.id.clone());
+                self.mark_degraded(component, "inspect_release_state");
             }
             self.release_states.insert(cache_key.clone(), state);
         }
@@ -98,7 +104,7 @@ impl StatusGitCache {
             // Baseline discovery currently uses synchronous local Git helpers.
             // Never enter that sequence after the shared status deadline.
             if timer.expired() {
-                self.degraded_components.insert(component.id.clone());
+                self.mark_degraded(component, "inspect_release_state");
                 self.baselines.insert(cache_key.clone(), None);
                 return None;
             }
@@ -113,11 +119,23 @@ impl StatusGitCache {
                 current_version.as_deref(),
                 tag_prefix.as_deref(),
                 timer,
-            );
+            )
+            .ok();
+            if baseline.is_none() {
+                self.mark_degraded(component, "inspect_release_state");
+            }
             self.baselines.insert(cache_key.clone(), baseline);
         }
 
         self.baselines.get(&cache_key).and_then(Option::as_ref)
+    }
+
+    fn mark_degraded(&mut self, component: &component::Component, phase: &'static str) {
+        self.degraded_components.insert(component.id.clone());
+        self.degraded_component_phases
+            .entry(component.id.clone())
+            .or_default()
+            .insert(phase);
     }
 
     fn default_origin_branch_for(&mut self, path: &str, timer: &StatusTimer) -> Option<&str> {
@@ -149,7 +167,7 @@ impl StatusGitCache {
             &["rev-list", "--count", "--no-merges", &range],
             "status git unreleased merges",
             &[],
-            timer.remaining()?,
+            local_probe_timeout(timer)?,
         )
         .ok()?;
 
@@ -169,7 +187,8 @@ impl StatusGitCache {
 pub(super) fn upstream_drift_cache_key(path: &str, timer: &StatusTimer) -> String {
     timer
         .remaining()
-        .and_then(|remaining| git::get_git_root_with_timeout(path, remaining).ok())
+        .and_then(|_| local_probe_timeout(timer))
+        .and_then(|timeout| git::get_git_root_with_timeout(path, timeout).ok())
         .unwrap_or_else(|| path.to_string())
 }
 
@@ -183,6 +202,12 @@ pub(super) fn component_cache_key(component: &component::Component) -> String {
 /// data, exactly like the previous unbounded best-effort fetch.
 const STATUS_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const STATUS_LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn local_probe_timeout(timer: &StatusTimer) -> Option<Duration> {
+    timer
+        .remaining()
+        .map(|remaining| remaining.min(STATUS_LOCAL_GIT_TIMEOUT))
+}
 
 fn fetch_origin_tags(path: &str, timer: &StatusTimer) {
     // Best-effort, timeout-bounded fetch — silently proceeds on no remote,
@@ -204,9 +229,7 @@ fn get_upstream_drift(
     timer: &StatusTimer,
 ) -> Option<UpstreamDrift> {
     let path = &component.local_path;
-    let snapshot =
-        git::get_repo_snapshot_with_timeout(path, timer.remaining()?.min(STATUS_LOCAL_GIT_TIMEOUT))
-            .ok()?;
+    let snapshot = git::get_repo_snapshot_with_timeout(path, local_probe_timeout(timer)?).ok()?;
 
     // After fetching tags, find the latest tag across ALL refs (not just HEAD).
     // `git describe --tags --abbrev=0` only returns tags reachable from HEAD,
@@ -217,7 +240,7 @@ fn get_upstream_drift(
     let latest_origin_tag = git::get_latest_tag_any_with_prefix_with_timeout(
         path,
         tag_prefix.as_deref(),
-        timer.remaining()?,
+        local_probe_timeout(timer)?,
     )
     .ok()
     .flatten();
@@ -235,9 +258,9 @@ fn detect_baseline_with_deadline(
     current_version: Option<&str>,
     tag_prefix: Option<&str>,
     timer: &StatusTimer,
-) -> Option<git::BaselineInfo> {
-    let Some(tag) = latest_merged_release_tag(path, tag_prefix, timer) else {
-        return Some(git::BaselineInfo {
+) -> Result<git::BaselineInfo, ()> {
+    let Some(tag) = latest_merged_release_tag(path, tag_prefix, timer)? else {
+        return Ok(git::BaselineInfo {
             latest_tag: None,
             source: Some(git::BaselineSource::LastNCommits),
             reference: None,
@@ -253,20 +276,20 @@ fn detect_baseline_with_deadline(
     {
         // Version-commit fallback is intentionally bounded as well. The tag is
         // still a safe baseline when no matching release commit is found.
-        let current = current_version?;
+        let current = current_version.ok_or(())?;
         let log = git::run_git_with_env_timeout(
             std::path::Path::new(path),
             &["log", "-200", "--format=%h|%s"],
             "status git version baseline",
             &[],
-            timer.remaining()?,
+            local_probe_timeout(timer).ok_or(())?,
         )
-        .ok()?;
+        .map_err(|_| ())?;
         if let Some(reference) = log.lines().find_map(|line| {
             let (hash, subject) = line.split_once('|')?;
             subject.contains(current).then(|| hash.to_string())
         }) {
-            return Some(git::BaselineInfo {
+            return Ok(git::BaselineInfo {
                 latest_tag: Some(tag),
                 source: Some(git::BaselineSource::VersionCommit),
                 reference: Some(reference),
@@ -276,7 +299,7 @@ fn detect_baseline_with_deadline(
             });
         }
     }
-    Some(git::BaselineInfo {
+    Ok(git::BaselineInfo {
         latest_tag: Some(tag.clone()),
         source: Some(git::BaselineSource::Tag),
         reference: Some(tag),
@@ -288,16 +311,17 @@ fn latest_merged_release_tag(
     path: &str,
     tag_prefix: Option<&str>,
     timer: &StatusTimer,
-) -> Option<String> {
+) -> Result<Option<String>, ()> {
     let tags = git::run_git_with_env_timeout(
         std::path::Path::new(path),
         &["tag", "--merged", "HEAD", "--sort=-v:refname", "--list"],
         "status git release baseline tag",
         &[],
-        timer.remaining()?,
+        local_probe_timeout(timer).ok_or(())?,
     )
-    .ok()?;
-    tags.lines()
+    .map_err(|_| ())?;
+    Ok(tags
+        .lines()
         .map(str::trim)
         .filter(|tag| tag_prefix.is_none_or(|prefix| tag.strip_prefix(prefix).is_some()))
         .filter_map(|tag| {
@@ -307,7 +331,7 @@ fn latest_merged_release_tag(
                 .map(|version| (tag, version))
         })
         .max_by(|(_, left), (_, right)| left.cmp(right))
-        .map(|(tag, _)| tag.to_string())
+        .map(|(tag, _)| tag.to_string()))
 }
 
 fn release_state_for_baseline(
@@ -325,7 +349,7 @@ fn release_state_for_baseline(
         &["log", "--no-merges", &range, "--format=%h|%s"],
         "status git release commits",
         &[],
-        timer.remaining()?,
+        local_probe_timeout(timer)?,
     )
     .ok()?;
     let mut total = 0;
@@ -342,7 +366,7 @@ fn release_state_for_baseline(
             &["diff-tree", "--no-commit-id", "--name-only", "-r", hash],
             "status git commit files",
             &[],
-            timer.remaining()?,
+            local_probe_timeout(timer)?,
         )
         .ok()?;
         if files
@@ -357,7 +381,7 @@ fn release_state_for_baseline(
         &["status", "--porcelain=v1", "--untracked-files=normal"],
         "status git release worktree",
         &[],
-        timer.remaining()?,
+        local_probe_timeout(timer)?,
     )
     .ok()?;
     Some(ReleaseState {
@@ -409,7 +433,7 @@ pub(super) fn default_origin_branch(path: &str, timer: &StatusTimer) -> Option<S
         ],
         "status git origin head",
         &[],
-        timer.remaining()?,
+        local_probe_timeout(timer)?,
     ) {
         let symbolic = symbolic.trim();
         if !symbolic.is_empty() {
@@ -425,7 +449,7 @@ pub(super) fn default_origin_branch(path: &str, timer: &StatusTimer) -> Option<S
                 &["rev-parse", "--verify", "--quiet", branch],
                 "status git origin branch",
                 &[],
-                timer.remaining().unwrap_or(Duration::ZERO),
+                local_probe_timeout(timer).unwrap_or(Duration::ZERO),
             )
             .is_ok()
         })
@@ -440,20 +464,26 @@ pub(super) fn fetch_project_remote_versions(
     project_id: &str,
     components: &[component::Component],
     timer: &StatusTimer,
-) -> deploy::RemoteVersionProbeResult {
+) -> ProjectRemoteVersionProbe {
     match deploy::fetch_project_remote_versions_with_deadline(
         project_id,
         components,
         timer.deadline(),
     ) {
-        Ok(result) => result,
-        Err(_) => {
+        Ok(result) => ProjectRemoteVersionProbe {
+            result,
+            failure: None,
+        },
+        Err(error) => {
             homeboy::log_status!(
                 "status",
                 "Warning: could not fetch remote versions for project '{}' — showing local data only",
                 project_id
             );
-            deploy::RemoteVersionProbeResult::default()
+            ProjectRemoteVersionProbe {
+                result: deploy::RemoteVersionProbeResult::default(),
+                failure: Some(error.to_string()),
+            }
         }
     }
 }

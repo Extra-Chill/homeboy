@@ -2,7 +2,7 @@
 //! dashboard rows/summaries, and the phase timer.
 
 use homeboy_upgrade::controller_staleness::ControllerStaleness;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 use clap::Args;
@@ -54,7 +54,7 @@ pub struct StatusArgs {
     #[arg(long)]
     pub outdated: bool,
 
-    /// Emit status phase progress to stderr and include phase timings in JSON
+    /// Include completed status phase timings in JSON.
     #[arg(long)]
     pub timings: bool,
 
@@ -194,10 +194,60 @@ pub struct StatusOutput {
 #[derive(Debug, Serialize)]
 pub struct StatusPartial {
     pub reason: &'static str,
+    /// The named phase that stopped producing complete observations.
+    pub phase: &'static str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub omitted_components: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub degraded_components: Vec<String>,
+    /// The inspection phases that produced degraded observations per component.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub degraded_component_phases: Vec<StatusPartialComponent>,
+    /// Deterministic commands that replay the omitted or degraded inspection.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replay_commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatusPartialComponent {
+    pub component_id: String,
+    pub phases: Vec<&'static str>,
+}
+
+/// Typed parent-side result when an isolated context, inventory, or registry
+/// probe cannot complete. Controller freshness is read before the child starts,
+/// so it remains available even when the probe itself is killed.
+#[derive(Debug, Serialize)]
+pub struct IsolatedStatusFallback {
+    pub command: &'static str,
+    pub status: &'static str,
+    pub controller: ControllerStaleness,
+    pub partial: StatusPartial,
+    pub diagnostic: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct StatusProbeRequest {
+    pub argv: Vec<String>,
+}
+
+/// Inventory-free status returned by bare `homeboy status`. It deliberately
+/// does not classify the CWD, because doing so requires Git or registry I/O.
+#[derive(Debug, Serialize)]
+pub struct CompactStatusOutput {
+    pub command: &'static str,
+    pub status: &'static str,
+    pub cwd: String,
+    pub controller: ControllerStaleness,
+    pub context: CompactContextStatus,
+    pub action: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompactContextStatus {
+    pub status: &'static str,
+    pub detail: &'static str,
+    pub command: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -345,17 +395,17 @@ pub struct ProjectDashboardOutput {
 }
 
 pub(super) struct StatusTimer {
-    enabled: bool,
+    include_timings: bool,
     phase_started: Instant,
     timings: Vec<StatusTiming>,
     deadline: Instant,
 }
 
 impl StatusTimer {
-    pub(super) fn new(enabled: bool) -> Self {
+    pub(super) fn new(include_timings: bool) -> Self {
         let budget = Duration::from_secs(30);
         Self {
-            enabled,
+            include_timings,
             phase_started: Instant::now(),
             timings: Vec::new(),
             deadline: Instant::now() + budget,
@@ -363,14 +413,17 @@ impl StatusTimer {
     }
 
     pub(super) fn begin(&mut self, phase: &'static str) {
-        if self.enabled {
-            eprintln!("[status] {phase}...");
+        // Status is often the first diagnostic command an operator runs. Name
+        // every phase so a blocked probe is observable without JSON timings.
+        eprintln!("[status] {phase}...");
+        if std::env::var_os("HOMEBOY_STATUS_PROBE_CHILD").is_some() {
+            eprintln!("HOMEBOY_PROGRESS {{\"phase\":\"{phase}\"}}");
         }
         self.phase_started = Instant::now();
     }
 
     pub(super) fn finish(&mut self, phase: &'static str) {
-        if !self.enabled {
+        if !self.include_timings {
             return;
         }
 
@@ -396,9 +449,9 @@ impl StatusTimer {
     }
 
     #[cfg(test)]
-    pub(super) fn with_budget(enabled: bool, budget: Duration) -> Self {
+    pub(super) fn with_budget(include_timings: bool, budget: Duration) -> Self {
         Self {
-            enabled,
+            include_timings,
             phase_started: Instant::now(),
             timings: Vec::new(),
             deadline: Instant::now() + budget,
@@ -486,10 +539,16 @@ fn is_zero(value: &usize) -> bool {
 
 pub enum StatusResult {
     Summary(StatusOutput),
+    Compact(CompactStatusOutput),
     UnregisteredContext(UnregisteredContextStatusOutput),
     Global(GlobalStatusOutput),
     Full(Box<homeboy::core::context::report::ContextReport>),
     Dashboard(ProjectDashboardOutput),
+    /// A successful isolated child result. Keeping its JSON opaque at this
+    /// boundary avoids making all public output types deserializable merely for
+    /// the internal process protocol.
+    Isolated(serde_json::Value),
+    ProbeFallback(IsolatedStatusFallback),
 }
 
 impl serde::Serialize for StatusResult {
@@ -499,10 +558,13 @@ impl serde::Serialize for StatusResult {
     {
         match self {
             StatusResult::Summary(output) => output.serialize(serializer),
+            StatusResult::Compact(output) => output.serialize(serializer),
             StatusResult::UnregisteredContext(output) => output.serialize(serializer),
             StatusResult::Global(output) => output.serialize(serializer),
             StatusResult::Full(output) => output.serialize(serializer),
             StatusResult::Dashboard(output) => output.serialize(serializer),
+            StatusResult::Isolated(output) => output.serialize(serializer),
+            StatusResult::ProbeFallback(output) => output.serialize(serializer),
         }
     }
 }

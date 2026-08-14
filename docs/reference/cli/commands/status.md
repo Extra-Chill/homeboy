@@ -40,6 +40,6 @@ Actionable component status overview
 | `-a`, `--all` | flag | Show all components regardless of current directory context |
 | `--global` | flag | Show a bounded local control-plane snapshot from any directory |
 | `--outdated` | flag | Show only outdated components (local != remote) |
-| `--timings` | flag | Emit status phase progress to stderr and include phase timings in JSON |
+| `--timings` | flag | Include completed status phase timings in JSON |
 | `--refresh` | flag | Refresh remote Git refs before calculating drift and release state |
 | `--unreleased` | flag | Show only components carrying merged-but-unreleased work (commits on origin/<default-branch> that are past the latest release tag) |
