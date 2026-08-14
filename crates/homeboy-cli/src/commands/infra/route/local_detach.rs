@@ -1675,14 +1675,18 @@ mod tests {
     }
 
     #[test]
-    fn exit_lock_first_blocks_later_attempt_materialization() {
+    fn exit_after_attempt_record_preserves_materialization_handoff() {
         crate::test_support::with_isolated_home(|_| {
-            let cook_id = "cook-exit-before-materialization";
-            let attempt_id = "cook-exit-before-materialization-attempt-1";
+            let cook_id = "cook-exit-after-attempt-record";
+            let attempt_id = "cook-exit-after-attempt-record-attempt-1";
             agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
                 .expect("persist pending handoff parent");
+            agent_task_lifecycle::reserve_detached_cook_handoff_materialization(
+                cook_id, attempt_id,
+            )
+            .expect("reserve materializing attempt identity");
             let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
-                "exit-before-materialization-attempt",
+                "exit-after-attempt-record",
                 Vec::new(),
             );
             agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
@@ -1692,27 +1696,59 @@ mod tests {
                 cook_id,
                 "detached Cook exited before materializing its first attempt",
             )
-            .expect("exit wins the handoff arbitration");
+            .expect("durable attempt protects the handoff arbitration");
 
-            assert!(
-                agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id).is_err(),
-                "a terminal exit winner must prevent later index publication"
-            );
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, attempt_id)
+                .expect("durable attempt publishes Cook ownership after child exit");
             let parent = agent_task_lifecycle::exact_record(cook_id)
-                .expect("read exit-winning handoff parent");
+                .expect("read redirected handoff parent");
             assert_eq!(
                 parent.state,
-                agent_task_lifecycle::AgentTaskRunState::Failed
+                agent_task_lifecycle::AgentTaskRunState::Succeeded
             );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["state"],
-                "exited_before_handoff"
+                "redirected"
             );
             assert!(
-                !agent_task_lifecycle::cook_index_exists(cook_id)
-                    .expect("exit winner left no Cook index"),
-                "a failed placeholder cannot coexist with an accepted Cook alias"
+                agent_task_lifecycle::cook_index_exists(cook_id)
+                    .expect("materialization published the Cook index"),
+                "the queued attempt remains continuable through its Cook alias"
             );
+        });
+    }
+
+    #[test]
+    fn detached_retry_after_first_handoff_does_not_rereserve_the_parent() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-retry-after-handoff";
+            let first_attempt = "cook-retry-after-handoff-attempt-1";
+            let retry_attempt = "cook-retry-after-handoff-attempt-2";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pending handoff parent");
+            agent_task_lifecycle::reserve_detached_cook_handoff_materialization(
+                cook_id,
+                first_attempt,
+            )
+            .expect("reserve first materialization");
+            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                "first-handoff-attempt",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some(first_attempt))
+                .expect("persist first attempt");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, first_attempt)
+                .expect("redirect parent to first attempt");
+
+            agent_task_lifecycle::reserve_detached_cook_handoff_materialization(
+                cook_id,
+                retry_attempt,
+            )
+            .expect("a later detached retry bypasses the completed first-handoff reservation");
+            agent_task_lifecycle::submit_plan(&plan, Some(retry_attempt))
+                .expect("persist detached retry");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 2, retry_attempt)
+                .expect("redirected first handoff accepts later retry registration");
         });
     }
 
