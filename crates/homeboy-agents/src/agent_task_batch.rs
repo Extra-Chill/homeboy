@@ -430,10 +430,16 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     AgentTaskBatchStore::from_current_data_root()?.status(batch_id)
 }
 
-fn status_in_store(
+fn status_in_store<S, P>(
     store: &AgentTaskBatchStore,
     batch_id: &str,
-) -> Result<AgentTaskBatchStatusReport> {
+    mut child_status: S,
+    mut projection_readiness: P,
+) -> Result<AgentTaskBatchStatusReport>
+where
+    S: FnMut(&str) -> Result<agent_task_lifecycle::AgentTaskRunRecord>,
+    P: FnMut(&str) -> Result<Option<String>>,
+{
     let mut batch = store.read_batch(batch_id)?;
     if batch.metadata["terminal_failure"].is_object() {
         batch.state = AgentTaskBatchState::Failed;
@@ -460,7 +466,7 @@ fn status_in_store(
         if terminal_preflight_or_admission_failure(&batch.metadata, &child.run_id) {
             continue;
         }
-        match agent_task_lifecycle::status(&child.run_id) {
+        match child_status(&child.run_id) {
             Ok(record) => {
                 if child.state != record.state {
                     child.state = record.state;
@@ -472,7 +478,9 @@ fn status_in_store(
                 {
                     timed_out_child_runs.insert(child.run_id.clone());
                 }
-                if let Some(pending) = projection_pending_child(child, &record)? {
+                if let Some(pending) =
+                    projection_pending_child(child, &record, projection_readiness(&record.run_id)?)
+                {
                     projection_pending_child_runs.push(pending);
                 } else if let Some(reason) = resumable_child_reason(&record) {
                     resumable_child_runs.push(AgentTaskBatchResumableChild {
@@ -506,7 +514,8 @@ fn status_in_store(
     if batch.state != state {
         batch.state = state;
     }
-    let dependency_graph = refresh_dependency_graph(&mut batch)?;
+    let dependency_graph =
+        refresh_dependency_graph_with_finalization_statuses(&mut batch, None, &mut child_status)?;
     if let Some(graph) = &dependency_graph {
         state = aggregate_state_after_graph_refresh(&totals, graph, state);
         if batch.state != state {
@@ -554,7 +563,11 @@ pub fn fanout_dependency_graph_with_finalization_statuses(
     statuses: &BTreeMap<String, String>,
 ) -> Result<Option<Value>> {
     let mut batch = read_batch(batch_id)?;
-    refresh_dependency_graph_with_finalization_statuses(&mut batch, Some(statuses))
+    refresh_dependency_graph_with_finalization_statuses(
+        &mut batch,
+        Some(statuses),
+        &mut agent_task_lifecycle::status,
+    )
 }
 
 fn aggregate_state_after_graph_refresh(
@@ -597,14 +610,14 @@ pub fn fanout_aggregate_state(totals: &AgentTaskBatchTotals, graph: &Value) -> A
 /// Reconcile persisted fanout graph state from durable child observations. A
 /// candidate that passed gates but is still awaiting human merge remains an
 /// explicit blocker; only a recorded merge releases its dependents.
-fn refresh_dependency_graph(batch: &mut AgentTaskBatchRecord) -> Result<Option<Value>> {
-    refresh_dependency_graph_with_finalization_statuses(batch, None)
-}
-
-fn refresh_dependency_graph_with_finalization_statuses(
+fn refresh_dependency_graph_with_finalization_statuses<S>(
     batch: &mut AgentTaskBatchRecord,
     finalization_statuses: Option<&BTreeMap<String, String>>,
-) -> Result<Option<Value>> {
+    child_status: &mut S,
+) -> Result<Option<Value>>
+where
+    S: FnMut(&str) -> Result<agent_task_lifecycle::AgentTaskRunRecord>,
+{
     let Some(graph) = batch.metadata.get("dependency_graph").cloned() else {
         return Ok(None);
     };
@@ -618,7 +631,7 @@ fn refresh_dependency_graph_with_finalization_statuses(
         let finalization_status = finalization_statuses
             .and_then(|statuses| statuses.get(&child.task_id).cloned())
             .or_else(|| {
-                agent_task_lifecycle::status(&child.run_id)
+                child_status(&child.run_id)
                     .ok()
                     .and_then(|record| record.metadata.get("cook_finalization").cloned())
                     .and_then(|value| {
@@ -933,20 +946,19 @@ fn child_issue(child: &AgentTaskBatchChildRun, problem: String) -> AgentTaskBatc
 fn projection_pending_child(
     child: &AgentTaskBatchChildRun,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<Option<AgentTaskBatchProjectionPendingChild>> {
-    let Some(reason) =
-        agent_task_lifecycle::terminal_artifact_projection_readiness(&record.run_id)?
-    else {
-        return Ok(None);
+    readiness: Option<String>,
+) -> Option<AgentTaskBatchProjectionPendingChild> {
+    let Some(reason) = readiness else {
+        return None;
     };
-    Ok(Some(AgentTaskBatchProjectionPendingChild {
+    Some(AgentTaskBatchProjectionPendingChild {
         task_id: child.task_id.clone(),
         run_id: child.run_id.clone(),
         state: record.state,
         phase: "artifact_projection".to_string(),
         reason,
         repair_command: format!("homeboy agent-task status {}", child.run_id),
-    }))
+    })
 }
 
 fn batch_next_actions(
@@ -1084,7 +1096,24 @@ impl AgentTaskBatchStore {
     }
 
     fn status(&self, batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
-        status_in_store(self, batch_id)
+        self.status_with(
+            batch_id,
+            agent_task_lifecycle::status,
+            agent_task_lifecycle::terminal_artifact_projection_readiness,
+        )
+    }
+
+    fn status_with<S, P>(
+        &self,
+        batch_id: &str,
+        child_status: S,
+        projection_readiness: P,
+    ) -> Result<AgentTaskBatchStatusReport>
+    where
+        S: FnMut(&str) -> Result<agent_task_lifecycle::AgentTaskRunRecord>,
+        P: FnMut(&str) -> Result<Option<String>>,
+    {
+        status_in_store(self, batch_id, child_status, projection_readiness)
     }
 
     fn record_child_finalization(
@@ -1359,25 +1388,70 @@ mod tests {
         )
     }
 
+    fn submit_batch(
+        batch_store: &AgentTaskBatchStore,
+        lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+        plan: &AgentTaskPlan,
+        batch_id: &str,
+    ) -> AgentTaskBatchRecord {
+        batch_store
+            .submit_plan_batch_with(
+                plan,
+                Some(batch_id),
+                |run_id| lifecycle_store.record_exists(run_id),
+                |child, run_id| {
+                    lifecycle_store
+                        .submit_plan_with_runtime_admission(child, run_id, |_| Ok(json!({})))
+                },
+            )
+            .expect("batch submitted")
+    }
+
+    fn batch_status(
+        batch_store: &AgentTaskBatchStore,
+        lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+        batch_id: &str,
+    ) -> AgentTaskBatchStatusReport {
+        batch_store
+            .status_with(
+                batch_id,
+                |run_id| lifecycle_store.read_record(run_id),
+                |_| Ok(None),
+            )
+            .expect("batch status")
+    }
+
+    fn rewrite_record(
+        lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+        run_id: &str,
+        rewrite: impl FnOnce(&mut agent_task_lifecycle::AgentTaskRunRecord),
+    ) {
+        let mut record = lifecycle_store.read_record(run_id).expect("child record");
+        rewrite(&mut record);
+        lifecycle_store
+            .write_record(&record)
+            .expect("rewritten child record");
+    }
+
     #[test]
     fn batch_submit_persists_parent_and_child_durable_runs() {
-        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
-        // the shared lock) so these tests serialize against every other module
-        // that mutates the same env — a module-local lock only ordered this
-        // module's own tests and raced `with_isolated_home` users elsewhere.
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/audit", vec![request("a"), request("b")]);
 
-        let batch = submit_plan_batch(&plan, Some("batch/audit")).expect("batch submitted");
+        let batch = submit_batch(&batch_store, &lifecycle_store, &plan, "batch/audit");
 
         assert_eq!(batch.batch_id, "batch_audit");
         assert_eq!(batch.state, AgentTaskBatchState::Queued);
         assert_eq!(batch.child_runs.len(), 2);
         assert_eq!(batch.child_runs[0].run_id, "batch_audit-a");
-        assert!(agent_task_lifecycle::run_record_exists("batch_audit-a").expect("child exists"));
-        assert!(agent_task_lifecycle::run_record_exists("batch_audit-b").expect("child exists"));
+        assert!(lifecycle_store
+            .record_exists("batch_audit-a")
+            .expect("child exists"));
+        assert!(lifecycle_store
+            .record_exists("batch_audit-b")
+            .expect("child exists"));
 
-        let status = status("batch/audit").expect("batch status");
+        let status = batch_status(&batch_store, &lifecycle_store, "batch/audit");
         assert_eq!(status.totals.queued, 2);
         assert_eq!(
             status.commands.run_next,
@@ -1492,23 +1566,23 @@ mod tests {
 
     #[test]
     fn batch_status_returns_partial_envelope_when_child_record_is_unavailable() {
-        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
-        // the shared lock) so these tests serialize against every other module
-        // that mutates the same env — a module-local lock only ordered this
-        // module's own tests and raced `with_isolated_home` users elsewhere.
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/restart", vec![request("a")]);
-        submit_plan_batch(&plan, Some("batch/restart")).expect("batch submitted");
-        let mut batch = read_batch("batch/restart").expect("batch record");
+        submit_batch(&batch_store, &lifecycle_store, &plan, "batch/restart");
+        let mut batch = batch_store
+            .read_batch("batch/restart")
+            .expect("batch record");
         batch.child_runs.push(AgentTaskBatchChildRun {
             task_id: "orphan".to_string(),
             run_id: "batch_restart-orphan".to_string(),
             state: AgentTaskRunState::Running,
         });
         batch.task_count = batch.child_runs.len();
-        write_batch(&batch).expect("batch rewritten with orphan child");
+        batch_store
+            .write_batch(&batch)
+            .expect("batch rewritten with orphan child");
 
-        let report = status("batch/restart").expect("partial batch status");
+        let report = batch_status(&batch_store, &lifecycle_store, "batch/restart");
 
         assert_eq!(report.batch.state, AgentTaskBatchState::Running);
         assert_eq!(report.totals.queued, 1);
@@ -1653,17 +1727,16 @@ mod tests {
 
     #[test]
     fn durable_status_marks_all_failed_children_as_failed() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/failed", vec![request("a"), request("b")]);
-        submit_plan_batch(&plan, Some("batch/failed")).expect("batch submitted");
+        submit_batch(&batch_store, &lifecycle_store, &plan, "batch/failed");
         for run_id in ["batch_failed-a", "batch_failed-b"] {
-            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            rewrite_record(&lifecycle_store, run_id, |record| {
                 record.state = AgentTaskRunState::Failed;
-            })
-            .expect("stage failed child");
+            });
         }
 
-        let report = status("batch/failed").expect("durable failed status");
+        let report = batch_status(&batch_store, &lifecycle_store, "batch/failed");
 
         assert_eq!(report.batch.state, AgentTaskBatchState::Failed);
         assert_eq!(report.status, "failed");
@@ -1674,24 +1747,22 @@ mod tests {
 
     #[test]
     fn batch_status_surfaces_resumable_children_and_the_resume_command() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/resume", vec![request("a"), request("b")]);
-        submit_plan_batch(&plan, Some("batch/resume")).expect("batch submitted");
+        submit_batch(&batch_store, &lifecycle_store, &plan, "batch/resume");
 
         // Child A finished its provider attempt but was never finalized (its
         // coordinator exited) — it is resumable. Child B was fully finalized —
         // it is not.
-        agent_task_lifecycle::rewrite_record_for_test("batch_resume-a", |record| {
+        rewrite_record(&lifecycle_store, "batch_resume-a", |record| {
             record.state = AgentTaskRunState::CandidateRecoverable;
-        })
-        .expect("stage terminal-unfinalized child");
-        agent_task_lifecycle::rewrite_record_for_test("batch_resume-b", |record| {
+        });
+        rewrite_record(&lifecycle_store, "batch_resume-b", |record| {
             record.state = AgentTaskRunState::Succeeded;
             record.metadata["cook_finalization"] = serde_json::json!({ "status": "review_ready" });
-        })
-        .expect("stage finalized child");
+        });
 
-        let report = status("batch/resume").expect("batch status");
+        let report = batch_status(&batch_store, &lifecycle_store, "batch/resume");
 
         assert!(report.resumable, "batch has a resumable child");
         assert_eq!(report.resumable_child_runs.len(), 1);
@@ -1717,16 +1788,15 @@ mod tests {
 
     #[test]
     fn batch_status_reports_no_resumable_children_when_every_child_is_finalized() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/finalized", vec![request("a")]);
-        submit_plan_batch(&plan, Some("batch/finalized")).expect("batch submitted");
-        agent_task_lifecycle::rewrite_record_for_test("batch_finalized-a", |record| {
+        submit_batch(&batch_store, &lifecycle_store, &plan, "batch/finalized");
+        rewrite_record(&lifecycle_store, "batch_finalized-a", |record| {
             record.state = AgentTaskRunState::Succeeded;
             record.metadata["cook_finalization"] = serde_json::json!({ "status": "review_ready" });
-        })
-        .expect("stage finalized child");
+        });
 
-        let report = status("batch/finalized").expect("batch status");
+        let report = batch_status(&batch_store, &lifecycle_store, "batch/finalized");
 
         assert!(!report.resumable);
         assert!(report.resumable_child_runs.is_empty());
@@ -1734,9 +1804,9 @@ mod tests {
 
     #[test]
     fn batch_status_withholds_resume_until_patch_projection_completes() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/projection", vec![request("a")]);
-        submit_plan_batch(&plan, Some("batch/projection")).expect("batch submitted");
+        submit_batch(&batch_store, &lifecycle_store, &plan, "batch/projection");
         let child_plan = child_plan(&plan, plan.tasks[0].clone(), "batch_projection");
         let patch_sha = "a".repeat(64);
         let aggregate = AgentTaskAggregate {
@@ -1785,16 +1855,21 @@ mod tests {
             artifact_bindings: Vec::new(),
             queue: Default::default(),
         };
-        agent_task_lifecycle::record_runner_job_identity(
-            "batch_projection-a",
-            "homeboy-lab",
-            "job-1",
-        )
-        .expect("record runner identity");
-        agent_task_lifecycle::record_run_aggregate("batch_projection-a", &child_plan, &aggregate)
+        rewrite_record(&lifecycle_store, "batch_projection-a", |record| {
+            record.metadata["runner_id"] = json!("homeboy-lab");
+            record.metadata["runner_job_id"] = json!("job-1");
+        });
+        lifecycle_store
+            .record_run_aggregate("batch_projection-a", &child_plan, &aggregate)
             .expect("stage unprojected child");
 
-        let report = status("batch/projection").expect("batch status");
+        let report = batch_store
+            .status_with(
+                "batch/projection",
+                |run_id| lifecycle_store.read_record(run_id),
+                |_| Ok(Some("controller projection is pending".to_string())),
+            )
+            .expect("batch status");
 
         assert!(!report.resumable);
         assert!(report.resumable_child_runs.is_empty());
@@ -1814,21 +1889,17 @@ mod tests {
 
     #[test]
     fn graph_pending_acceptance_prevents_a_succeeded_batch_aggregate() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let mut plan = AgentTaskPlan::new("fanout/acceptance", vec![request("a"), request("b")]);
         plan.metadata = json!({
             "acceptance": { "authority": "independent-review", "policy": "release-v1" },
         });
-        submit_plan_batch(&plan, Some("batch/acceptance")).expect("batch submitted");
+        submit_batch(&batch_store, &lifecycle_store, &plan, "batch/acceptance");
         for run_id in ["batch_acceptance-a", "batch_acceptance-b"] {
-            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            rewrite_record(&lifecycle_store, run_id, |record| {
                 record.state = AgentTaskRunState::Succeeded;
                 record.metadata["cook_finalization"] = json!({ "status": "awaiting_acceptance" });
-            })
-            .expect("stage awaiting-acceptance child");
-            agent_task_lifecycle::record_promotion(
-                run_id,
-                json!({
+                record.metadata["latest_promotion"] = json!({
                     "status": "applied",
                     "verified_base": { "sha": "base-a" },
                     "provenance": { "candidate": { "fingerprint": {
@@ -1840,18 +1911,19 @@ mod tests {
                         "sha256": "candidate-sha",
                         "tree": "candidate-tree",
                     } } },
-                }),
-            )
-            .expect("persist pending acceptance");
+                });
+            });
         }
-        let mut batch = read_batch("batch/acceptance").expect("batch record");
+        let mut batch = batch_store
+            .read_batch("batch/acceptance")
+            .expect("batch record");
         batch.metadata = json!({ "dependency_graph": { "nodes": [
             { "id": "a", "depends_on": [] },
             { "id": "b", "depends_on": ["a"] }
         ]}});
-        write_batch(&batch).expect("persist graph");
+        batch_store.write_batch(&batch).expect("persist graph");
 
-        let report = status("batch/acceptance").expect("batch status");
+        let report = batch_status(&batch_store, &lifecycle_store, "batch/acceptance");
 
         assert_eq!(report.totals.succeeded, 2);
         assert_eq!(report.batch.state, AgentTaskBatchState::Running);
@@ -1860,16 +1932,19 @@ mod tests {
 
     #[test]
     fn status_keeps_timestamps_stable_without_a_durable_change() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/stable-status", vec![request("a")]);
-        submit_plan_batch(&plan, Some("batch/stable-status")).expect("batch submitted");
-        let before = read_batch("batch/stable-status").expect("batch record");
+        submit_batch(&batch_store, &lifecycle_store, &plan, "batch/stable-status");
+        let before = batch_store
+            .read_batch("batch/stable-status")
+            .expect("batch record");
 
-        let report = status("batch/stable-status").expect("status observation");
+        let report = batch_status(&batch_store, &lifecycle_store, "batch/stable-status");
 
         assert_eq!(report.batch.updated_at, before.updated_at);
         assert_eq!(
-            read_batch("batch/stable-status")
+            batch_store
+                .read_batch("batch/stable-status")
                 .expect("persisted batch")
                 .updated_at,
             before.updated_at
@@ -1878,15 +1953,21 @@ mod tests {
 
     #[test]
     fn merged_dependent_terminalizes_after_its_invalidated_review_is_recompleted() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/merged-dependent", vec![request("a")]);
-        submit_plan_batch(&plan, Some("batch/merged-dependent")).expect("batch submitted");
-        agent_task_lifecycle::rewrite_record_for_test("batch_merged-dependent-a", |record| {
+        submit_batch(
+            &batch_store,
+            &lifecycle_store,
+            &plan,
+            "batch/merged-dependent",
+        );
+        rewrite_record(&lifecycle_store, "batch_merged-dependent-a", |record| {
             record.state = AgentTaskRunState::Succeeded;
             record.metadata["cook_finalization"] = json!({ "status": "merged" });
-        })
-        .expect("stage merged child");
-        let mut batch = read_batch("batch/merged-dependent").expect("batch record");
+        });
+        let mut batch = batch_store
+            .read_batch("batch/merged-dependent")
+            .expect("batch record");
         batch.metadata = json!({
             "dependency_graph": { "nodes": [{ "id": "a", "depends_on": [] }] },
             "dependency_action_receipts": {
@@ -1897,9 +1978,9 @@ mod tests {
                 }
             }
         });
-        write_batch(&batch).expect("persist graph");
+        batch_store.write_batch(&batch).expect("persist graph");
 
-        let report = status("batch/merged-dependent").expect("batch status");
+        let report = batch_status(&batch_store, &lifecycle_store, "batch/merged-dependent");
 
         assert_eq!(report.batch.state, AgentTaskBatchState::Succeeded);
         assert_eq!(
