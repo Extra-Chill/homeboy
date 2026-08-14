@@ -220,18 +220,76 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AiFilledReviewForm {
     /// What is changing in this PR and why.
+    #[serde(deserialize_with = "prose_field")]
     pub summary: String,
     /// Bullet points of the concrete changes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "prose_lines")]
     pub what_changed: Vec<String>,
     /// Compatibility / impact assessment.
+    #[serde(deserialize_with = "prose_field")]
     pub compatibility: String,
     /// Numeric test claims which Homeboy binds to durable candidate gate evidence.
     #[serde(default)]
     pub verification: Vec<AiReviewVerificationClaim>,
     /// Self-reflective, concise description of the *process* the AI took —
     /// deliberately distinct from `summary` (which describes *what* changed).
+    #[serde(deserialize_with = "prose_field")]
     pub used_for: String,
+}
+
+/// Accept a prose field as either a string or a list of strings.
+///
+/// A model asked for "a compatibility assessment" reasonably answers with
+/// bullets, and one asked for "change bullets" reasonably answers with a
+/// paragraph. Neither is garbage: it is the agent's own content in the shape it
+/// found natural. Refusing it on type alone discarded an entire verified
+/// candidate -- the patch was applied and the deterministic gates never ran,
+/// because the parse error short-circuits before the review-form nudge loop can
+/// see it. Reporting shape is not worth a thrown-away cook. (#12386)
+///
+/// Joining with newlines preserves the agent's own separation; the renderer
+/// treats these fields as prose blocks.
+fn prose_field<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Prose {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    Ok(match Prose::deserialize(deserializer)? {
+        Prose::One(text) => text,
+        Prose::Many(entries) => entries.join("\n"),
+    })
+}
+
+/// The inverse shape for a list field: accept a single string as one entry.
+///
+/// Blank entries are dropped so a stray trailing newline cannot masquerade as a
+/// bullet; `validate` already refuses a list with no non-empty entries, and it
+/// should keep refusing that rather than seeing a list of empty strings.
+fn prose_lines<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Lines {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    let entries = match Lines::deserialize(deserializer)? {
+        Lines::One(text) => text.lines().map(str::to_string).collect(),
+        Lines::Many(entries) => entries,
+    };
+    Ok(entries
+        .into_iter()
+        .filter(|entry| !entry.trim().is_empty())
+        .collect())
 }
 
 impl AiFilledReviewForm {
@@ -249,9 +307,14 @@ impl AiFilledReviewForm {
             return Ok(None);
         }
         let form: Self = serde_json::from_value(value.clone()).map_err(|error| {
+            // A shape error here costs the whole cook, so the message has to be
+            // enough to fix it in one attempt rather than "malformed". (#12386)
             Error::validation_invalid_argument(
                 "review_form",
-                format!("agent-emitted review_form is malformed: {error}"),
+                format!(
+                    "agent-emitted review_form is malformed: {error}. {}",
+                    Self::requirement_feedback()
+                ),
                 None,
                 None,
             )
@@ -1376,6 +1439,108 @@ fn dossier_schema() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure that discarded two fully-verified cooks on 2026-08-13: the
+    /// agent answered a prose field with bullets, the parse hard-errored, and
+    /// the candidate was thrown away before its gates ran. Both prose shapes
+    /// must now parse. (#12386)
+    #[test]
+    fn prose_fields_accept_a_list_as_well_as_a_string() {
+        let outputs = serde_json::json!({
+            "review_form": {
+                "summary": ["Adds the guard.", "Refs #12386."],
+                "what_changed": ["one", "two"],
+                "compatibility": ["No breaking changes.", "Default is off."],
+                "used_for": ["Diagnosed the failure.", "Wrote the regression test."],
+            }
+        });
+
+        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("a list-shaped prose field must not be a hard error")
+            .expect("form present");
+
+        assert_eq!(form.summary, "Adds the guard.\nRefs #12386.");
+        assert_eq!(form.compatibility, "No breaking changes.\nDefault is off.");
+        assert_eq!(
+            form.used_for,
+            "Diagnosed the failure.\nWrote the regression test."
+        );
+        assert_eq!(
+            form.what_changed,
+            vec!["one".to_string(), "two".to_string()]
+        );
+        form.validate().expect("a coerced form is still valid");
+    }
+
+    /// The inverse shape: a single paragraph where a bullet list was asked for.
+    #[test]
+    fn what_changed_accepts_a_single_string() {
+        let outputs = serde_json::json!({
+            "review_form": {
+                "summary": "s",
+                "what_changed": "first line\nsecond line\n",
+                "compatibility": "c",
+                "used_for": "Investigated, then implemented and verified the change.",
+            }
+        });
+
+        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("a string-shaped list field must not be a hard error")
+            .expect("form present");
+
+        // The trailing newline must not become an empty bullet: `validate`
+        // refuses a list with no non-empty entries and should keep doing so.
+        assert_eq!(
+            form.what_changed,
+            vec!["first line".to_string(), "second line".to_string()]
+        );
+    }
+
+    /// Plain strings keep behaving exactly as before.
+    #[test]
+    fn prose_fields_still_accept_plain_strings() {
+        let outputs = serde_json::json!({
+            "review_form": {
+                "summary": "s",
+                "what_changed": ["one"],
+                "compatibility": "c",
+                "used_for": "Investigated, then implemented and verified the change.",
+            }
+        });
+
+        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("parses")
+            .expect("form present");
+        assert_eq!(form.summary, "s");
+        assert_eq!(form.compatibility, "c");
+        assert_eq!(form.what_changed, vec!["one".to_string()]);
+    }
+
+    /// A shape that still cannot be coerced must say what a valid form needs,
+    /// because this error costs the whole cook.
+    #[test]
+    fn an_uncoercible_shape_reports_what_a_valid_form_requires() {
+        let outputs = serde_json::json!({ "review_form": { "summary": 7 } });
+        let error = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect_err("a numeric summary is not prose");
+        assert!(
+            error.to_string().contains("review_form"),
+            "message names the field: {error}"
+        );
+        assert!(
+            error.to_string().contains("`summary`"),
+            "message states what a valid form requires: {error}"
+        );
+    }
+
+    /// An absent form is still `Ok(None)` so the nudge loop keeps owning it.
+    #[test]
+    fn an_absent_form_is_not_an_error() {
+        let outputs = serde_json::json!({});
+        assert!(AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("absence is not an error")
+            .is_none());
+    }
     fn dossier() -> AgentTaskReviewDossier {
         AgentTaskReviewDossier {
             schema: dossier_schema(),
