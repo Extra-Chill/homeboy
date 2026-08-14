@@ -21,9 +21,8 @@ use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 
 /// Durable agent-task lifecycle storage bound to immutable filesystem roots.
 ///
-/// Record writes are intentionally outside this first boundary: renewing the
-/// workspace owner, persisting terminal workspace authority, and updating the
-/// observation row must move together in a later atomic migration.
+/// Record writes keep workspace owner renewal, terminal workspace authority,
+/// and observation projection bound to the same roots.
 #[derive(Clone, Debug)]
 pub struct AgentTaskLifecycleStore {
     roots: paths::PathRoots,
@@ -81,6 +80,10 @@ impl AgentTaskLifecycleStore {
         self.roots.data().join("homeboy.sqlite")
     }
 
+    fn data_root(&self) -> PathBuf {
+        self.roots.data().to_path_buf()
+    }
+
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
         ObservationStore::open_initialized_at(self.observation_db_path())
     }
@@ -134,6 +137,110 @@ impl AgentTaskLifecycleStore {
 
     pub fn cook_index_exists(&self, cook_id: &str) -> bool {
         self.cook_index_path(cook_id).exists()
+    }
+
+    pub fn read_record(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
+        read_record_in_store(self, run_id)
+    }
+
+    pub fn read_record_bounded(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
+        read_record_bounded_in_store(self, run_id)
+    }
+
+    pub fn write_record(&self, record: &AgentTaskRunRecord) -> Result<()> {
+        self.write_record_with_aggregate(
+            record,
+            read_mirrored_aggregate_in_store(self, &record.run_id)?,
+        )
+    }
+
+    /// Persist a record while the caller owns this store's config lock. Terminal
+    /// authority is intentionally projected only after that lock is released.
+    pub(crate) fn write_record_locked_without_terminal_projection(
+        &self,
+        record: &AgentTaskRunRecord,
+    ) -> Result<AgentTaskRunRecord> {
+        write_record_with_aggregate_without_workspace_authority(
+            self,
+            record,
+            read_mirrored_aggregate_in_store(self, &record.run_id)?,
+        )
+    }
+
+    pub fn mutate_record(
+        &self,
+        run_id: &str,
+        mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
+    ) -> Result<Option<AgentTaskRunRecord>> {
+        let record = self.with_config_lock(|| {
+            self.mutate_record_locked_without_terminal_projection(run_id, mutate)
+        })?;
+        if let Some(record) = record.as_ref() {
+            self.project_terminal_record_after_unlock(&record.run_id)?;
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn mutate_record_locked_without_terminal_projection(
+        &self,
+        run_id: &str,
+        mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
+    ) -> Result<Option<AgentTaskRunRecord>> {
+        let mut record = self.read_record(run_id)?;
+        if !mutate(&mut record) {
+            return Ok(None);
+        }
+        self.write_record_locked_without_terminal_projection(&record)
+            .map(Some)
+    }
+
+    /// Complete terminal projection after the record lock has been released:
+    /// receipt first, then the workspace owner lease.
+    pub(crate) fn project_terminal_record_after_unlock(&self, run_id: &str) -> Result<()> {
+        let record = self.read_record(run_id)?;
+        super::workspace_authority::WorkspaceTerminalAuthorityStore::new(
+            self.data_root(),
+            self.roots.config().to_path_buf(),
+        )
+        .persist_terminal_from_record(&record)
+        .and_then(|_| {
+            super::workspace_claims::release_terminal_record_workspace_owner_in_store(
+                &super::workspace_claims::workspace_claim_store_at(self.data_root()),
+                &record,
+            )
+        })
+    }
+
+    pub fn write_aggregate_and_record(
+        &self,
+        record: &AgentTaskRunRecord,
+        aggregate: &AgentTaskAggregate,
+    ) -> Result<PathBuf> {
+        self.write_record_with_aggregate(record, Some(aggregate.clone()))?;
+        #[cfg(test)]
+        if INTERRUPT_AFTER_TERMINAL_COMMIT.swap(false, Ordering::SeqCst) {
+            return Err(Error::internal_io(
+                "injected interruption after terminal lifecycle commit",
+                Some(record.run_id.clone()),
+            ));
+        }
+        self.write_aggregate(&record.run_id, aggregate)
+    }
+
+    fn write_record_with_aggregate(
+        &self,
+        record: &AgentTaskRunRecord,
+        aggregate: Option<AgentTaskAggregate>,
+    ) -> Result<()> {
+        let mut record = record.clone();
+        super::workspace_claims::renew_record_workspace_owner_in_store(
+            &super::workspace_claims::workspace_claim_store_at(self.data_root()),
+            &mut record,
+        )?;
+        let committed = self.with_config_lock(|| {
+            write_record_with_aggregate_without_workspace_authority(self, &record, aggregate)
+        })?;
+        self.project_terminal_record_after_unlock(&committed.run_id)
     }
 }
 
@@ -349,7 +456,7 @@ pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
 }
 
 pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
-    write_record_with_aggregate(record, read_mirrored_aggregate(&record.run_id)?)
+    default_store()?.write_record(record)
 }
 
 /// Persist a record while the caller owns the config lock. Terminal workspace
@@ -357,17 +464,12 @@ pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
 pub(super) fn write_record_locked_without_terminal_projection(
     record: &AgentTaskRunRecord,
 ) -> Result<AgentTaskRunRecord> {
-    write_record_with_aggregate_without_workspace_authority(
-        record,
-        read_mirrored_aggregate(&record.run_id)?,
-    )
+    default_store()?.write_record_locked_without_terminal_projection(record)
 }
 
 /// Complete terminal projection from committed lifecycle truth after unlocking.
 pub(super) fn project_terminal_record_after_unlock(run_id: &str) -> Result<()> {
-    let record = read_record(run_id)?;
-    super::workspace_authority::persist_terminal_from_record(&record)
-        .and_then(|_| super::release_terminal_record_workspace_owner(&record))
+    default_store()?.project_terminal_record_after_unlock(run_id)
 }
 
 /// Serialize a record read-modify-write so independent lifecycle projections do
@@ -376,23 +478,7 @@ pub(super) fn mutate_record(
     run_id: &str,
     mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
 ) -> Result<Option<AgentTaskRunRecord>> {
-    let record = homeboy_core::config::with_config_lock(|| {
-        let mut record = read_record(run_id)?;
-        if !mutate(&mut record) {
-            return Ok(None);
-        }
-        let committed = write_record_with_aggregate_without_workspace_authority(
-            &record,
-            read_mirrored_aggregate(&record.run_id)?,
-        )?;
-        Ok(Some(committed))
-    })?;
-    if let Some(record) = record.as_ref() {
-        // Terminal authority has its own config lock. Persist it after releasing
-        // the record mutation lock so a terminal update cannot self-deadlock.
-        super::workspace_authority::persist_terminal_from_record(record)?;
-    }
-    Ok(record)
+    default_store()?.mutate_record(run_id, mutate)
 }
 
 /// Mutate a record while the caller owns the config lock. Terminal authority is
@@ -402,11 +488,7 @@ pub(super) fn mutate_record_locked_without_terminal_projection(
     run_id: &str,
     mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
 ) -> Result<Option<AgentTaskRunRecord>> {
-    let mut record = read_record(run_id)?;
-    if !mutate(&mut record) {
-        return Ok(None);
-    }
-    write_record_locked_without_terminal_projection(&record).map(Some)
+    default_store()?.mutate_record_locked_without_terminal_projection(run_id, mutate)
 }
 
 /// Commit the controller projection and child aggregate in one observation row.
@@ -416,15 +498,7 @@ pub(super) fn write_aggregate_and_record(
     record: &AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> Result<PathBuf> {
-    write_record_with_aggregate(record, Some(aggregate.clone()))?;
-    #[cfg(test)]
-    if INTERRUPT_AFTER_TERMINAL_COMMIT.swap(false, Ordering::SeqCst) {
-        return Err(Error::internal_io(
-            "injected interruption after terminal lifecycle commit",
-            Some(record.run_id.clone()),
-        ));
-    }
-    write_aggregate(&record.run_id, aggregate)
+    default_store()?.write_aggregate_and_record(record, aggregate)
 }
 
 #[cfg(test)]
@@ -437,23 +511,8 @@ pub(super) fn interrupt_after_terminal_commit_for_test() {
     INTERRUPT_AFTER_TERMINAL_COMMIT.store(true, Ordering::SeqCst);
 }
 
-fn write_record_with_aggregate(
-    record: &AgentTaskRunRecord,
-    aggregate: Option<AgentTaskAggregate>,
-) -> Result<()> {
-    let mut record = record.clone();
-    // Every durable scheduler/provider/controller heartbeat passes through this
-    // write boundary. Renew before persisting so the record carries the exact
-    // store-issued epoch rather than an optimistic local timestamp.
-    super::renew_record_workspace_owner(&mut record)?;
-    let committed = homeboy_core::config::with_config_lock(|| {
-        write_record_with_aggregate_without_workspace_authority(&record, aggregate)
-    })?;
-    super::workspace_authority::persist_terminal_from_record(&committed)
-        .and_then(|_| super::release_terminal_record_workspace_owner(&committed))
-}
-
 fn write_record_with_aggregate_without_workspace_authority(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
     aggregate: Option<AgentTaskAggregate>,
 ) -> Result<AgentTaskRunRecord> {
@@ -464,7 +523,7 @@ fn write_record_with_aggregate_without_workspace_authority(
             Some(record.run_id.clone()),
         ));
     }
-    let store = ObservationStore::open_initialized()?;
+    let store = lifecycle_store.open_observation_initialized()?;
     let existing_metadata = store
         .get_run(&record.run_id)?
         .map(|run| run.metadata_json)
@@ -504,7 +563,14 @@ fn write_record_with_aggregate_without_workspace_authority(
 }
 
 pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let store = ObservationStore::open_initialized()?;
+    default_store()?.read_record(run_id)
+}
+
+fn read_record_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let store = lifecycle_store.open_observation_initialized()?;
     let run = store.get_run(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
@@ -519,7 +585,14 @@ pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
 /// Read one durable record under the observation store's read-only busy budget.
 /// Inspection must not initialize, migrate, or contend like a writer.
 pub(super) fn read_record_bounded(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let store = ObservationStore::open_readonly()?;
+    default_store()?.read_record_bounded(run_id)
+}
+
+fn read_record_bounded_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let store = lifecycle_store.open_observation_readonly()?;
     let run = store.get_run(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
