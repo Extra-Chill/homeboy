@@ -1,3 +1,4 @@
+use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy::core::server::RunnerSettings;
 use homeboy::runner::runners::{
     self as runner, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, RunnerExecOutput,
@@ -215,8 +216,9 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             force,
             allow_downgrade,
             dry_run,
-        } => map_refresh_homeboy(runner::refresh_homeboy_binary(
-            runner::HomeboyBinaryRefreshOptions {
+            full: _,
+        } => {
+            let options = runner::HomeboyBinaryRefreshOptions {
                 runner_id,
                 mode: match select {
                     Some(binary_path) => runner::HomeboyBinaryRefreshMode::Select { binary_path },
@@ -229,8 +231,10 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 force,
                 allow_downgrade,
                 dry_run,
-            },
-        )),
+            };
+            let runner_id = options.runner_id.clone();
+            map_refresh_homeboy(&runner_id, runner::refresh_homeboy_binary(options))
+        }
         RunnerCommand::DevSync {
             runner_id,
             homeboy_source,
@@ -941,55 +945,207 @@ fn runner_exec_command_output(
 }
 
 fn map_refresh_homeboy(
+    runner_id: &str,
     result: CmdResult<runner::HomeboyBinaryRefreshOutput>,
 ) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| {
-        let actionable = output.failure.as_ref().map(|failure| {
-            let mut metadata = failure
-                .mirror_run_id
-                .as_ref()
-                .map(|run_id| {
-                    crate::commands::utils::response::actionable_metadata_for_run_ref(
-                        run_id.clone(),
-                        "runner_exec",
-                        "homeboy-runner-refresh",
+    match result {
+        Err(mut error) => {
+            let artifacts = persist_refresh_error_artifacts(runner_id, &error)?;
+            error.details["artifacts"] =
+                serde_json::to_value(artifacts).map_err(|serialization| {
+                    homeboy::core::Error::internal_json(
+                        serialization.to_string(),
+                        Some("serialize runner refresh error artifacts".to_string()),
                     )
-                })
-                .unwrap_or_default();
-            if let Some(job_id) = &failure.job_id {
+                })?;
+            Err(error)
+        }
+        Ok((mut output, exit_code)) => {
+            let artifacts = persist_refresh_artifacts(&output, exit_code)?;
+            output.artifacts = Some(artifacts);
+            let actionable = output.failure.as_ref().map(|failure| {
+                let mut metadata = failure
+                    .mirror_run_id
+                    .as_ref()
+                    .map(|run_id| {
+                        crate::commands::utils::response::actionable_metadata_for_run_ref(
+                            run_id.clone(),
+                            "runner_exec",
+                            "homeboy-runner-refresh",
+                        )
+                    })
+                    .unwrap_or_default();
+                if let Some(job_id) = &failure.job_id {
+                    metadata
+                        .refs
+                        .jobs
+                        .push(crate::commands::utils::response::CommandJobRef {
+                            id: job_id.clone(),
+                            kind: "runner_job".to_string(),
+                            source: "homeboy-runner-refresh".to_string(),
+                            status_command: format!(
+                                "homeboy runner job logs {} {job_id}",
+                                output.runner_id
+                            ),
+                            watch_command: Some(format!(
+                                "homeboy runner job logs {} {job_id} --follow",
+                                output.runner_id
+                            )),
+                        });
+                }
                 metadata
-                    .refs
-                    .jobs
-                    .push(crate::commands::utils::response::CommandJobRef {
-                        id: job_id.clone(),
-                        kind: "runner_job".to_string(),
-                        source: "homeboy-runner-refresh".to_string(),
-                        status_command: format!(
-                            "homeboy runner job logs {} {job_id}",
-                            output.runner_id
-                        ),
-                        watch_command: Some(format!(
-                            "homeboy runner job logs {} {job_id} --follow",
-                            output.runner_id
-                        )),
-                    });
-            }
-            metadata
-                .next_actions
-                .extend(failure.recovery_actions.iter().map(|action| {
-                    crate::commands::utils::response::CommandNextAction::new(
-                        action.label.clone(),
-                        action.command.join(" "),
-                    )
-                }));
-            metadata
-        });
-        (
-            RunnerCommandOutput::RefreshHomeboy(Box::new(
-                super::types::RunnerRefreshHomeboyCommandOutput { output, actionable },
-            )),
-            exit_code,
+                    .next_actions
+                    .extend(failure.recovery_actions.iter().map(|action| {
+                        crate::commands::utils::response::CommandNextAction::new(
+                            action.label.clone(),
+                            action.command.join(" "),
+                        )
+                    }));
+                metadata
+            });
+            Ok((
+                RunnerCommandOutput::RefreshHomeboy(Box::new(
+                    super::types::RunnerRefreshHomeboyCommandOutput { output, actionable },
+                )),
+                exit_code,
+            ))
+        }
+    }
+}
+
+fn persist_refresh_artifacts(
+    output: &runner::HomeboyBinaryRefreshOutput,
+    exit_code: i32,
+) -> homeboy::core::Result<runner::HomeboyBinaryRefreshArtifacts> {
+    use std::io::Write;
+
+    let store = ObservationStore::open_initialized()?;
+    let run = store.start_run(
+        NewRunRecord::builder("runner_refresh_homeboy")
+            .component_id(output.runner_id.clone())
+            .command("homeboy runner refresh-homeboy")
+            .current_homeboy_version()
+            .metadata(serde_json::json!({ "dry_run": output.dry_run }))
+            .build(),
+    )?;
+    let run_id = run.id;
+    let store_artifact = |kind: &str, content: &str| -> homeboy::core::Result<String> {
+        let mut file = tempfile::NamedTempFile::new().map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(format!("create {kind}")))
+        })?;
+        file.write_all(homeboy::core::redaction::redact_string(content).as_bytes())
+            .map_err(|error| {
+                homeboy::core::Error::internal_io(error.to_string(), Some(format!("write {kind}")))
+            })?;
+        file.as_file().sync_all().map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(format!("sync {kind}")))
+        })?;
+        let artifact_id = format!("{kind}-{run_id}");
+        store.record_artifact_with_id(
+            &run_id,
+            kind,
+            file.path(),
+            &artifact_id,
+            serde_json::json!({ "schema": "homeboy/runner-refresh-artifact/v1", "redacted": true }),
+        )?;
+        Ok(format!("homeboy://run/{run_id}/artifact/{artifact_id}"))
+    };
+    let materialization_script = Some(store_artifact(
+        "materialization-script",
+        &output.plan.script,
+    )?);
+    let transcript = output.build_transcript.clone().or_else(|| {
+        output.failure.as_ref().map(|failure| {
+            // Older in-process producers may not supply the transient transcript.
+            // Their structured failure streams remain complete durable evidence.
+            format!("stdout:\n{}\n\nstderr:\n{}", failure.stdout, failure.stderr)
+        })
+    });
+    let build_log = transcript
+        .as_deref()
+        .map(|transcript| store_artifact("build-log", transcript))
+        .transpose()?;
+    let status = if exit_code == 0 {
+        RunStatus::Pass
+    } else {
+        RunStatus::Error
+    };
+    let _ = store.finish_run(
+        &run_id,
+        status,
+        Some(serde_json::json!({ "exit_code": exit_code })),
+    );
+    Ok(runner::HomeboyBinaryRefreshArtifacts {
+        run_id,
+        materialization_script,
+        build_log,
+        error_log: None,
+    })
+}
+
+fn persist_refresh_error_artifacts(
+    runner_id: &str,
+    error: &homeboy::core::Error,
+) -> homeboy::core::Result<runner::HomeboyBinaryRefreshArtifacts> {
+    use std::io::Write;
+
+    let store = ObservationStore::open_initialized()?;
+    let run = store.start_run(
+        NewRunRecord::builder("runner_refresh_homeboy")
+            .component_id(runner_id)
+            .command("homeboy runner refresh-homeboy")
+            .current_homeboy_version()
+            .metadata(serde_json::json!({ "outcome": "error" }))
+            .build(),
+    )?;
+    let run_id = run.id;
+    let mut file = tempfile::NamedTempFile::new().map_err(|source| {
+        homeboy::core::Error::internal_io(
+            source.to_string(),
+            Some("create refresh error log".to_string()),
         )
+    })?;
+    let content = serde_json::to_string_pretty(&serde_json::json!({
+        "code": error.code.as_str(),
+        "message": error.message,
+        "details": error.details,
+        "hints": error.hints,
+        "retryable": error.retryable,
+    }))
+    .map_err(|source| {
+        homeboy::core::Error::internal_json(
+            source.to_string(),
+            Some("serialize refresh error".to_string()),
+        )
+    })?;
+    file.write_all(homeboy::core::redaction::redact_string(&content).as_bytes())
+        .map_err(|source| {
+            homeboy::core::Error::internal_io(
+                source.to_string(),
+                Some("write refresh error log".to_string()),
+            )
+        })?;
+    file.as_file().sync_all().map_err(|source| {
+        homeboy::core::Error::internal_io(
+            source.to_string(),
+            Some("sync refresh error log".to_string()),
+        )
+    })?;
+    let artifact_id = format!("error-log-{run_id}");
+    store.record_artifact_with_id(
+        &run_id,
+        "error-log",
+        file.path(),
+        &artifact_id,
+        serde_json::json!({ "schema": "homeboy/runner-refresh-artifact/v1", "redacted": true }),
+    )?;
+    let _ = store.finish_run(&run_id, RunStatus::Error, None);
+    let error_log = format!("homeboy://run/{run_id}/artifact/{artifact_id}");
+    Ok(runner::HomeboyBinaryRefreshArtifacts {
+        run_id,
+        materialization_script: None,
+        build_log: None,
+        error_log: Some(error_log),
     })
 }
 
@@ -1048,79 +1204,186 @@ mod tests {
 
     #[test]
     fn refresh_failure_maps_parent_run_job_evidence_and_recovery_actions() {
-        let output = runner::HomeboyBinaryRefreshOutput {
-            variant: "refresh_homeboy",
-            command: "runner.refresh_homeboy",
-            runner_id: "lab".to_string(),
-            dry_run: false,
-            plan: runner::HomeboyBinaryRefreshPlan {
+        homeboy::test_support::with_isolated_home(|_| {
+            let output = runner::HomeboyBinaryRefreshOutput {
+                variant: "refresh_homeboy",
+                command: "runner.refresh_homeboy",
                 runner_id: "lab".to_string(),
-                mode: "materialize".to_string(),
-                source: None,
-                git_ref: None,
-                target_dir: None,
-                binary_path: "/runner/homeboy".to_string(),
-                script: String::new(),
-                reconnect: false,
+                dry_run: false,
+                plan: runner::HomeboyBinaryRefreshPlan {
+                    runner_id: "lab".to_string(),
+                    mode: "materialize".to_string(),
+                    source: None,
+                    git_ref: None,
+                    target_dir: None,
+                    binary_path: "/runner/homeboy".to_string(),
+                    script: String::new(),
+                    reconnect: false,
+                    followup_commands: Vec::new(),
+                },
+                identity: None,
+                updated_fields: Vec::new(),
+                phase_summary: Vec::new(),
+                daemon_refreshed: false,
+                interrupted_job_ids: Vec::new(),
+                selected_binary_path: "/runner/homeboy".to_string(),
+                next_actions: Vec::new(),
+                reconnect_required: true,
                 followup_commands: Vec::new(),
-            },
-            identity: None,
-            updated_fields: Vec::new(),
-            phase_summary: Vec::new(),
-            daemon_refreshed: false,
-            interrupted_job_ids: Vec::new(),
-            selected_binary_path: "/runner/homeboy".to_string(),
-            next_actions: Vec::new(),
-            reconnect_required: true,
-            followup_commands: Vec::new(),
-            readiness: Some(runner::HomeboyRefreshReadiness {
-                state: runner::HomeboyRefreshReadinessState::Failed,
-                accepting_jobs: false,
-                daemon_fresh: false,
-                owners: Vec::new(),
-                continuation: Some("homeboy runner refresh-homeboy lab --reconnect".to_string()),
-            }),
-            reconnect_deferred: None,
-            failure: Some(runner::HomeboyBinaryRefreshFailure {
-                exit_code: 2,
-                failed_command: vec!["git".to_string()],
-                source: None,
-                git_ref: None,
-                source_sha: None,
-                build_path: "/runner/homeboy".to_string(),
-                stdout: String::new(),
-                stderr: "fatal ancestry failure".to_string(),
-                capture: None,
-                execution_record: None,
-                job_id: Some("job-1".to_string()),
-                mirror_run_id: Some("run-1".to_string()),
-                recovery_actions: vec![
-                    homeboy::core::runner_execution_envelope::RunnerExecutionNextAction {
-                        label: "retry".to_string(),
-                        command: vec!["homeboy".to_string(), "retry".to_string()],
-                    },
-                ],
-                verification: None,
-            }),
-            bootstrap_provenance: None,
-            rollback: None,
-        };
-        let (mapped, exit_code) = map_refresh_homeboy(Ok((output, 2))).expect("mapped output");
-        assert_eq!(exit_code, 2);
-        let value = serde_json::to_value(mapped).expect("JSON envelope");
-        assert_eq!(value["_homeboy_actionable"]["run"]["id"], "run-1");
-        assert_eq!(value["readiness"]["state"], "failed");
-        assert!(!value["readiness"]["accepting_jobs"]
-            .as_bool()
-            .expect("readiness acceptance flag"));
-        assert_eq!(
-            value["_homeboy_actionable"]["refs"]["jobs"][0]["id"],
-            "job-1"
-        );
-        assert!(value["_homeboy_actionable"]["next_actions"]
-            .as_array()
-            .expect("next actions")
-            .iter()
-            .any(|action| action["command"] == "homeboy retry"));
+                readiness: Some(runner::HomeboyRefreshReadiness {
+                    state: runner::HomeboyRefreshReadinessState::Failed,
+                    accepting_jobs: false,
+                    daemon_fresh: false,
+                    owners: Vec::new(),
+                    continuation: Some(
+                        "homeboy runner refresh-homeboy lab --reconnect".to_string(),
+                    ),
+                }),
+                reconnect_deferred: None,
+                failure: Some(runner::HomeboyBinaryRefreshFailure {
+                    exit_code: 2,
+                    failed_command: vec!["git".to_string()],
+                    source: None,
+                    git_ref: None,
+                    source_sha: None,
+                    build_path: "/runner/homeboy".to_string(),
+                    stdout: String::new(),
+                    stderr: "fatal ancestry failure token=super-secret".to_string(),
+                    capture: None,
+                    execution_record: None,
+                    job_id: Some("job-1".to_string()),
+                    mirror_run_id: Some("run-1".to_string()),
+                    recovery_actions: vec![
+                        homeboy::core::runner_execution_envelope::RunnerExecutionNextAction {
+                            label: "retry".to_string(),
+                            command: vec!["homeboy".to_string(), "retry".to_string()],
+                        },
+                    ],
+                    verification: None,
+                }),
+                bootstrap_provenance: None,
+                rollback: None,
+                build_transcript: None,
+                artifacts: None,
+            };
+            let (mapped, exit_code) =
+                map_refresh_homeboy("lab", Ok((output, 2))).expect("mapped output");
+            assert_eq!(exit_code, 2);
+            let value = serde_json::to_value(mapped).expect("JSON envelope");
+            assert_eq!(value["_homeboy_actionable"]["run"]["id"], "run-1");
+            assert_eq!(value["readiness"]["state"], "failed");
+            assert!(!value["readiness"]["accepting_jobs"]
+                .as_bool()
+                .expect("readiness acceptance flag"));
+            assert_eq!(
+                value["_homeboy_actionable"]["refs"]["jobs"][0]["id"],
+                "job-1"
+            );
+            assert!(value["_homeboy_actionable"]["next_actions"]
+                .as_array()
+                .expect("next actions")
+                .iter()
+                .any(|action| action["command"] == "homeboy retry"));
+            let run_id = value["artifacts"]["run_id"]
+                .as_str()
+                .expect("durable run id");
+            let store = homeboy::core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let artifacts = store
+                .list_artifacts_for_runs(&[run_id.to_string()])
+                .expect("durable artifacts");
+            let artifacts = &artifacts[run_id];
+            assert_eq!(artifacts.len(), 2);
+            let build_log = artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "build-log")
+                .expect("build log");
+            let content = std::fs::read_to_string(&build_log.path).expect("build log content");
+            assert!(content.contains("[REDACTED]"));
+            assert!(!content.contains("super-secret"));
+        });
+    }
+
+    #[test]
+    fn refresh_success_persists_the_complete_build_transcript() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let output = runner::HomeboyBinaryRefreshOutput {
+                variant: "refresh_homeboy",
+                command: "runner.refresh_homeboy",
+                runner_id: "lab".to_string(),
+                dry_run: false,
+                plan: runner::HomeboyBinaryRefreshPlan {
+                    runner_id: "lab".to_string(),
+                    mode: "materialize".to_string(),
+                    source: None,
+                    git_ref: None,
+                    target_dir: None,
+                    binary_path: "/runner/homeboy".to_string(),
+                    script: "build script".to_string(),
+                    reconnect: false,
+                    followup_commands: Vec::new(),
+                },
+                identity: None,
+                updated_fields: Vec::new(),
+                phase_summary: Vec::new(),
+                daemon_refreshed: false,
+                interrupted_job_ids: Vec::new(),
+                selected_binary_path: "/runner/homeboy".to_string(),
+                next_actions: Vec::new(),
+                reconnect_required: false,
+                followup_commands: Vec::new(),
+                readiness: None,
+                reconnect_deferred: None,
+                failure: None,
+                bootstrap_provenance: None,
+                rollback: None,
+                build_transcript: Some("stdout:\nbuild complete\n\nstderr:\n".to_string()),
+                artifacts: None,
+            };
+            let (mapped, exit_code) =
+                map_refresh_homeboy("lab", Ok((output, 0))).expect("mapped output");
+            assert_eq!(exit_code, 0);
+            let value = serde_json::to_value(mapped).expect("JSON envelope");
+            let run_id = value["artifacts"]["run_id"]
+                .as_str()
+                .expect("durable run id");
+            let store = homeboy::core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let artifacts = store
+                .list_artifacts_for_runs(&[run_id.to_string()])
+                .expect("durable artifacts");
+            let build_log = artifacts[run_id]
+                .iter()
+                .find(|artifact| artifact.kind == "build-log")
+                .expect("build log");
+            assert_eq!(
+                std::fs::read_to_string(&build_log.path).expect("build log content"),
+                "stdout:\nbuild complete\n\nstderr:\n"
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_error_persists_a_durable_error_artifact() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let error = homeboy::core::Error::validation_invalid_argument(
+                "target_dir",
+                "invalid refresh plan",
+                None,
+                None,
+            );
+            let error = map_refresh_homeboy("lab", Err(error)).expect_err("refresh error");
+            let run_id = error.details["artifacts"]["run_id"]
+                .as_str()
+                .expect("durable run id");
+            let store = homeboy::core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let artifacts = store
+                .list_artifacts_for_runs(&[run_id.to_string()])
+                .expect("durable artifacts");
+            assert!(artifacts[run_id]
+                .iter()
+                .any(|artifact| artifact.kind == "error-log"));
+        });
     }
 }
