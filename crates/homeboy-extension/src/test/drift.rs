@@ -781,6 +781,52 @@ fn collect_test_files(root: &Path, test_patterns: &[String]) -> Vec<PathBuf> {
 }
 
 /// Scan test files for references to changed production symbols.
+/// How a drift symbol is matched inside test sources.
+///
+/// A symbol is only a useful drift signal when it is matched the way it was
+/// extracted. `STRING_RE` harvests *every* single-quoted lowercase word in a
+/// diff, so in PHP ordinary array keys and English words become "symbols".
+/// Matching those as raw substrings selected 161 of 480 test files for a
+/// three-file change, with zero methods and zero classes among them: the whole
+/// selection came from `version`, `unknown`, `available`, and `abilities`
+/// appearing somewhere inside unrelated identifiers. (#12392)
+enum SymbolMatch {
+    /// String literals are matched as literals, quotes included, because that
+    /// is the form they were extracted from. `'version'` no longer matches
+    /// `php_version`, `version_compare`, or `$versioned`.
+    QuotedLiteral([String; 2]),
+    /// Identifiers are matched on word boundaries, so a short method name is
+    /// not found inside a longer unrelated one.
+    Identifier(Regex),
+    /// Paths carry their own separators and are specific enough verbatim.
+    Verbatim(String),
+}
+
+impl SymbolMatch {
+    fn for_change(change: &ProductionChange) -> Option<Self> {
+        let symbol = &change.old_symbol;
+        match change.change_type {
+            // Both of these are harvested by STRING_RE from quoted literals.
+            ChangeType::ErrorCodeChange | ChangeType::StringChange => Some(Self::QuotedLiteral([
+                format!("'{symbol}'"),
+                format!("\"{symbol}\""),
+            ])),
+            ChangeType::FileMove => Some(Self::Verbatim(symbol.clone())),
+            _ => Regex::new(&format!(r"\b{}\b", regex::escape(symbol)))
+                .ok()
+                .map(Self::Identifier),
+        }
+    }
+
+    fn matches(&self, line: &str) -> bool {
+        match self {
+            Self::QuotedLiteral(forms) => forms.iter().any(|form| line.contains(form)),
+            Self::Identifier(pattern) => pattern.is_match(line),
+            Self::Verbatim(symbol) => line.contains(symbol),
+        }
+    }
+}
+
 fn find_drift_references(
     changes: &[ProductionChange],
     test_files: &[PathBuf],
@@ -788,28 +834,35 @@ fn find_drift_references(
 ) -> Vec<DriftedTest> {
     let mut drifted = Vec::new();
 
+    // Read each test file once instead of once per change. The previous shape
+    // re-read the whole suite for every symbol, which for the case above was
+    // 8 symbols x 480 files of redundant IO.
+    let sources: Vec<(String, String)> = test_files
+        .iter()
+        .filter_map(|test_file| {
+            let content = std::fs::read_to_string(test_file).ok()?;
+            let relative = test_file
+                .strip_prefix(root)
+                .unwrap_or(test_file)
+                .to_string_lossy()
+                .to_string();
+            Some((relative, content))
+        })
+        .collect();
+
     for (ci, change) in changes.iter().enumerate() {
         // Skip changes with very short symbols (likely false positives)
         if change.old_symbol.len() < 3 {
             continue;
         }
 
-        // Build search pattern for the old symbol
-        let search = &change.old_symbol;
+        let Some(matcher) = SymbolMatch::for_change(change) else {
+            continue;
+        };
 
-        for test_file in test_files {
-            let Ok(content) = std::fs::read_to_string(test_file) else {
-                continue;
-            };
-
-            let relative = test_file
-                .strip_prefix(root)
-                .unwrap_or(test_file)
-                .to_string_lossy()
-                .to_string();
-
+        for (relative, content) in &sources {
             for (i, line) in content.lines().enumerate() {
-                if line.contains(search) {
+                if matcher.matches(line) {
                     // Skip if it's a comment-only line
                     let trimmed = line.trim();
                     if trimmed.starts_with("//")
@@ -1313,6 +1366,152 @@ mod tests {
         let test_files = vec![tests_dir.join("FooTest.php")];
         let drifted = find_drift_references(&changes, &test_files, root);
         assert!(drifted.is_empty()); // Skipped because symbol < 3 chars
+    }
+
+    /// The defect behind #12392: STRING_RE harvests every single-quoted
+    /// lowercase word from a diff, so ordinary PHP array keys become drift
+    /// "symbols". Matching them as raw substrings made `'version'` drift every
+    /// test mentioning `php_version`, `wp_version`, or `version_compare` --
+    /// 161 of 480 test files for a three-file change, none from a method or a
+    /// class. A string literal must be matched as a string literal.
+    #[test]
+    fn string_literal_drift_does_not_match_words_inside_other_identifiers() {
+        let changes = vec![ProductionChange {
+            change_type: ChangeType::ErrorCodeChange,
+            file: "inc/Bootstrap/DependencyChecker.php".into(),
+            old_symbol: "version".into(),
+            new_symbol: Some("php_version".into()),
+            line: 10,
+        }];
+
+        let test_content = r#"<?php
+class FooTest extends TestCase {
+    public function testUnrelated() {
+        $this->assertSame('8.2', $report['php_version']);
+        $this->assertTrue(version_compare($wp_version, '6.0', '>='));
+    }
+    public function testTheActualKey() {
+        $this->assertArrayHasKey('version', $payload);
+    }
+}
+"#;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let tests_dir = root.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(tests_dir.join("FooTest.php"), test_content).unwrap();
+
+        let test_files = vec![tests_dir.join("FooTest.php")];
+        let drifted = find_drift_references(&changes, &test_files, root);
+
+        assert_eq!(
+            drifted.len(),
+            1,
+            "only the literal 'version' key should drift, got {:?}",
+            drifted.iter().map(|d| &d.content).collect::<Vec<_>>()
+        );
+        assert!(drifted[0].content.contains("assertArrayHasKey('version'"));
+    }
+
+    /// The same literal referenced with double quotes is still the same
+    /// literal, so both quoting styles count.
+    #[test]
+    fn string_literal_drift_matches_either_quoting_style() {
+        let changes = vec![ProductionChange {
+            change_type: ChangeType::StringChange,
+            file: "inc/Abilities/SystemAbilities.php".into(),
+            old_symbol: "rest_status".into(),
+            new_symbol: Some("status".into()),
+            line: 4,
+        }];
+
+        let test_content = "<?php
+$a = $r['rest_status'];
+$b = $r[\"rest_status\"];
+$c = $r['prefixed_rest_status_suffix'];
+";
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let tests_dir = root.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(tests_dir.join("BarTest.php"), test_content).unwrap();
+
+        let test_files = vec![tests_dir.join("BarTest.php")];
+        let drifted = find_drift_references(&changes, &test_files, root);
+
+        assert_eq!(
+            drifted.len(),
+            2,
+            "both quoting styles drift, the embedded one does not: {drifted:?}"
+        );
+        assert_eq!(drifted[0].line, 2);
+        assert_eq!(drifted[1].line, 3);
+    }
+
+    /// Identifier symbols keep matching, but on word boundaries, so a short
+    /// method name is not found inside a longer unrelated one.
+    #[test]
+    fn identifier_drift_matches_on_word_boundaries() {
+        let changes = vec![ProductionChange {
+            change_type: ChangeType::MethodRemoved,
+            file: "src/Foo.php".into(),
+            old_symbol: "runFlow".into(),
+            new_symbol: None,
+            line: 10,
+        }];
+
+        let test_content = "<?php
+$this->runFlow(1);
+$this->runFlowBatchInParallel(2);
+";
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let tests_dir = root.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(tests_dir.join("BazTest.php"), test_content).unwrap();
+
+        let test_files = vec![tests_dir.join("BazTest.php")];
+        let drifted = find_drift_references(&changes, &test_files, root);
+
+        assert_eq!(
+            drifted.len(),
+            1,
+            "runFlowBatchInParallel is a different symbol: {drifted:?}"
+        );
+        assert_eq!(drifted[0].line, 2);
+    }
+
+    /// A moved file is matched verbatim: paths carry their own separators and
+    /// word boundaries would split them.
+    #[test]
+    fn file_move_drift_matches_the_path_verbatim() {
+        let changes = vec![ProductionChange {
+            change_type: ChangeType::FileMove,
+            file: "inc/New/Home.php".into(),
+            old_symbol: "inc/Old/Home.php".into(),
+            new_symbol: Some("inc/New/Home.php".into()),
+            line: 0,
+        }];
+
+        let test_content = "<?php
+require_once __DIR__ . '/../inc/Old/Home.php';
+$x = 1;
+";
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let tests_dir = root.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(tests_dir.join("QuxTest.php"), test_content).unwrap();
+
+        let test_files = vec![tests_dir.join("QuxTest.php")];
+        let drifted = find_drift_references(&changes, &test_files, root);
+
+        assert_eq!(drifted.len(), 1);
+        assert_eq!(drifted[0].line, 2);
     }
 
     #[test]
