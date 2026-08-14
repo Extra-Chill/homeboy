@@ -172,16 +172,17 @@ function configuredSecretValues() {
     .map(([, value]) => value)
     .sort((left, right) => right.length - left.length);
 }
+function redactSecrets(text, secretValues = configuredSecretValues()) {
+  for (const secret of secretValues) {
+    text = text.replaceAll(secret, '[REDACTED]');
+  }
+  return text;
+}
 function createLineRedactor(secretValues) {
   const decoder = new StringDecoder('utf8');
   let pending = '';
   const overlap = Math.max(0, ...secretValues.map((secret) => secret.length - 1));
-  const redact = (text) => {
-    for (const secret of secretValues) {
-      text = text.replaceAll(secret, '[REDACTED]');
-    }
-    return text;
-  };
+  const redact = (text) => redactSecrets(text, secretValues);
   return {
     write(chunk) {
       pending += decoder.write(chunk);
@@ -945,14 +946,14 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
 
   const stdout = await readFile(execution.stdoutPath, 'utf8');
   const stderr = await readFile(execution.stderrPath, 'utf8');
+  let preservedOutput = '';
+  try { preservedOutput = await readFile(phpunitOutputPath, 'utf8'); } catch {}
   // The recipe-run JSON payload carries the step ledger the raw log concatenation
   // discards. Preserve it as first-class structured evidence so a run that never
   // reaches the PHPUnit step still names the stage that stopped it.
   const recipeRun = parseRecipeRunPayload(stdout);
   const recipeRunSteps = buildRecipeRunStepsLedger(recipeRun);
   await writeFile(recipeRunStepsPath, `${JSON.stringify(recipeRunSteps, null, 2)}\n`);
-  const output = extractPhpunitOutput(stdout, stderr, recipeRun);
-  await writeFile(phpunitOutputPath, output);
   if (managedRuntimeServices.length > 0) {
     await writeFile(managedRuntimeServicesPath, `${JSON.stringify(managedRuntimeServices, null, 2)}\n`);
   }
@@ -966,16 +967,26 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     .map((line) => line.trim())
     .find((line) => /^(STAGE_FAIL|STAGE_FATAL|STAGE_DIE):/.test(line)) || '';
 
-  const aggregate = phpunitAggregate(output);
   let results;
   try { results = json(await readFile(testResultsPath, 'utf8'), null); } catch { results = null; }
   const validResults = validTestResults(results);
+  const structuredExecution = validResults && results.summary.total > 0 && !stageFailure;
+  const preservedAggregate = phpunitAggregate(preservedOutput);
+  const preservedOutputReferenced = validResults && Array.isArray(results.rawLogReferences) && results.rawLogReferences.some((reference) => reference?.path === 'files/phpunit-output.log' && reference?.kind === 'phpunit-output');
+  const preservedOutputMatches = structuredExecution && preservedOutputReferenced && preservedAggregate?.total === results.summary.total && preservedAggregate.failed === results.summary.failed;
+  const output = redactSecrets( structuredExecution
+    ? ((preservedOutputMatches && preservedOutput) || stageLog || structuredPhpunitOutputUnavailable(results, recipeRun))
+    : extractPhpunitOutput(stdout, stderr, recipeRun) );
+  await writeFile(phpunitOutputPath, output);
+  const aggregate = phpunitAggregate(output);
   if (!validResults) {
     results = { schema: 'wp-codebox/test-results/v1', status: 'unknown', summary: aggregate || emptyTestSummary(), suites: [], rawLogReferences: [] };
   }
   if (results && typeof results === 'object') {
     const summary = isObject(results.summary) ? results.summary : {};
-    if (aggregate) {
+    if (stageFailure) {
+      results.summary = emptyTestSummary();
+    } else if (aggregate) {
       results.summary = { ...summary, ...aggregate };
     }
     results.status = stageFailure ? 'failed' : normalizedTestStatus(results, aggregate, execution.status, validResults);
@@ -1067,7 +1078,6 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
     if (executed > 0) {
       return { cause: 'tests_executed', detail: `PHPUnit executed ${executed} test(s).`, remediation: 'No execution diagnosis is required.' };
     }
-    const failedRecipeStep = (recipeRunSteps?.executions || []).find((step) => Number.isInteger(step.exit_code) && step.exit_code !== 0);
     if (recipeRunSteps?.parse_status === 'unparseable') {
       return {
         cause: 'recipe_run_payload_unparseable',
@@ -1082,6 +1092,7 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
         remediation: 'Inspect artifact://files/recipe-run-steps.json and logs/recipe-run.stderr.log for why the recipe dispatched no steps.',
       };
     }
+    const failedRecipeStep = (recipeRunSteps?.executions || []).find((step) => Number.isInteger(step.exit_code) && step.exit_code !== 0);
     if (failedRecipeStep) {
       return {
         cause: 'recipe_step_failed',
@@ -1290,6 +1301,20 @@ function noPhpunitExecutionBanner(recipeRun) {
     'Test execution never started; the setup output below is retained for the record.',
     'Structured step ledger: artifact://files/recipe-run-steps.json',
     ...steps,
+    '============================================================',
+    '',
+  ].join('\n');
+}
+function structuredPhpunitOutputUnavailable(results, recipeRun) {
+  const summary = results.summary;
+  const setupOutput = recipeRun.executions.flatMap((execution) => [execution?.stdout, execution?.stderr]).filter((value) => typeof value === 'string' && value !== '').join('');
+  if (setupOutput) {
+    return setupOutput;
+  }
+  return [
+    '============================================================',
+    'WP_CODEBOX_PHPUNIT_OUTPUT: UNAVAILABLE',
+    `Structured results report ${summary.total} test(s), ${summary.failed} failed, but no raw PHPUnit output artifact was retained.`,
     '============================================================',
     '',
   ].join('\n');
