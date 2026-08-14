@@ -14,7 +14,7 @@ use crate::agent_task_dependency_graph::{
 };
 use crate::agent_task_lifecycle::{self, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
-use homeboy_core::{paths, Error, Result};
+use homeboy_core::{paths, Error, ErrorCode, Result};
 
 mod types;
 
@@ -447,6 +447,7 @@ where
         return Ok(AgentTaskBatchStatusReport {
             schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
             status: "failed".to_string(),
+            observation_fresh: true,
             totals: totals_for_children(&batch.child_runs),
             batch,
             unavailable_child_runs: Vec::new(),
@@ -544,6 +545,7 @@ where
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
         status: state.outcome_status().to_string(),
+        observation_fresh: unavailable_child_runs.is_empty(),
         dependency_graph,
         next_actions,
         commands,
@@ -566,7 +568,7 @@ pub fn fanout_dependency_graph_with_finalization_statuses(
     refresh_dependency_graph_with_finalization_statuses(
         &mut batch,
         Some(statuses),
-        &mut agent_task_lifecycle::status,
+        &mut agent_task_lifecycle::persisted_status,
     )
 }
 
@@ -628,19 +630,25 @@ where
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     let mut states = BTreeMap::new();
     for child in &batch.child_runs {
-        let finalization_status = finalization_statuses
-            .and_then(|statuses| statuses.get(&child.task_id).cloned())
-            .or_else(|| {
-                child_status(&child.run_id)
-                    .ok()
-                    .and_then(|record| record.metadata.get("cook_finalization").cloned())
-                    .and_then(|value| {
-                        value
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-            });
+        let finalization_status = if let Some(status) =
+            finalization_statuses.and_then(|statuses| statuses.get(&child.task_id).cloned())
+        {
+            Some(status)
+        } else {
+            match child_status(&child.run_id) {
+                Ok(record) => record
+                    .metadata
+                    .get("cook_finalization")
+                    .and_then(|value| value.get("status"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                // A status projection has already retained the batch's last
+                // durable child state; a transient read lock must not turn a
+                // graph refresh into a user-visible status failure.
+                Err(error) if error.code == ErrorCode::ObservationStoreBusy => None,
+                Err(error) => return Err(error),
+            }
+        };
         let has_finalization = finalization_status.is_some();
         let mut state = match child.state {
             AgentTaskRunState::Failed => AgentTaskDependencyState::Failed,
@@ -1367,6 +1375,7 @@ mod tests {
         AgentTaskExecutionContext, AgentTaskExecutorAdapter,
     };
     use std::collections::HashMap;
+    use std::sync::{Arc, Barrier};
 
     fn batch_store() -> (tempfile::TempDir, AgentTaskBatchStore) {
         let temp = tempfile::tempdir().expect("temporary batch data root");
@@ -1949,6 +1958,68 @@ mod tests {
                 .updated_at,
             before.updated_at
         );
+    }
+
+    #[test]
+    fn fanout_status_retains_durable_state_while_observation_writers_contend() {
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
+        let plan = AgentTaskPlan::new(
+            "fanout/contended-status",
+            vec![request("a"), request("b"), request("c")],
+        );
+        let batch = submit_batch(
+            &batch_store,
+            &lifecycle_store,
+            &plan,
+            "batch/contended-status",
+        );
+        let database = lifecycle_store.observation_db_path();
+        let barrier = Arc::new(Barrier::new(batch.child_runs.len() + 1));
+        let writers = batch
+            .child_runs
+            .iter()
+            .enumerate()
+            .map(|(writer, child)| {
+                let barrier = Arc::clone(&barrier);
+                let database = database.clone();
+                let run_id = child.run_id.clone();
+                std::thread::spawn(move || {
+                    let store =
+                        homeboy_core::observation::ObservationStore::open_initialized_at(database)
+                            .expect("open contending writer");
+                    let metadata = store
+                        .get_run(&run_id)
+                        .expect("read writer record")
+                        .expect("writer record exists")
+                        .metadata_json;
+                    barrier.wait();
+                    for sequence in 0..50 {
+                        let mut metadata = metadata.clone();
+                        metadata["contention"] = json!({ "writer": writer, "sequence": sequence });
+                        store
+                            .update_run_metadata(&run_id, metadata)
+                            .expect("bounded observation writer completes");
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        for _ in 0..100 {
+            let report = batch_store
+                .status_with(
+                    "batch/contended-status",
+                    |run_id| lifecycle_store.read_record_bounded(run_id),
+                    |_| Ok(None),
+                )
+                .expect("fanout status remains available during writes");
+            assert_eq!(report.batch.state, AgentTaskBatchState::Queued);
+            assert_eq!(report.totals.queued, 3);
+            assert!(report.observation_fresh);
+        }
+        for writer in writers {
+            writer.join().expect("contending writer joined");
+        }
     }
 
     #[test]

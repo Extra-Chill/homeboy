@@ -73,6 +73,9 @@ pub struct AgentTaskBatchStatusReport {
     pub schema: &'static str,
     /// Additive top-level projection of `batch.state` for command envelopes.
     pub status: String,
+    /// Whether every child lifecycle observation was available for this status
+    /// projection. `batch` remains the durable orchestration state when false.
+    pub observation_fresh: bool,
     pub batch: AgentTaskBatchRecord,
     pub totals: AgentTaskBatchTotals,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

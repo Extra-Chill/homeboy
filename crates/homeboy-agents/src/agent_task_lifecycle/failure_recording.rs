@@ -1047,7 +1047,27 @@ pub(crate) fn terminal_artifact_projection_is_verified(
 /// recovery behavior.
 pub fn terminal_artifact_projection_readiness(run_id: &str) -> Result<Option<String>> {
     let record = store::read_record(&super::sanitize_run_id(run_id))?;
-    let Ok(aggregate) = store::read_aggregate(&record.run_id) else {
+    terminal_artifact_projection_readiness_for_record(
+        &record,
+        store::read_aggregate(&record.run_id),
+    )
+}
+
+/// Bounded read-only counterpart used by fanout status while coordinators are
+/// writing observations. It intentionally leaves reconciliation to `resume`.
+pub fn terminal_artifact_projection_readiness_bounded(run_id: &str) -> Result<Option<String>> {
+    let record = store::read_record_bounded(&super::sanitize_run_id(run_id))?;
+    terminal_artifact_projection_readiness_for_record(
+        &record,
+        store::read_aggregate_bounded(&record.run_id),
+    )
+}
+
+fn terminal_artifact_projection_readiness_for_record(
+    record: &AgentTaskRunRecord,
+    aggregate: Result<AgentTaskAggregate>,
+) -> Result<Option<String>> {
+    let Ok(aggregate) = aggregate else {
         return Ok(None);
     };
     if terminal_artifact_projection_is_verified(&record, &aggregate)? {

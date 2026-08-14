@@ -258,8 +258,17 @@ fn reconcile_fanout_pr_states(batch_id: &str, mutate: bool) -> Result<BTreeMap<S
     let mut resolutions = Vec::new();
     let mut statuses = BTreeMap::new();
     for child in batch.child_runs {
-        let Ok(record) = agent_task_lifecycle::status(&child.run_id) else {
-            continue;
+        let record = if mutate {
+            agent_task_lifecycle::status(&child.run_id)?
+        } else {
+            match agent_task_lifecycle::persisted_status(&child.run_id) {
+                Ok(record) => record,
+                // The batch report retains the last durable child state and
+                // marks observation freshness separately below. A transient
+                // projection lock must not make status itself unavailable.
+                Err(error) if error.code == ErrorCode::ObservationStoreBusy => continue,
+                Err(error) => return Err(error),
+            }
         };
         let Some(mut finalization) = record.metadata.get("cook_finalization").cloned() else {
             continue;
