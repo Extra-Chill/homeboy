@@ -17,6 +17,7 @@ HOMEBOY_CI_RESULTS_DIR="${TMP_DIR}/results" \
 HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TMP_DIR}/phases.jsonl" \
 HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS=1 \
 HOMEBOY_ACTION_PHASE_BUDGET_SECONDS=1 \
+HOMEBOY_ACTION_PHASE_ANNOTATIONS=verbose \
 bash "${PROGRESS}" run command_execution -- bash -c 'sleep 2' >"${TMP_DIR}/run.log" 2>&1
 exit_code=$?
 set -e
@@ -51,4 +52,22 @@ if ! grep -q 'Three slowest phases' "${TMP_DIR}/summary"; then
   printf 'FAIL: phase summary does not report the slowest phases\n'
   exit 1
 fi
-printf 'PASS: delayed phase emits live progress before terminal timing evidence\n'
+
+HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TMP_DIR}/bounded-phases.jsonl" \
+bash "${PROGRESS}" run command_execution -- bash -c 'exit 1' >"${TMP_DIR}/bounded.log" 2>&1 || true
+HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TMP_DIR}/bounded-phases.jsonl" \
+bash "${PROGRESS}" run command_execution -- bash -c 'exit 1' >>"${TMP_DIR}/bounded.log" 2>&1 || true
+
+if [ "$(grep -c '^::error title=Homeboy phase failed \[command_execution\]::' "${TMP_DIR}/bounded.log")" -ne 1 ]; then
+  printf 'FAIL: repeated failed phase did not emit exactly one stable terminal annotation\n'
+  exit 1
+fi
+if grep -q '^::\(notice\|warning\)' "${TMP_DIR}/bounded.log"; then
+  printf 'FAIL: bounded mode emitted lifecycle progress annotations\n'
+  exit 1
+fi
+if [ "$(jq -s '[.[] | select(.phase == "command_execution" and .status == "failed")] | length' "${TMP_DIR}/bounded-phases.jsonl")" -ne 2 ]; then
+  printf 'FAIL: bounded mode did not retain complete failed phase progress\n'
+  exit 1
+fi
+printf 'PASS: phase progress preserves verbose diagnostics and bounds default annotations\n'
