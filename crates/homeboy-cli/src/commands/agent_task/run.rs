@@ -832,6 +832,28 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     }
 
     let config = defaults::load_config();
+    // A command provider's answer is external, bounded, and retryable. Preserve
+    // the complete creation intent in the Cook plan and resolve it only after
+    // Cook has materialized its durable recipe/run identity.
+    if config.worktree_providers.values().any(|provider| {
+        provider.enabled
+            && provider.apply_enabled
+            && (provider.commands.resolve_identity.is_some()
+                || provider.commands.resolve.is_some()
+                || provider.commands.list.is_some())
+    }) {
+        return Ok(serde_json::json!({
+            "action": "lookup_pending",
+            "kind": "provider",
+            "handle": to_worktree,
+            "provision_intent": {
+                "repo": args.dispatch.repo,
+                "base": args.base,
+                "head": args.head,
+                "task_url": args.dispatch.task_url,
+            },
+        }));
+    }
     match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(to_worktree, &config) {
         Ok(identity) => {
             homeboy::core::worktree_providers::validate_task_worktree_root(

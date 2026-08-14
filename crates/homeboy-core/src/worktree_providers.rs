@@ -1,5 +1,8 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -55,14 +58,41 @@ const PROVIDER_CLEANUP_HEARTBEAT: Duration = Duration::from_secs(5);
 const PROVIDER_CLEANUP_HEARTBEAT: Duration = Duration::from_millis(100);
 const PROVIDER_CLEANUP_OUTPUT_LIMIT: usize = 64 * 1024;
 #[cfg(not(test))]
-const PROVIDER_ENSURE_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(test)]
-const PROVIDER_ENSURE_TIMEOUT: Duration = Duration::from_secs(3);
-const PROVIDER_LOOKUP_OUTPUT_LIMIT: usize = 64 * 1024;
-#[cfg(not(test))]
 const PROVIDER_LOOKUP_HEARTBEAT: Duration = Duration::from_millis(100);
 #[cfg(test)]
 const PROVIDER_LOOKUP_HEARTBEAT: Duration = Duration::from_millis(1);
+
+/// Cancellation is scoped to the controller thread issuing provider commands.
+/// This keeps provider supervision generic while letting a durable owner stop
+/// an isolated process group when its own lifecycle is cancelled.
+#[derive(Clone, Default)]
+pub struct WorktreeProviderCommandControl(Arc<AtomicBool>);
+
+impl WorktreeProviderCommandControl {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+thread_local! {
+    static PROVIDER_COMMAND_CONTROL: RefCell<Option<WorktreeProviderCommandControl>> = const { RefCell::new(None) };
+}
+
+pub fn with_worktree_provider_command_control<T>(
+    control: WorktreeProviderCommandControl,
+    run: impl FnOnce() -> T,
+) -> T {
+    PROVIDER_COMMAND_CONTROL.with(|active| {
+        let previous = active.replace(Some(control));
+        let result = run();
+        active.replace(previous);
+        result
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct WorktreeProviderCleanupOptions {
@@ -452,6 +482,18 @@ pub fn resolve_apply_enabled_worktree_provider_by_id_from_config(
             None,
         );
         error.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
+        let command = provider
+            .commands
+            .resolve
+            .as_ref()
+            .or(provider.commands.list.as_ref())
+            .expect("provider resolve or list command was selected");
+        let operation = if provider.commands.resolve.is_some() {
+            "resolve"
+        } else {
+            "list"
+        };
+        annotate_provider_lookup_error(&mut error, provider_id, command, operation, "not_found");
         error
     })?;
     validate_provider_handle(provider_id, &worktree, None, None)?;
@@ -1046,6 +1088,7 @@ fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
                 })?;
                 run_provider_ensure_command(
                     &resolution.provider_id,
+                    provider,
                     &expand_lifecycle_ensure_command(
                         command,
                         intent,
@@ -1148,7 +1191,7 @@ fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
             Some(vec![format!("Create it with: {rendered_command}")]),
         ));
     }
-    run_provider_ensure_command(provider_id, &command)?;
+    run_provider_ensure_command(provider_id, provider, &command)?;
     let resolution =
         resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None)
             .map_err(mark_bootstrap_postcondition_failure)?;
@@ -1236,7 +1279,7 @@ pub fn finalize_apply_enabled_worktree_provider_from_config(
                 .replace("{lifecycle_state}", disposition.lifecycle_state())
         })
         .collect::<Vec<_>>();
-    run_provider_ensure_command(&resolution.provider_id, &command)?;
+    run_provider_mutation_command(&resolution.provider_id, provider, &command, "finalize")?;
     Ok(WorktreeProviderFinalization {
         provider_id: resolution.provider_id.clone(),
         handle: resolution.worktree.handle.clone(),
@@ -1336,82 +1379,84 @@ fn render_provider_command(command: &[String]) -> String {
         .join(" ")
 }
 
-fn run_provider_ensure_command(provider_id: &str, command: &[String]) -> Result<()> {
+fn run_provider_ensure_command(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+) -> Result<()> {
+    run_provider_mutation_command(provider_id, provider, command, "ensure")
+}
+
+fn run_provider_mutation_command(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+    operation: &str,
+) -> Result<()> {
     if let Some(argument) = command.iter().find(|argument| argument.contains('{')) {
-        return Err(Error::validation_invalid_argument(
+        return Err(provider_lookup_error(
+            provider_id,
+            command,
+            operation,
+            "command",
             "worktree_providers.commands",
             format!(
                 "worktree provider `{provider_id}` command contains an unresolved placeholder: {argument}"
             ),
-            Some(provider_id.to_string()),
-            None,
+            false,
         ));
     }
-    let Some((program, args)) = command
-        .split_first()
-        .filter(|(program, _)| !program.trim().is_empty())
-    else {
-        return Err(Error::validation_invalid_argument(
-            "worktree_providers.commands.ensure",
-            format!("worktree provider `{provider_id}` ensure command must include an executable"),
-            Some(provider_id.to_string()),
-            None,
-        ));
-    };
-    let mut process = Command::new(program);
-    process
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::engine::command::isolate_process_tree(&mut process);
-    let mut child = process.spawn().map_err(|error| {
-        Error::validation_invalid_argument(
-            "to_worktree",
-            format!("worktree provider `{provider_id}` ensure command could not start: {error}"),
-            Some(provider_id.to_string()),
-            None,
-        )
-    })?;
-    let output = crate::engine::command::wait_with_bounded_output_supervised(
-        &mut child,
-        PROVIDER_LOOKUP_OUTPUT_LIMIT,
-        PROVIDER_ENSURE_TIMEOUT,
-        Duration::from_millis(100),
-        || false,
-        |_, _| Ok(()),
-    )
-    .map_err(|error| {
-        Error::validation_invalid_argument(
-            "to_worktree",
-            format!(
-                "worktree provider `{provider_id}` ensure command could not be supervised: {error}"
-            ),
-            Some(provider_id.to_string()),
-            None,
-        )
-    })?;
+    let timeout = provider_mutation_timeout(provider)?;
+    let output_limit = provider_lookup_output_limit(provider)?;
+    let supervised = run_bounded_provider_lookup_command(
+        provider_id,
+        command,
+        operation,
+        timeout,
+        output_limit,
+    )?;
+    let elapsed_ms = supervised.elapsed_ms;
+    let output = supervised.output;
     if output.termination != crate::engine::command::SupervisedCommandTermination::Completed {
-        return Err(Error::validation_invalid_argument(
+        let classification = match output.termination {
+            crate::engine::command::SupervisedCommandTermination::Cancelled => "cancelled",
+            crate::engine::command::SupervisedCommandTermination::TimedOut
+            | crate::engine::command::SupervisedCommandTermination::NoProgress => "timeout",
+            crate::engine::command::SupervisedCommandTermination::Completed => unreachable!(),
+        };
+        return Err(provider_lookup_error(
+            provider_id,
+            command,
+                operation,
+            classification,
             "to_worktree",
             format!(
-                "worktree provider `{provider_id}` ensure command timed out after {} ms",
-                PROVIDER_ENSURE_TIMEOUT.as_millis()
+                "worktree provider `{provider_id}` {operation} command {classification} after {elapsed_ms} ms (configured provider budget: {} ms)",
+                timeout.as_millis()
             ),
-            Some(provider_id.to_string()),
-            Some(vec![
-                "Refresh or repair the configured workspace provider, then retry the operation."
-                    .to_string(),
-            ]),
+            classification == "timeout" || classification == "cancelled",
         ));
     }
-    let output = output.output.into_output();
+    let output = output.output;
+    if output.capture.stdout.truncated || output.capture.stderr.truncated {
+        return Err(provider_lookup_error(
+            provider_id,
+            command,
+            operation,
+            "malformed",
+            "to_worktree",
+            format!("worktree provider `{provider_id}` {operation} command output exceeded configured lookup_output_limit_bytes"),
+            false,
+        ));
+    }
+    let output = output.into_output();
     if output.status.success() {
         return Ok(());
     }
-    Err(Error::validation_invalid_argument_with_evidence(
+    let mut error = Error::validation_invalid_argument_with_evidence(
         "to_worktree",
         format!(
-            "worktree provider `{provider_id}` ensure command failed with {}",
+            "worktree provider `{provider_id}` {operation} command failed with {}",
             output
                 .status
                 .code()
@@ -1421,7 +1466,9 @@ fn run_provider_ensure_command(provider_id: &str, command: &[String]) -> Result<
         Some(provider_id.to_string()),
         None,
         Some(provider_command_evidence(command, &output)),
-    ))
+    );
+    annotate_provider_lookup_error(&mut error, provider_id, command, operation, "command");
+    Err(error)
 }
 
 fn resolve_worktree_provider_with_policy_from_config(
@@ -1522,6 +1569,9 @@ fn resolve_worktree_provider_with_policy_from_config(
         ]),
     );
     error.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
+    error.details["worktree_provider_call_classification"] = Value::String("not_found".to_string());
+    error.details["worktree_provider_phase"] =
+        Value::String("worktree_provider_lookup".to_string());
     Err(error)
 }
 
@@ -1559,14 +1609,41 @@ fn run_provider_identity_command(
     if split_identity_not_owned(&payload) {
         return Ok(None);
     }
-    let identity: WorktreeProviderExactIdentity = serde_json::from_value(payload).map_err(|error| Error::validation_invalid_argument("worktree_providers.commands.resolve_identity", format!("worktree provider `{provider_id}` returned an invalid identity envelope: {error}"), Some(provider_id.to_string()), None))?;
+    let identity: WorktreeProviderExactIdentity = serde_json::from_value(payload).map_err(|error| {
+        provider_lookup_error(
+            provider_id,
+            &command,
+            "resolve_identity",
+            "malformed",
+            "worktree_providers.commands.resolve_identity",
+            format!("worktree provider `{provider_id}` returned an invalid identity envelope: {error}"),
+            false,
+        )
+    })?;
     if identity.schema != "homeboy/worktree-provider-identity/v1"
         || identity.provider_id != provider_id
         || identity.token.trim().is_empty()
     {
-        return Err(Error::validation_invalid_argument("worktree_providers.commands.resolve_identity", format!("worktree provider `{provider_id}` returned an unsupported or incomplete identity envelope"), Some(provider_id.to_string()), None));
+        return Err(provider_lookup_error(
+            provider_id,
+            &command,
+            "resolve_identity",
+            "malformed",
+            "worktree_providers.commands.resolve_identity",
+            format!("worktree provider `{provider_id}` returned an unsupported or incomplete identity envelope"),
+            false,
+        ));
     }
-    validate_split_identity(provider_id, handle, &identity)?;
+    validate_split_identity(provider_id, handle, &identity).map_err(|mut error| {
+        annotate_provider_lookup_error(
+            &mut error,
+            provider_id,
+            &command,
+            "resolve_identity",
+            "malformed",
+        );
+        error
+    })?;
     Ok(Some(WorktreeProviderExactIdentity {
         latency_ms,
         budget_ms,
@@ -1655,12 +1732,30 @@ fn run_provider_safety_command(
         .collect::<Vec<_>>();
     let (payload, latency_ms, budget_ms) =
         run_provider_split_command(provider_id, provider, &command, "attest_safety")?;
-    let safety: WorktreeProviderSafetyAttestation = serde_json::from_value(payload).map_err(|error| Error::validation_invalid_argument("worktree_providers.commands.attest_safety", format!("worktree provider `{provider_id}` returned an invalid safety envelope: {error}"), Some(provider_id.to_string()), None))?;
+    let safety: WorktreeProviderSafetyAttestation = serde_json::from_value(payload).map_err(|error| {
+        provider_lookup_error(
+            provider_id,
+            &command,
+            "attest_safety",
+            "malformed",
+            "worktree_providers.commands.attest_safety",
+            format!("worktree provider `{provider_id}` returned an invalid safety envelope: {error}"),
+            false,
+        )
+    })?;
     if safety.schema != "homeboy/worktree-provider-safety/v1"
         || safety.identity_token.trim().is_empty()
         || safety.observed_at.trim().is_empty()
     {
-        return Err(Error::validation_invalid_argument("worktree_providers.commands.attest_safety", format!("worktree provider `{provider_id}` returned an unsupported or incomplete safety envelope"), Some(provider_id.to_string()), None));
+        return Err(provider_lookup_error(
+            provider_id,
+            &command,
+            "attest_safety",
+            "malformed",
+            "worktree_providers.commands.attest_safety",
+            format!("worktree provider `{provider_id}` returned an unsupported or incomplete safety envelope"),
+            false,
+        ));
     }
     Ok(WorktreeProviderSafetyAttestation {
         latency_ms,
@@ -1677,55 +1772,76 @@ fn run_provider_split_command(
 ) -> Result<(Value, u128, u128)> {
     let timeout = provider_lookup_timeout(provider)?;
     let output_limit = provider_lookup_output_limit(provider)?;
-    let (program, args) = command.split_first().filter(|(program, _)| !program.trim().is_empty()).ok_or_else(|| Error::validation_invalid_argument("worktree_providers.commands", format!("worktree provider `{provider_id}` {operation} command must include an executable"), Some(provider_id.to_string()), None))?;
-    let mut process = Command::new(program);
-    process
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::engine::command::isolate_process_tree(&mut process);
-    let mut child = process.spawn().map_err(|error| {
-        Error::validation_invalid_argument(
-            "to_worktree",
-            format!(
-                "worktree provider `{provider_id}` {operation} command could not start: {error}"
-            ),
-            Some(provider_id.to_string()),
-            None,
-        )
-    })?;
-    let started = std::time::Instant::now();
-    let supervised = crate::engine::command::wait_with_bounded_output_supervised(&mut child, output_limit, timeout, Duration::from_millis(100), || false, |_, _| Ok(())).map_err(|error| Error::validation_invalid_argument("to_worktree", format!("worktree provider `{provider_id}` {operation} command could not be supervised: {error}"), Some(provider_id.to_string()), None))?;
-    let elapsed_ms = started.elapsed().as_millis();
-    if supervised.termination != crate::engine::command::SupervisedCommandTermination::Completed {
-        let mut error = Error::validation_invalid_argument("to_worktree", format!("worktree provider `{provider_id}` {operation} command timed out after {elapsed_ms} ms (configured safety/identity budget: {} ms)", timeout.as_millis()), Some(provider_id.to_string()), None);
+    let supervised = run_bounded_provider_lookup_command(
+        provider_id,
+        command,
+        operation,
+        timeout,
+        output_limit,
+    )?;
+    let elapsed_ms = supervised.elapsed_ms;
+    let output = supervised.output;
+    if output.termination != crate::engine::command::SupervisedCommandTermination::Completed {
+        let cancelled =
+            output.termination == crate::engine::command::SupervisedCommandTermination::Cancelled;
+        let outcome = if cancelled { "cancelled" } else { "timed out" };
+        let mut error = Error::validation_invalid_argument("to_worktree", format!("worktree provider `{provider_id}` {operation} command {outcome} after {elapsed_ms} ms (configured safety/identity budget: {} ms)", timeout.as_millis()), Some(provider_id.to_string()), None);
         error.retryable = Some(true);
         // Preserve the established deferred-Cook contract so split resolver
         // timeouts create the same durable lookup_pending state as legacy ones.
-        error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
+        error.details["worktree_provider_lookup"] =
+            Value::String(if cancelled { "cancelled" } else { "timed_out" }.to_string());
         error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
         error.details["worktree_provider_operation"] = Value::String(operation.to_string());
         error.details["worktree_provider_split_operation"] = Value::String(operation.to_string());
-        error.details["worktree_provider_split"] = Value::String("timed_out".to_string());
+        error.details["worktree_provider_split"] =
+            Value::String(if cancelled { "cancelled" } else { "timed_out" }.to_string());
         error.details["latency_ms"] = Value::from(elapsed_ms as u64);
         error.details["budget_ms"] = Value::from(timeout.as_millis() as u64);
+        annotate_provider_lookup_error(
+            &mut error,
+            provider_id,
+            command,
+            operation,
+            if cancelled { "cancelled" } else { "timeout" },
+        );
         return Err(error);
     }
-    let output = supervised.output;
+    let output = output.output;
     if output.capture.stdout.truncated {
-        return Err(Error::validation_invalid_argument("to_worktree", format!("worktree provider `{provider_id}` {operation} command output exceeded configured lookup_output_limit_bytes"), Some(provider_id.to_string()), None));
+        return Err(provider_lookup_error(
+            provider_id,
+            command,
+            operation,
+            "malformed",
+            "to_worktree",
+            format!("worktree provider `{provider_id}` {operation} command output exceeded configured lookup_output_limit_bytes"),
+            false,
+        ));
     }
     let output = output.into_output();
     if !output.status.success() {
-        return Err(Error::validation_invalid_argument_with_evidence(
+        let mut error = Error::validation_invalid_argument_with_evidence(
             "to_worktree",
             format!("worktree provider `{provider_id}` {operation} command failed"),
             Some(provider_id.to_string()),
             None,
             Some(provider_command_evidence(command, &output)),
-        ));
+        );
+        annotate_provider_lookup_error(&mut error, provider_id, command, operation, "command");
+        return Err(error);
     }
-    let payload = serde_json::from_slice(&output.stdout).map_err(|error| Error::validation_invalid_argument("to_worktree", format!("worktree provider `{provider_id}` {operation} command returned invalid JSON: {error}"), Some(provider_id.to_string()), None))?;
+    let payload = serde_json::from_slice(&output.stdout).map_err(|error| {
+        provider_lookup_error(
+            provider_id,
+            command,
+            operation,
+            "malformed",
+            "to_worktree",
+            format!("worktree provider `{provider_id}` {operation} command returned invalid JSON: {error}"),
+            false,
+        )
+    })?;
     Ok((payload, elapsed_ms, timeout.as_millis()))
 }
 
@@ -1783,7 +1899,7 @@ fn retry_resolve_path_timeouts(
                     "observed_total_elapsed_ms": u64::try_from(started.elapsed().as_millis())
                         .unwrap_or(u64::MAX),
                     "attempts": timed_out_attempts,
-                    "replay_command": crate::redaction::redact_argv_shell_display(&command),
+                    "replay_command": crate::redaction::redact_argv_shell_display(command),
                 });
                 return Err(error);
             }
@@ -1835,58 +1951,23 @@ fn run_provider_lookup_command(
 ) -> Result<Vec<WorktreeProviderHandle>> {
     let timeout = provider_lookup_timeout(provider)?;
     let output_limit = provider_lookup_output_limit(provider)?;
-    let (program, args) = command
-        .split_first()
-        .filter(|(program, _)| !program.trim().is_empty())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                format!("worktree_providers.commands.{operation}"),
-                format!(
-                    "worktree provider `{provider_id}` {operation} command must include an executable"
-                ),
-                Some(provider_id.to_string()),
-                None,
-            )
-        })?;
-    let mut process = Command::new(program);
-    process
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::engine::command::isolate_process_tree(&mut process);
-    let mut child = process.spawn().map_err(|error| {
-        Error::validation_invalid_argument(
-            "to_worktree",
-            format!(
-                "worktree provider `{provider_id}` {operation} command could not start: {error}"
-            ),
-            Some(provider_id.to_string()),
-            None,
-        )
-    })?;
-    let started = std::time::Instant::now();
-    let output = crate::engine::command::wait_with_bounded_output_supervised(
-        &mut child,
-        output_limit,
+    let supervised = run_bounded_provider_lookup_command(
+        provider_id,
+        command,
+        operation,
         timeout,
-        PROVIDER_LOOKUP_HEARTBEAT,
-        || false,
-        |_, _| Ok(()),
-    )
-    .map_err(|error| {
-        Error::validation_invalid_argument(
-            "to_worktree",
-            format!("worktree provider `{provider_id}` {operation} command could not be supervised: {error}"),
-            Some(provider_id.to_string()),
-            None,
-        )
-    })?;
-    let elapsed_ms = started.elapsed().as_millis();
+        output_limit,
+    )?;
+    let elapsed_ms = supervised.elapsed_ms;
+    let output = supervised.output;
     if output.termination != crate::engine::command::SupervisedCommandTermination::Completed {
+        let cancelled =
+            output.termination == crate::engine::command::SupervisedCommandTermination::Cancelled;
+        let outcome = if cancelled { "cancelled" } else { "timed out" };
         let mut error = Error::validation_invalid_argument(
             "to_worktree",
             format!(
-                "worktree provider `{provider_id}` {operation} command timed out after {elapsed_ms} ms (configured lookup_timeout_ms: {})",
+                "worktree provider `{provider_id}` {operation} command {outcome} after {elapsed_ms} ms (configured lookup_timeout_ms: {})",
                 timeout.as_millis()
             ),
             Some(provider_id.to_string()),
@@ -1899,17 +1980,32 @@ fn run_provider_lookup_command(
         // invalid. Preserve that distinction for durable callers instead of
         // turning provider latency into an input error.
         error.retryable = Some(true);
-        error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
+        error.details["worktree_provider_lookup"] =
+            Value::String(if cancelled { "cancelled" } else { "timed_out" }.to_string());
         error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
         error.details["worktree_provider_operation"] = Value::String(operation.to_string());
         error.details["lookup_timeout_ms"] = Value::from(timeout.as_millis() as u64);
         error.details["latency_ms"] = Value::from(elapsed_ms as u64);
-        error.details["provider_lookup_timeout_kind"] = Value::String("supervision".to_string());
+        error.details["provider_lookup_timeout_kind"] = Value::String(
+            if cancelled {
+                "cancellation"
+            } else {
+                "supervision"
+            }
+            .to_string(),
+        );
+        annotate_provider_lookup_error(
+            &mut error,
+            provider_id,
+            command,
+            operation,
+            if cancelled { "cancelled" } else { "timeout" },
+        );
         return Err(error);
     }
     let output = output.output;
     if output.capture.stdout.truncated {
-        return Err(Error::validation_invalid_argument(
+        let mut error = Error::validation_invalid_argument(
             "to_worktree",
             format!(
                 "worktree provider `{provider_id}` {operation} command output exceeded configured lookup_output_limit_bytes: {output_limit} (received {} bytes)",
@@ -1919,7 +2015,9 @@ fn run_provider_lookup_command(
             Some(vec![
                 "Increase the provider lookup_output_limit_bytes within its configured bound, then retry the operation.".to_string(),
             ]),
-        ));
+        );
+        annotate_provider_lookup_error(&mut error, provider_id, command, operation, "malformed");
+        return Err(error);
     }
     let output = output.into_output();
     if !output.status.success() {
@@ -1930,7 +2028,7 @@ fn run_provider_lookup_command(
         {
             return Ok(Vec::new());
         }
-        return Err(Error::validation_invalid_argument_with_evidence(
+        let mut error = Error::validation_invalid_argument_with_evidence(
             "to_worktree",
             format!(
                 "worktree provider `{provider_id}` {operation} command failed with {}",
@@ -1943,16 +2041,19 @@ fn run_provider_lookup_command(
             Some(provider_id.to_string()),
             None,
             Some(provider_command_evidence(command, &output)),
-        ));
+        );
+        annotate_provider_lookup_error(&mut error, provider_id, command, operation, "command");
+        return Err(error);
     }
     let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
-        Error::validation_invalid_argument(
+        provider_lookup_error(
+            provider_id,
+            command,
+            operation,
+            "malformed",
             "to_worktree",
-            format!(
-                "worktree provider `{provider_id}` {operation} command returned invalid JSON: {error}"
-            ),
-            Some(provider_id.to_string()),
-            None,
+            format!("worktree provider `{provider_id}` {operation} command returned invalid JSON: {error}"),
+            false,
         )
     })?;
     if let Some(attribution) = provider_failed_lookup_timeout_attribution(&value) {
@@ -1975,6 +2076,7 @@ fn run_provider_lookup_command(
         // Persist only this fixed, redacted timeout classification.
         error.details["provider_timeout_attribution"] =
             serde_json::to_value(attribution).expect("fixed timeout attribution serializes");
+        annotate_provider_lookup_error(&mut error, provider_id, command, operation, "timeout");
         return Err(error);
     }
     let mapping = provider.list_result_mapping.as_ref().ok_or_else(|| {
@@ -1987,7 +2089,10 @@ fn run_provider_lookup_command(
             None,
         )
     })?;
-    map_provider_list_result(provider_id, mapping, &value)
+    map_provider_list_result(provider_id, mapping, &value).map_err(|mut error| {
+        annotate_provider_lookup_error(&mut error, provider_id, command, operation, "malformed");
+        error
+    })
 }
 
 #[derive(Serialize)]
@@ -2026,6 +2131,19 @@ fn provider_lookup_timeout(provider: &WorktreeProviderConfig) -> Result<Duration
     Ok(Duration::from_millis(provider.lookup_timeout_ms))
 }
 
+fn provider_mutation_timeout(provider: &WorktreeProviderConfig) -> Result<Duration> {
+    defaults::validate_worktree_provider_mutation_timeout_ms(provider.mutation_timeout_ms)
+        .map_err(|message| {
+            Error::validation_invalid_argument(
+                "worktree_providers.mutation_timeout_ms",
+                message,
+                Some(provider.mutation_timeout_ms.to_string()),
+                None,
+            )
+        })?;
+    Ok(Duration::from_millis(provider.mutation_timeout_ms))
+}
+
 fn provider_lookup_output_limit(provider: &WorktreeProviderConfig) -> Result<usize> {
     defaults::validate_worktree_provider_lookup_output_limit_bytes(
         provider.lookup_output_limit_bytes,
@@ -2041,16 +2159,130 @@ fn provider_lookup_output_limit(provider: &WorktreeProviderConfig) -> Result<usi
     Ok(provider.lookup_output_limit_bytes)
 }
 
+struct BoundedProviderLookupCommand {
+    output: crate::engine::command::SupervisedCommandOutput,
+    elapsed_ms: u128,
+}
+
+/// Run one provider command in its own process group with its operation-specific
+/// configured bound. This prevents an external provider from leaving Cook
+/// waiting silently or retaining descendants on timeout.
+fn run_bounded_provider_lookup_command(
+    provider_id: &str,
+    command: &[String],
+    operation: &str,
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<BoundedProviderLookupCommand> {
+    let (program, args) = command
+        .split_first()
+        .filter(|(program, _)| !program.trim().is_empty())
+        .ok_or_else(|| {
+            provider_lookup_error(
+                provider_id,
+                command,
+                operation,
+                "command",
+                &format!("worktree_providers.commands.{operation}"),
+                format!("worktree provider `{provider_id}` {operation} command must include an executable"),
+                false,
+            )
+        })?;
+    let mut process = Command::new(program);
+    process
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::engine::command::isolate_process_tree(&mut process);
+    let mut child = process.spawn().map_err(|error| {
+        provider_lookup_error(
+            provider_id,
+            command,
+            operation,
+            "command",
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` {operation} command could not start: {error}"
+            ),
+            false,
+        )
+    })?;
+    let started = std::time::Instant::now();
+    let output = crate::engine::command::wait_with_bounded_output_supervised(
+        &mut child,
+        output_limit,
+        timeout,
+        PROVIDER_LOOKUP_HEARTBEAT,
+        || {
+            PROVIDER_COMMAND_CONTROL.with(|active| {
+                active
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(WorktreeProviderCommandControl::is_cancelled)
+            })
+        },
+        |_, _| Ok(()),
+    )
+    .map_err(|error| {
+        provider_lookup_error(
+            provider_id,
+            command,
+            operation,
+            "command",
+            "to_worktree",
+            format!("worktree provider `{provider_id}` {operation} command could not be supervised: {error}"),
+            false,
+        )
+    })?;
+    Ok(BoundedProviderLookupCommand {
+        output,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+fn provider_lookup_error(
+    provider_id: &str,
+    command: &[String],
+    operation: &str,
+    classification: &str,
+    field: &str,
+    message: String,
+    retryable: bool,
+) -> Error {
+    let mut error =
+        Error::validation_invalid_argument(field, message, Some(provider_id.to_string()), None);
+    error.retryable = retryable.then_some(true);
+    annotate_provider_lookup_error(&mut error, provider_id, command, operation, classification);
+    error
+}
+
+fn annotate_provider_lookup_error(
+    error: &mut Error,
+    provider_id: &str,
+    command: &[String],
+    operation: &str,
+    classification: &str,
+) {
+    error.details["worktree_provider_id"] = Value::String(provider_id.to_string());
+    error.details["worktree_provider_operation"] = Value::String(operation.to_string());
+    error.details["worktree_provider_call_classification"] =
+        Value::String(classification.to_string());
+    error.details["worktree_provider_phase"] =
+        Value::String(format!("worktree_provider_{operation}"));
+    error.details["worktree_provider_replay_command"] =
+        Value::String(crate::redaction::redact_argv_shell_display(command));
+}
+
 fn provider_command_evidence(command: &[String], output: &std::process::Output) -> CommandEvidence {
     let (stdout, stdout_truncated) = bounded_provider_output(&output.stdout);
     let (stderr, stderr_truncated) = bounded_provider_output(&output.stderr);
     CommandEvidence {
-        command: command.join(" "),
+        command: crate::redaction::redact_argv_shell_display(command),
         cwd: None,
         location: Some("local".to_string()),
         exit_code: output.status.code().unwrap_or(-1),
-        stdout,
-        stderr,
+        stdout: crate::redaction::redact_string(&stdout),
+        stderr: crate::redaction::redact_string(&stderr),
         truncated: stdout_truncated || stderr_truncated,
     }
 }
@@ -3194,6 +3426,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec!["false".to_string()]),
@@ -3285,6 +3518,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: true,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 resolve: Some(vec![
@@ -3432,6 +3666,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: true,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 ensure: Some(vec![fake_provider_script_body(&format!(
@@ -3497,6 +3732,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 resolve: Some(vec![script.display().to_string(), "resolve".to_string()]),
@@ -3572,6 +3808,7 @@ mod tests {
                 apply_enabled: true,
                 commands: WorktreeProviderCommands::default(),
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 list_result_mapping: None,
             },
@@ -3830,6 +4067,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![
@@ -3921,6 +4159,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![
@@ -4015,6 +4254,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![
@@ -4028,7 +4268,7 @@ mod tests {
                 list_result_mapping: Some(worktrees_mapping()),
             },
         );
-        for handle in ["auth", "malformed"] {
+        for (handle, classification) in [("auth", "command"), ("malformed", "malformed")] {
             let error = provision_apply_enabled_worktree_provider_from_config(
                 &WorktreeProviderCreateIntent {
                     handle: handle.to_string(),
@@ -4041,6 +4281,15 @@ mod tests {
             )
             .expect_err("lookup failure is not absence");
             assert!(error.message.contains("provider `fixture` resolve command"));
+            assert_eq!(
+                error.details["worktree_provider_call_classification"],
+                classification
+            );
+            assert_eq!(error.details["worktree_provider_id"], "fixture");
+            assert!(error.details["worktree_provider_replay_command"]
+                .as_str()
+                .expect("replay command")
+                .contains(script.to_string_lossy().as_ref()));
         }
         assert!(
             !ensured.exists(),
@@ -4063,6 +4312,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     cleanup_preview: Some(vec![script, "preview".to_string()]),
@@ -4207,6 +4457,7 @@ mod tests {
                     kind: WorktreeProviderKind::Command,
                     apply_enabled: false,
                     lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
                     lookup_output_limit_bytes: 64 * 1024,
                     commands: WorktreeProviderCommands {
                         cleanup_preview: Some(vec![script]),
@@ -4238,6 +4489,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: true,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 cleanup_preview_timeout_ms: 25,
@@ -4289,6 +4541,7 @@ mod tests {
                     kind: WorktreeProviderKind::Command,
                     apply_enabled: false,
                     lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
                     lookup_output_limit_bytes: 64 * 1024,
                     commands: WorktreeProviderCommands {
                         cleanup_preview: Some(vec![script]),
@@ -4323,6 +4576,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 cleanup_preview: Some(vec![script]),
@@ -4388,6 +4642,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     cleanup_apply: Some(vec![script, "apply".to_string()]),
@@ -4422,6 +4677,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     cleanup_apply: Some(vec![script, "apply".to_string()]),
@@ -4459,6 +4715,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![script, "{handle}".to_string()]),
@@ -4491,6 +4748,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     list: Some(vec![script]),
@@ -4523,6 +4781,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     list: Some(vec![script]),
@@ -4557,6 +4816,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 resolve_path: Some(vec![script, "{path}".to_string()]),
@@ -4585,6 +4845,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 resolve_path: Some(vec![
@@ -4633,6 +4894,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve_path: Some(vec![script, "{path}".to_string()]),
@@ -4656,6 +4918,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 25,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands::default(),
             list_result_mapping: Some(worktrees_mapping()),
@@ -4699,6 +4962,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 4_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 resolve_path: Some(vec![script, "{path}".to_string()]),
@@ -4725,6 +4989,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 25,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands::default(),
             list_result_mapping: Some(worktrees_mapping()),
@@ -4776,6 +5041,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 25,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     list: Some(vec![script.to_string_lossy().to_string()]),
@@ -4791,6 +5057,14 @@ mod tests {
         assert_eq!(error.retryable, Some(true));
         assert_eq!(error.details["worktree_provider_lookup"], "timed_out");
         assert_eq!(error.details["worktree_provider_operation"], "list");
+        assert_eq!(
+            error.details["worktree_provider_call_classification"],
+            "timeout"
+        );
+        assert!(error.details["worktree_provider_replay_command"]
+            .as_str()
+            .expect("replay command")
+            .contains(script.to_string_lossy().as_ref()));
     }
 
     #[test]
@@ -4809,9 +5083,14 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
-                    resolve: Some(vec![script, "{handle}".to_string()]),
+                    resolve: Some(vec![
+                        script,
+                        "{handle}".to_string(),
+                        "token=secret".to_string(),
+                    ]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(worktrees_mapping()),
@@ -4823,6 +5102,18 @@ mod tests {
         assert_eq!(error.details["worktree_provider_lookup"], "timed_out");
         assert_eq!(error.details["worktree_provider_operation"], "resolve");
         assert_eq!(
+            error.details["worktree_provider_call_classification"],
+            "timeout"
+        );
+        assert_eq!(
+            error.details["worktree_provider_phase"],
+            "worktree_provider_resolve"
+        );
+        assert!(error.details["worktree_provider_replay_command"]
+            .as_str()
+            .expect("replay command")
+            .contains("[REDACTED]"));
+        assert_eq!(
             error.details["provider_timeout_attribution"],
             json!({ "error_code": "git_command_timeout" })
         );
@@ -4832,6 +5123,162 @@ mod tests {
             .contains("provider-secret-must-not-persist"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ensure_uses_the_configured_provider_bound_and_typed_evidence() {
+        let dir = unique_fixture_script_dir();
+        let script = dir.join("provider");
+        fs::write(&script, "#!/bin/sh\nsleep 1\n").expect("write provider");
+        make_executable(&script);
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 1,
+            mutation_timeout_ms: 25,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands::default(),
+            list_result_mapping: None,
+        };
+
+        let error = run_provider_ensure_command(
+            "fixture",
+            &provider,
+            &[
+                script.to_string_lossy().to_string(),
+                "token=secret".to_string(),
+            ],
+        )
+        .expect_err("ensure is supervised by the configured provider budget");
+
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(error.details["worktree_provider_operation"], "ensure");
+        assert_eq!(
+            error.details["worktree_provider_call_classification"],
+            "timeout"
+        );
+        assert_eq!(
+            error.details["worktree_provider_phase"],
+            "worktree_provider_ensure"
+        );
+        assert!(error.details["worktree_provider_replay_command"]
+            .as_str()
+            .expect("replay command")
+            .contains("[REDACTED]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_mutation_evidence_redacts_command_and_output_secrets() {
+        let dir = unique_fixture_script_dir();
+        let script = dir.join("provider");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'stdout_token=provider-secret-must-not-persist\\n'\nprintf 'stderr_token=provider-secret-must-not-persist\\n' >&2\nexit 1\n",
+        )
+        .expect("write provider");
+        make_executable(&script);
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands::default(),
+            list_result_mapping: None,
+        };
+
+        let error = run_provider_mutation_command(
+            "fixture",
+            &provider,
+            &[
+                script.to_string_lossy().to_string(),
+                "token=provider-secret-must-not-persist".to_string(),
+            ],
+            "finalize",
+        )
+        .expect_err("failed provider mutation returns evidence");
+
+        assert_eq!(error.details["worktree_provider_operation"], "finalize");
+        assert_eq!(
+            error.details["worktree_provider_phase"],
+            "worktree_provider_finalize"
+        );
+        assert!(error.details["command_evidence"]["command"]
+            .as_str()
+            .expect("command evidence")
+            .contains("[REDACTED]"));
+        assert!(!error
+            .details
+            .to_string()
+            .contains("provider-secret-must-not-persist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_split_provider_results_have_typed_redacted_replay_evidence() {
+        let dir = unique_fixture_script_dir();
+        let script = dir.join("provider");
+        fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '{\"schema\":false}'\n")
+            .expect("write provider");
+        make_executable(&script);
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands::default(),
+            list_result_mapping: None,
+        };
+
+        for (operation, result) in [
+            (
+                "resolve_identity",
+                run_provider_identity_command(
+                    "fixture",
+                    &provider,
+                    &[
+                        script.to_string_lossy().to_string(),
+                        "token=provider-secret-must-not-persist".to_string(),
+                    ],
+                    "fixture@target",
+                )
+                .map(|_| ()),
+            ),
+            (
+                "attest_safety",
+                run_provider_safety_command(
+                    "fixture",
+                    &provider,
+                    &[
+                        script.to_string_lossy().to_string(),
+                        "token=provider-secret-must-not-persist".to_string(),
+                    ],
+                    "provider-secret-must-not-persist",
+                )
+                .map(|_| ()),
+            ),
+        ] {
+            let error = result.expect_err("malformed split response is rejected");
+            assert_eq!(error.details["worktree_provider_operation"], operation);
+            assert_eq!(
+                error.details["worktree_provider_call_classification"],
+                "malformed"
+            );
+            assert!(error.details["worktree_provider_replay_command"]
+                .as_str()
+                .expect("replay command")
+                .contains("[REDACTED]"));
+            assert!(!error
+                .details
+                .to_string()
+                .contains("provider-secret-must-not-persist"));
+        }
+    }
+
     #[test]
     fn path_resolution_does_not_retry_a_provider_reported_timeout() {
         let provider = WorktreeProviderConfig {
@@ -4839,6 +5286,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 25,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands::default(),
             list_result_mapping: Some(worktrees_mapping()),
@@ -4888,6 +5336,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![script, "{handle}".to_string()]),
@@ -4914,6 +5363,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 5_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 resolve: Some(vec![script, "{handle}".to_string()]),
@@ -4948,6 +5398,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 128 * 1024,
             commands: WorktreeProviderCommands {
                 resolve: Some(vec![script, "{handle}".to_string()]),
@@ -5001,6 +5452,7 @@ mod tests {
                     kind: WorktreeProviderKind::Command,
                     apply_enabled: false,
                     lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
                     lookup_output_limit_bytes: 64 * 1024,
                     commands: WorktreeProviderCommands::default(),
                     list_result_mapping: None,
@@ -5043,6 +5495,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![resolve, "{handle}".to_string()]),
@@ -5094,6 +5547,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![script, "{handle}".to_string()]),
@@ -5135,6 +5589,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     list: Some(vec![script]),
@@ -5295,6 +5750,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![
@@ -5680,6 +6136,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     cleanup_apply: Some(vec![script]),
@@ -5877,6 +6334,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: true,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands::default(),
             list_result_mapping: None,
@@ -5905,6 +6363,7 @@ mod tests {
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
             lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 list: Some(vec![script]),
