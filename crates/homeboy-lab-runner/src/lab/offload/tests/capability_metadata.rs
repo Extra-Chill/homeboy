@@ -621,6 +621,87 @@ fn runner_homeboy_version_drift_blocks_offload_with_upgrade_guidance() {
         .is_some_and(|hint| hint.contains("no ancestry-verified refresh target"))));
 }
 
+#[test]
+fn exact_immutable_daemon_supplies_command_capabilities_when_the_second_probe_is_unavailable() {
+    let hash = "a".repeat(64);
+    let identity = "homeboy 0.348.6+b83a29fa4dea";
+    let mut status = hash_bound_direct_status(identity);
+    status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        restartable: false,
+        lease_id: Some("lease-a".to_string()),
+        pid: Some(42),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: Some(hash.clone()),
+        daemon_version: Some("0.348.6".to_string()),
+        daemon_build_identity: Some(identity.to_string()),
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    let capabilities = homeboy_lab_runner_contract::required_lab_handoff_capabilities();
+
+    let evidence = super::super::metadata::hash_bound_runner_command_evidence(
+        &status,
+        &format!("/runner/homeboy-{hash}/homeboy"),
+        &capabilities,
+    )
+    .expect("the exact immutable daemon proves the command evidence");
+
+    assert_eq!(evidence.0.build_identity, identity);
+    assert_eq!(evidence.0.source_revision, "b83a29fa4dea");
+    assert_eq!(evidence.1, capabilities);
+}
+
+#[test]
+fn daemon_capabilities_do_not_substitute_for_a_different_configured_binary_hash() {
+    let hash = "a".repeat(64);
+    let identity = "homeboy 0.348.6+b83a29fa4dea";
+    let mut status = hash_bound_direct_status(identity);
+    status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        restartable: false,
+        lease_id: Some("lease-a".to_string()),
+        pid: Some(42),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: Some(hash),
+        daemon_version: Some("0.348.6".to_string()),
+        daemon_build_identity: Some(identity.to_string()),
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+
+    assert!(super::super::metadata::hash_bound_runner_command_evidence(
+        &status,
+        &format!("/runner/homeboy-{}/homeboy", "b".repeat(64)),
+        &homeboy_lab_runner_contract::required_lab_handoff_capabilities(),
+    )
+    .is_none());
+}
+
+fn hash_bound_direct_status(identity: &str) -> RunnerStatusReport {
+    let mut status = reverse_status("homeboy-lab");
+    let session = status.session.as_mut().expect("session");
+    session.mode = RunnerTunnelMode::DirectSsh;
+    session.local_url = Some("http://127.0.0.1:7421".to_string());
+    session.remote_daemon_address = Some("127.0.0.1:7422".to_string());
+    session.remote_daemon_pid = Some(42);
+    session.remote_daemon_lease_id = Some("lease-a".to_string());
+    session.homeboy_version = "0.348.6".to_string();
+    session.homeboy_build_identity = Some(identity.to_string());
+    status.configured_job_binary_build_identity = Some(identity.to_string());
+    status
+}
+
 /// Build a reverse-connected status whose runner session reports `version`.
 fn status_with_runner_version(runner_id: &str, version: &str) -> RunnerStatusReport {
     let mut status = reverse_status(runner_id);
