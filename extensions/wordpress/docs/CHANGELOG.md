@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.35.0] - 2026-08-14
+
+### Added
+- emit a test inventory so the suite can be sharded
+
 ## [3.34.50] - 2026-08-14
 
 ### Fixed
