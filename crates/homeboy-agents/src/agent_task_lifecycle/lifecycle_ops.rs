@@ -1321,7 +1321,7 @@ pub fn persist_notification_route(
 ///
 /// The route a caller supplied is bound to the launching *thread*
 /// (`notification_route::current`), which a process that did not launch the
-/// cook — `cook --continue`, controller adoption, claimed continuation — never
+/// cook — `cook-continue`, controller adoption, claimed continuation — never
 /// inherits. It is also persisted on the durable record by
 /// [`persist_notification_route`], and that copy survives the process. This is
 /// the same durable read the daemon completion backstop and `runs watch`

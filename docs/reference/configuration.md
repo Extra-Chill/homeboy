@@ -52,7 +52,7 @@ A run resolves its destination in this order, most explicit first:
 1. Explicit `--notification-transport` and `--notification-route` CLI values.
 2. `HOMEBOY_NOTIFICATION_TRANSPORT` and `HOMEBOY_NOTIFICATION_ROUTE`.
 3. The route persisted on the durable run record, which is what lets a run
-   resumed in another process — `cook --continue`, controller adoption, a
+   resumed in another process — `cook-continue`, controller adoption, a
    claimed continuation — keep reporting to the destination that launched it.
 
 Homeboy sets both environment variables on the child processes it spawns when a

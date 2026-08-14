@@ -24,6 +24,7 @@ use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
 use homeboy_core::{Error, Result};
+use homeboy_engine_primitives::shell::quote_arg;
 
 use super::cook_activity::{CookActivityProbe, CookProviderActivity};
 use super::cook_baseline::{
@@ -58,6 +59,34 @@ use super::AgentTaskRunResult;
 /// controller finishes promoting and records the result within it; a crashed
 /// controller's lease elapses so a resumed pass can reconcile and continue.
 const PROMOTION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Render the public CLI continuation route.
+///
+/// Cook IDs deliberately preserve normal current-attempt selection, while
+/// attempt IDs preserve exact lifecycle lineage for recovery. `executable`
+/// permits a controller-pinned runtime to own the continuation without
+/// changing the public command shape.
+pub fn cook_continue_command(
+    executable: Option<&str>,
+    cook_or_attempt_id: &str,
+    rearm: bool,
+    artifact_id: Option<&str>,
+) -> String {
+    let executable = executable.unwrap_or("homeboy");
+    let mut command = format!(
+        "{} agent-task cook-continue {}",
+        quote_arg(executable),
+        quote_arg(cook_or_attempt_id)
+    );
+    if rearm {
+        command.push_str(" --rearm");
+    }
+    if let Some(artifact_id) = artifact_id {
+        command.push_str(" --artifact-id ");
+        command.push_str(&quote_arg(artifact_id));
+    }
+    command
+}
 
 /// Durable operation key for the promotion of one cook attempt. Promotion is
 /// one-per-`run_id`, so the run id is the stable operation identity (#8357).
@@ -488,7 +517,7 @@ fn promote_with_operation_claim(
                 "promotion_operation",
                 "operation_in_progress",
                 Some(operation_key),
-                Some(vec![format!("homeboy agent-task cook-continue {run_id}")]),
+                Some(vec![cook_continue_command(None, run_id, false, None)]),
             );
             error.details["claim"] = serde_json::to_value(claim).unwrap_or(Value::Null);
             Err(error)
@@ -5779,8 +5808,8 @@ fn trusted_initial_cook_workspace(
             "clean unpushed provider checkout cannot be trusted for initial Cook adoption",
             Some(options.to_worktree.clone()),
             Some(vec![format!(
-                "Adopt or continue this exact Cook with: homeboy agent-task cook-continue {}",
-                options.cook_id
+                "Adopt or continue this exact Cook with: {}",
+                cook_continue_command(None, &options.cook_id, false, None)
             )]),
         );
         if !clean {
@@ -5810,8 +5839,8 @@ fn trusted_initial_cook_workspace(
             "explicitly targeted provider worktree is not owned by this Cook task",
             Some(options.to_worktree.clone()),
             Some(vec![format!(
-                "Continue the owning Cook with: homeboy agent-task cook-continue {}",
-                options.cook_id
+                "Continue the owning Cook with: {}",
+                cook_continue_command(None, &options.cook_id, false, None)
             )]),
         ));
     }
@@ -5829,8 +5858,8 @@ fn trusted_initial_cook_workspace(
             "provider resolved a different checkout than the explicitly targeted Cook checkout",
             Some(options.to_worktree.clone()),
             Some(vec![format!(
-                "Continue the owning Cook with: homeboy agent-task cook-continue {}",
-                options.cook_id
+                "Continue the owning Cook with: {}",
+                cook_continue_command(None, &options.cook_id, false, None)
             )]),
         ));
     }

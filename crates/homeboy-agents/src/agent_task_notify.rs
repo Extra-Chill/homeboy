@@ -64,7 +64,7 @@ fn should_deliver(kind: NotifyEventKind, has_explicit_route: bool) -> bool {
 ///
 /// `notification_route::current()` is a **thread-local**, so it only answers in
 /// the process and on the thread that accepted `--notification-route`. A cook
-/// resumed elsewhere — `cook --continue`, controller adoption, a claimed
+/// resumed elsewhere — `cook-continue`, controller adoption, a claimed
 /// continuation — starts with an empty one, which silently downgraded the whole
 /// arc: `Started`/`Progress` were dropped by `should_deliver`, and the terminal
 /// event went to the ambient default transport instead of the thread that
@@ -93,7 +93,7 @@ fn should_deliver(kind: NotifyEventKind, has_explicit_route: bool) -> bool {
 ///
 /// The durable fallback is not made redundant by environment propagation. It
 /// covers resumption paths that inherit neither argv nor environment from the
-/// launching process — `cook --continue`, controller adoption, a claimed
+/// launching process — `cook-continue`, controller adoption, a claimed
 /// continuation — so both remain load-bearing.
 fn effective_route(run_id: &str) -> Option<NotificationRoute> {
     notification_route::current()

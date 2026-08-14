@@ -443,7 +443,7 @@ fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Resul
         "provider_executions_consumed": 0,
         "guidance": {
             "action": "materialize_recipe_attempt",
-            "command": format!("homeboy agent-task cook-continue {}", attempt.run_id),
+            "command": agent_task_service_direct::cook_continue_command(None, &attempt.run_id, false, None),
             "message": "The immutable Cook recipe is durable but its lifecycle record is absent. Continue the exact attempt to materialize the controller lifecycle before provider work."
         }
     })))
@@ -498,9 +498,8 @@ fn attach_cook_notification_delivery(
         return;
     };
     if outcome.get("status").and_then(Value::as_str) != Some("delivered") {
-        outcome["retry_command"] = Value::String(format!(
-            "homeboy agent-task cook --continue {}",
-            quote_arg(cook_id)
+        outcome["retry_command"] = Value::String(agent_task_service_direct::cook_continue_command(
+            None, cook_id, false, None,
         ));
     }
     if outcome.get("status").and_then(Value::as_str) == Some("not_configured") {
@@ -5089,7 +5088,7 @@ fn cook_continuation_action(record: &AgentTaskRunRecord) -> homeboy::core::Resul
 fn cook_continuation_command(run_id: &str) -> CommandNextAction {
     CommandNextAction::new(
         "resume the authenticated Cook continuation",
-        format!("homeboy agent-task cook-continue {}", quote_arg(run_id)),
+        agent_task_service_direct::cook_continue_command(None, run_id, false, None),
     )
     .with_kind(CommandNextActionKind::Repair)
 }
@@ -5650,7 +5649,7 @@ mod tests {
                     "route_classification": "explicit",
                     "status": "failed",
                     "error_class": "transport_spawn_failed",
-                    "retry_command": "homeboy agent-task cook --continue cook-1",
+                    "retry_command": "homeboy agent-task cook-continue cook-1",
                     "raw_destination": "must-not-appear"
                 }
             }),
@@ -5660,7 +5659,7 @@ mod tests {
         assert_eq!(summary["notification_delivery"]["status"], "failed");
         assert_eq!(
             summary["notification_delivery"]["retry_command"],
-            "homeboy agent-task cook --continue cook-1"
+            "homeboy agent-task cook-continue cook-1"
         );
         assert!(summary["notification_delivery"]
             .get("raw_destination")

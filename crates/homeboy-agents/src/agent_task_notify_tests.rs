@@ -52,7 +52,7 @@ fn failure_context() -> AgentTaskCookFailureContext {
         recovery_reason: "the durable recipe is intact".to_string(),
         legal_actions: vec![AgentTaskCookRecoveryAction {
             action: "continue".to_string(),
-            command: "homeboy agent-task cook --continue cook-abc".to_string(),
+            command: "homeboy agent-task cook-continue cook-abc".to_string(),
         }],
         next_actions: vec![AgentTaskCookRecoveryAction {
             action: "diagnose".to_string(),
@@ -97,7 +97,7 @@ fn failed_cook_forwards_its_own_legal_recovery_commands() {
         "{commands:?}"
     );
     assert!(
-        commands.contains(&"homeboy agent-task cook --continue cook-abc"),
+        commands.contains(&"homeboy agent-task cook-continue cook-abc"),
         "{commands:?}"
     );
     assert!(payload
@@ -377,7 +377,7 @@ fn resumed_terminal_delivery_uses_the_durable_route_and_stays_deduplicated() {
 #[test]
 fn a_cook_resumed_in_a_new_process_recovers_its_route_from_the_durable_record() {
     // #11115: `notification_route::current()` is a thread-local, so a
-    // process that did not launch the cook (`cook --continue`, controller
+    // process that did not launch the cook (`cook-continue`, controller
     // adoption, claimed continuation) has none. Without the durable
     // fallback the whole arc degrades: Started/Progress are dropped and the
     // terminal event lands on the ambient default transport instead of the

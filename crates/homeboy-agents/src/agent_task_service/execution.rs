@@ -844,8 +844,8 @@ fn retryable_cook_attempt(
             "retryable pre-provider failure is not owned by its durable Cook recipe",
             Some(source.run_id.clone()),
             Some(vec![format!(
-                "Continue the owning Cook with: homeboy agent-task cook-continue {}",
-                cook_id
+                "Continue the owning Cook with: {}",
+                super::cook_continue_command(None, cook_id, false, None)
             )]),
         ));
     };

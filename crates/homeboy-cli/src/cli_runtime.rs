@@ -21,6 +21,7 @@ use homeboy::extension::{
     list_summaries_with, load_all_extensions, CliConfig,
     ExtensionManifest as InstalledExtensionManifest, ExtensionReadinessMode, ExtensionSummary,
 };
+use homeboy_agents::agent_task_service::cook_continue_command;
 use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
 use homeboy_upgrade::upgrade;
 
@@ -1208,11 +1209,7 @@ fn guard_fanout_resume_runtime(cli: &Cli) -> homeboy::core::Result<()> {
 }
 
 fn pinned_cook_continue_command(pinned: &std::path::Path, cook_id: &str) -> String {
-    format!(
-        "{} agent-task cook-continue {}",
-        homeboy::core::engine::shell::quote_arg(&pinned.to_string_lossy()),
-        homeboy::core::engine::shell::quote_arg(cook_id),
-    )
+    cook_continue_command(Some(&pinned.to_string_lossy()), cook_id, false, None)
 }
 
 fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {
