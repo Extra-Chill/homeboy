@@ -13,7 +13,7 @@ inventory() {
 run() {
   : > "${tmp}/output"
   TEST_INVENTORY_FILE="${tmp}/inventory.json" TEST_SCOPE_EFFECTIVE="$1" TEST_SCOPE_CAP="$2" TEST_SCOPE_SHARDS="$3" TEST_SCOPE_BUDGET_SECONDS=1500 TEST_SCOPE_ALLOW_OVERRIDE="$4" GITHUB_OUTPUT="${tmp}/output" \
-    bash "${ROOT}/scripts/core/test-scope-budget-preflight.sh"
+    bash "${ROOT}/scripts/core/preflight-test-scope-budget.sh"
 }
 
 inventory 8
@@ -39,18 +39,18 @@ mv "${tmp}/without-duration.json" "${tmp}/inventory.json"
 run changed 8 4 false
 grep -Fx 'budget-evidence=unknown' "${tmp}/output" >/dev/null || { echo 'FAIL: durationless inventory must report unknown budget evidence'; exit 1; }
 TEST_INVENTORY_FILE="${tmp}/inventory.json" TEST_SHARD_COUNT=4 TEST_SHARD_PLAN_FILE="${tmp}/durationless-plan.json" bash "${ROOT}/scripts/core/shard-tests.sh" plan
-TEST_INVENTORY_FILE="${tmp}/inventory.json" TEST_SCOPE_EFFECTIVE=changed TEST_SCOPE_CAP=8 TEST_SCOPE_SHARDS=4 TEST_SCOPE_BUDGET_SECONDS=1500 TEST_SCOPE_ALLOW_OVERRIDE=false TEST_SHARD_PLAN_FILE="${tmp}/durationless-plan.json" GITHUB_OUTPUT="${tmp}/output" bash "${ROOT}/scripts/core/test-scope-budget-preflight.sh" verify >"${tmp}/durationless-verify.log" 2>&1
+TEST_INVENTORY_FILE="${tmp}/inventory.json" TEST_SCOPE_EFFECTIVE=changed TEST_SCOPE_CAP=8 TEST_SCOPE_SHARDS=4 TEST_SCOPE_BUDGET_SECONDS=1500 TEST_SCOPE_ALLOW_OVERRIDE=false TEST_SHARD_PLAN_FILE="${tmp}/durationless-plan.json" GITHUB_OUTPUT="${tmp}/output" bash "${ROOT}/scripts/core/preflight-test-scope-budget.sh" verify >"${tmp}/durationless-verify.log" 2>&1
 grep -F 'budget fit is unknown' "${tmp}/durationless-verify.log" >/dev/null || { echo 'FAIL: durationless budget verification must remain unknown'; exit 1; }
 
 inventory 2 1000000
 run changed 2 2 false
 TEST_INVENTORY_FILE="${tmp}/inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/plan.json" TEST_SHARD_COUNT=1 bash "${ROOT}/scripts/core/shard-tests.sh" plan
-if TEST_INVENTORY_FILE="${tmp}/inventory.json" TEST_SCOPE_SHARDS=1 TEST_SCOPE_BUDGET_SECONDS=1500 TEST_SCOPE_ALLOW_OVERRIDE=false TEST_SHARD_PLAN_FILE="${tmp}/plan.json" TEST_SCOPE_BUDGET_FILE="${tmp}/budget.json" GITHUB_OUTPUT="${tmp}/output" bash "${ROOT}/scripts/core/test-scope-budget-preflight.sh" verify >"${tmp}/budget-over.log" 2>&1; then
+if TEST_INVENTORY_FILE="${tmp}/inventory.json" TEST_SCOPE_SHARDS=1 TEST_SCOPE_BUDGET_SECONDS=1500 TEST_SCOPE_ALLOW_OVERRIDE=false TEST_SHARD_PLAN_FILE="${tmp}/plan.json" TEST_SCOPE_BUDGET_FILE="${tmp}/budget.json" GITHUB_OUTPUT="${tmp}/output" bash "${ROOT}/scripts/core/preflight-test-scope-budget.sh" verify >"${tmp}/budget-over.log" 2>&1; then
   echo 'FAIL: over-budget duration plan must fail'; exit 1
 fi
 grep -F 'exceeds budget=1500s' "${tmp}/budget-over.log" >/dev/null || { echo 'FAIL: over-budget plan diagnostic is incomplete'; exit 1; }
 jq -e '.verdict == "exceeds" and .max_estimate_ms == 2000000 and .budget_seconds == 1500 and .override == false' "${tmp}/budget.json" >/dev/null || { echo 'FAIL: failed budget verdict was not persisted'; exit 1; }
-TEST_INVENTORY_FILE="${tmp}/inventory.json" TEST_SCOPE_SHARDS=1 TEST_SCOPE_BUDGET_SECONDS=1500 TEST_SCOPE_ALLOW_OVERRIDE=true TEST_SHARD_PLAN_FILE="${tmp}/plan.json" TEST_SCOPE_BUDGET_FILE="${tmp}/budget.json" GITHUB_OUTPUT="${tmp}/output" bash "${ROOT}/scripts/core/test-scope-budget-preflight.sh" verify >"${tmp}/budget-override.log" 2>&1
+TEST_INVENTORY_FILE="${tmp}/inventory.json" TEST_SCOPE_SHARDS=1 TEST_SCOPE_BUDGET_SECONDS=1500 TEST_SCOPE_ALLOW_OVERRIDE=true TEST_SHARD_PLAN_FILE="${tmp}/plan.json" TEST_SCOPE_BUDGET_FILE="${tmp}/budget.json" GITHUB_OUTPUT="${tmp}/output" bash "${ROOT}/scripts/core/preflight-test-scope-budget.sh" verify >"${tmp}/budget-override.log" 2>&1
 grep -F 'budget fit was explicitly overridden' "${tmp}/budget-override.log" >/dev/null || { echo 'FAIL: over-budget override was not reported'; exit 1; }
 jq -e '.verdict == "overridden" and .override == true' "${tmp}/budget.json" >/dev/null || { echo 'FAIL: override verdict was not persisted'; exit 1; }
 TEST_SHARD_PLAN_FILE="${tmp}/plan.json" TEST_SCOPE_BUDGET_FILE="${tmp}/budget.json" bash "${ROOT}/scripts/core/shard-tests.sh" attach-budget

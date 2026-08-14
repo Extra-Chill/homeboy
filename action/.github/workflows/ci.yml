@@ -761,11 +761,11 @@ jobs:
           TEST_SCOPE_BUDGET_SECONDS: ${{ inputs.test-timeout-seconds }}
           TEST_SCOPE_ALLOW_OVERRIDE: ${{ inputs.allow-oversized-test-scope }}
         run: |
-          bash .homeboy-action/scripts/core/test-scope-budget-preflight.sh
+          bash .homeboy-action/scripts/core/preflight-test-scope-budget.sh
           TEST_SHARD_COUNT="$(awk -F= '$1 == "shard-count" {print $2}' "${GITHUB_OUTPUT}")"
           export TEST_SHARD_COUNT
           bash .homeboy-action/scripts/core/shard-tests.sh plan
-          TEST_SHARD_PLAN_FILE="${TEST_SHARD_PLAN_FILE}" bash .homeboy-action/scripts/core/test-scope-budget-preflight.sh verify
+          TEST_SHARD_PLAN_FILE="${TEST_SHARD_PLAN_FILE}" bash .homeboy-action/scripts/core/preflight-test-scope-budget.sh verify
           bash .homeboy-action/scripts/core/shard-tests.sh attach-budget
           echo "matrix=$(jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}')" >> "${GITHUB_OUTPUT}"
       - name: Write candidate Test inventory failure provenance

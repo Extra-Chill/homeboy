@@ -44,9 +44,9 @@ else:
         if env.get(key) != value:
             problems.append(f"candidate Test planner must provide {key} to the preflight")
     run = preflight.get("run", "")
-    if "test-scope-budget-preflight.sh" not in run or "TEST_SHARD_COUNT=" not in run:
+    if "preflight-test-scope-budget.sh" not in run or "TEST_SHARD_COUNT=" not in run:
         problems.append("candidate Test planner must route before creating a shard plan")
-    if 'test-scope-budget-preflight.sh verify' not in run:
+    if 'preflight-test-scope-budget.sh verify' not in run:
         problems.append("candidate Test planner must verify the shard plan against the budget")
     if 'shard-tests.sh attach-budget' not in run:
         problems.append("candidate Test planner must attach budget evidence before publishing the plan")
