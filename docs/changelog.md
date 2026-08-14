@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.348.0] - 2026-08-14
+
+### Added
+- support explicit remote cwd
+
+### Changed
+- isolate credential readiness fixtures
+- cover pending handoff discovery
+
+### Fixed
+- restore provider fixture compilation
+- assert the status label the summary actually renders
+- preserve detached materialization handoff
+- isolate lifecycle opens from artifact maintenance
+- bootstrap refresh over diagnostic SSH
+- derive child test names so a module move cannot silently disarm them
+
 ## [0.347.1] - 2026-08-14
 
 ### Changed
