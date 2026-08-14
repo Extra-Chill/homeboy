@@ -925,9 +925,10 @@ pub struct AgentTaskCookArgs {
     /// one is not a built-in capability: it requires an enabled worktree
     /// provider with a `commands.ensure` argv template, and without one you must
     /// create the destination first with `homeboy worktree create`. When
-    /// omitted, --repo plus --task-url derives an issue-owned destination
-    /// through that same configured provider. An explicit --workspace or --cwd
-    /// Git checkout can infer --repo when its remote maps to exactly one
+    /// omitted, an explicit --cwd is the canonical destination. Otherwise,
+    /// --repo plus --task-url derives an issue-owned destination through that
+    /// same configured provider. An explicit --workspace or --cwd Git checkout
+    /// can infer --repo when its remote maps to exactly one
     /// configured component; an explicit --repo must match that checkout. When
     /// paired with --cwd, this must name the same existing local or active
     /// registered linked task worktree; --cwd remains the Cook workspace

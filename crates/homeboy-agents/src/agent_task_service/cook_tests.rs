@@ -3016,9 +3016,166 @@ fn explicit_cook_workspace_bypasses_a_timed_out_provider_lookup() {
         );
         options.to_worktree = "fixture@cwd-authority".to_string();
         options.source_worktree_path = Some(target);
+        options.task_base_sha = Some("base".to_string());
+        options.initial_plan.tasks[0].workspace.task_url =
+            Some("https://example.test/issues/cwd-authority".to_string());
+        options.initial_plan.tasks[0].metadata["worktree_provision"] =
+            serde_json::json!({ "kind": "explicit_cwd" });
 
         validate_cook_workspace(&options)
             .expect("explicit workspace must not wait for provider resolution");
+    });
+}
+
+#[test]
+fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary repository");
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(primary.path(), &["init", "--initial-branch=main"]);
+        git(
+            primary.path(),
+            &["config", "user.email", "agent@example.test"],
+        );
+        git(primary.path(), &["config", "user.name", "Agent"]);
+        std::fs::write(primary.path().join("tracked.txt"), "base\n").expect("write base");
+        git(primary.path(), &["add", "tracked.txt"]);
+        git(primary.path(), &["commit", "-m", "base"]);
+        git(
+            primary.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fix/cwd-cleanliness",
+                target.to_str().expect("target path"),
+                "HEAD",
+            ],
+        );
+
+        let mut options = batch_cook_options(
+            "cwd-cleanliness-boundary",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.to_worktree = target.display().to_string();
+        options.source_worktree_path = Some(target.clone());
+        options.initial_plan.tasks[0].metadata["worktree_provision"] =
+            serde_json::json!({ "kind": "explicit_cwd" });
+        validate_cook_workspace(&options).expect("clean explicit CWD has a valid identity");
+        admit_explicit_cook_workspace_before_provider(&options, &options.initial_run_id)
+            .expect("clean explicit CWD is admitted before its first provider attempt");
+
+        std::fs::write(target.join("candidate.txt"), "provider change\n")
+            .expect("write candidate change");
+        validate_cook_workspace(&options)
+            .expect("retry identity validation retains provider candidate changes");
+        let error =
+            admit_explicit_cook_workspace_before_provider(&options, &options.initial_run_id)
+                .expect_err("a dirty initial CWD cannot enter its first provider attempt");
+        assert_eq!(error.details["field"], "to_worktree");
+        assert!(error.message.contains("must be clean"));
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .expect("persist a pre-provider lifecycle failure");
+        agent_task_lifecycle::record_cook_attempt(&options.cook_id, 1, &options.initial_run_id)
+            .expect("index zero-execution attempt");
+        admit_explicit_cook_workspace_before_provider(&options, &options.initial_run_id)
+            .expect_err("a retry after a zero-execution lifecycle failure must reject user drift");
+
+        std::fs::remove_file(target.join("candidate.txt")).expect("remove pre-provider drift");
+        let evidence = target.join(".homeboy/evidence/input/context.txt");
+        std::fs::create_dir_all(evidence.parent().expect("evidence parent"))
+            .expect("create projected evidence directory");
+        std::fs::write(&evidence, "controller evidence\n").expect("write projected evidence");
+        options.initial_plan.tasks[0].executor.config = serde_json::json!({
+            "evidence_inputs": [{ "path": evidence }]
+        });
+        admit_explicit_cook_workspace_before_provider(&options, &options.initial_run_id)
+            .expect("the durable projected evidence path is not user drift");
+
+        agent_task_lifecycle::record_metadata_value(
+            &options.initial_run_id,
+            "provider_executions_consumed",
+            serde_json::json!(1),
+        )
+        .expect("record provider execution boundary");
+        std::fs::write(target.join("candidate.txt"), "provider change\n")
+            .expect("write provider candidate");
+        admit_explicit_cook_workspace_before_provider(&options, &options.initial_run_id)
+            .expect("candidate changes remain admissible after a durable provider execution");
+
+        agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+            record.metadata["provider_executions_consumed"] = serde_json::Value::Null;
+            record.metadata["provider_executions"] = serde_json::json!([{
+                "key": "task:1", "state": "succeeded"
+            }]);
+        })
+        .expect("persist a historical provider execution ledger without its counter");
+        admit_explicit_cook_workspace_before_provider(&options, &options.initial_run_id)
+            .expect("historical provider ledger keeps candidate changes admissible");
+    });
+}
+
+#[test]
+fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary repository");
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(primary.path(), &["init", "--initial-branch=main"]);
+        git(
+            primary.path(),
+            &["config", "user.email", "agent@example.test"],
+        );
+        git(primary.path(), &["config", "user.name", "Agent"]);
+        std::fs::write(primary.path().join("tracked.txt"), "base\n").expect("write base");
+        git(primary.path(), &["add", "tracked.txt"]);
+        git(primary.path(), &["commit", "-m", "base"]);
+        git(
+            primary.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fix/cwd-dispatch",
+                target.to_str().expect("target path"),
+                "HEAD",
+            ],
+        );
+
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut options = batch_cook_options(
+            "cwd-detached-dirty",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: dispatches.clone(),
+            }),
+        );
+        options.to_worktree = target.display().to_string();
+        options.source_worktree_path = Some(target.clone());
+        options.initial_plan.tasks[0].workspace.root = Some(target.display().to_string());
+        options.initial_plan.tasks[0].metadata["worktree_provision"] =
+            serde_json::json!({ "kind": "explicit_cwd" });
+        std::fs::write(target.join("untracked.txt"), "user drift\n").expect("write drift");
+
+        let result = run_cook(options, UnusedExecutor).expect("Cook reports admission failure");
+        assert_eq!(result.value.status, "pre_execution_failure");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
     });
 }
 

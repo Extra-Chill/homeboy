@@ -29,7 +29,6 @@ Start with `cook` when the goal is one branch and one reviewable PR:
 homeboy agent-task cook \
   --repo homeboy \
   --cwd /path/to/homeboy@fix-issue \
-  --to-worktree homeboy@fix-issue \
   --task-url https://github.com/Extra-Chill/homeboy/issues/123 \
   --verify "homeboy review test homeboy" \
   --prompt @task.txt
@@ -46,10 +45,12 @@ homeboy agent-task logs <run-id>
 Use this path before designing a loop. It proves the provider, workspace, promotion, and deterministic gates work for the repo.
 
 When `--cwd` names an existing linked task worktree, it is the authoritative
-workspace for provider execution, gates, promotion, and finalization. If you
-also pass `--to-worktree`, it must resolve locally or through Homeboy's active
-managed workspace registry to that same worktree; Cook does not query a
-provider merely to rediscover the supplied path.
+workspace for provider execution, gates, promotion, and finalization, including
+when `--task-url` is supplied. If you also pass `--to-worktree`, it must resolve
+locally or through Homeboy's active managed workspace registry to that same
+worktree; Cook does not query a provider merely to rediscover the supplied path.
+The explicit checkout must be clean when the first provider attempt is admitted;
+later retries retain the candidate changes produced by earlier attempts.
 
 ## 3. Define A Durable Loop
 
