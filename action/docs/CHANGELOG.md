@@ -2,6 +2,13 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.12.3] - 2026-08-14
+
+### Changed
+- Preserve preflight helper executable mode
+- Keep preflight helper out of test discovery
+- Preflight sharded test budgets
+
 ## [2.12.2] - 2026-08-14
 
 ### Changed
