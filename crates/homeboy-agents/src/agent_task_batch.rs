@@ -25,19 +25,16 @@ pub fn submit_plan_batch(
     plan: &AgentTaskPlan,
     requested_batch_id: Option<&str>,
 ) -> Result<AgentTaskBatchRecord> {
-    submit_plan_batch_with(plan, requested_batch_id, |child_plan, run_id| {
-        agent_task_lifecycle::submit_plan(child_plan, Some(run_id))
-    })
+    validate_plan_batch(plan)?;
+    AgentTaskBatchStore::from_current_data_root()?.submit_plan_batch_with(
+        plan,
+        requested_batch_id,
+        agent_task_lifecycle::run_record_exists,
+        |child_plan, run_id| agent_task_lifecycle::submit_plan(child_plan, Some(run_id)),
+    )
 }
 
-fn submit_plan_batch_with<F>(
-    plan: &AgentTaskPlan,
-    requested_batch_id: Option<&str>,
-    mut submit_child: F,
-) -> Result<AgentTaskBatchRecord>
-where
-    F: FnMut(&AgentTaskPlan, &str) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord>,
-{
+fn validate_plan_batch(plan: &AgentTaskPlan) -> Result<()> {
     if plan.tasks.is_empty() {
         return Err(Error::validation_invalid_argument(
             "input",
@@ -54,6 +51,21 @@ where
             None,
         ));
     }
+    Ok(())
+}
+
+fn submit_plan_batch_with_store<F, E>(
+    store: &AgentTaskBatchStore,
+    plan: &AgentTaskPlan,
+    requested_batch_id: Option<&str>,
+    mut run_record_exists: E,
+    mut submit_child: F,
+) -> Result<AgentTaskBatchRecord>
+where
+    F: FnMut(&AgentTaskPlan, &str) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord>,
+    E: FnMut(&str) -> Result<bool>,
+{
+    validate_plan_batch(plan)?;
 
     let batch_id = requested_batch_id
         .map(sanitize_id)
@@ -75,7 +87,7 @@ where
                     None,
                 ));
             }
-            if agent_task_lifecycle::run_record_exists(&child_run_id)? {
+            if run_record_exists(&child_run_id)? {
                 return Err(Error::validation_invalid_argument(
                     "batch_id",
                     format!(
@@ -112,7 +124,7 @@ where
             .collect(),
         metadata: batch_metadata(plan),
     };
-    write_batch(&record)?;
+    store.write_batch(&record)?;
 
     for (index, task) in plan.tasks.iter().enumerate() {
         let child_run_id = child_run_ids[index].clone();
@@ -122,7 +134,7 @@ where
         child.run_id = child_record.run_id;
         child.state = child_record.state;
         record.updated_at = Some(now_timestamp());
-        write_batch(&record)?;
+        store.write_batch(&record)?;
     }
 
     Ok(record)
@@ -368,7 +380,16 @@ pub fn record_fanout_run_batch_failed_admissions<'a>(
     batch_id: &str,
     failed_run_ids: impl IntoIterator<Item = &'a str>,
 ) -> Result<()> {
-    mutate_batch(batch_id, |batch| {
+    AgentTaskBatchStore::from_current_data_root()?
+        .record_fanout_run_batch_failed_admissions(batch_id, failed_run_ids)
+}
+
+fn record_fanout_run_batch_failed_admissions_in_store<'a>(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+    failed_run_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    store.mutate_batch(batch_id, |batch| {
         let failed_run_ids = failed_run_ids.into_iter().collect::<HashSet<_>>();
         if failed_run_ids.is_empty() {
             return Ok(());
@@ -696,10 +717,19 @@ pub fn fanout_ready_child_run_ids(batch_id: &str) -> Result<Option<HashSet<Strin
 /// only an index: each listed run must independently prove its persisted plan
 /// was created for this batch before it can be dispatched.
 pub fn owned_child_run_ids(batch_id: &str) -> Result<HashSet<String>> {
-    let batch = read_batch(batch_id)?;
+    owned_child_run_ids_for(
+        read_batch(batch_id)?,
+        agent_task_lifecycle::load_controller_plan,
+    )
+}
+
+fn owned_child_run_ids_for(
+    batch: AgentTaskBatchRecord,
+    mut load_controller_plan: impl FnMut(&str) -> Result<AgentTaskPlan>,
+) -> Result<HashSet<String>> {
     let mut owned = HashSet::new();
     for child in batch.child_runs {
-        let plan = agent_task_lifecycle::load_controller_plan(&child.run_id)?;
+        let plan = load_controller_plan(&child.run_id)?;
         let plan_batch_id = plan.metadata.get("batch_id").and_then(Value::as_str);
         if plan_batch_id != Some(batch.batch_id.as_str()) {
             return Err(Error::validation_invalid_argument(
@@ -997,6 +1027,26 @@ impl AgentTaskBatchStore {
         Ok(Self::from_data_root(paths::homeboy_data()?))
     }
 
+    fn submit_plan_batch_with<F, E>(
+        &self,
+        plan: &AgentTaskPlan,
+        requested_batch_id: Option<&str>,
+        run_record_exists: E,
+        submit_child: F,
+    ) -> Result<AgentTaskBatchRecord>
+    where
+        F: FnMut(&AgentTaskPlan, &str) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord>,
+        E: FnMut(&str) -> Result<bool>,
+    {
+        submit_plan_batch_with_store(
+            self,
+            plan,
+            requested_batch_id,
+            run_record_exists,
+            submit_child,
+        )
+    }
+
     fn persist_fanout_run_batch(
         &self,
         fanout_id: &str,
@@ -1023,6 +1073,14 @@ impl AgentTaskBatchStore {
         failure: Value,
     ) -> Result<()> {
         record_fanout_run_batch_failure_in_store(self, batch_id, claim_id, stage, failure)
+    }
+
+    fn record_fanout_run_batch_failed_admissions<'a>(
+        &self,
+        batch_id: &str,
+        failed_run_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<()> {
+        record_fanout_run_batch_failed_admissions_in_store(self, batch_id, failed_run_ids)
     }
 
     fn status(&self, batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
@@ -1287,6 +1345,20 @@ mod tests {
         (temp, store)
     }
 
+    fn batch_and_lifecycle_stores() -> (
+        tempfile::TempDir,
+        AgentTaskBatchStore,
+        agent_task_lifecycle::AgentTaskLifecycleStore,
+    ) {
+        let temp = tempfile::tempdir().expect("temporary agent-task data root");
+        let data_root = temp.path().to_path_buf();
+        (
+            temp,
+            AgentTaskBatchStore::from_data_root(data_root.clone()),
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(data_root),
+        )
+    }
+
     #[test]
     fn batch_submit_persists_parent_and_child_durable_runs() {
         // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
@@ -1315,16 +1387,22 @@ mod tests {
 
     #[test]
     fn owned_child_runs_reject_a_tampered_batch_roster() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/ownership", vec![request("a")]);
-        let batch = submit_plan_batch(&plan, Some("batch-ownership")).expect("batch submitted");
+        let batch = batch_store
+            .submit_plan_batch_with(
+                &plan,
+                Some("batch-ownership"),
+                |run_id| lifecycle_store.record_exists(run_id),
+                |child, run_id| {
+                    lifecycle_store
+                        .submit_plan_with_runtime_admission(child, run_id, |_| Ok(json!({})))
+                },
+            )
+            .expect("batch submitted");
         let child_run_id = &batch.child_runs[0].run_id;
 
-        let plan_path = paths::homeboy_data()
-            .expect("data path")
-            .join("agent-task-runs")
-            .join(child_run_id)
-            .join("plan.json");
+        let plan_path = lifecycle_store.controller_plan_path(child_run_id);
         let mut child_plan: Value =
             serde_json::from_slice(&fs::read(&plan_path).expect("child plan")).expect("plan JSON");
         child_plan["metadata"]["batch_id"] = json!("other-batch");
@@ -1334,29 +1412,44 @@ mod tests {
         )
         .expect("tamper child plan");
 
-        let error = owned_child_run_ids("batch-ownership").expect_err("lineage mismatch rejected");
+        let error = owned_child_run_ids_for(
+            batch_store
+                .read_batch("batch-ownership")
+                .expect("batch record"),
+            |run_id| lifecycle_store.read_controller_plan(run_id),
+        )
+        .expect_err("lineage mismatch rejected");
         assert_eq!(error.details["field"], "fanout");
         assert!(error.message.contains("batch lineage"));
     }
 
     #[test]
     fn batch_identity_is_persisted_before_the_first_child_submission() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/pre-submit", vec![request("a"), request("b")]);
         let mut observed = false;
 
-        let batch = submit_plan_batch_with(&plan, Some("batch/pre-submit"), |child, run_id| {
-            let persisted = read_batch("batch/pre-submit").expect("persisted batch identity");
-            assert_eq!(persisted.batch_id, "batch_pre-submit");
-            assert_eq!(persisted.child_runs.len(), 2);
-            assert!(persisted
-                .child_runs
-                .iter()
-                .all(|child| child.state == AgentTaskRunState::Queued));
-            observed = true;
-            agent_task_lifecycle::submit_plan(child, Some(run_id))
-        })
-        .expect("batch submitted");
+        let batch = batch_store
+            .submit_plan_batch_with(
+                &plan,
+                Some("batch/pre-submit"),
+                |run_id| lifecycle_store.record_exists(run_id),
+                |child, run_id| {
+                    let persisted = batch_store
+                        .read_batch("batch/pre-submit")
+                        .expect("persisted batch identity");
+                    assert_eq!(persisted.batch_id, "batch_pre-submit");
+                    assert_eq!(persisted.child_runs.len(), 2);
+                    assert!(persisted
+                        .child_runs
+                        .iter()
+                        .all(|child| child.state == AgentTaskRunState::Queued));
+                    observed = true;
+                    lifecycle_store
+                        .submit_plan_with_runtime_admission(child, run_id, |_| Ok(json!({})))
+                },
+            )
+            .expect("batch submitted");
 
         assert!(observed);
         assert_eq!(batch.child_runs.len(), 2);
@@ -1364,11 +1457,7 @@ mod tests {
 
     #[test]
     fn batch_children_inherit_the_scoped_notification_route() {
-        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
-        // the shared lock) so these tests serialize against every other module
-        // that mutates the same env — a module-local lock only ordered this
-        // module's own tests and raced `with_isolated_home` users elsewhere.
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/routes", vec![request("a"), request("b")]);
         let route = homeboy_core::notification_route::NotificationRoute::new(
             "extension",
@@ -1377,11 +1466,23 @@ mod tests {
         .expect("route");
 
         let batch = homeboy_core::notification_route::with_current(Some(route), || {
-            submit_plan_batch(&plan, Some("batch-routes")).expect("batch submitted")
+            batch_store
+                .submit_plan_batch_with(
+                    &plan,
+                    Some("batch-routes"),
+                    |run_id| lifecycle_store.record_exists(run_id),
+                    |child, run_id| {
+                        lifecycle_store
+                            .submit_plan_with_runtime_admission(child, run_id, |_| Ok(json!({})))
+                    },
+                )
+                .expect("batch submitted")
         });
 
         for child in batch.child_runs {
-            let record = agent_task_lifecycle::status(&child.run_id).expect("child record");
+            let record = lifecycle_store
+                .read_record(&child.run_id)
+                .expect("child record");
             assert_eq!(
                 record.metadata["notification_route"]["route"],
                 "opaque-parent-route"
@@ -1431,23 +1532,25 @@ mod tests {
 
     #[test]
     fn terminal_admission_failure_is_not_reclassified_as_unavailable() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, store) = batch_store();
         let batch_id = format!("fanout-admission-failure-{}", uuid::Uuid::new_v4());
         let child_run_id = format!("cook-workspace-bound-child-{}", uuid::Uuid::new_v4());
-        persist_fanout_run_batch(
-            &batch_id,
-            &batch_id,
-            &[FanoutRunBatchChild {
-                task_id: "workspace-bound-child".to_string(),
-                run_id: child_run_id.clone(),
-            }],
-            Value::Null,
-        )
-        .expect("persist fanout");
-        record_fanout_run_batch_failed_admissions(&batch_id, [child_run_id.as_str()])
+        store
+            .persist_fanout_run_batch(
+                &batch_id,
+                &batch_id,
+                &[FanoutRunBatchChild {
+                    task_id: "workspace-bound-child".to_string(),
+                    run_id: child_run_id.clone(),
+                }],
+                Value::Null,
+            )
+            .expect("persist fanout");
+        store
+            .record_fanout_run_batch_failed_admissions(&batch_id, [child_run_id.as_str()])
             .expect("record terminal admission failure");
 
-        let report = status(&batch_id).expect("terminal batch status");
+        let report = store.status(&batch_id).expect("terminal batch status");
         assert_eq!(report.status, "failed");
         assert_eq!(report.batch.state, AgentTaskBatchState::Failed);
         assert_eq!(report.totals.failed, 1);
@@ -1807,25 +1910,36 @@ mod tests {
 
     #[test]
     fn record_child_finalization_is_idempotent_and_convergent() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
-        let plan = AgentTaskPlan::new("fanout/converge", vec![request("a")]);
-        submit_plan_batch(&plan, Some("batch/converge")).expect("batch submitted");
+        let (_temp, store) = batch_store();
+        store
+            .persist_fanout_run_batch(
+                "batch/converge",
+                "fanout/converge",
+                &[FanoutRunBatchChild {
+                    task_id: "a".to_string(),
+                    run_id: "batch_converge-a".to_string(),
+                }],
+                Value::Null,
+            )
+            .expect("batch submitted");
 
-        record_child_finalization(
-            "batch/converge",
-            "batch_converge-a",
-            json!({ "status": "review_ready", "attempt": 1 }),
-        )
-        .expect("first finalization recorded");
+        store
+            .record_child_finalization(
+                "batch/converge",
+                "batch_converge-a",
+                json!({ "status": "review_ready", "attempt": 1 }),
+            )
+            .expect("first finalization recorded");
         // A repeated resume overwrites the same key rather than accumulating.
-        record_child_finalization(
-            "batch/converge",
-            "batch_converge-a",
-            json!({ "status": "review_ready", "attempt": 2 }),
-        )
-        .expect("second finalization overwrites");
+        store
+            .record_child_finalization(
+                "batch/converge",
+                "batch_converge-a",
+                json!({ "status": "review_ready", "attempt": 2 }),
+            )
+            .expect("second finalization overwrites");
 
-        let batch = read_batch_record("batch/converge").expect("batch record");
+        let batch = store.read_batch("batch/converge").expect("batch record");
         let finalizations = batch.metadata["child_finalizations"]
             .as_object()
             .expect("child_finalizations recorded");
