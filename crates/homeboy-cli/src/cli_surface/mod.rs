@@ -1154,6 +1154,30 @@ mod tests {
     }
 
     #[test]
+    fn generated_cook_continuation_commands_parse_against_the_live_cli() {
+        use homeboy_agents::agent_task_service::cook_continue_command;
+
+        for command in [
+            cook_continue_command(None, "cook-1", false, None),
+            cook_continue_command(None, "cook-1-attempt-2", false, None),
+            cook_continue_command(None, "cook-1-attempt-2", true, None),
+            cook_continue_command(None, "cook-1-attempt-2", true, Some("selected patch")),
+            cook_continue_command(
+                Some("/tmp/controller runtimes/homeboy"),
+                "cook-1-attempt-2",
+                false,
+                None,
+            ),
+        ] {
+            let argv =
+                shlex::split(&command).expect("generated continuation command must be shell-safe");
+            Cli::try_parse_from(&argv).unwrap_or_else(|error| {
+                panic!("generated Cook continuation command failed to parse: {command}\n{error}")
+            });
+        }
+    }
+
+    #[test]
     fn core_command_docs_do_not_drift_from_registry() {
         let root = workspace_root();
         let registered_docs = crate::command_contract::COMMAND_SPECS

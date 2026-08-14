@@ -1166,7 +1166,8 @@ pub fn reconcile_recipe_attempt_for_continuation(
             ),
             Some(run_id.to_string()),
             Some(vec![format!(
-                "Retry `homeboy agent-task cook-continue {run_id}` after the runner artifact can be harvested."
+                "Retry `{}` after the runner artifact can be harvested.",
+                super::cook_continue_command(None, run_id, false, None)
             )]),
         )
         .with_retryable(true));

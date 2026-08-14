@@ -9,6 +9,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider;
@@ -619,7 +620,7 @@ fn cook_terminal_continuation_status(
             "continuation_pending",
             serde_json::json!({
                 "action": "await_continuation_claim",
-                "command": format!("homeboy agent-task cook-continue {run_id}"),
+                "command": agent_task_service_direct::cook_continue_command(None, run_id, false, None),
             }),
         ),
         agent_task_service::CookContinuationState::Claimed => (
@@ -633,7 +634,7 @@ fn cook_terminal_continuation_status(
             "continuation_recovery_required",
             serde_json::json!({
                 "action": "rearm_failed_continuation",
-                "command": format!("homeboy agent-task cook-continue {run_id} --rearm"),
+                "command": agent_task_service_direct::cook_continue_command(None, run_id, true, None),
             }),
         ),
         agent_task_service::CookContinuationState::Completed => (
@@ -758,7 +759,9 @@ fn cook_report_with_continuation(mut value: Value) -> Value {
         );
         report.insert(
             "continuation_command".to_string(),
-            serde_json::json!(format!("homeboy agent-task cook-continue {run_id}")),
+            serde_json::json!(agent_task_service_direct::cook_continue_command(
+                None, &run_id, false, None
+            )),
         );
     }
     value

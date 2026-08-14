@@ -803,7 +803,7 @@ pub(crate) fn moving_base_recovery_for_run_with_store(
             // Recoveries written before scoped continuation used `run-next`.
             // The run ID remains authoritative, so expose the safe command
             // without requiring an unsafe migration of historical records.
-            recovery.continuation = format!("homeboy agent-task cook-continue {run_id}");
+            recovery.continuation = super::cook_continue_command(None, run_id, false, None);
             Ok(Some(recovery))
         })
 }
@@ -841,7 +841,7 @@ pub(crate) fn moving_base_recovery_from_promotion(
         blocker: String::new(),
         // This recovery belongs to one immutable Cook attempt. `run-next` is a
         // global scheduler operation and must never be offered as its recovery.
-        continuation: format!("homeboy agent-task cook-continue {run_id}"),
+        continuation: super::cook_continue_command(None, run_id, false, None),
         base_movements: 0,
     }
 }
@@ -3437,15 +3437,13 @@ fn cook_recovery_actions(
         actions.extend(ambiguous_artifact_ids.into_iter().map(|artifact_id| {
             super::AgentTaskCookRecoveryAction {
                 action: "resume_with_artifact".to_string(),
-                command: format!(
-                    "homeboy agent-task cook-continue {run_id} --rearm --artifact-id {artifact_id}"
-                ),
+                command: super::cook_continue_command(None, run_id, true, Some(&artifact_id)),
             }
         }));
     } else if continuation_eligible {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "resume".to_string(),
-            command: format!("homeboy agent-task cook-continue {run_id}"),
+            command: super::cook_continue_command(None, run_id, false, None),
         });
     }
     let next_actions = actions.clone();
