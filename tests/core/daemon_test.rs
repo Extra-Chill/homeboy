@@ -1884,11 +1884,13 @@ fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_produce
 fn dead_lease_conflict_suppresses_the_adoption_command_until_candidate_attribution_clears() {
     let candidate = DaemonProcessCandidate {
         pid: 4242,
+        process_start_identity: None,
         executable: "/tmp/homeboy".to_string(),
         cmdline: "HOME=/tmp/home homeboy daemon serve --addr 127.0.0.1:0".to_string(),
         bind_endpoint: Some("127.0.0.1:0".to_string()),
         durable_store_path: Some("/tmp/home/.config/homeboy/daemon/jobs.json".to_string()),
         build_identity: None,
+        startup_token: None,
         ownership: DaemonProcessOwnership::Ambiguous,
     };
 
@@ -3085,6 +3087,47 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(finish.status_code, 200);
     assert_eq!(finish.body["endpoint"], "runner.jobs.finish");
     assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
+}
+
+#[test]
+fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission_fence() {
+    let _home = HomeGuard::new();
+    let store = JobStore::default();
+    let reconciliation_fence = super::acquire_daemon_job_admission_fence()
+        .expect("reconciliation acquires exclusive admission fence");
+    let (submitted_tx, submitted_rx) = mpsc::channel();
+    let route_store = store.clone();
+
+    std::thread::spawn(move || {
+        let response = route_with_job_store_and_body(
+            "POST",
+            "/runner/jobs",
+            Some(serde_json::json!({
+                "runner_id": "homeboy-lab",
+                "submission_key": "fenced-reverse-submission",
+                "command": ["homeboy", "test", "sample-component"]
+            })),
+            &route_store,
+        );
+        submitted_tx
+            .send(response)
+            .expect("return submission response");
+    });
+
+    assert!(
+        submitted_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err(),
+        "a reverse submission must wait for the exclusive reconciliation fence"
+    );
+    assert!(store.list().is_empty(), "no job persisted while fenced");
+
+    drop(reconciliation_fence);
+    let response = submitted_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("submission resumes after reconciliation");
+    assert_eq!(response.status_code, 200);
+    assert_eq!(store.list().len(), 1);
 }
 
 #[test]

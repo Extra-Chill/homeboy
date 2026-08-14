@@ -2388,3 +2388,25 @@ fn stale_replacement_force_stop_rejects_a_success_envelope_without_stop_action()
         assert!(error.contains("unexpected response"));
     });
 }
+
+#[test]
+fn unleased_candidate_reconciliation_requires_a_negotiated_contract() {
+    let output = || {
+        homeboy_core::server::CommandOutput {
+        success: true,
+        stdout: "Options:\n    --apply\n    --addr <ADDR>\n    --replacement-operation-id <REPLACEMENT_OPERATION_ID>\n".to_string(),
+        stderr: String::new(),
+        exit_code: 0,
+        timed_out: false,
+        child_resource: None,
+    }
+    };
+    negotiate_unleased_candidate_reconciliation(None, output)
+        .expect("legacy help advertises the canonical contract");
+
+    let error = negotiate_unleased_candidate_reconciliation(Some(&[]), || {
+        unreachable!("typed capability absence must not fall back to help")
+    })
+    .expect_err("current remote without capability requires upgrade");
+    assert!(error.contains("must be upgraded"));
+}

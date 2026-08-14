@@ -263,6 +263,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         reconcile_leaseless_orphans: bool,
 
+        /// Explicitly apply the bounded remote daemon-candidate reconciliation.
+        #[arg(long)]
+        reconcile_unleased_candidates: bool,
+
         /// Deprecated no-op retained for one release; the runner fails closed on owner-lock, process, and listener probes
         #[arg(long)]
         confirm_no_daemon_owner: bool,

@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use homeboy::core::daemon::{
-    self, BrokerConfig, BrokerConfigOptions, DaemonExactOrphanRecoveryResult,
-    DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult,
-    DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult, ServiceIdentity,
+    self, BrokerConfig, BrokerConfigOptions, DaemonCandidateReconciliationResult,
+    DaemonExactOrphanRecoveryResult, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult,
+    DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
+    ServiceIdentity,
 };
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
 use homeboy::core::Error;
@@ -138,6 +139,20 @@ enum DaemonCommand {
         #[arg(long)]
         replacement_operation_id: Option<String>,
     },
+    /// Preview unleased daemon candidates, or explicitly retire only proven
+    /// orphan candidates and start a replacement when the durable store is idle.
+    #[cfg_attr(not(target_os = "linux"), command(hide = true))]
+    ReconcileUnleasedCandidates {
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+        /// Signal only candidates whose store, binary, startup token, and
+        /// unreachable endpoint were proven by this invocation.
+        #[arg(long)]
+        apply: bool,
+        /// Controller-generated idempotency key for this replacement operation.
+        #[arg(long)]
+        replacement_operation_id: Option<String>,
+    },
     /// Recover one exact lease after its daemon state record was lost
     RecoverMissingLeaseState {
         /// Exact lease ID captured before the daemon state record was lost
@@ -241,6 +256,7 @@ pub enum DaemonOutput {
     ReconcileDeadLeaseOrphans(DaemonExactOrphanRecoveryResult),
     RecoverMissingChildIdentity(homeboy::core::api_jobs::Job),
     ReconcileLeaselessOrphans(DaemonLeaselessRecoveryResult),
+    ReconcileUnleasedCandidates(DaemonCandidateReconciliationResult),
     RecoverMissingLeaseState(DaemonStateLossRecoveryResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
@@ -377,6 +393,18 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         } => Ok((
             DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(
                 &addr,
+                replacement_operation_id.as_deref(),
+            )?),
+            0,
+        )),
+        DaemonCommand::ReconcileUnleasedCandidates {
+            addr,
+            apply,
+            replacement_operation_id,
+        } => Ok((
+            DaemonOutput::ReconcileUnleasedCandidates(daemon::reconcile_unleased_candidates(
+                &addr,
+                apply,
                 replacement_operation_id.as_deref(),
             )?),
             0,

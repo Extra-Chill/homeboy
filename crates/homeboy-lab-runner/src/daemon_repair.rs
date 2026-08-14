@@ -29,6 +29,7 @@ pub mod codes {
     pub const RUNNER_REFRESH_HOMEBOY: &str = "runner_refresh_homeboy";
     pub const RUNNER_ADOPT_ORPHAN_LEASE: &str = "runner_adopt_orphan_lease";
     pub const RUNNER_RECONCILE_LEASELESS_ORPHANS: &str = "runner_reconcile_leaseless_orphans";
+    pub const RUNNER_RECONCILE_UNLEASED_CANDIDATES: &str = "runner_reconcile_unleased_candidates";
     /// A recovery command a runner advertised as text. It has no argv behind it,
     /// so it is surfaced to the operator rather than executed.
     pub const STALE_DAEMON_RECOVERY: &str = "stale_daemon_recovery";
@@ -39,7 +40,8 @@ pub mod codes {
 
 pub(crate) use codes::{
     RUNNER_ADOPT_ORPHAN_LEASE, RUNNER_CONNECT, RUNNER_DIAGNOSE, RUNNER_DISCONNECT,
-    RUNNER_RECONCILE_LEASELESS_ORPHANS, RUNNER_REFRESH_HOMEBOY, STALE_DAEMON_RECOVERY,
+    RUNNER_RECONCILE_LEASELESS_ORPHANS, RUNNER_RECONCILE_UNLEASED_CANDIDATES,
+    RUNNER_REFRESH_HOMEBOY, STALE_DAEMON_RECOVERY,
 };
 
 /// A step whose argv is authoritative; its text is rendered from the action.
@@ -115,6 +117,29 @@ pub(crate) fn reconcile_leaseless_orphans_action(runner_id: &str) -> ExecutableA
         ],
         ActionSafety::Mutating,
     )
+}
+
+/// `homeboy runner connect <id> --reconcile-unleased-candidates`.
+pub(crate) fn reconcile_unleased_candidates_action(runner_id: &str) -> Option<ExecutableAction> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(runner_action(
+            "runner.reconcile_unleased_candidates",
+            format!("reconcile unleased daemon candidates on runner {runner_id}"),
+            [
+                "runner".to_string(),
+                "connect".to_string(),
+                runner_id.to_string(),
+                "--reconcile-unleased-candidates".to_string(),
+            ],
+            ActionSafety::Mutating,
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = runner_id;
+        None
+    }
 }
 
 /// `homeboy runner refresh-homeboy <id> --reconnect`.
@@ -351,6 +376,31 @@ mod tests {
                 "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn unleased_candidate_reconciliation_has_authoritative_argv() {
+        let action = reconcile_unleased_candidates_action("homeboy-lab");
+
+        if cfg!(target_os = "linux") {
+            let action = action.expect("Linux emits a pidfd-safe reconciliation action");
+            assert_eq!(action.id, "runner.reconcile_unleased_candidates");
+            assert_eq!(
+                action.args,
+                [
+                    "runner",
+                    "connect",
+                    "homeboy-lab",
+                    "--reconcile-unleased-candidates"
+                ]
+            );
+            assert_eq!(
+                action.render_command(),
+                "homeboy runner connect homeboy-lab --reconcile-unleased-candidates"
+            );
+        } else {
+            assert!(action.is_none(), "non-Linux cannot emit a pidfd action");
+        }
     }
 
     #[test]

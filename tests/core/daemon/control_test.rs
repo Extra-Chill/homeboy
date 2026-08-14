@@ -633,11 +633,13 @@ fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
 fn multiple_ambiguous_candidates_block_recovery_and_pid_reuse_blocks_adoption() {
     let ambiguous = super::super::DaemonProcessCandidate {
         pid: 71,
+        process_start_identity: None,
         executable: "/tmp/homeboy".to_string(),
         cmdline: "homeboy daemon serve --addr 127.0.0.1:0".to_string(),
         bind_endpoint: Some("127.0.0.1:0".to_string()),
         durable_store_path: None,
         build_identity: None,
+        startup_token: None,
         ownership: super::super::DaemonProcessOwnership::Ambiguous,
     };
     assert!(!super::candidates_prove_no_owner(&[
@@ -655,11 +657,13 @@ fn multiple_ambiguous_candidates_block_recovery_and_pid_reuse_blocks_adoption() 
 fn dead_persisted_lease_with_ambiguous_candidates_refuses_replacement_before_spawn() {
     let candidate = super::super::DaemonProcessCandidate {
         pid: 71,
+        process_start_identity: None,
         executable: "/tmp/homeboy".to_string(),
         cmdline: "homeboy daemon serve --addr 127.0.0.1:0".to_string(),
         bind_endpoint: Some("127.0.0.1:0".to_string()),
         durable_store_path: None,
         build_identity: None,
+        startup_token: None,
         ownership: super::super::DaemonProcessOwnership::Ambiguous,
     };
     let state = tempfile::tempdir().expect("state directory");

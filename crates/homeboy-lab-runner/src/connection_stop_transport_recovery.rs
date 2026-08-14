@@ -1134,54 +1134,56 @@ mod tests {
 
     #[test]
     fn endpoint_reuse_after_identity_probe_never_receives_stop() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("reused listener");
-        let address = listener.local_addr().expect("reused address");
-        let mutations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observed_mutations = Arc::clone(&mutations);
-        let server = thread::spawn(move || {
-            listener
-                .set_nonblocking(true)
-                .expect("nonblocking listener");
-            let deadline = std::time::Instant::now() + Duration::from_millis(750);
-            let mut identity_served = false;
-            while std::time::Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut request = [0; 4096];
-                        let length = stream.read(&mut request).expect("reused request");
-                        let request = String::from_utf8_lossy(&request[..length]);
-                        if !identity_served {
-                            assert!(request.starts_with("GET /lifecycle/identity?nonce="));
-                            let nonce = request
-                                .split("nonce=")
-                                .nth(1)
-                                .and_then(|value| value.split_whitespace().next())
-                                .expect("identity nonce");
-                            let body = format!(
-                                r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v1","lease_id":"lease-live","pid":4242}}}}"#
-                            );
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("identity response");
-                            identity_served = true;
-                        } else if request.starts_with("POST /lifecycle/stop") {
-                            observed_mutations.fetch_add(1, Ordering::SeqCst);
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("reused listener");
+            let address = listener.local_addr().expect("reused address");
+            let mutations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed_mutations = Arc::clone(&mutations);
+            let server = thread::spawn(move || {
+                listener
+                    .set_nonblocking(true)
+                    .expect("nonblocking listener");
+                let deadline = std::time::Instant::now() + Duration::from_millis(750);
+                let mut identity_served = false;
+                while std::time::Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let mut request = [0; 4096];
+                            let length = stream.read(&mut request).expect("reused request");
+                            let request = String::from_utf8_lossy(&request[..length]);
+                            if !identity_served {
+                                assert!(request.starts_with("GET /lifecycle/identity?nonce="));
+                                let nonce = request
+                                    .split("nonce=")
+                                    .nth(1)
+                                    .and_then(|value| value.split_whitespace().next())
+                                    .expect("identity nonce");
+                                let body = format!(
+                                    r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v1","lease_id":"lease-live","pid":4242}}}}"#
+                                );
+                                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("identity response");
+                                identity_served = true;
+                            } else if request.starts_with("POST /lifecycle/stop") {
+                                observed_mutations.fetch_add(1, Ordering::SeqCst);
+                            }
                         }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(error) => panic!("reused listener failed: {error}"),
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5))
-                    }
-                    Err(error) => panic!("reused listener failed: {error}"),
                 }
-            }
+            });
+            let mut session = direct_ssh_session("lease-live");
+            session.local_url = Some(format!("http://{address}"));
+
+            let error = disconnect_remote_daemon(&session, false)
+                .expect_err("the isolated fixture cannot authorize an SSH lifecycle mutation");
+
+            server.join().expect("reused server");
+            assert!(!error.contains("endpoint_identity_mismatch"));
+            assert_eq!(mutations.load(Ordering::SeqCst), 0);
         });
-        let mut session = direct_ssh_session("lease-live");
-        session.local_url = Some(format!("http://{address}"));
-
-        let error = disconnect_remote_daemon(&session, false)
-            .expect_err("the fixture cannot authorize an SSH lifecycle mutation");
-
-        server.join().expect("reused server");
-        assert!(!error.contains("endpoint_identity_mismatch"));
-        assert_eq!(mutations.load(Ordering::SeqCst), 0);
     }
 
     #[test]
