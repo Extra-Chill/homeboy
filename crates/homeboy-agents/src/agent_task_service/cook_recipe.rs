@@ -1064,6 +1064,16 @@ pub fn validate_recipe_attempt_record(
     run_id: &str,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<()> {
+    let controller_plan = agent_task_lifecycle::load_controller_plan(run_id)?;
+    validate_recipe_attempt_record_with_controller_plan(recipe, run_id, record, &controller_plan)
+}
+
+pub(crate) fn validate_recipe_attempt_record_with_controller_plan(
+    recipe: &AgentTaskCookRecipe,
+    run_id: &str,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    controller_plan: &AgentTaskPlan,
+) -> Result<()> {
     let attempt = recipe
         .attempts
         .iter()
@@ -1100,7 +1110,6 @@ pub fn validate_recipe_attempt_record(
             ]),
         ));
     }
-    let controller_plan = agent_task_lifecycle::load_controller_plan(run_id)?;
     let plan_identity_matches = controller_plan.tasks.len() == attempt.plan.tasks.len()
         && attempt.plan.tasks.iter().all(|expected| {
             controller_plan

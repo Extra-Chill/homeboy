@@ -110,6 +110,24 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub(crate) fn submit_plan_with_runtime_admission_status(
+        &self,
+        plan: &AgentTaskPlan,
+        run_id: &str,
+        admission_status: &dyn Fn(&str) -> Option<Value>,
+        admit_runtime: impl FnOnce(&str) -> Result<Value>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::submit_plan_with_runtime_admission_in_store(
+            self,
+            plan,
+            Some(run_id),
+            None,
+            None,
+            Some(admission_status),
+            admit_runtime,
+        )
+    }
+
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
         ObservationStore::open_initialized_at(self.observation_db_path())
     }
@@ -157,6 +175,33 @@ impl AgentTaskLifecycleStore {
         write_cook_index_attempt_in_store(self, cook_id, attempt, run_id, recorded_at, candidate)
     }
 
+    pub(crate) fn write_cook_index_attempt_locked(
+        &self,
+        cook_id: &str,
+        attempt: u32,
+        run_id: &str,
+        recorded_at: String,
+        candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
+    ) -> Result<AgentTaskCookIndex> {
+        write_cook_index_attempt_locked_in_store(
+            self,
+            cook_id,
+            attempt,
+            run_id,
+            recorded_at,
+            candidate,
+        )
+    }
+
+    pub(crate) fn validate_cook_index_attempt(
+        &self,
+        cook_id: &str,
+        attempt: u32,
+        run_id: &str,
+    ) -> Result<()> {
+        validate_cook_index_attempt_in_store(self, cook_id, attempt, run_id)
+    }
+
     pub fn read_cook_index(&self, cook_id: &str) -> Result<AgentTaskCookIndex> {
         read_cook_index_in_store(self, cook_id)
     }
@@ -167,6 +212,26 @@ impl AgentTaskLifecycleStore {
 
     pub fn read_record(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         read_record_in_store(self, run_id)
+    }
+
+    /// Check this store for one exact durable run identity without Cook alias
+    /// resolution.
+    pub fn record_exists(&self, run_id: &str) -> Result<bool> {
+        Ok(self
+            .open_observation_initialized()?
+            .get_run(run_id)?
+            .is_some())
+    }
+
+    /// Register a Cook attempt using this store's record, lock, index, and
+    /// terminal-projection roots.
+    pub fn record_cook_attempt(
+        &self,
+        cook_id: &str,
+        attempt: u32,
+        run_id: &str,
+    ) -> Result<AgentTaskCookIndex> {
+        super::lifecycle_ops::record_cook_attempt_in_store(self, cook_id, attempt, run_id)
     }
 
     pub fn read_record_bounded(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -715,7 +780,7 @@ fn write_cook_index_attempt_locked_in_store(
 ) -> Result<AgentTaskCookIndex> {
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
-    validate_cook_index_attempt(&cook_id, attempt, &run_id)?;
+    validate_cook_index_attempt_in_store(store, &cook_id, attempt, &run_id)?;
     let path = store.cook_index_path(&cook_id);
     let mut index = if path.exists() {
         read_json(&path)?
@@ -914,9 +979,18 @@ pub(super) fn record_exists_readonly(run_id: &str) -> Result<bool> {
 }
 
 pub(super) fn validate_cook_index_attempt(cook_id: &str, attempt: u32, run_id: &str) -> Result<()> {
+    validate_cook_index_attempt_in_store(&default_store()?, cook_id, attempt, run_id)
+}
+
+fn validate_cook_index_attempt_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+) -> Result<()> {
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
-    let path = cook_index_path(&cook_id)?;
+    let path = store.cook_index_path(&cook_id);
     if !path.exists() {
         return Ok(());
     }

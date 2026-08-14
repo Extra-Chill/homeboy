@@ -15,7 +15,7 @@
 use serde_json::Value;
 
 use crate::agent_task::AgentTaskExecutor;
-use crate::agent_task_lifecycle;
+use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore};
 use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::cook_status::CookDisposition;
 use homeboy_core::{Error, Result};
@@ -33,19 +33,36 @@ use super::AgentTaskRunResult;
 pub(crate) fn materialize_initial_cook_attempt(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<()> {
-    let store = CookRecipeStore::from_current_data_root()?;
-    materialize_initial_cook_attempt_with_store(&store, options)
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    materialize_initial_cook_attempt_with_store_and_lifecycle(
+        &recipe_store,
+        &lifecycle_store,
+        options,
+    )
 }
 
 pub(crate) fn materialize_initial_cook_attempt_with_store(
     store: &CookRecipeStore,
     options: &AgentTaskCookServiceOptions,
 ) -> Result<()> {
-    materialize_cook_attempt_with_store(
-        store,
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    materialize_initial_cook_attempt_with_store_and_lifecycle(store, &lifecycle_store, options)
+}
+
+fn materialize_initial_cook_attempt_with_store_and_lifecycle(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &AgentTaskCookServiceOptions,
+) -> Result<()> {
+    materialize_cook_attempt_with_stores_and_runtime(
+        recipe_store,
+        lifecycle_store,
         &options.cook_id,
         &options.initial_run_id,
         &options.initial_plan,
+        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        production_runtime_admission(lifecycle_store),
     )
 }
 
@@ -57,8 +74,17 @@ pub(crate) fn materialize_cook_attempt(
     run_id: &str,
     plan: &AgentTaskPlan,
 ) -> Result<()> {
-    let store = CookRecipeStore::from_current_data_root()?;
-    materialize_cook_attempt_with_store(&store, cook_id, run_id, plan)
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    materialize_cook_attempt_with_stores_and_runtime(
+        &recipe_store,
+        &lifecycle_store,
+        cook_id,
+        run_id,
+        plan,
+        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        production_runtime_admission(&lifecycle_store),
+    )
 }
 
 pub(crate) fn materialize_cook_attempt_with_store(
@@ -67,26 +93,94 @@ pub(crate) fn materialize_cook_attempt_with_store(
     run_id: &str,
     plan: &AgentTaskPlan,
 ) -> Result<()> {
-    if agent_task_lifecycle::run_record_exists(run_id)? {
-        return ensure_cook_attempt_index(store, cook_id, run_id);
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    materialize_cook_attempt_with_stores_and_runtime(
+        store,
+        &lifecycle_store,
+        cook_id,
+        run_id,
+        plan,
+        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        production_runtime_admission(&lifecycle_store),
+    )
+}
+
+/// Materialize an immutable Cook recipe attempt into explicitly rooted lifecycle
+/// storage. Detached handoff parents are supported only when they share this
+/// lifecycle store; a parent in another root is never consulted.
+pub(crate) fn materialize_cook_attempt_with_stores_and_admission(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    admit_runtime: impl FnOnce(&str) -> Result<Value>,
+) -> Result<()> {
+    materialize_cook_attempt_with_stores_and_runtime(
+        recipe_store,
+        lifecycle_store,
+        cook_id,
+        run_id,
+        plan,
+        None,
+        admit_runtime,
+    )
+}
+
+fn materialize_cook_attempt_with_stores_and_runtime(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
+    admit_runtime: impl FnOnce(&str) -> Result<Value>,
+) -> Result<()> {
+    if lifecycle_store.record_exists(run_id)? {
+        return ensure_cook_attempt_index(recipe_store, lifecycle_store, cook_id, run_id);
     }
-    match agent_task_lifecycle::submit_plan(plan, Some(run_id)) {
-        Ok(_) => ensure_cook_attempt_index(store, cook_id, run_id),
+    let submission = match admission_status {
+        Some(project) => lifecycle_store.submit_plan_with_runtime_admission_status(
+            plan,
+            run_id,
+            project,
+            admit_runtime,
+        ),
+        None => lifecycle_store.submit_plan_with_runtime_admission(plan, run_id, admit_runtime),
+    };
+    match submission {
+        Ok(_) => ensure_cook_attempt_index(recipe_store, lifecycle_store, cook_id, run_id),
         Err(error) => {
             // `submit_plan` persists admission failures before returning them.
-            if agent_task_lifecycle::run_record_exists(run_id)? {
-                ensure_cook_attempt_index(store, cook_id, run_id)?;
+            if lifecycle_store.record_exists(run_id)? {
+                ensure_cook_attempt_index(recipe_store, lifecycle_store, cook_id, run_id)?;
             }
             Err(error)
         }
     }
 }
 
+fn production_runtime_admission(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> impl FnOnce(&str) -> Result<Value> + '_ {
+    move |run_id| {
+        homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(run_id, || {
+            Ok(lifecycle_store.read_record(run_id)?.state.is_terminal())
+        })
+        .map(|admission| admission.runtime)
+    }
+}
+
 /// Complete the second half of initial-attempt materialization after a crash.
 /// The recipe and run record are independent durable writes, so their exact
 /// identities must agree before repairing the alias/index projection.
-fn ensure_cook_attempt_index(store: &CookRecipeStore, cook_id: &str, run_id: &str) -> Result<()> {
-    let recipe = store.load_recipe(cook_id)?;
+fn ensure_cook_attempt_index(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+) -> Result<()> {
+    let recipe = recipe_store.load_recipe(cook_id)?;
     let attempt = recipe
         .attempts
         .iter()
@@ -99,7 +193,7 @@ fn ensure_cook_attempt_index(store: &CookRecipeStore, cook_id: &str, run_id: &st
                 None,
             )
         })?;
-    let record = agent_task_lifecycle::exact_record(run_id)?;
+    let record = lifecycle_store.read_record(run_id)?;
     if let Some(cook_id) = record.metadata.get("cook_id").and_then(Value::as_str) {
         if cook_id != recipe.cook_id {
             return Err(Error::validation_invalid_argument(
@@ -120,8 +214,15 @@ fn ensure_cook_attempt_index(store: &CookRecipeStore, cook_id: &str, run_id: &st
             ));
         }
     }
-    super::cook_recipe::validate_recipe_attempt_record(&recipe, &attempt.run_id, &record)?;
-    agent_task_lifecycle::record_cook_attempt(&recipe.cook_id, attempt.attempt, &attempt.run_id)
+    let controller_plan = lifecycle_store.read_controller_plan(run_id)?;
+    super::cook_recipe::validate_recipe_attempt_record_with_controller_plan(
+        &recipe,
+        &attempt.run_id,
+        &record,
+        &controller_plan,
+    )?;
+    lifecycle_store
+        .record_cook_attempt(&recipe.cook_id, attempt.attempt, &attempt.run_id)
         .map(|_| ())
 }
 
@@ -436,4 +537,194 @@ fn terminal_provider_execution(
             backend: terminal.backend.clone(),
             model: terminal.model.clone(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+    use crate::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
+        AGENT_TASK_REQUEST_SCHEMA,
+    };
+    use crate::agent_task_lifecycle::AgentTaskLifecycleStore;
+    use crate::agent_task_service::cook_recipe::{
+        AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, COOK_RECIPE_SCHEMA,
+    };
+
+    fn recipe(cook_id: &str, run_id: &str, plan: AgentTaskPlan) -> AgentTaskCookRecipe {
+        AgentTaskCookRecipe {
+            schema: COOK_RECIPE_SCHEMA.to_string(),
+            cook_id: cook_id.to_string(),
+            attempts: vec![AgentTaskCookRecipeAttempt {
+                attempt: 1,
+                run_id: run_id.to_string(),
+                plan: plan.clone(),
+            }],
+            promotion_transport: serde_json::json!({}),
+            gate_policy: serde_json::json!({}),
+            retry_budget: serde_json::json!({}),
+            finalization: serde_json::json!({}),
+            source_refs: vec![format!("{cook_id}-source")],
+            runtime_generation: "test".to_string(),
+            sensitive_mappings: Vec::new(),
+            harvest_context: Default::default(),
+        }
+    }
+
+    fn plan(plan_id: &str, marker: &str) -> AgentTaskPlan {
+        AgentTaskPlan::new(
+            plan_id,
+            vec![AgentTaskRequest {
+                schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: "task".to_string(),
+                group_key: None,
+                parent_plan_id: None,
+                executor: AgentTaskExecutor {
+                    backend: "test".to_string(),
+                    selector: None,
+                    runtime_selection: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: Value::Null,
+                },
+                instructions: marker.to_string(),
+                inputs: Value::Null,
+                source_refs: Vec::new(),
+                workspace: AgentTaskWorkspace::default(),
+                component_contracts: Vec::new(),
+                policy: AgentTaskPolicy::default(),
+                limits: AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
+                runtime_tools: Vec::new(),
+                metadata: Value::Null,
+            }],
+        )
+    }
+
+    #[test]
+    fn explicit_stores_materialize_identical_cook_attempts_in_parallel() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_recipe_store = CookRecipeStore::new(left_context.path_roots());
+        let right_recipe_store = CookRecipeStore::new(right_context.path_roots());
+        let left_lifecycle_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+        let right_lifecycle_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+        let cook_id = "same-cook";
+        let run_id = "same-run";
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut left_plan = plan("left-plan", "left");
+        left_plan.metadata = serde_json::json!({ "store": "left" });
+        let mut right_plan = plan("right-plan", "right");
+        right_plan.metadata = serde_json::json!({ "store": "right" });
+        left_recipe_store
+            .persist_recipe(&recipe(cook_id, run_id, left_plan.clone()))
+            .expect("persist left recipe");
+        right_recipe_store
+            .persist_recipe(&recipe(cook_id, run_id, right_plan.clone()))
+            .expect("persist right recipe");
+
+        std::thread::scope(|scope| {
+            let left_barrier = Arc::clone(&barrier);
+            let left_recipe_store = left_recipe_store.clone();
+            let left_lifecycle_store = left_lifecycle_store.clone();
+            scope.spawn(move || {
+                materialize_cook_attempt_with_stores_and_admission(
+                    &left_recipe_store,
+                    &left_lifecycle_store,
+                    cook_id,
+                    run_id,
+                    &left_plan,
+                    |_| {
+                        left_barrier.wait();
+                        Ok(serde_json::json!({ "store": "left" }))
+                    },
+                )
+                .expect("materialize left");
+            });
+            let right_barrier = Arc::clone(&barrier);
+            let right_recipe_store = right_recipe_store.clone();
+            let right_lifecycle_store = right_lifecycle_store.clone();
+            scope.spawn(move || {
+                materialize_cook_attempt_with_stores_and_admission(
+                    &right_recipe_store,
+                    &right_lifecycle_store,
+                    cook_id,
+                    run_id,
+                    &right_plan,
+                    |_| {
+                        right_barrier.wait();
+                        Ok(serde_json::json!({ "store": "right" }))
+                    },
+                )
+                .expect("materialize right");
+            });
+        });
+
+        assert_eq!(
+            left_lifecycle_store
+                .read_controller_plan(run_id)
+                .unwrap()
+                .plan_id,
+            "left-plan"
+        );
+        assert_eq!(
+            right_lifecycle_store
+                .read_controller_plan(run_id)
+                .unwrap()
+                .plan_id,
+            "right-plan"
+        );
+        assert_eq!(
+            left_lifecycle_store.read_record(run_id).unwrap().metadata["controller_runtime"]
+                ["store"],
+            "left"
+        );
+        assert_eq!(
+            right_lifecycle_store.read_record(run_id).unwrap().metadata["controller_runtime"]
+                ["store"],
+            "right"
+        );
+        assert_eq!(
+            left_lifecycle_store
+                .read_cook_index(cook_id)
+                .unwrap()
+                .latest_run_id,
+            run_id
+        );
+        assert_eq!(
+            right_lifecycle_store
+                .read_cook_index(cook_id)
+                .unwrap()
+                .latest_run_id,
+            run_id
+        );
+        assert!(left_lifecycle_store
+            .cook_index_path(cook_id)
+            .starts_with(left_context.data_dir()));
+        assert!(right_lifecycle_store
+            .cook_index_path(cook_id)
+            .starts_with(right_context.data_dir()));
+        assert_ne!(
+            left_lifecycle_store.cook_index_path(cook_id),
+            right_lifecycle_store.cook_index_path(cook_id)
+        );
+        assert_eq!(
+            left_recipe_store.load_recipe(cook_id).unwrap().attempts[0]
+                .plan
+                .plan_id,
+            "left-plan"
+        );
+        assert_eq!(
+            right_recipe_store.load_recipe(cook_id).unwrap().attempts[0]
+                .plan
+                .plan_id,
+            "right-plan"
+        );
+    }
 }
