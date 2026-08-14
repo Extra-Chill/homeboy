@@ -73,10 +73,34 @@ phase_last_start() {
   jq -sr --arg phase "${phase}" '[.[] | select(.phase == $phase and .event == "started") | .at_seconds] | last // empty' "${file}"
 }
 
+phase_annotations_verbose() {
+  case "${HOMEBOY_ACTION_PHASE_ANNOTATIONS:-${HOMEBOY_ACTION_DEBUG:-${RUNNER_DEBUG:-}}}" in
+    1|true|verbose|debug) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+phase_first_failure() {
+  local phase="$1" file="$2"
+  jq -se --arg phase "${phase}" \
+    '[.[] | select(.phase == $phase and .event == "completed" and .status == "failed")] | length == 1' \
+    "${file}" >/dev/null
+}
+
+phase_failure_annotation() {
+  local phase="$1" elapsed_seconds="$2" file="$3"
+  # The JSONL artifact retains every attempt; CI gets one stable terminal signal.
+  phase_first_failure "${phase}" "${file}" || return 0
+  printf '::error title=Homeboy phase failed [%s]::%s failed after %ss; owner: %s. Reproduce: %s\n' \
+    "${phase}" "${phase}" "${elapsed_seconds}" "$(phase_owner "${phase}")" "$(phase_reproduction_command "${phase}")"
+}
+
 phase_start() {
   local phase="$1"
   phase_append "${phase}" started running 0
-  printf '::notice title=Homeboy phase::%s started; run %s.\n' "${phase}" "$(phase_run_ref)"
+  if phase_annotations_verbose; then
+    printf '::notice title=Homeboy phase::%s started; run %s.\n' "${phase}" "$(phase_run_ref)"
+  fi
 }
 
 phase_end() {
@@ -92,7 +116,12 @@ phase_end() {
     status=skipped
   fi
   phase_append "${phase}" completed "${status}" "${elapsed}"
-  printf '::notice title=Homeboy phase::%s %s after %ss; run %s.\n' "${phase}" "${status}" "${elapsed}" "$(phase_run_ref)"
+  if [ "${status}" = failed ]; then
+    phase_failure_annotation "${phase}" "${elapsed}" "${file}"
+  fi
+  if phase_annotations_verbose; then
+    printf '::notice title=Homeboy phase::%s %s after %ss; run %s.\n' "${phase}" "${status}" "${elapsed}" "$(phase_run_ref)"
+  fi
 }
 
 phase_run() {
@@ -117,10 +146,18 @@ phase_run() {
       sleep "${heartbeat_seconds}"
       if kill -0 "${pid}" 2>/dev/null; then
         elapsed="$(( $(date +%s) - started ))"
-        printf '::notice title=Homeboy phase heartbeat::%s running for %ss; run %s.\n' "${phase}" "${elapsed}" "$(phase_run_ref)"
+        if phase_annotations_verbose; then
+          printf '::notice title=Homeboy phase heartbeat::%s running for %ss; run %s.\n' "${phase}" "${elapsed}" "$(phase_run_ref)"
+        else
+          printf 'Homeboy phase heartbeat::%s running for %ss; run %s.\n' "${phase}" "${elapsed}" "$(phase_run_ref)"
+        fi
         if [ "${elapsed}" -ge "${budget_seconds}" ] && [ "${over_budget}" = false ]; then
           over_budget=true
-          printf '::warning title=Homeboy phase budget exceeded::%s exceeded its %ss budget; owner: %s. Reproduce: %s\n' "${phase}" "${budget_seconds}" "$(phase_owner "${phase}")" "$(phase_reproduction_command)"
+          if phase_annotations_verbose; then
+            printf '::warning title=Homeboy phase budget exceeded::%s exceeded its %ss budget; owner: %s. Reproduce: %s\n' "${phase}" "${budget_seconds}" "$(phase_owner "${phase}")" "$(phase_reproduction_command)"
+          else
+            printf 'Homeboy phase budget exceeded::%s exceeded its %ss budget; owner: %s. Reproduce: %s\n' "${phase}" "${budget_seconds}" "$(phase_owner "${phase}")" "$(phase_reproduction_command)"
+          fi
         fi
       fi
     done
@@ -171,7 +208,9 @@ phase_summary() {
     } >> "${summary_file}"
   fi
   printf 'phase-progress=%s\n' "${output}" >> "${GITHUB_OUTPUT:-/dev/null}"
-  printf '::notice title=Homeboy phase timings::published %s for run %s.\n' "${output}" "$(phase_run_ref)"
+  if phase_annotations_verbose; then
+    printf '::notice title=Homeboy phase timings::published %s for run %s.\n' "${output}" "$(phase_run_ref)"
+  fi
 }
 
 case "${1:-}" in
