@@ -370,7 +370,12 @@ fn ci_job_passthrough_args(job: Option<&CiResolvedJob>) -> Vec<String> {
 fn test_runner_ci_env(job: Option<&CiResolvedJob>) -> Vec<(String, String)> {
     let mut env = ci_profile::ci_job_env(job);
 
-    for key in ["GITHUB_ACTIONS", "RELEASE_BLOCKING_COMMANDS"] {
+    for key in [
+        "GITHUB_ACTIONS",
+        "RELEASE_BLOCKING_COMMANDS",
+        "HOMEBOY_TEST_INVENTORY_ONLY",
+        "HOMEBOY_TEST_INVENTORY_FILE",
+    ] {
         if let Ok(value) = std::env::var(key) {
             env.push((key.to_string(), value));
         }
@@ -1212,6 +1217,27 @@ mod tests {
             .expect("test should parse --ci-job");
 
         assert_eq!(cli.test.ci_job.as_deref(), Some("unit"));
+    }
+
+    #[test]
+    fn test_runner_ci_env_projects_inventory_contract() {
+        let _lock = homeboy::core::test_support::env_lock();
+        let _inventory_only =
+            EnvVarGuard::set("HOMEBOY_TEST_INVENTORY_ONLY", std::path::Path::new("1"));
+        let _inventory_file = EnvVarGuard::set(
+            "HOMEBOY_TEST_INVENTORY_FILE",
+            std::path::Path::new("/workspace/homeboy-test-inventory.json"),
+        );
+
+        let env = test_runner_ci_env(None);
+
+        assert!(env
+            .iter()
+            .any(|(key, value)| { key == "HOMEBOY_TEST_INVENTORY_ONLY" && value == "1" }));
+        assert!(env.iter().any(|(key, value)| {
+            key == "HOMEBOY_TEST_INVENTORY_FILE"
+                && value == "/workspace/homeboy-test-inventory.json"
+        }));
     }
 
     #[test]
