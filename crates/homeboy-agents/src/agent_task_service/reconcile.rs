@@ -441,6 +441,31 @@ mod tests {
     }
 
     #[test]
+    fn pre_supervisor_detached_cook_admission_is_not_reconciled_as_stale_work() {
+        with_isolated_home(|_| {
+            let cook_id = "reconcile-pre-supervisor-cook";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist detached admission");
+
+            let report = reconcile_stale_active_runs(false).expect("reconcile admission state");
+
+            assert!(
+                report.runs.is_empty(),
+                "a pre-supervisor admission is not an abandoned executor: {report:#?}"
+            );
+            let parent = agent_task_lifecycle::status(cook_id).expect("read durable admission");
+            assert_eq!(
+                parent.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["admission_state"],
+                "pre_supervisor"
+            );
+        });
+    }
+
+    #[test]
     fn a_preview_reports_the_observed_state_and_mutates_nothing() {
         with_isolated_home(|_| {
             orphaned_running_run("reconcile-preview-orphan");

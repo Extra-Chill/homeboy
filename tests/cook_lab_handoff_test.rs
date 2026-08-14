@@ -208,10 +208,35 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
             "--verify",
             "true",
         ]);
-    let output = bounded_output(command);
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!output.status.success(), "{stdout}");
+    let stdout_path = context.root().join("detached-cook.stdout");
+    let stderr_path = context.root().join("detached-cook.stderr");
+    command
+        .stdout(Stdio::from(
+            std::fs::File::create(&stdout_path).expect("create detached Cook stdout"),
+        ))
+        .stderr(Stdio::from(
+            std::fs::File::create(&stderr_path).expect("create detached Cook stderr"),
+        ));
+    let mut child = command.spawn().expect("start detached Cook launcher");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+        if stderr.contains("durable run id `local-detach-exits-before-attempt`") {
+            assert!(
+                child.try_wait().expect("poll detached Cook launcher").is_none(),
+                "the launcher must still be crossing daemon/child admission after it emits the durable parent identity"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the parent identity was not emitted before detached admission completed: {stderr}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let status = child.wait().expect("wait for detached Cook launcher");
+    let stdout = std::fs::read_to_string(&stdout_path).expect("read detached Cook stdout");
+    assert!(!status.success(), "{stdout}");
     assert!(
         !stdout.contains("cannot detach after handoff with --placement local"),
         "{stdout}"
@@ -231,6 +256,10 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
     let status = bounded_output(status);
     let status_stdout = String::from_utf8_lossy(&status.stdout);
     assert!(status.status.success(), "{status_stdout}");
+    assert!(
+        status_stdout.contains("\"admission_state\": \"failed\""),
+        "an abandoned admission must terminalize truthfully: {status_stdout}"
+    );
     assert!(
         status_stdout.contains("\"state\": \"failed\""),
         "{status_stdout}"

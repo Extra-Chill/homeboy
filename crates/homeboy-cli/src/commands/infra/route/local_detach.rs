@@ -179,14 +179,26 @@ pub(super) fn intercept_local_detached_cook(
     materialize_stdin_prompt(&mut child_args, &session_root)?;
     let log_path = session_root.join("cook.log");
 
-    // A daemon-owned job is the authority that outlives this launcher. Prove it
-    // is reachable before a provider-capable child exists, so unsupported
-    // detachment is rejected before dispatch.
-    let controller_client = homeboy::core::daemon::LocalControllerJobClient::connect()?;
-
     // Make the returned Cook ID resolvable before a child exists. If this fails,
     // nothing has been spawned and no detached work can leak.
     agent_task_lifecycle::record_detached_cook_handoff_parent(&cook_id)?;
+    // Daemon startup can run reconciliation. Announce the durable admission
+    // handle before that potentially slow boundary so a disconnected caller can
+    // inspect or cancel it safely.
+    crate::commands::agent_task::run::announce_durable_cook_identity(Some(&cook_id), &cook_id);
+    // A daemon-owned job is the authority that outlives this launcher. Prove it
+    // is reachable before a provider-capable child exists, so unsupported
+    // detachment is rejected before dispatch.
+    let controller_client = match homeboy::core::daemon::LocalControllerJobClient::connect() {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                &cook_id,
+                "durable controller ownership could not be established",
+            );
+            return Err(error);
+        }
+    };
     let route = detached_route(cli);
     let launch_token = create_local_cook_launch_token(&session_root)?;
     let mut child = match spawn_detached_cook(&child_args, &log_path, route.as_ref(), &launch_token)
@@ -279,7 +291,6 @@ pub(super) fn intercept_local_detached_cook(
                 None,
             ));
         }
-        crate::commands::agent_task::run::announce_durable_cook_identity(Some(&cook_id), &cook_id);
         let envelope = handoff_envelope(
             &cook_id,
             pid,
@@ -1366,6 +1377,44 @@ mod tests {
                     .expect("pending handoff cancel command resolves")
                     .run_id,
                 "cook-pending"
+            );
+        });
+    }
+
+    #[test]
+    fn handoff_admission_transitions_from_parent_to_child_to_supervisor() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-admission-transitions";
+            let parent = agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist pre-supervisor parent");
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["admission_state"],
+                "pre_supervisor"
+            );
+            let child = agent_task_lifecycle::record_detached_cook_handoff_child(
+                cook_id,
+                1,
+                homeboy::core::process::ProcessStartIdentity::Macos {
+                    start_seconds: 1,
+                    start_microseconds: 1,
+                },
+            )
+            .expect("attach child identity");
+            assert_eq!(
+                child.metadata["detached_cook_handoff"]["admission_state"],
+                "child_attached"
+            );
+            agent_task_lifecycle::record_detached_cook_supervisor(cook_id, "supervisor-1")
+                .expect("attach supervisor");
+            let supervised =
+                agent_task_lifecycle::exact_record(cook_id).expect("read supervised handoff");
+            assert_eq!(
+                supervised.metadata["detached_cook_handoff"]["admission_state"],
+                "supervising"
+            );
+            assert_eq!(
+                supervised.metadata["detached_cook_handoff"]["supervisor_job_id"],
+                "supervisor-1"
             );
         });
     }

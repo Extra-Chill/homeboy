@@ -349,6 +349,7 @@ pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRun
     let mut record = submit_plan(&plan, Some(&cook_id))?;
     record.metadata["detached_cook_handoff"] = json!({
         "state": "pending",
+        "admission_state": "pre_supervisor",
         "cook_id": cook_id,
         "cancellation_fence": { "state": "open" },
     });
@@ -393,17 +394,18 @@ pub fn record_detached_cook_handoff_child(
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
     let record = store::mutate_record(&cook_id, |record| {
-        let state = if record.state == AgentTaskRunState::Cancelled {
-            "cancelled"
-        } else {
-            "pending"
-        };
+        let cancelled = record.state == AgentTaskRunState::Cancelled;
+        let state = if cancelled { "cancelled" } else { "pending" };
+        let cancellation_fence =
+            record.metadata["detached_cook_handoff"]["cancellation_fence"].clone();
         let metadata = record.ensure_metadata_object();
         metadata["detached_cook_handoff"] = json!({
             "state": state,
+            "admission_state": if cancelled { "cancelled" } else { "child_attached" },
             "cook_id": cook_id,
             "child_pid": pid,
             "child_start_identity": start_identity,
+            "cancellation_fence": cancellation_fence,
         });
         record.updated_at = Some(now_timestamp());
         true
@@ -420,6 +422,7 @@ pub fn record_detached_cook_supervisor(cook_id: &str, job_id: &str) -> Result<()
             return false;
         }
         record.metadata["detached_cook_handoff"]["supervisor_job_id"] = json!(job_id);
+        record.metadata["detached_cook_handoff"]["admission_state"] = json!("supervising");
         record.metadata["detached_cook_handoff"]["reattach_command"] =
             json!(format!("homeboy agent-task status {cook_id} --full"));
         true
@@ -554,6 +557,8 @@ pub fn fail_detached_cook_handoff_parent(
         } else {
             "exited_before_handoff"
         });
+        metadata["detached_cook_handoff"]["admission_state"] =
+            json!(if cancelled { "cancelled" } else { "failed" });
         metadata["detached_cook_handoff"]["reason"] = json!(reason);
         if !record.state.is_terminal() {
             set_run_state(record, AgentTaskRunState::Failed);
@@ -586,6 +591,7 @@ fn complete_detached_cook_handoff_parent_in_store(
             }
             let metadata = record.ensure_metadata_object();
             metadata["detached_cook_handoff"]["state"] = json!("redirected");
+            metadata["detached_cook_handoff"]["admission_state"] = json!("materialized");
             metadata["detached_cook_handoff"]["attempt_run_id"] = json!(attempt_run_id);
             metadata["detached_cook_handoff"]
                 .as_object_mut()
@@ -596,6 +602,16 @@ fn complete_detached_cook_handoff_parent_in_store(
             true
         })?;
     Ok(())
+}
+
+/// A detached Cook parent is admission state, never an executable queued plan.
+///
+/// The original persisted shape only carries `state: pending`; treating that as
+/// the default preserves mixed-version records while newer writers add a more
+/// specific `admission_state` for operator visibility.
+pub fn has_pending_detached_cook_handoff(record: &AgentTaskRunRecord) -> bool {
+    record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id
+        && record.metadata["detached_cook_handoff"]["state"] == "pending"
 }
 
 /// Build the canonical decision for a run this controller is about to execute
