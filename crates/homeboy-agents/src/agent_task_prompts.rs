@@ -17,8 +17,118 @@ pub struct AgentTaskPromptRecord {
     pub modified_unix: Option<u64>,
 }
 
+struct PromptStore {
+    dir: PathBuf,
+}
+
+impl PromptStore {
+    fn from_data_root(data_root: PathBuf) -> Self {
+        Self {
+            dir: data_root.join("agent-task").join("prompts"),
+        }
+    }
+
+    fn path(&self, name: &str) -> Result<PathBuf> {
+        Ok(self.dir.join(format!("{}.md", prompt_id(name)?)))
+    }
+
+    fn save(&self, name: &str, content: &str) -> Result<AgentTaskPromptRecord> {
+        let path = self.path(name)?;
+        fs::create_dir_all(&self.dir).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(self.dir.display().to_string()))
+        })?;
+        fs::write(&path, content).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        prompt_record_for_path(prompt_id(name)?, path)
+    }
+
+    fn read(&self, name: &str) -> Result<String> {
+        let path = self.path(name)?;
+        fs::read_to_string(&path).map_err(|error| self.io_error("prompt", name, &path, error))
+    }
+
+    fn remove(&self, name: &str) -> Result<AgentTaskPromptRecord> {
+        let id = prompt_id(name)?;
+        let path = self.path(&id)?;
+        let record = prompt_record_for_path(id, path.clone())?;
+        fs::remove_file(&path).map_err(|error| self.io_error("prompt", name, &path, error))?;
+        Ok(record)
+    }
+
+    fn list(&self) -> Result<Vec<AgentTaskPromptRecord>> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(self.dir.display().to_string()),
+                ))
+            }
+        };
+
+        let mut records = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                Error::internal_io(error.to_string(), Some(self.dir.display().to_string()))
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            records.push(prompt_record_for_path(stem.to_string(), path)?);
+        }
+        records.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(records)
+    }
+
+    fn resolve(&self, spec: &str) -> Result<Option<String>> {
+        let Some(name) = stored_prompt_ref_id(spec) else {
+            return Ok(None);
+        };
+        Ok(Some(self.read(name)?))
+    }
+
+    fn io_error(
+        &self,
+        field: &str,
+        name: &str,
+        path: &std::path::Path,
+        error: std::io::Error,
+    ) -> Error {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            let mut hints =
+                vec!["Run `homeboy agent-task prompts list` to see stored prompts".to_string()];
+            if let Ok(records) = self.list() {
+                let ids = records
+                    .into_iter()
+                    .map(|record| record.id)
+                    .collect::<Vec<_>>();
+                if !ids.is_empty() {
+                    hints.push(format!("Available stored prompt ids: {}", ids.join(", ")));
+                }
+            }
+            return Error::validation_invalid_argument(
+                field,
+                format!("stored agent-task prompt '{}' was not found", name),
+                Some(name.to_string()),
+                Some(hints),
+            );
+        }
+        Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    }
+}
+
+fn prompt_store() -> Result<PromptStore> {
+    Ok(PromptStore::from_data_root(paths::homeboy_data()?))
+}
+
 pub fn prompts_dir() -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?.join("agent-task").join("prompts"))
+    Ok(prompt_store()?.dir)
 }
 
 pub fn prompt_id(name: &str) -> Result<String> {
@@ -48,70 +158,27 @@ pub fn prompt_id(name: &str) -> Result<String> {
 }
 
 pub fn prompt_path(name: &str) -> Result<PathBuf> {
-    Ok(prompts_dir()?.join(format!("{}.md", prompt_id(name)?)))
+    prompt_store()?.path(name)
 }
 
 pub fn save_prompt(name: &str, content: &str) -> Result<AgentTaskPromptRecord> {
-    let path = prompt_path(name)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-        })?;
-    }
-    fs::write(&path, content)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    prompt_record_for_path(prompt_id(name)?, path)
+    prompt_store()?.save(name, content)
 }
 
 pub fn read_prompt(name: &str) -> Result<String> {
-    let path = prompt_path(name)?;
-    fs::read_to_string(&path).map_err(|error| prompt_io_error("prompt", name, &path, error))
+    prompt_store()?.read(name)
 }
 
 pub fn remove_prompt(name: &str) -> Result<AgentTaskPromptRecord> {
-    let id = prompt_id(name)?;
-    let path = prompt_path(&id)?;
-    let record = prompt_record_for_path(id, path.clone())?;
-    fs::remove_file(&path).map_err(|error| prompt_io_error("prompt", name, &path, error))?;
-    Ok(record)
+    prompt_store()?.remove(name)
 }
 
 pub fn list_prompts() -> Result<Vec<AgentTaskPromptRecord>> {
-    let dir = prompts_dir()?;
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(Error::internal_io(
-                error.to_string(),
-                Some(dir.display().to_string()),
-            ))
-        }
-    };
-
-    let mut records = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            Error::internal_io(error.to_string(), Some(dir.display().to_string()))
-        })?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        records.push(prompt_record_for_path(stem.to_string(), path)?);
-    }
-    records.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(records)
+    prompt_store()?.list()
 }
 
 pub fn resolve_stored_prompt_ref(spec: &str) -> Result<Option<String>> {
-    let Some(name) = stored_prompt_ref_id(spec) else {
-        return Ok(None);
-    };
-    Ok(Some(read_prompt(name)?))
+    prompt_store()?.resolve(spec)
 }
 
 pub fn stored_prompt_ref_id(spec: &str) -> Option<&str> {
@@ -165,79 +232,49 @@ fn prompt_record_for_path(id: String, path: PathBuf) -> Result<AgentTaskPromptRe
     })
 }
 
-fn prompt_io_error(
-    field: &str,
-    name: &str,
-    path: &std::path::Path,
-    error: std::io::Error,
-) -> Error {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        let mut hints =
-            vec!["Run `homeboy agent-task prompts list` to see stored prompts".to_string()];
-        if let Ok(records) = list_prompts() {
-            let ids = records
-                .into_iter()
-                .map(|record| record.id)
-                .collect::<Vec<_>>();
-            if !ids.is_empty() {
-                hints.push(format!("Available stored prompt ids: {}", ids.join(", ")));
-            }
-        }
-        return Error::validation_invalid_argument(
-            field,
-            format!("stored agent-task prompt '{}' was not found", name),
-            Some(name.to_string()),
-            Some(hints),
-        );
-    }
-    Error::internal_io(error.to_string(), Some(path.display().to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::test_support::with_isolated_home;
 
     #[test]
-    fn stores_markdown_prompts_under_homeboy_data() {
-        with_isolated_home(|home| {
-            let record =
-                save_prompt("Cook: PR 123.md", "# Cook\nDo the thing.\n").expect("saved prompt");
+    fn stores_markdown_prompts_under_configured_data_root() {
+        let temp = tempfile::tempdir().expect("prompt store");
+        let store = PromptStore::from_data_root(temp.path().to_path_buf());
+        let record = store
+            .save("Cook: PR 123.md", "# Cook\nDo the thing.\n")
+            .expect("saved prompt");
 
-            assert_eq!(record.id, "Cook__PR_123");
-            assert!(record.path.ends_with("agent-task/prompts/Cook__PR_123.md"));
-            assert!(record.path.starts_with(&home.path().display().to_string()));
-            assert_eq!(
-                read_prompt("Cook__PR_123").expect("read prompt"),
-                "# Cook\nDo the thing.\n"
-            );
-        });
+        assert_eq!(record.id, "Cook__PR_123");
+        assert!(record.path.ends_with("agent-task/prompts/Cook__PR_123.md"));
+        assert!(record.path.starts_with(&temp.path().display().to_string()));
+        assert_eq!(
+            store.read("Cook__PR_123").expect("read prompt"),
+            "# Cook\nDo the thing.\n"
+        );
     }
 
     #[test]
     fn lists_and_resolves_prompt_refs() {
-        with_isolated_home(|_| {
-            save_prompt("beta", "second").expect("save beta");
-            save_prompt("alpha", "first").expect("save alpha");
+        let temp = tempfile::tempdir().expect("prompt store");
+        let store = PromptStore::from_data_root(temp.path().to_path_buf());
+        store.save("beta", "second").expect("save beta");
+        store.save("alpha", "first").expect("save alpha");
 
-            let ids: Vec<String> = list_prompts()
-                .expect("list prompts")
-                .into_iter()
-                .map(|record| record.id)
-                .collect();
-            assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
-            assert_eq!(
-                resolve_stored_prompt_ref("prompt:alpha").expect("resolve ref"),
-                Some("first".to_string())
-            );
-            assert_eq!(
-                resolve_stored_prompt_ref("@prompt:alpha").expect("resolve at ref"),
-                Some("first".to_string())
-            );
-            assert_eq!(
-                resolve_stored_prompt_ref("plain prompt").expect("plain prompt"),
-                None
-            );
-        });
+        let ids: Vec<String> = store
+            .list()
+            .expect("list prompts")
+            .into_iter()
+            .map(|record| record.id)
+            .collect();
+        assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(
+            store.resolve("prompt:alpha").expect("resolve ref"),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            store.resolve("@prompt:alpha").expect("resolve at ref"),
+            Some("first".to_string())
+        );
+        assert_eq!(store.resolve("plain prompt").expect("plain prompt"), None);
     }
 }
