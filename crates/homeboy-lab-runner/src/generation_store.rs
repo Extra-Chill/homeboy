@@ -984,47 +984,7 @@ pub(crate) fn status_projection(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
 ) -> Result<Vec<RunnerDaemonGenerationStatus>> {
-    Ok(
-        read_projection(runner_id, legacy)?.map_or_else(Vec::new, |generations| {
-            generations
-                .generations
-                .into_iter()
-                .map(|(generation, entry)| RunnerDaemonGenerationStatus {
-                    job_owner_count: generations
-                        .job_owners
-                        .values()
-                        .filter(|owner| {
-                            owner_matches_generation(owner, &generation, &entry.endpoint)
-                        })
-                        .count(),
-                    run_owner_count: generations
-                        .run_owners
-                        .values()
-                        .filter(|owner| {
-                            owner_matches_generation(owner, &generation, &entry.endpoint)
-                        })
-                        .count(),
-                    artifact_owner_count: generations
-                        .artifact_owners
-                        .values()
-                        .filter(|owner| {
-                            owner_matches_generation(owner, &generation, &entry.endpoint)
-                        })
-                        .count(),
-                    admission_owner: generation == generations.admission_owner,
-                    generation,
-                    drain_state: entry.drain_state,
-                    active_job_count: entry.active_jobs,
-                    observed_active_job_count: entry.observed_active_jobs,
-                    active_job_count_authoritative: entry.observed_active_jobs.is_some(),
-                    homeboy_build_identity: entry.endpoint.homeboy_build_identity,
-                    remote_daemon_lease_id: entry.endpoint.remote_daemon_lease_id,
-                    remote_daemon_address: entry.endpoint.remote_daemon_address,
-                    local_url: entry.endpoint.local_url,
-                })
-                .collect()
-        }),
-    )
+    Ok(status_admission_projection(runner_id, legacy)?.0)
 }
 
 /// Return durable job identities grouped by generation. These identities can
@@ -1033,18 +993,69 @@ pub(crate) fn status_job_owners(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
 ) -> Result<Vec<RunnerGenerationJobOwners>> {
-    Ok(
-        read_projection(runner_id, legacy)?.map_or_else(Vec::new, |generations| {
-            generations
+    Ok(status_admission_projection(runner_id, legacy)?.1)
+}
+
+/// Capture the complete admission ledger from one persisted generation read.
+/// Inventory and durable job ownership must describe the same generation state.
+pub(crate) fn status_admission_projection(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+) -> Result<(
+    Vec<RunnerDaemonGenerationStatus>,
+    Vec<RunnerGenerationJobOwners>,
+)> {
+    Ok(read_projection(runner_id, legacy)?.map_or_else(
+        || (Vec::new(), Vec::new()),
+        |generations| {
+            let inventory = generations
+                .generations
+                .iter()
+                .map(|(generation, entry)| RunnerDaemonGenerationStatus {
+                    job_owner_count: generations
+                        .job_owners
+                        .values()
+                        .filter(|owner| {
+                            owner_matches_generation(owner, generation, &entry.endpoint)
+                        })
+                        .count(),
+                    run_owner_count: generations
+                        .run_owners
+                        .values()
+                        .filter(|owner| {
+                            owner_matches_generation(owner, generation, &entry.endpoint)
+                        })
+                        .count(),
+                    artifact_owner_count: generations
+                        .artifact_owners
+                        .values()
+                        .filter(|owner| {
+                            owner_matches_generation(owner, generation, &entry.endpoint)
+                        })
+                        .count(),
+                    admission_owner: *generation == generations.admission_owner,
+                    generation: generation.clone(),
+                    drain_state: entry.drain_state,
+                    active_job_count: entry.active_jobs,
+                    observed_active_job_count: entry.observed_active_jobs,
+                    active_job_count_authoritative: entry.observed_active_jobs.is_some(),
+                    homeboy_build_identity: entry.endpoint.homeboy_build_identity.clone(),
+                    remote_daemon_lease_id: entry.endpoint.remote_daemon_lease_id.clone(),
+                    remote_daemon_address: entry.endpoint.remote_daemon_address.clone(),
+                    local_url: entry.endpoint.local_url.clone(),
+                })
+                .collect();
+            let owners = generations
                 .generations
                 .iter()
                 .map(|(generation, entry)| RunnerGenerationJobOwners {
                     generation: generation.clone(),
                     job_ids: job_owner_ids_for(&generations, generation, &entry.endpoint),
                 })
-                .collect()
-        }),
-    )
+                .collect();
+            (inventory, owners)
+        },
+    ))
 }
 
 /// Report whether a refresh must preserve existing daemon endpoints. Current

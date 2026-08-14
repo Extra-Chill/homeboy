@@ -29,6 +29,35 @@ fn controller_proxy_url_rejects_userinfo_before_opening_a_forward() {
 }
 
 #[test]
+fn admission_observations_share_a_total_deadline() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("listener address");
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (_stream, _) = listener.accept().expect("admission request");
+            accepted_tx.send(()).expect("record admission request");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+    let mut session = direct_ssh_session("lease-deadline");
+    session.local_url = Some(format!("http://{address}"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+
+    assert!(runner_jobs_until("homeboy-lab", &session, deadline).is_err());
+    assert!(runner_running_runs_until(&session, deadline).is_err());
+    accepted_rx
+        .recv_timeout(std::time::Duration::from_millis(10))
+        .expect("first observation reached the listener");
+    assert!(
+        accepted_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err(),
+        "a later admission observation must not receive a fresh timeout budget"
+    );
+}
+
+#[test]
 fn proxy_forward_reuse_rejects_a_reused_pid_with_a_different_start_identity() {
     let forward = RunnerProxyForward {
         runner_url: "http://127.0.0.1:8080".to_string(),

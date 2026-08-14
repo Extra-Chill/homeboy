@@ -134,8 +134,28 @@ pub(super) fn bounded_remote_homeboy_identity(
     homeboy: &str,
     runner_id: Option<&str>,
 ) -> std::result::Result<RemoteHomeboyIdentity, String> {
+    bounded_remote_homeboy_identity_until(
+        client,
+        homeboy,
+        runner_id,
+        std::time::Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+pub(super) fn bounded_remote_homeboy_identity_until(
+    client: &SshClient,
+    homeboy: &str,
+    runner_id: Option<&str>,
+    deadline: std::time::Instant,
+) -> std::result::Result<RemoteHomeboyIdentity, String> {
     let command = remote_homeboy_identity_command(homeboy);
-    let timeout = crate::readonly_probe::readonly_probe_timeout();
+    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    if timeout.is_zero() {
+        return Err(
+            "runner admission observation deadline exhausted before remote Homeboy identity"
+                .to_string(),
+        );
+    }
     let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
     let degraded = crate::readonly_probe::record_probe_outcome(
@@ -159,7 +179,24 @@ pub(super) fn bounded_remote_homeboy_identity(
             &output,
         ));
     }
-    let version = bounded_remote_homeboy_version(client, homeboy, runner_id)?;
+    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    if timeout.is_zero() {
+        return Err(
+            "runner admission observation deadline exhausted before remote Homeboy version"
+                .to_string(),
+        );
+    }
+    let command = remote_homeboy_version_command(homeboy);
+    let started = std::time::Instant::now();
+    let output = client.execute_with_timeout(&command, timeout);
+    crate::readonly_probe::record_probe_outcome(
+        "runner_homeboy_version",
+        runner_id,
+        started,
+        timeout,
+        &output,
+    );
+    let version = parse_remote_homeboy_version(&output)?;
     Ok(RemoteHomeboyIdentity {
         version: normalize_homeboy_version_owned(&version),
         build_identity: None,
@@ -1460,6 +1497,15 @@ pub(super) fn bounded_remote_daemon_status(
     remote_daemon_status_with_timeout(client, homeboy, timeout, Some(runner_id))
 }
 
+pub(super) fn bounded_remote_daemon_status_with_timeout(
+    client: &SshClient,
+    homeboy: &str,
+    runner_id: &str,
+    timeout: Duration,
+) -> std::result::Result<RemoteDaemonStatus, String> {
+    remote_daemon_status_with_timeout(client, homeboy, timeout, Some(runner_id))
+}
+
 fn remote_daemon_status_with_timeout(
     client: &SshClient,
     homeboy: &str,
@@ -1624,6 +1670,20 @@ pub(super) fn probe_remote_daemon_endpoint(
     status: &mut RemoteDaemonStatus,
     runner_id: Option<&str>,
 ) {
+    probe_remote_daemon_endpoint_until(
+        client,
+        status,
+        runner_id,
+        std::time::Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    );
+}
+
+pub(super) fn probe_remote_daemon_endpoint_until(
+    client: &SshClient,
+    status: &mut RemoteDaemonStatus,
+    runner_id: Option<&str>,
+    deadline: std::time::Instant,
+) {
     if !status.reachable {
         return;
     }
@@ -1641,7 +1701,14 @@ pub(super) fn probe_remote_daemon_endpoint(
         "curl --fail --silent --show-error --max-time 2 {}/version",
         shell::quote_arg(&format!("http://{}", daemon.address))
     );
-    let timeout = crate::readonly_probe::readonly_probe_timeout();
+    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    if timeout.is_zero() {
+        status.endpoint_probe_error = Some(
+            "runner admission observation deadline exhausted before endpoint identity probe"
+                .to_string(),
+        );
+        return;
+    }
     let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
     crate::readonly_probe::record_probe_outcome(
@@ -1690,6 +1757,13 @@ pub(super) fn probe_remote_daemon_endpoint(
         "curl --fail --silent --show-error --max-time 2 {}/jobs",
         shell::quote_arg(&format!("http://{}", daemon.address))
     );
+    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    if timeout.is_zero() {
+        status.endpoint_probe_error = Some(
+            "runner admission observation deadline exhausted before endpoint job probe".to_string(),
+        );
+        return;
+    }
     let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
     crate::readonly_probe::record_probe_outcome(

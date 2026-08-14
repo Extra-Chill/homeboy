@@ -48,9 +48,15 @@ const CONTROLLER_PROXY_ENV: &str = "HOMEBOY_CONTROLLER_PROXY";
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
 pub(crate) use connection_daemon::versions_match;
-use connection_daemon::{connect_remote_daemon, daemon_http_freshness, daemon_http_version};
+use connection_daemon::{
+    connect_remote_daemon, daemon_http_freshness, daemon_http_freshness_with_timeout,
+    daemon_http_version,
+};
 use connection_daemon::{daemon_http_identity, normalize_homeboy_version_owned};
-use connection_daemon::{daemon_http_runtime_loaded_paths, daemon_http_runtime_stale_paths};
+use connection_daemon::{
+    daemon_http_identity_with_timeout, daemon_http_runtime_loaded_paths_with_timeout,
+    daemon_http_runtime_stale_paths_with_timeout, daemon_http_version_with_timeout,
+};
 
 #[path = "connection_stop_transport_recovery.rs"]
 mod stop_transport_recovery;
@@ -1818,20 +1824,50 @@ fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSessio
 }
 
 pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
+    status_with_admission_projection(runner_id).map(|(status, _, _)| status)
+}
+
+/// Capture status and the generation ledger together so callers that need an
+/// admission answer cannot observe a second, racing persisted generation state.
+pub(crate) fn status_with_admission_projection(
+    runner_id: &str,
+) -> Result<(
+    RunnerStatusReport,
+    Vec<super::RunnerDaemonGenerationStatus>,
+    Vec<super::RunnerGenerationJobOwners>,
+)> {
+    status_with_admission_projection_until(
+        runner_id,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+/// Capture status and its admission ledger under one caller-owned deadline.
+/// Network observations must share this budget so diagnostic callers retain
+/// their envelope even when individual endpoints stall.
+pub(crate) fn status_with_admission_projection_until(
+    runner_id: &str,
+    deadline: Instant,
+) -> Result<(
+    RunnerStatusReport,
+    Vec<super::RunnerDaemonGenerationStatus>,
+    Vec<super::RunnerGenerationJobOwners>,
+)> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
     // Status is an observation path. In particular, a stale direct-SSH record
     // must be reported as disconnected rather than triggering tunnel recovery.
     // Recovery can wait on shared control-plane state and may open a tunnel, so
     // it belongs to explicit connect/admission operations instead.
-    let session = read_session_for_status(runner_id)?;
-    let state = status_session_state(session.as_ref());
+    let session = read_session_for_status_until(runner_id, deadline)?;
+    let state = status_session_state_until(session.as_ref(), deadline);
     let connected = state == RunnerSessionState::Connected;
     let (stale_daemon, configured_job_binary_build_identity) =
-        stale_daemon_warning(&runner, session.as_ref(), connected)?;
-    let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
-    let mut daemon_freshness =
-        local_daemon_freshness.or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
+        stale_daemon_warning_until(&runner, session.as_ref(), connected, deadline)?;
+    let local_daemon_freshness =
+        runner_daemon_freshness_until(&runner, session.as_ref(), connected, deadline)?;
+    let mut daemon_freshness = local_daemon_freshness
+        .or_else(|| remote_daemon_recovery_freshness_until(runner_id, &runner, deadline));
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
     let direct_daemon_active_jobs =
         matches!(active_job_source, Some(RunnerActiveJobSource::DirectDaemon))
@@ -1843,17 +1879,18 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
             .flatten();
     let (active_jobs, stale_jobs, active_job_state, active_job_error) = if connected {
         match session.as_ref() {
-            Some(session) => match runner_jobs(runner_id, session) {
+            Some(session) => match runner_jobs_until(runner_id, session, deadline) {
                 Ok((active_jobs, mut stale_jobs)) => {
                     // `/jobs` has a typed remote-runner subset while daemon
                     // freshness counts every live child. Never manufacture an
                     // orphan when that subset is incomplete.
                     if should_infer_child_run_orphans(active_jobs.len(), direct_daemon_active_jobs)
                     {
-                        stale_jobs.extend(orphaned_child_run_jobs(
+                        stale_jobs.extend(orphaned_child_run_jobs_until(
                             runner_id,
                             session,
                             &active_jobs,
+                            deadline,
                         ));
                     }
                     let active_jobs = project_unknown_daemon_owners(
@@ -1903,11 +1940,12 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     // This is strictly the selected daemon's live count. The admission summary
     // separately reports durable ownership and unidentified retained counters.
     let active_job_count = selected_active_job_count;
-    let authoritative_generation_count =
-        super::generation_store::status_projection(runner_id, session.as_ref())?
-            .into_iter()
-            .find(|generation| generation.admission_owner)
-            .and_then(|generation| generation.observed_active_job_count);
+    let (generation_inventory, generation_owners) =
+        super::generation_store::status_admission_projection(runner_id, session.as_ref())?;
+    let authoritative_generation_count = generation_inventory
+        .iter()
+        .find(|generation| generation.admission_owner)
+        .and_then(|generation| generation.observed_active_job_count);
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
         (None, Some(authoritative_count)) if authoritative_count != active_jobs.len() => {
@@ -1933,7 +1971,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let stale_runner_job_count = stale_jobs.len();
     let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
     let stale_runner_jobs = stale_jobs.iter().map(Into::into).collect();
-    Ok(RunnerStatusReport {
+    let status = RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected,
         state,
@@ -1951,7 +1989,8 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         active_job_error,
         active_job_recovery_evidence: None,
         session_path: session_path.display().to_string(),
-    })
+    };
+    Ok((status, generation_inventory, generation_owners))
 }
 
 /// Apply the bounded reconciliation that status intentionally only projects.
@@ -2693,6 +2732,20 @@ fn runner_daemon_freshness(
     session: Option<&RunnerSession>,
     connected: bool,
 ) -> Result<Option<homeboy_core::daemon::DaemonFreshnessReport>> {
+    runner_daemon_freshness_until(
+        runner,
+        session,
+        connected,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+fn runner_daemon_freshness_until(
+    runner: &Runner,
+    session: Option<&RunnerSession>,
+    connected: bool,
+    deadline: Instant,
+) -> Result<Option<homeboy_core::daemon::DaemonFreshnessReport>> {
     if !connected || runner.kind != RunnerKind::Ssh {
         return Ok(None);
     }
@@ -2702,11 +2755,15 @@ fn runner_daemon_freshness(
     let Some(local_url) = session.local_url.as_deref() else {
         return Ok(None);
     };
-    Ok(daemon_http_freshness(
+    let Some(timeout) = remaining_observation_budget(deadline) else {
+        return Ok(None);
+    };
+    Ok(daemon_http_freshness_with_timeout(
         &runner.id,
         local_url,
         &session.homeboy_version,
         session.homeboy_build_identity.as_deref().unwrap_or(""),
+        timeout,
     )
     .ok())
 }
@@ -2715,6 +2772,18 @@ fn runner_daemon_freshness(
 fn remote_daemon_recovery_freshness(
     runner_id: &str,
     runner: &Runner,
+) -> Option<DaemonFreshnessReport> {
+    remote_daemon_recovery_freshness_until(
+        runner_id,
+        runner,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+fn remote_daemon_recovery_freshness_until(
+    runner_id: &str,
+    runner: &Runner,
+    deadline: Instant,
 ) -> Option<DaemonFreshnessReport> {
     if runner.kind != RunnerKind::Ssh {
         return None;
@@ -2728,9 +2797,25 @@ fn remote_daemon_recovery_freshness(
         Ok(None) => return None,
         Err(error) => return Some(unavailable_recovery_freshness(runner_id, error.message)),
     };
-    match bounded_remote_daemon_status(&client, homeboy, runner_id) {
+    let Some(timeout) = remaining_observation_budget(deadline) else {
+        return Some(unavailable_recovery_freshness(
+            runner_id,
+            "runner admission observation deadline exhausted before remote daemon recovery"
+                .to_string(),
+        ));
+    };
+    match remote_daemon::bounded_remote_daemon_status_with_timeout(
+        &client, homeboy, runner_id, timeout,
+    ) {
         Ok(mut status) => {
-            remote_daemon::probe_remote_daemon_endpoint(&client, &mut status, Some(runner_id));
+            if remaining_observation_budget(deadline).is_some() {
+                remote_daemon::probe_remote_daemon_endpoint_until(
+                    &client,
+                    &mut status,
+                    Some(runner_id),
+                    deadline,
+                );
+            }
             Some(remote_daemon_recovery_freshness_from_status(
                 runner_id, &status,
             ))
@@ -2753,7 +2838,23 @@ fn runner_jobs(
     runner_id: &str,
     session: &RunnerSession,
 ) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
-    let timeout = crate::readonly_probe::readonly_probe_timeout();
+    runner_jobs_until(
+        runner_id,
+        session,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+fn runner_jobs_until(
+    runner_id: &str,
+    session: &RunnerSession,
+    deadline: Instant,
+) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
+    let timeout = remaining_observation_budget(deadline).ok_or_else(|| {
+        Error::internal_unexpected(
+            "runner admission observation deadline exhausted before typed jobs",
+        )
+    })?;
     let client = Client::builder()
         .timeout(timeout)
         .build()
@@ -2910,7 +3011,21 @@ fn orphaned_child_run_jobs(
     session: &RunnerSession,
     active_jobs: &[ActiveRunnerJobSummary],
 ) -> Vec<ActiveRunnerJobSummary> {
-    let Ok(runs) = runner_running_runs(session) else {
+    orphaned_child_run_jobs_until(
+        runner_id,
+        session,
+        active_jobs,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+fn orphaned_child_run_jobs_until(
+    runner_id: &str,
+    session: &RunnerSession,
+    active_jobs: &[ActiveRunnerJobSummary],
+    deadline: Instant,
+) -> Vec<ActiveRunnerJobSummary> {
+    let Ok(runs) = runner_running_runs_until(session, deadline) else {
         return Vec::new();
     };
     runs.into_iter()
@@ -2927,15 +3042,37 @@ fn child_run_has_active_job(run: &RunSummary, active_jobs: &[ActiveRunnerJobSumm
 }
 
 fn runner_running_runs(session: &RunnerSession) -> Result<Vec<RunSummary>> {
+    if session.local_url.is_none() {
+        return Ok(Vec::new());
+    }
+    runner_running_runs_until(
+        session,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+fn runner_running_runs_until(
+    session: &RunnerSession,
+    deadline: Instant,
+) -> Result<Vec<RunSummary>> {
     let Some(local_url) = session.local_url.as_deref() else {
         return Ok(Vec::new());
     };
-    let timeout = crate::readonly_probe::readonly_probe_timeout();
+    let timeout = remaining_observation_budget(deadline).ok_or_else(|| {
+        Error::internal_unexpected(
+            "runner admission observation deadline exhausted before running runs",
+        )
+    })?;
     let client = Client::builder()
         .timeout(timeout)
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build runner runs client: {err}")))?;
     runner_running_runs_with_client(&session.runner_id, local_url, &client, timeout)
+}
+
+fn remaining_observation_budget(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    (!remaining.is_zero()).then_some(remaining)
 }
 
 fn runner_running_runs_with_client(
@@ -3510,6 +3647,20 @@ fn stale_daemon_warning(
     session: Option<&RunnerSession>,
     connected: bool,
 ) -> Result<(Option<RunnerStaleDaemonWarning>, Option<String>)> {
+    stale_daemon_warning_until(
+        runner,
+        session,
+        connected,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+fn stale_daemon_warning_until(
+    runner: &Runner,
+    session: Option<&RunnerSession>,
+    connected: bool,
+    deadline: Instant,
+) -> Result<(Option<RunnerStaleDaemonWarning>, Option<String>)> {
     if !connected {
         return Ok((None, None));
     }
@@ -3532,8 +3683,12 @@ fn stale_daemon_warning(
     // the session's own version here made `versions_match` trivially true and
     // published a fabricated "current version" alongside a vague unverifiable
     // message, hiding the actual SSH failure (#11106).
-    let current_identity = match bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id))
-    {
+    let current_identity = match remote_daemon::bounded_remote_homeboy_identity_until(
+        &client,
+        homeboy,
+        Some(&runner.id),
+        deadline,
+    ) {
         Ok(identity) => identity,
         Err(probe_error) => {
             return Ok((
@@ -3554,12 +3709,18 @@ fn stale_daemon_warning(
     let observed_session_version = session
         .local_url
         .as_deref()
-        .and_then(|local_url| daemon_http_version(local_url).ok())
+        .and_then(|local_url| {
+            remaining_observation_budget(deadline)
+                .and_then(|timeout| daemon_http_version_with_timeout(local_url, timeout).ok())
+        })
         .unwrap_or_else(|| session.homeboy_version.clone());
     let daemon_identity = session
         .local_url
         .as_deref()
-        .and_then(|local_url| daemon_http_identity(local_url).ok())
+        .and_then(|local_url| {
+            remaining_observation_budget(deadline)
+                .and_then(|timeout| daemon_http_identity_with_timeout(local_url, timeout).ok())
+        })
         .filter(|identity| !identity.trim().is_empty());
     let session_identity = daemon_identity.or_else(|| session.homeboy_build_identity.clone());
     let identity_comparison = compare_identities(
@@ -3573,12 +3734,20 @@ fn stale_daemon_warning(
     let stale_runtime_paths = session
         .local_url
         .as_deref()
-        .and_then(|local_url| daemon_http_runtime_stale_paths(local_url).ok())
+        .and_then(|local_url| {
+            remaining_observation_budget(deadline).and_then(|timeout| {
+                daemon_http_runtime_stale_paths_with_timeout(local_url, timeout).ok()
+            })
+        })
         .unwrap_or_default();
     let changed_runtime_paths = session
         .local_url
         .as_deref()
-        .and_then(|local_url| daemon_http_runtime_loaded_paths(local_url).ok())
+        .and_then(|local_url| {
+            remaining_observation_budget(deadline).and_then(|timeout| {
+                daemon_http_runtime_loaded_paths_with_timeout(local_url, timeout).ok()
+            })
+        })
         .map(|loaded| changed_runtime_paths(&runner.env, &loaded))
         .unwrap_or_default();
     let daemon_matches_configured = daemon_runtime_is_current(

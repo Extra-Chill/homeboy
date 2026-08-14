@@ -103,6 +103,81 @@ pub fn runner_generation_job_owners_for_session(
 ) -> Result<Vec<RunnerGenerationJobOwners>> {
     generation_store::status_job_owners(runner_id, session)
 }
+
+/// The complete read-only admission projection for a runner. Command surfaces
+/// enrich this snapshot with their own diagnostics but must not recalculate
+/// compatibility or rotation safety from a partial observation.
+#[derive(Debug)]
+pub struct RunnerAdmissionSnapshot {
+    pub status: RunnerStatusReport,
+    pub generation_inventory: Vec<RunnerDaemonGenerationStatus>,
+    pub generation_owners: Vec<RunnerGenerationJobOwners>,
+    pub summary: RunnerAdmissionSummary,
+}
+
+impl RunnerAdmissionSnapshot {
+    fn from_status_and_generations(
+        status: RunnerStatusReport,
+        generation_inventory: Vec<RunnerDaemonGenerationStatus>,
+        generation_owners: Vec<RunnerGenerationJobOwners>,
+    ) -> Self {
+        let summary = status.admission_summary_with_generations(
+            &generation_inventory,
+            &generation_owners,
+            generation_inventory
+                .iter()
+                .filter(|generation| !generation.admission_owner)
+                .count(),
+        );
+
+        Self {
+            status,
+            generation_inventory,
+            generation_owners,
+            summary,
+        }
+    }
+}
+
+/// Observe a runner once, then derive every admission fact from that status and
+/// its matching generation ledger.
+pub fn runner_admission_snapshot(runner_id: &str) -> Result<RunnerAdmissionSnapshot> {
+    runner_admission_snapshot_until(
+        runner_id,
+        std::time::Instant::now() + readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+/// Observe admission under one caller-owned deadline. Every remote observation
+/// in the status projection receives only the budget that remains.
+pub fn runner_admission_snapshot_until(
+    runner_id: &str,
+    deadline: std::time::Instant,
+) -> Result<RunnerAdmissionSnapshot> {
+    let (status, generation_inventory, generation_owners) =
+        connection::status_with_admission_projection_until(runner_id, deadline)?;
+    Ok(RunnerAdmissionSnapshot::from_status_and_generations(
+        status,
+        generation_inventory,
+        generation_owners,
+    ))
+}
+
+/// Build the admission projection from an already-observed status report.
+/// This avoids repeating remote inspection when a caller also needs status
+/// details.
+pub fn runner_admission_snapshot_for_status(
+    status: RunnerStatusReport,
+) -> Result<RunnerAdmissionSnapshot> {
+    let (generation_inventory, generation_owners) =
+        generation_store::status_admission_projection(&status.runner_id, status.session.as_ref())?;
+    Ok(RunnerAdmissionSnapshot::from_status_and_generations(
+        status,
+        generation_inventory,
+        generation_owners,
+    ))
+}
+
 mod git_dependency_materialization;
 #[allow(
     dead_code,
@@ -1587,7 +1662,166 @@ fn validate_server_runner(server_id: &str, runner: &ServerRunner) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
     use homeboy_core::test_support;
+
+    #[test]
+    fn admission_snapshot_keeps_identity_and_rotation_decisions_on_one_ledger() {
+        let status = RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: None,
+            stale_daemon: Some(RunnerStaleDaemonWarning::new(
+                "homeboy-lab",
+                "old".to_string(),
+                "current".to_string(),
+                None,
+                Some("current".to_string()),
+            )),
+            configured_job_binary_build_identity: None,
+            daemon_freshness: Some(DaemonFreshnessReport {
+                fresh: false,
+                stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+                restartable: true,
+                lease_id: Some("lease-current".to_string()),
+                pid: Some(1),
+                recovery_evidence: None,
+                ownership_evidence: None,
+                adoption_command: None,
+                binary_hash: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            }),
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "test".to_string(),
+        };
+        let generations = vec![RunnerDaemonGenerationStatus {
+            generation: "lease-current".to_string(),
+            admission_owner: true,
+            drain_state: RollingDrainState::Admitting,
+            active_job_count: 0,
+            observed_active_job_count: Some(0),
+            active_job_count_authoritative: true,
+            job_owner_count: 0,
+            run_owner_count: 0,
+            artifact_owner_count: 0,
+            homeboy_build_identity: None,
+            remote_daemon_lease_id: Some("lease-current".to_string()),
+            remote_daemon_address: None,
+            local_url: None,
+        }];
+
+        let snapshot =
+            RunnerAdmissionSnapshot::from_status_and_generations(status, generations, Vec::new());
+
+        assert!(!snapshot.summary.daemon_compatible);
+        assert!(snapshot.summary.safe_to_rotate);
+        assert_eq!(snapshot.summary.draining_generation_count, 0);
+        assert_eq!(
+            snapshot.summary,
+            snapshot.status.admission_summary_with_generations(
+                &snapshot.generation_inventory,
+                &snapshot.generation_owners,
+                snapshot
+                    .generation_inventory
+                    .iter()
+                    .filter(|generation| !generation.admission_owner)
+                    .count(),
+            )
+        );
+    }
+
+    #[test]
+    fn admission_snapshot_healthy_connected_lab_runner_accepts_jobs() {
+        let status = RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: None,
+            stale_daemon: None,
+            configured_job_binary_build_identity: None,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "test".to_string(),
+        };
+
+        let snapshot =
+            RunnerAdmissionSnapshot::from_status_and_generations(status, Vec::new(), Vec::new());
+
+        assert!(snapshot.summary.accepting_jobs);
+    }
+
+    #[test]
+    fn admission_snapshot_stale_idle_lab_runner_is_safe_to_rotate_but_not_admitted() {
+        let status = RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: None,
+            stale_daemon: Some(RunnerStaleDaemonWarning::new(
+                "homeboy-lab",
+                "old".to_string(),
+                "current".to_string(),
+                None,
+                Some("current".to_string()),
+            )),
+            configured_job_binary_build_identity: None,
+            daemon_freshness: Some(DaemonFreshnessReport {
+                fresh: false,
+                stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+                restartable: true,
+                lease_id: Some("lease-current".to_string()),
+                pid: Some(1),
+                recovery_evidence: None,
+                ownership_evidence: None,
+                adoption_command: None,
+                binary_hash: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            }),
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "test".to_string(),
+        };
+
+        let snapshot =
+            RunnerAdmissionSnapshot::from_status_and_generations(status, Vec::new(), Vec::new());
+
+        assert!(!snapshot.summary.accepting_jobs);
+        assert!(snapshot.summary.safe_to_rotate);
+    }
 
     #[test]
     fn register_runner_config_entity_participates_in_collision_detection() {

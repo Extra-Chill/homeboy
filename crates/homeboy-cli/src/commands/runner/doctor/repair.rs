@@ -69,8 +69,8 @@ pub fn apply(
         .checks
         .iter()
         .any(|check| check.id == "daemon.exec" && check.status == RunnerDoctorStatus::Error);
-    let daemon_admission_closed = runner::status(id)
-        .map(|status| !daemon_admission_ready(&status))
+    let daemon_admission_closed = daemon_admission_ready(id)
+        .map(|ready| !ready)
         .unwrap_or(false);
     if !daemon_failed && !daemon_admission_closed {
         report.repairs.push(RunnerRepair {
@@ -97,8 +97,8 @@ pub fn apply(
             report
                 .checks
                 .extend(probes::connected_daemon_exec_checks(id, workspace_root));
-            let (status, message) = match runner::status(id) {
-                Ok(status) if daemon_admission_ready(&status) => (
+            let (status, message) = match daemon_admission_ready(id) {
+                Ok(true) => (
                     RunnerDoctorStatus::Ok,
                     match disconnect_error {
                         Some(error) => format!(
@@ -111,7 +111,7 @@ pub fn apply(
                         }
                     },
                 ),
-                Ok(_) => (
+                Ok(false) => (
                     RunnerDoctorStatus::Error,
                     "Reconnected the Lab runner daemon, but Lab admission remains closed".to_string(),
                 ),
@@ -319,14 +319,14 @@ fn apply_daemon_repair_plan(runner_id: &str, report: &mut RunnerDoctorOutput) ->
         .map(|step| step.code.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    match runner::status(runner_id) {
-        Ok(status) if daemon_admission_ready(&status) => report.repairs.push(RunnerRepair {
+    match daemon_admission_ready(runner_id) {
+        Ok(true) => report.repairs.push(RunnerRepair {
             id: "repair.daemon".to_string(),
             status: RunnerDoctorStatus::Ok,
             message: format!("Applied the reported daemon repair plan ({applied} step(s): {steps})"),
             commands,
         }),
-        Ok(_) => report.repairs.push(RunnerRepair {
+        Ok(false) => report.repairs.push(RunnerRepair {
             id: "repair.daemon".to_string(),
             status: RunnerDoctorStatus::Error,
             message: format!(
@@ -350,8 +350,10 @@ fn apply_daemon_repair_plan(runner_id: &str, report: &mut RunnerDoctorOutput) ->
 /// The same typed readiness decision rendered as `accepting_jobs` by runner
 /// status and used by Lab admission. Repair success is only valid when it is
 /// true after the final mutation.
-pub(super) fn daemon_admission_ready(status: &runner::RunnerStatusReport) -> bool {
-    status.admission_summary(0).accepting_jobs
+pub(super) fn daemon_admission_ready(runner_id: &str) -> homeboy::core::Result<bool> {
+    Ok(runner::runner_admission_snapshot(runner_id)?
+        .summary
+        .accepting_jobs)
 }
 
 fn connect_outcome(
