@@ -85,6 +85,8 @@ assert_not_contains 'actions/\(upload\|download\)-artifact@v4' "${ROOT_DIR}/acti
 # gate publication rather than running advisory-only (or not at all).
 assert_contains 'uses: ./.github/workflows/self-test.yml' "${WORKFLOW}" "release workflow runs the action self-test suite"
 assert_contains '      - self-test' "${WORKFLOW}" "release job is gated on the self-test suite"
+assert_contains 'uses: ./.github/workflows/consumer-contract.yml' "${WORKFLOW}" "release workflow runs the GitHub consumer contract probe"
+assert_contains '      - consumer-contract' "${WORKFLOW}" "release job is gated on the GitHub consumer contract probe"
 assert_contains 'bash scripts/run-tests.sh' "${SELF_TEST_WORKFLOW}" "self-test workflow runs every action shell test"
 assert_contains 'pull_request' "${SELF_TEST_WORKFLOW}" "self-test workflow also guards pull requests"
 
