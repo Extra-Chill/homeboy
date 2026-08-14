@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.346.0] - 2026-08-14
+
+### Added
+- give the inventory contract an extension seam
+
+### Changed
+- materialize attempts with explicit stores
+
+### Fixed
+- keep the macOS checksum step within bash 3.2
+- keep the hermetic temp root outside the repository, and unbusy two fixtures
+- let an exact-ref deploy assert the version it expects to install
+- canonicalize continuation commands
+
 ## [0.345.5] - 2026-08-14
 
 ### Changed
