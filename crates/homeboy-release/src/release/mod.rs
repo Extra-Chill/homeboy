@@ -63,6 +63,7 @@ pub use context::readiness_provenance;
 pub use executor::artifacts::{
     write_artifact_source_authority_manifest, ArtifactSourceAuthorityManifest,
 };
+pub use executor::release_notes_path;
 pub use package_recovery::{package_existing_tag, ReleasePackageResult};
 pub use pipeline::run;
 pub use planner::plan;

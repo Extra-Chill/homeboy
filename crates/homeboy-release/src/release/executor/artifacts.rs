@@ -26,10 +26,19 @@ pub struct ArtifactSourceAuthorityManifest {
     version: String,
     commit: String,
     artifacts: Vec<ArtifactSourceAuthorityArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_notes: Option<ArtifactSourceAuthorityControlArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct ArtifactSourceAuthorityArtifact {
+    path: String,
+    sha256: String,
+}
+
+/// A non-publication file that controls release recovery behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ArtifactSourceAuthorityControlArtifact {
     path: String,
     sha256: String,
 }
@@ -42,6 +51,7 @@ pub fn write_artifact_source_authority_manifest(
     tag: &str,
     version: &str,
     commit: &str,
+    release_notes: Option<&std::path::Path>,
 ) -> Result<ArtifactSourceAuthorityManifest> {
     if [component_id, tag, version, commit]
         .iter()
@@ -78,8 +88,17 @@ pub fn write_artifact_source_authority_manifest(
     }
 
     let manifest_path = artifact_dir.join(PACKAGE_RECOVERY_MANIFEST);
+    let release_notes = release_notes
+        .map(|source| copy_release_notes_control_artifact(&artifact_dir, source))
+        .transpose()?;
     let mut files = Vec::new();
-    collect_artifact_files(&artifact_dir, &artifact_dir, &manifest_path, &mut files)?;
+    collect_artifact_files(
+        &artifact_dir,
+        &artifact_dir,
+        &manifest_path,
+        release_notes.as_ref().map(|notes| notes.path.as_str()),
+        &mut files,
+    )?;
     files.sort();
     if files.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -112,6 +131,7 @@ pub fn write_artifact_source_authority_manifest(
                 })
             })
             .collect::<Result<Vec<_>>>()?,
+        release_notes,
     };
     let contents = serde_json::to_vec_pretty(&manifest).map_err(|error| {
         Error::internal_io(
@@ -131,10 +151,72 @@ pub fn write_artifact_source_authority_manifest(
     Ok(manifest)
 }
 
+fn copy_release_notes_control_artifact(
+    artifact_dir: &std::path::Path,
+    source: &std::path::Path,
+) -> Result<ArtifactSourceAuthorityControlArtifact> {
+    let source = std::fs::canonicalize(source).map_err(|error| {
+        Error::validation_invalid_argument(
+            "release-notes",
+            format!(
+                "Release notes file '{}' cannot be resolved: {error}",
+                source.display()
+            ),
+            Some(source.display().to_string()),
+            None,
+        )
+    })?;
+    if !source.is_file() {
+        return Err(Error::validation_invalid_argument(
+            "release-notes",
+            format!("Release notes '{}' is not a file", source.display()),
+            Some(source.display().to_string()),
+            None,
+        ));
+    }
+    let (relative, destination) = if source.starts_with(artifact_dir) {
+        (
+            source
+                .strip_prefix(artifact_dir)
+                .expect("release notes are inside authority directory")
+                .to_string_lossy()
+                .replace('\\', "/"),
+            source.clone(),
+        )
+    } else {
+        let relative = ".homeboy/release-notes.md";
+        (relative.to_string(), artifact_dir.join(relative))
+    };
+    if source != destination {
+        std::fs::create_dir_all(destination.parent().expect("control artifact parent")).map_err(
+            |error| {
+                Error::internal_io(
+                    format!("Failed to create release-notes control directory: {error}"),
+                    Some(destination.display().to_string()),
+                )
+            },
+        )?;
+        std::fs::copy(&source, &destination).map_err(|error| {
+            Error::internal_io(
+                format!(
+                    "Failed to copy release notes '{}' into authority directory: {error}",
+                    source.display()
+                ),
+                Some(destination.display().to_string()),
+            )
+        })?;
+    }
+    Ok(ArtifactSourceAuthorityControlArtifact {
+        path: relative,
+        sha256: sha256_file(&destination.display().to_string())?,
+    })
+}
+
 fn collect_artifact_files(
     root: &std::path::Path,
     directory: &std::path::Path,
     manifest_path: &std::path::Path,
+    release_notes_path: Option<&str>,
     files: &mut Vec<std::path::PathBuf>,
 ) -> Result<()> {
     for entry in std::fs::read_dir(directory).map_err(|error| {
@@ -170,8 +252,11 @@ fn collect_artifact_files(
             ));
         }
         if canonical.is_dir() {
-            collect_artifact_files(root, &canonical, manifest_path, files)?;
-        } else if canonical.is_file() && canonical != manifest_path {
+            collect_artifact_files(root, &canonical, manifest_path, release_notes_path, files)?;
+        } else if canonical.is_file()
+            && canonical != manifest_path
+            && root.join(release_notes_path.unwrap_or_default()) != canonical
+        {
             files.push(canonical);
         }
     }
@@ -187,6 +272,8 @@ struct PackageRecoveryManifest {
     version: String,
     commit: String,
     artifacts: Vec<ReleaseArtifact>,
+    #[serde(default)]
+    release_notes: Option<ArtifactSourceAuthorityControlArtifact>,
 }
 
 #[derive(Deserialize)]
@@ -322,8 +409,13 @@ pub(crate) fn run_artifact_inventory(
             Vec::new(),
         ));
     }
-    let mut artifacts = if manifest_path.is_file() && is_package_recovery_manifest(&manifest_path) {
-        inventory_package_recovery_manifest(dir, &manifest_path, recovery_context)?
+    let (mut artifacts, exact_release_notes) = if manifest_path.is_file()
+        && is_package_recovery_manifest(&manifest_path)
+    {
+        (
+            inventory_package_recovery_manifest(dir, &manifest_path, recovery_context)?,
+            None,
+        )
     } else if manifest_path.is_file() && is_artifact_source_authority_manifest(&manifest_path) {
         inventory_artifact_source_authority_manifest(dir, &manifest_path, recovery_context)?
     } else {
@@ -337,6 +429,10 @@ pub(crate) fn run_artifact_inventory(
             None,
         ));
     };
+
+    if let Some(notes) = exact_release_notes {
+        state.exact_release_notes = Some(notes);
+    }
 
     collapse_ordinal_durable_duplicates(&mut artifacts)?;
     artifacts.sort_by(|a, b| a.path.cmp(&b.path));
@@ -550,6 +646,7 @@ fn inventory_draft_adoption_manifest(
         version: manifest.version,
         commit: manifest.commit,
         artifacts: Vec::new(),
+        release_notes: None,
     };
     validate_recovery_identity(&identity, manifest_path, context)?;
 
@@ -806,7 +903,10 @@ fn inventory_artifact_source_authority_manifest(
     artifact_dir: &std::path::Path,
     manifest_path: &std::path::Path,
     recovery_context: &PackageRecoveryContext,
-) -> Result<Vec<ReleaseArtifact>> {
+) -> Result<(
+    Vec<ReleaseArtifact>,
+    Option<crate::release::types::ExactReleaseNotes>,
+)> {
     let mut manifest: PackageRecoveryManifest = read_recovery_manifest(manifest_path)?;
     if manifest.schema != ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA
         || manifest.schema_version != ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA_VERSION
@@ -861,11 +961,82 @@ fn inventory_artifact_source_authority_manifest(
             Some(artifact_dir.display().to_string()),
         )
     })?;
-    manifest
+    let release_notes = manifest
+        .release_notes
+        .map(|notes| validate_recovery_release_notes(&artifact_dir, notes))
+        .transpose()?;
+    let artifacts = manifest
         .artifacts
         .drain(..)
         .map(|artifact| validate_recovery_artifact(&artifact_dir, artifact))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok((artifacts, release_notes))
+}
+
+fn validate_recovery_release_notes(
+    artifact_dir: &std::path::Path,
+    notes: ArtifactSourceAuthorityControlArtifact,
+) -> Result<crate::release::types::ExactReleaseNotes> {
+    let path = validate_control_artifact(artifact_dir, &notes, "release notes")?;
+    let body = std::fs::read_to_string(&path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Recovered release notes '{}' are not valid UTF-8: {error}",
+                path.display()
+            ),
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    Ok(crate::release::types::ExactReleaseNotes {
+        body,
+        source: "artifact-source-authority".to_string(),
+    })
+}
+
+fn validate_control_artifact(
+    artifact_dir: &std::path::Path,
+    artifact: &ArtifactSourceAuthorityControlArtifact,
+    label: &str,
+) -> Result<std::path::PathBuf> {
+    let path = artifact_dir.join(&artifact.path);
+    let canonical = std::fs::canonicalize(&path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "from-artifacts",
+            format!("Recovered {label} '{}' is missing: {error}", artifact.path),
+            Some(artifact.path.clone()),
+            None,
+        )
+    })?;
+    if !canonical.is_file() || !canonical.starts_with(artifact_dir) {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Recovered {label} '{}' must be a file inside '{}'",
+                canonical.display(),
+                artifact_dir.display()
+            ),
+            Some(canonical.display().to_string()),
+            None,
+        ));
+    }
+    let actual_sha256 = sha256_file(&canonical.display().to_string())?;
+    if artifact.sha256.len() != 64
+        || !artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !artifact.sha256.eq_ignore_ascii_case(&actual_sha256)
+    {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Recovered {label} '{}' sha256 does not match declared sha256",
+                canonical.display()
+            ),
+            Some(canonical.display().to_string()),
+            None,
+        ));
+    }
+    Ok(canonical)
 }
 
 fn read_recovery_manifest(manifest_path: &std::path::Path) -> Result<PackageRecoveryManifest> {
@@ -1061,6 +1232,7 @@ mod tests {
             "v1.2.3",
             "1.2.3",
             "abc123",
+            None,
         )
         .expect("generate authority manifest");
 
@@ -1095,6 +1267,7 @@ mod tests {
             "v1.2.3",
             "1.2.3",
             "abc123",
+            None,
         )
         .expect("regenerate authority manifest");
         let mut manifest: serde_json::Value =
@@ -1117,6 +1290,7 @@ mod tests {
             "v1.2.3",
             "1.2.3",
             "abc123",
+            None,
         )
         .expect("regenerate authority manifest");
         std::fs::write(&artifact, "substituted bytes").expect("tamper artifact");
@@ -1420,6 +1594,65 @@ mod tests {
         )
         .expect_err("tampered artifact must not be published");
         assert!(error.message.contains("does not match declared sha256"));
+    }
+
+    #[test]
+    fn source_authority_binds_exact_notes_without_publishing_them() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = tempfile::NamedTempFile::new().expect("notes source");
+        let artifact = temp.path().join("plugin.zip");
+        std::fs::write(&artifact, "release asset").expect("artifact");
+        std::fs::write(source.path(), b"exact\nrelease\nbody\n").expect("notes");
+
+        write_artifact_source_authority_manifest(
+            temp.path(),
+            "plugin",
+            "v1.2.3",
+            "1.2.3",
+            "abc123",
+            Some(source.path()),
+        )
+        .expect("generate authority manifest");
+
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(temp.path().join(PACKAGE_RECOVERY_MANIFEST))
+                .expect("manifest"),
+        )
+        .expect("valid manifest");
+        assert_eq!(manifest["artifacts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            manifest["release_notes"]["path"],
+            ".homeboy/release-notes.md"
+        );
+        assert_eq!(manifest["release_notes"]["sha256"], sha256(source.path()));
+
+        let mut state = ReleaseState::default();
+        run_artifact_inventory(
+            &mut state,
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+        .expect("inventory exact notes");
+        assert_eq!(
+            state.exact_release_notes.as_ref().unwrap().body,
+            "exact\nrelease\nbody\n"
+        );
+        assert_eq!(
+            state.exact_release_notes.as_ref().unwrap().source,
+            "artifact-source-authority"
+        );
+        establish_publication_authority(&mut state).expect("authority");
+        assert_eq!(github_release_publications(&state).unwrap().len(), 1);
+
+        std::fs::write(temp.path().join(".homeboy/release-notes.md"), "tampered")
+            .expect("tamper notes");
+        let error = run_artifact_inventory(
+            &mut ReleaseState::default(),
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+        .expect_err("tampered notes must fail closed");
+        assert!(error.message.contains("release notes") && error.message.contains("sha256"));
     }
 
     #[test]

@@ -98,6 +98,9 @@ struct ArtifactSourceAuthorityArgs {
     /// Exact commit the prepared tag resolves to
     #[arg(long)]
     commit: String,
+    /// Exact persisted GitHub Release body to bind as a non-publication control artifact
+    #[arg(long, value_name = "PATH")]
+    release_notes: Option<String>,
 }
 
 #[derive(Args)]
@@ -335,6 +338,39 @@ fn map_nested<T>(
     result.map(|(output, code)| (wrap(output), code))
 }
 
+fn artifact_source_authority_release_notes(
+    args: &ArtifactSourceAuthorityArgs,
+) -> Option<std::path::PathBuf> {
+    let current_dir = std::env::current_dir().ok();
+    let component_path = component::load(&args.component_id)
+        .ok()
+        .map(|component| std::path::PathBuf::from(component.local_path));
+    select_artifact_source_authority_release_notes(
+        args.release_notes.as_deref(),
+        current_dir.as_deref(),
+        component_path.as_deref(),
+        &args.tag,
+    )
+}
+
+fn select_artifact_source_authority_release_notes(
+    explicit: Option<&str>,
+    current_dir: Option<&std::path::Path>,
+    component_path: Option<&std::path::Path>,
+    tag: &str,
+) -> Option<std::path::PathBuf> {
+    if let Some(path) = explicit {
+        return Some(std::path::PathBuf::from(path));
+    }
+    [current_dir, component_path]
+        .into_iter()
+        .flatten()
+        .find_map(|path| {
+            let path = path.join(release::release_notes_path(tag));
+            path.is_file().then_some(path)
+        })
+}
+
 impl ReleaseExecuteArgs {
     fn pipeline_options(&self) -> ReleasePipelineOptions {
         ReleasePipelineOptions {
@@ -448,12 +484,14 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
             });
         }
         Some(ReleaseSubcommand::ArtifactSourceAuthority(args)) => {
+            let release_notes = artifact_source_authority_release_notes(&args);
             let manifest = release::write_artifact_source_authority_manifest(
                 Path::new(&args.dir),
                 &args.component_id,
                 &args.tag,
                 &args.version,
                 &args.commit,
+                release_notes.as_deref(),
             )?;
             return Ok((
                 ReleaseCommandOutput::ArtifactSourceAuthority(ArtifactSourceAuthorityOutput {
@@ -1555,6 +1593,66 @@ mod tests {
             git_identity: None,
             cascade: false,
         }
+    }
+
+    #[test]
+    fn artifact_source_authority_uses_configured_notes_when_cwd_has_none() {
+        let current = tempfile::tempdir().expect("current directory");
+        let component = tempfile::tempdir().expect("component directory");
+        let canonical = component.path().join(release::release_notes_path("v1.2.3"));
+        std::fs::create_dir_all(canonical.parent().unwrap()).expect("build dir");
+        std::fs::write(&canonical, "exact body").expect("canonical notes");
+
+        assert_eq!(
+            select_artifact_source_authority_release_notes(
+                None,
+                Some(current.path()),
+                Some(component.path()),
+                "v1.2.3",
+            ),
+            Some(canonical)
+        );
+    }
+
+    #[test]
+    fn artifact_source_authority_prefers_cwd_notes_over_configured_component() {
+        let current = tempfile::tempdir().expect("current directory");
+        let component = tempfile::tempdir().expect("component directory");
+        let cwd_notes = current.path().join(release::release_notes_path("v1.2.3"));
+        let component_notes = component.path().join(release::release_notes_path("v1.2.3"));
+        for notes in [&cwd_notes, &component_notes] {
+            std::fs::create_dir_all(notes.parent().unwrap()).expect("build dir");
+            std::fs::write(notes, "exact body").expect("canonical notes");
+        }
+
+        assert_eq!(
+            select_artifact_source_authority_release_notes(
+                None,
+                Some(current.path()),
+                Some(component.path()),
+                "v1.2.3",
+            ),
+            Some(cwd_notes)
+        );
+    }
+
+    #[test]
+    fn artifact_source_authority_explicit_notes_override_canonical_notes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let explicit = temp.path().join("provided.md");
+        let canonical = temp.path().join(release::release_notes_path("v1.2.3"));
+        std::fs::create_dir_all(canonical.parent().unwrap()).expect("build dir");
+        std::fs::write(&canonical, "canonical body").expect("canonical notes");
+
+        assert_eq!(
+            select_artifact_source_authority_release_notes(
+                Some(explicit.to_str().unwrap()),
+                Some(temp.path()),
+                Some(temp.path()),
+                "v1.2.3",
+            ),
+            Some(explicit)
+        );
     }
 
     #[test]

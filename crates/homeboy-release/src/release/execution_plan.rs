@@ -175,6 +175,7 @@ fn initial_release_state(
         version: Some(version),
         tag: Some(tag),
         notes,
+        exact_release_notes: None,
         artifacts: Vec::new(),
         package_owned_paths: Vec::new(),
         changelog_validation: None,

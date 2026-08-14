@@ -378,6 +378,8 @@ pub struct ReleaseState {
     pub version: Option<String>,
     pub tag: Option<String>,
     pub notes: Option<String>,
+    /// A manifest-bound final GitHub Release body recovered without regeneration.
+    pub exact_release_notes: Option<ExactReleaseNotes>,
     pub artifacts: Vec<ReleaseArtifact>,
     /// Component-relative checkout paths proven absent before packaging and
     /// created by the current package invocation.
@@ -386,6 +388,12 @@ pub struct ReleaseState {
     /// A remote-only draft may be published only when this manifest-bound
     /// intent has been validated against the active release identity.
     pub draft_adoption: Option<DraftAdoptionIntent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExactReleaseNotes {
+    pub body: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone)]
