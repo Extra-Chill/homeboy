@@ -1941,6 +1941,54 @@ fn release_builds_canonicalize_cargo_dist_checksum_sidecars_before_upload() {
     );
 }
 
+/// Release builds run on macOS, which ships bash 3.2. A bash 4+ builtin in a
+/// script that executes there is not a style question: `mapfile` aborted both
+/// Darwin builds with exit 127, `Create GitHub Release` was skipped, and the
+/// tag had already been pushed — so v0.345.1 through v0.345.5 exist as tags
+/// with no published release, and every consumer pinned to `latest` stayed on
+/// v0.345.0.
+///
+/// Scoped to scripts that actually run on a macOS runner.
+/// `canonicalize-checksum-sidecars.sh` runs in `build-local-artifacts`, whose
+/// `runs-on` is `${{ matrix.runner }}` and therefore includes Darwin.
+/// `release-asset-completeness.sh` runs only on `ubuntu-*`, so its bash 4 use
+/// is legitimate and deliberately not covered here.
+///
+/// Pin the absence, because the Linux runners cannot observe this failure.
+#[test]
+fn macos_release_shell_scripts_avoid_bash_4_only_constructs() {
+    const MACOS_SCRIPTS: &[(&str, &str)] = &[(
+        ".github/canonicalize-checksum-sidecars.sh",
+        include_str!("../.github/canonicalize-checksum-sidecars.sh"),
+    )];
+
+    // (needle, why it is unavailable on macOS bash 3.2)
+    const BASH_4_ONLY: &[(&str, &str)] = &[
+        ("mapfile", "`mapfile` is a bash 4 builtin"),
+        ("readarray", "`readarray` is a bash 4 builtin"),
+        ("declare -A", "associative arrays are bash 4"),
+        ("local -A", "associative arrays are bash 4"),
+        (",,}", "`${var,,}` case expansion is bash 4"),
+        ("^^}", "`${var^^}` case expansion is bash 4"),
+    ];
+
+    for (path, source) in MACOS_SCRIPTS {
+        // Comments explain which constructs are unavailable and why, so they
+        // name them on purpose. Only executable lines are checked.
+        let code: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (needle, reason) in BASH_4_ONLY {
+            assert!(
+                !code.contains(needle),
+                "{path} uses `{needle}`, but {reason} and this script runs on macOS bash 3.2"
+            );
+        }
+    }
+}
+
 /// The exact published inventory of `v0.332.0` — the last healthy release.
 const HEALTHY_RELEASE_ASSETS: &[&str] = &[
     "dist-manifest.json",
