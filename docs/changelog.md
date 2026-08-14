@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.348.6] - 2026-08-14
+
+### Fixed
+- isolate inventory producer scope
+- preserve prepared binary identity
+- report inventory rejection stage
+- preserve exact notes across recovery
+- recover candidate stores from procfs
+
 ## [0.348.5] - 2026-08-14
 
 ### Fixed
