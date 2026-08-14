@@ -144,6 +144,16 @@ impl AgentTaskLifecycleStore {
         write_plan_in_store(self, run_id, plan)
     }
 
+    pub fn record_pre_execution_failure(
+        &self,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+        phase: &str,
+        error: &Error,
+    ) -> Result<AgentTaskRunRecord> {
+        super::record_pre_execution_failure_in_store(self, run_id, plan, phase, error)
+    }
+
     pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {
         read_controller_plan_in_store(self, run_id)
     }
