@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.345.5] - 2026-08-14
+
+### Changed
+- root plan submission
+- root record authority stores
+- make the changed-scope cap fixture select the files it claims to
+- add explicit storage roots
+- support rooted lock domains
+
+### Fixed
+- match a drift symbol the way it was extracted
+- cap oversized changed-scope test selections before execution
+- preserve Linux lifecycle contracts
+- bind approved check waivers to the readiness gate
+- assert the rig toolchain PATH contract instead of a borrowed provider
+- restore current-main integration contracts
+
 ## [0.345.4] - 2026-08-13
 
 ### Fixed
