@@ -638,6 +638,7 @@ mod tests {
         AuditCommandOutput::Full {
             passed: result.findings.is_empty(),
             result,
+            timing: homeboy_code_audit::AuditTiming::default(),
             measurement: homeboy_code_audit::AuditMeasurement::new(
                 homeboy_code_audit::AuditProfile::Full,
                 false,
@@ -649,6 +650,7 @@ mod tests {
             fixability: None,
             extension_phase_timings: Vec::new(),
             actionable: None,
+            full_report: None,
         }
     }
 

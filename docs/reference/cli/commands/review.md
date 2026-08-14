@@ -74,6 +74,7 @@ Audit code conventions and detect architectural drift
 | `--changed-since` | `<REF>` | Only operate on files changed since this git ref (branch, tag, or SHA) |
 | `--json-summary` | flag | Include compact machine-readable summary for CI wrappers. Also accepts `--summary` |
 | `--fixability` | flag | Include automated-fixability metadata. This can be expensive because it runs the refactor planner after audit completes |
+| `--full` | flag | Emit the complete audit report on stdout. The default changed-since presentation is a bounded operator summary; `--output` always retains the complete report |
 
 ## `homeboy review lint`
 

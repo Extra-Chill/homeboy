@@ -87,6 +87,7 @@ mod tests {
         let output = AuditCommandOutput::Full {
             passed: false,
             result: audit_result(vec![audit_finding("src/lib.rs", "missing method")]),
+            timing: homeboy_code_audit::AuditTiming::default(),
             measurement: homeboy_code_audit::AuditMeasurement::new(
                 homeboy_code_audit::AuditProfile::Full,
                 false,
@@ -98,6 +99,7 @@ mod tests {
             fixability: None,
             extension_phase_timings: Vec::new(),
             actionable: None,
+            full_report: None,
         };
 
         let findings = output.review_artifact_findings();
@@ -114,6 +116,7 @@ mod tests {
         let output = AuditCommandOutput::Compared {
             passed: false,
             result: audit_result(vec![audit_finding("src/main.rs", "naming drift")]),
+            timing: homeboy_code_audit::AuditTiming::default(),
             measurement: homeboy_code_audit::AuditMeasurement::new(
                 homeboy_code_audit::AuditProfile::Full,
                 false,
@@ -133,6 +136,7 @@ mod tests {
             fixability: None,
             extension_phase_timings: Vec::new(),
             actionable: None,
+            full_report: None,
         };
 
         let findings = output.review_artifact_findings();

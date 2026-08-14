@@ -9,6 +9,12 @@ use super::{adapter, runner};
 
 type JsonRun = (homeboy::core::Result<Value>, i32);
 
+const MAX_AUDIT_WARNING_SAMPLES: usize = 3;
+const MAX_AUDIT_TIMING_SPANS: usize = 8;
+const MAX_AUDIT_SCOPE_REASONS: usize = 8;
+const MAX_AUDIT_PROJECTION_TEXT_BYTES: usize = 160;
+const MAX_AUDIT_PROJECTION_BYTES: usize = 4 * 1024;
+
 /// Dispatch a command to its handler and map the structured result to JSON.
 pub fn run(
     command: Commands,
@@ -28,6 +34,7 @@ pub fn run_command_output(
     placement: Placement,
 ) -> CommandRun {
     crate::commands::utils::tty::status("homeboy is working...");
+    let summarize_changed_since_audit = changed_since_audit_uses_bounded_output(&command);
     let run = match command {
         Commands::AgentTask(args) => {
             let run_from_spec_output_ref =
@@ -146,6 +153,9 @@ pub fn run_command_output(
                 },
             )
         }
+        command if summarize_changed_since_audit => {
+            changed_since_audit_command_run(dispatch(command, spec, placement), output_file)
+        }
         command => {
             let (stdout_result, exit_code) = dispatch(command, spec, placement);
             CommandRun::from_stdout_result(stdout_result, exit_code)
@@ -153,6 +163,157 @@ pub fn run_command_output(
     };
 
     run.with_command(spec.name)
+}
+
+fn changed_since_audit_uses_bounded_output(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Review(crate::commands::review::ReviewArgs {
+            command: Some(crate::commands::review::ReviewCommand::Audit(args)),
+            ..
+        }) if args.audit.changed.changed_since.is_some()
+            && !args.audit.full
+            && !homeboy::core::lab_routing::is_lab_offload_subprocess()
+    )
+}
+
+/// Keep changed-since audit terminal output useful at repository scale. The
+/// full command payload remains the `--output` artifact and is available on
+/// demand through `--full`; this projection is deliberately derived only from
+/// aggregate fields, never individual findings or convention reports.
+fn changed_since_audit_command_run(
+    (output_file_result, exit_code): JsonRun,
+    output_file: Option<&str>,
+) -> CommandRun {
+    let stdout_result = output_file_result
+        .clone()
+        .map(|payload| bounded_audit_projection(&payload, exit_code, output_file));
+    CommandRun::from_command_stdout_result("review", stdout_result, exit_code)
+        .with_output_file_result(output_file_result)
+}
+
+fn render_changed_since_audit_projection(
+    payload: &Value,
+    exit_code: i32,
+    output_file: Option<&str>,
+) -> Value {
+    let timing = payload
+        .get("timing")
+        .and_then(|timing| timing.get("spans"))
+        .and_then(Value::as_array)
+        .map(|spans| {
+            spans
+                .iter()
+                .take(MAX_AUDIT_TIMING_SPANS)
+                .filter_map(|span| {
+                    Some(serde_json::json!({
+                        "id": bounded_audit_projection_text(span.get("id")?.as_str()?),
+                        "status": bounded_audit_projection_text(span.get("status")?.as_str()?),
+                        "duration_ms": span.get("duration_ms").and_then(Value::as_f64),
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let warnings = payload
+        .pointer("/summary/warnings")
+        .map(audit_warning_summary)
+        .unwrap_or_else(|| serde_json::json!({ "count": 0, "samples": [] }));
+    serde_json::json!({
+        "schema": "homeboy/audit-bounded-output/v1",
+        "command": "audit",
+        "verdict": if exit_code == 0 { "pass" } else { "fail" },
+        "exit_code": exit_code,
+        "component_id": payload.get("component_id").and_then(Value::as_str).map(bounded_audit_projection_text),
+        "measurement": audit_measurement_summary(payload.get("measurement")),
+        "counts": {
+            "findings": payload.get("findings").and_then(Value::as_array).map_or(0, Vec::len),
+            "warnings": warnings["count"],
+            "files_scanned": payload.pointer("/summary/files_scanned").and_then(Value::as_u64),
+        },
+        "changed_since": audit_changed_since_summary(payload.get("changed_since")),
+        "warnings": warnings,
+        "timing": timing,
+        "full_report": audit_full_report_ref(payload, output_file),
+    })
+}
+
+fn audit_full_report_ref(payload: &Value, output_file: Option<&str>) -> Value {
+    if let Some(reference) = payload.get("full_report").and_then(Value::as_object) {
+        return serde_json::json!({
+            "schema": "homeboy/audit-full-report-ref/v1",
+            "uri": reference.get("uri").and_then(Value::as_str).map(bounded_audit_projection_text),
+            "command": reference.get("command").and_then(Value::as_str).map(bounded_audit_projection_text),
+        });
+    }
+
+    serde_json::json!({
+        "schema": "homeboy/audit-full-report-ref/v1",
+        "output": output_file.map(bounded_audit_projection_text),
+        "command": "rerun with --full for the complete report; --output writes the lossless artifact",
+    })
+}
+
+fn audit_warning_summary(warnings: &Value) -> Value {
+    match warnings {
+        Value::Array(warnings) => serde_json::json!({
+            "count": warnings.len(),
+            "samples": warnings.iter().filter_map(Value::as_str).take(MAX_AUDIT_WARNING_SAMPLES).map(bounded_audit_projection_text).collect::<Vec<_>>(),
+        }),
+        Value::Number(count) => serde_json::json!({ "count": count, "samples": [] }),
+        _ => serde_json::json!({ "count": 0, "samples": [] }),
+    }
+}
+
+fn audit_measurement_summary(measurement: Option<&Value>) -> Value {
+    let Some(measurement) = measurement else {
+        return Value::Null;
+    };
+
+    serde_json::json!({
+        "profile": measurement.get("profile").and_then(Value::as_str).map(bounded_audit_projection_text),
+        "complete": measurement.get("complete").and_then(Value::as_bool),
+        "narrowed_by": measurement.get("narrowed_by").and_then(Value::as_array).map(|reasons| reasons.iter().filter_map(Value::as_str).take(MAX_AUDIT_SCOPE_REASONS).map(bounded_audit_projection_text).collect::<Vec<_>>()).unwrap_or_default(),
+    })
+}
+
+fn audit_changed_since_summary(changed_since: Option<&Value>) -> Value {
+    let Some(changed_since) = changed_since else {
+        return Value::Null;
+    };
+
+    serde_json::json!({
+        "introduced_findings": changed_since.get("introduced_findings").and_then(Value::as_u64),
+        "contextual_findings": changed_since.get("contextual_findings").and_then(Value::as_u64),
+    })
+}
+
+fn bounded_audit_projection_text(value: &str) -> String {
+    if value.len() <= MAX_AUDIT_PROJECTION_TEXT_BYTES {
+        return value.to_string();
+    }
+
+    let mut end = MAX_AUDIT_PROJECTION_TEXT_BYTES - 3;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &value[..end])
+}
+
+fn bounded_audit_projection(payload: &Value, exit_code: i32, output_file: Option<&str>) -> Value {
+    let projection = render_changed_since_audit_projection(payload, exit_code, output_file);
+    if serde_json::to_vec(&projection).is_ok_and(|bytes| bytes.len() <= MAX_AUDIT_PROJECTION_BYTES)
+    {
+        return projection;
+    }
+
+    serde_json::json!({
+        "schema": "homeboy/audit-bounded-output/v1",
+        "command": "audit",
+        "verdict": if exit_code == 0 { "pass" } else { "fail" },
+        "exit_code": exit_code,
+        "full_report": audit_full_report_ref(payload, output_file),
+    })
 }
 
 fn command_run_with_summary(
@@ -474,6 +635,84 @@ mod tests {
                 .expect("lossless output file"),
             &payload
         );
+    }
+
+    #[test]
+    fn changed_since_audit_projection_is_bounded_and_omits_findings() {
+        let payload = serde_json::json!({
+            "command": "audit.compared",
+            "component_id": "large-component",
+            "measurement": { "profile": "pr", "complete": false, "narrowed_by": ["changed-since"] },
+            "summary": { "files_scanned": 1200, "warnings": (0..50_000).map(|_| "w".repeat(512)).collect::<Vec<_>>() },
+            "findings": (0..50_000).map(|i| serde_json::json!({ "file": format!("src/{i}.rs"), "description": "x".repeat(512) })).collect::<Vec<_>>(),
+            "changed_since": { "introduced_findings": 1, "contextual_findings": 49999 },
+            "timing": { "spans": (0..50_000).map(|_| serde_json::json!({ "id": "detectors", "status": "ok", "duration_ms": 42.0 })).collect::<Vec<_>>() }
+        });
+
+        let rendered =
+            serde_json::to_string(&bounded_audit_projection(&payload, 1, Some("audit.json")))
+                .expect("projection serializes");
+
+        assert!(
+            rendered.len() < 2_000,
+            "projection was {} bytes",
+            rendered.len()
+        );
+        assert!(rendered.contains("\"verdict\":\"fail\""));
+        assert!(rendered.contains("\"introduced_findings\":1"));
+        assert!(rendered.contains("\"count\":50000"));
+        assert!(rendered.contains("rerun with --full"));
+        assert!(rendered.contains("audit.json"));
+        assert!(!rendered.contains("src/49999.rs"));
+        assert!(!rendered.contains(&"x".repeat(512)));
+        assert!(!rendered.contains(&"w".repeat(512)));
+    }
+
+    #[test]
+    fn changed_since_audit_projection_uses_durable_report_reference_without_output_file() {
+        let payload = serde_json::json!({
+            "full_report": {
+                "uri": "homeboy://run/run-1/artifact/audit-report",
+                "command": "homeboy runs evidence run-1",
+            }
+        });
+
+        let rendered = bounded_audit_projection(&payload, 1, None);
+
+        assert_eq!(
+            rendered["full_report"]["uri"],
+            "homeboy://run/run-1/artifact/audit-report"
+        );
+        assert_eq!(rendered["full_report"]["output"], Value::Null);
+    }
+
+    #[test]
+    fn changed_since_audit_output_file_is_lossless_while_stdout_is_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.json");
+        let payload = serde_json::json!({
+            "command": "audit.compared",
+            "component_id": "large-component",
+            "measurement": { "profile": "pr", "complete": false, "narrowed_by": ["changed-since"] },
+            "summary": { "files_scanned": 1, "warnings": [] },
+            "findings": [{ "description": "x".repeat(512 * 1024) }],
+            "changed_since": { "introduced_findings": 1, "contextual_findings": 0 },
+            "timing": { "spans": [] }
+        });
+        let run = changed_since_audit_command_run((Ok(payload.clone()), 1), Some("audit.json"));
+        let stdout = serde_json::to_string(run.stdout_result.as_ref().expect("bounded stdout"))
+            .expect("stdout serializes");
+
+        assert!(stdout.len() < 2_000, "stdout was {} bytes", stdout.len());
+        assert!(!stdout.contains(&"x".repeat(512)));
+
+        super::super::output_runtime::write_output_file(
+            &run,
+            crate::command_contract::CommandOutputFileMode::GenericEnvelope,
+            Some(path.to_str().expect("utf8 path")),
+        );
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(written["data"], payload);
     }
 
     #[test]

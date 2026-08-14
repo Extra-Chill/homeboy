@@ -169,6 +169,9 @@ pub enum AuditCommandOutput {
         passed: bool,
         #[serde(flatten)]
         result: CodeAuditResult,
+        /// Per-phase measurements retained in full artifacts and available to
+        /// bounded operator projections.
+        timing: crate::AuditTiming,
         /// Coverage declaration — see [`AuditMeasurement`].
         measurement: AuditMeasurement,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,6 +183,8 @@ pub enum AuditCommandOutput {
             skip_serializing_if = "Option::is_none"
         )]
         actionable: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        full_report: Option<Value>,
     },
 
     #[serde(rename = "audit.conventions")]
@@ -206,6 +211,9 @@ pub enum AuditCommandOutput {
         #[serde(flatten)]
         result: CodeAuditResult,
         baseline_comparison: baseline::BaselineComparison,
+        /// Per-phase measurements retained in full artifacts and available to
+        /// bounded operator projections.
+        timing: crate::AuditTiming,
         /// Coverage declaration — see [`AuditMeasurement`].
         measurement: AuditMeasurement,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -221,6 +229,8 @@ pub enum AuditCommandOutput {
             skip_serializing_if = "Option::is_none"
         )]
         actionable: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        full_report: Option<Value>,
     },
 
     #[serde(rename = "audit.summary")]

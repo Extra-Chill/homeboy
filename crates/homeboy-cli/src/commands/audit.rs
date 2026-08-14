@@ -1,4 +1,5 @@
 use clap::Args;
+use std::io::Write;
 use std::path::Path;
 
 use homeboy::core::code_audit::{
@@ -76,6 +77,12 @@ pub struct AuditArgs {
     /// runs the refactor planner after audit completes.
     #[arg(long)]
     pub fixability: bool,
+
+    /// Emit the complete audit report on stdout. The default changed-since
+    /// presentation is a bounded operator summary; `--output` always retains
+    /// the complete report.
+    #[arg(long)]
+    pub full: bool,
 }
 
 impl AuditArgs {
@@ -140,7 +147,12 @@ pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
     let resolved_path = source_ctx.source_path.to_string_lossy().to_string();
 
     let observation = AuditObservationAdapter::new(&resolved_id, &resolved_path, &args);
-    let active_observation = ActiveObservation::start_best_effort(observation.start_record());
+    let bounded_output = args.changed.changed_since.is_some() && !args.full;
+    let active_observation = if bounded_output {
+        Some(ActiveObservation::start(observation.start_record())?)
+    } else {
+        ActiveObservation::start_best_effort(observation.start_record())
+    };
     let run_id = active_observation
         .as_ref()
         .map(|observation| observation.run_id().to_string());
@@ -162,25 +174,14 @@ pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
         },
         changed_since: args.changed.changed_since,
         precomputed_changed_files: args.changed.precomputed_changed_files,
-        json_summary: args.json_summary,
+        // `--full` is an explicit request for the complete report and wins
+        // over the compact-summary aliases.
+        json_summary: args.json_summary && !args.full,
         include_fixability: args.fixability,
     });
 
     let workflow = match workflow {
-        Ok(workflow) => {
-            if let Some(active) = active_observation {
-                let findings = observation.success_findings(active.run_id(), &workflow);
-                active.record_findings(&findings);
-                active.finish(
-                    observation.success_status(&workflow),
-                    Some(homeboy::core::observation::merge_metadata(
-                        active.initial_metadata().clone(),
-                        observation.success_metadata(&workflow),
-                    )),
-                );
-            }
-            workflow
-        }
+        Ok(workflow) => workflow,
         Err(error) => {
             if let Some(active) = active_observation {
                 active.finish_error(observation.error_metadata(&error));
@@ -189,9 +190,101 @@ pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
         }
     };
 
+    let observation_result = active_observation.as_ref().map(|active| {
+        (
+            observation.success_findings(active.run_id(), &workflow),
+            observation.success_status(&workflow),
+            homeboy::core::observation::merge_metadata(
+                active.initial_metadata().clone(),
+                observation.success_metadata(&workflow),
+            ),
+        )
+    });
     let (mut output, exit_code) = report::from_main_workflow(workflow);
     attach_audit_actionable(&mut output, run_id);
+    if let Some(active) = active_observation {
+        let (findings, status, metadata) = observation_result.expect("active audit observation");
+        finish_audit_observation(
+            active,
+            &observation,
+            &mut output,
+            findings,
+            status,
+            metadata,
+            bounded_output,
+        )?;
+    }
     Ok((output, exit_code))
+}
+
+const AUDIT_FULL_REPORT_ARTIFACT_PREFIX: &str = "audit-report";
+
+fn audit_full_report_artifact_id(run_id: &str) -> String {
+    format!("{AUDIT_FULL_REPORT_ARTIFACT_PREFIX}-{run_id}")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_audit_observation(
+    active: ActiveObservation,
+    observation: &AuditObservationAdapter,
+    output: &mut AuditCommandOutput,
+    findings: Vec<NewFindingRecord>,
+    status: RunStatus,
+    metadata: serde_json::Value,
+    require_full_report: bool,
+) -> homeboy::core::Result<()> {
+    match persist_audit_full_report(&active, output) {
+        Ok(full_report) => attach_audit_full_report(output, full_report),
+        Err(error) if require_full_report => {
+            // A required bounded-output artifact may fail, but its run must not remain active.
+            active.finish_error(observation.error_metadata(&error));
+            return Err(error);
+        }
+        Err(_) => {}
+    }
+    active.record_findings(&findings);
+    active.finish(status, Some(metadata));
+    Ok(())
+}
+
+fn persist_audit_full_report(
+    active: &ActiveObservation,
+    output: &AuditCommandOutput,
+) -> homeboy::core::Result<serde_json::Value> {
+    let artifact_id = audit_full_report_artifact_id(active.run_id());
+    let bytes = serde_json::to_vec(output).map_err(|error| {
+        homeboy::core::Error::internal_json(
+            error.to_string(),
+            Some("serialize audit report".to_string()),
+        )
+    })?;
+    let mut report = tempfile::NamedTempFile::new().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("create audit report".to_string()),
+        )
+    })?;
+    report.write_all(&bytes).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some("write audit report".to_string()))
+    })?;
+    report.as_file().sync_all().map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some("sync audit report".to_string()))
+    })?;
+    active.store().record_artifact_with_id(
+        active.run_id(),
+        "audit_report",
+        report.path(),
+        &artifact_id,
+        serde_json::json!({ "schema": "homeboy/audit-full-report/v1" }),
+    )?;
+    Ok(serde_json::json!({
+        "schema": "homeboy/audit-full-report-ref/v1",
+        "uri": format!(
+            "homeboy://run/{}/artifact/{artifact_id}",
+            active.run_id(),
+        ),
+        "command": format!("homeboy runs evidence {}", active.run_id()),
+    }))
 }
 
 fn attach_audit_actionable(output: &mut AuditCommandOutput, run_id: Option<String>) {
@@ -210,6 +303,20 @@ fn attach_audit_actionable(output: &mut AuditCommandOutput, run_id: Option<Strin
         | AuditCommandOutput::Compared {
             actionable: slot, ..
         } => *slot = actionable,
+        AuditCommandOutput::Conventions { .. }
+        | AuditCommandOutput::BaselineSaved { .. }
+        | AuditCommandOutput::Summary(_) => {}
+    }
+}
+
+fn attach_audit_full_report(output: &mut AuditCommandOutput, full_report: serde_json::Value) {
+    match output {
+        AuditCommandOutput::Full {
+            full_report: slot, ..
+        }
+        | AuditCommandOutput::Compared {
+            full_report: slot, ..
+        } => *slot = Some(full_report),
         AuditCommandOutput::Conventions { .. }
         | AuditCommandOutput::BaselineSaved { .. }
         | AuditCommandOutput::Summary(_) => {}
@@ -316,6 +423,9 @@ fn audit_observation_command(component_id: &str, args: &AuditArgs) -> String {
     }
     if args.fixability {
         parts.push("--fixability".to_string());
+    }
+    if args.full {
+        parts.push("--full".to_string());
     }
     parts.join(" ")
 }
@@ -569,6 +679,7 @@ mod tests {
             },
             json_summary: true,
             fixability: false,
+            full: false,
         }
     }
 
@@ -596,6 +707,7 @@ mod tests {
         code_audit::AuditRunWorkflowResult {
             output: AuditCommandOutput::Full {
                 passed: false,
+                timing: code_audit::AuditTiming::default(),
                 measurement: code_audit::AuditMeasurement::new(
                     code_audit::AuditProfile::Full,
                     false,
@@ -623,6 +735,7 @@ mod tests {
                 fixability: None,
                 extension_phase_timings: Vec::new(),
                 actionable: None,
+                full_report: None,
             },
             exit_code: 1,
             findings: vec![finding],
@@ -735,6 +848,33 @@ mod tests {
         assert_eq!(cli.audit.extension_override.extensions, vec!["rust"]);
         assert_eq!(cli.audit.changed.changed_since(), Some("origin/main"));
         assert_eq!(cli.audit.profile, "pr");
+    }
+
+    #[test]
+    fn parses_full_output_request() {
+        let cli = TestCli::try_parse_from([
+            "audit",
+            "--path",
+            "/tmp/repo",
+            "--changed-since",
+            "origin/main",
+            "--full",
+        ])
+        .expect("audit should parse --full");
+
+        assert!(cli.audit.full);
+    }
+
+    #[test]
+    fn full_output_precedes_summary_request() {
+        let args = AuditArgs {
+            full: true,
+            json_summary: true,
+            ..sample_args()
+        };
+
+        assert!(args.full);
+        assert!(!(args.json_summary && !args.full));
     }
 
     #[test]
@@ -931,6 +1071,80 @@ mod tests {
     }
 
     #[test]
+    fn audit_full_reports_use_run_scoped_resolvable_artifacts() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let args = sample_args();
+            let first = ActiveObservation::start(
+                AuditObservationAdapter::new("homeboy", &home.path().to_string_lossy(), &args)
+                    .start_record(),
+            )
+            .expect("first observation");
+            let second = ActiveObservation::start(
+                AuditObservationAdapter::new("homeboy", &home.path().to_string_lossy(), &args)
+                    .start_record(),
+            )
+            .expect("second observation");
+            let output = sample_audit_workflow(home.path()).output;
+
+            let first_report = persist_audit_full_report(&first, &output).expect("first report");
+            let second_report = persist_audit_full_report(&second, &output).expect("second report");
+            let store = ObservationStore::open_initialized().expect("store");
+
+            for (active, report) in [(&first, first_report), (&second, second_report)] {
+                let artifact_id = audit_full_report_artifact_id(active.run_id());
+                assert_eq!(
+                    report["uri"],
+                    format!("homeboy://run/{}/artifact/{artifact_id}", active.run_id())
+                );
+                let resolved = homeboy::core::observation::runs_service::resolve_artifact_for_run(
+                    &store,
+                    active.run_id(),
+                    &artifact_id,
+                )
+                .expect("resolve report URI artifact");
+                assert_eq!(resolved.id, artifact_id);
+            }
+        });
+    }
+
+    #[test]
+    fn required_audit_report_failure_terminalizes_observation() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let args = sample_args();
+            let adapter =
+                AuditObservationAdapter::new("homeboy", &home.path().to_string_lossy(), &args);
+            let active = ActiveObservation::start(adapter.start_record()).expect("observation");
+            let run_id = active.run_id().to_string();
+            let run_artifact_dir = homeboy::core::artifact_root()
+                .expect("artifact root")
+                .join(&run_id);
+            fs::create_dir_all(run_artifact_dir.parent().expect("artifact root parent"))
+                .expect("artifact root");
+            fs::write(&run_artifact_dir, "block report directory").expect("block report directory");
+
+            let workflow = sample_audit_workflow(home.path());
+            let (mut output, _) = report::from_main_workflow(workflow);
+            let _error = finish_audit_observation(
+                active,
+                &adapter,
+                &mut output,
+                Vec::new(),
+                RunStatus::Fail,
+                serde_json::json!({ "observation_status": "fail" }),
+                true,
+            )
+            .expect_err("required report persistence should fail");
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store.get_run(&run_id).expect("read run").expect("run");
+            assert_eq!(run.status, "error");
+            assert_eq!(run.metadata_json["observation_status"], "error");
+        });
+    }
+
+    #[test]
     fn audit_observation_start_is_best_effort_when_store_unavailable() {
         with_isolated_home(|home| {
             let bad_data_home = home.path().join("not-a-dir");
@@ -997,6 +1211,7 @@ mod tests {
                 changed: ChangedSinceArgs::default(),
                 json_summary: false,
                 fixability: false,
+                full: false,
             };
 
             let (output, code) = run(args).expect("audit should run");
