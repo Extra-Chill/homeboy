@@ -384,11 +384,15 @@ fn patch_sha256(contents: impl AsRef<[u8]>) -> String {
 
 fn attempt_patch_path(running: &RunningTask, kind: &str) -> Result<PathBuf, HarvestError> {
     let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
-    let dir = homeboy_core::artifacts::root()
-        .map_err(|error| HarvestError::ArtifactDirectory {
+    #[cfg(test)]
+    let root = running.scratch.path.clone();
+    #[cfg(not(test))]
+    let root =
+        homeboy_core::artifacts::root().map_err(|error| HarvestError::ArtifactDirectory {
             path: PathBuf::from("<artifact-root>"),
             message: error.message,
-        })?
+        })?;
+    let dir = root
         .join("agent-task")
         .join("attempt-patches")
         .join(homeboy_core::paths::sanitize_path_segment(run_id))
@@ -749,7 +753,6 @@ mod committed_harvest_tests {
 
     #[test]
     fn gate_feedback_baseline_allows_only_the_recorded_candidate_and_harvests_remediation_delta() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("workspace");
@@ -861,7 +864,6 @@ mod committed_harvest_tests {
 
     #[test]
     fn git_metadata_failure_after_patch_creation_preserves_the_patch_artifact() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("workspace");
@@ -928,9 +930,9 @@ mod committed_harvest_tests {
             task_base_sha: Some(base),
             source_provenance: None,
             scratch: crate::controller_scratch::ControllerScratchAllocation {
-                path: PathBuf::from("/test/controller-scratch/1"),
+                path: temp.path().join("controller-scratch"),
                 lease_id: "test-lease-1".to_string(),
-                index_path: PathBuf::from("/test/controller-scratch/resources.json"),
+                index_path: temp.path().join("resources.json"),
             },
             adoption: None,
             join_handle: None,
@@ -976,7 +978,6 @@ mod committed_harvest_tests {
 
     #[test]
     fn uncommitted_harvest_excludes_homeboy_runner_metadata_drift() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("workspace");
@@ -1211,7 +1212,6 @@ mod committed_harvest_tests {
 
     #[test]
     fn committed_harvest_falls_back_to_source_when_attempt_scratch_is_reaped() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
 
         // Create the durable source workspace with a committed change past base.
