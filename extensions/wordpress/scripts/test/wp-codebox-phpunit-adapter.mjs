@@ -10,6 +10,10 @@ import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { preflightWpCodeboxCommand } = require('../../../agent-runtimes/wp-codebox/lib/wp-codebox-runtime-selection.js');
 
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
 const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMPONENT_PATH');
@@ -92,6 +96,10 @@ const options = clean({
 });
 
 try {
+  const runtimePreflight = preflightWpCodeboxCommand(wpCodeboxCommand());
+  if (!runtimePreflight.ready) {
+    throw new Error(`WP Codebox runtime preflight failed: ${runtimePreflight.reason}; required >=${runtimePreflight.required_version}, observed ${runtimePreflight.selected.version || 'unavailable'} at ${runtimePreflight.selected.path || 'no executable'}. Run homeboy extension setup wordpress.`);
+  }
   // Every other WordPress test backend announces itself (standalone-php,
   // node-test, package-script, and the core-dev wp-codebox runner). ca924281
   // replaced this runner's shell implementation with the Node adapter and the
@@ -224,11 +232,6 @@ function wpCodeboxCommand() {
   return wpCodeboxCommandCache;
 }
 
-// The shell library at scripts/lib/wp-codebox-paths.sh is the single source of
-// truth for candidate precedence, the runtime probe, and `node` prefixing.
-// `test-runner-wp-codebox.sh` normally resolves and exports the argv before this
-// adapter starts; when the adapter is invoked directly, delegate to the same
-// library rather than maintaining a second precedence list here.
 function resolveWpCodeboxCommand() {
   const exported = parseCommandArgv(process.env.HOMEBOY_WP_CODEBOX_COMMAND_JSON);
   if (exported) {

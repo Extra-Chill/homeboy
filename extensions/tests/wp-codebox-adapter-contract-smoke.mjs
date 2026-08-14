@@ -61,7 +61,7 @@ assert.equal(recipeRunProviders.length, 1);
 const [recipeRunProvider] = recipeRunProviders;
 assert.deepEqual(recipeRunProvider, {
 	id: 'wordpress.wp-codebox.recipe-run',
-	version: '1.5.2',
+	version: '1.5.3',
 	executable: cliDescriptor.executable,
 	command: [
 		cliDescriptor.executable,

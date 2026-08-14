@@ -83,10 +83,19 @@ install_wp_codebox() {
     prune_stale_wp_codebox_wrapper() {
         local wrapper="$1"
         local target
+        local line
 
         [ -f "${wrapper}" ] || return 0
 
-        target="$(sed -n 's/^exec \(node \)\?"\([^"]*\)".*$/\2/p' "${wrapper}" | head -1)"
+        while IFS= read -r line; do
+            case "${line}" in
+                "exec "*)
+                    target="${line#*\"}"
+                    target="${target%%\"*}"
+                    break
+                    ;;
+            esac
+        done < "${wrapper}"
         [ -n "${target}" ] || return 0
         [ ! -e "${target}" ] || return 0
 
