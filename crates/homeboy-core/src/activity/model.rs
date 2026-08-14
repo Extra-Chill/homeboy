@@ -49,6 +49,31 @@ pub struct ActivityCrossRefs {
     pub runner_job_id: Option<String>,
 }
 
+/// Stable task identity carried by sources that know the submitted work.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+}
+
+impl ActivityContext {
+    pub fn is_empty(&self) -> bool {
+        self.task_url.is_none() && self.repository.is_none() && self.worktree.is_none()
+    }
+}
+
+/// Exact identity selectors for a bounded unified activity lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityFilter {
+    pub task_url: Option<String>,
+    pub repository: Option<String>,
+    pub worktree: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityEvidenceRef {
     pub id: String,
@@ -97,6 +122,8 @@ pub struct ActivityItem {
     pub runner: ActivityRunnerRefs,
     #[serde(default)]
     pub refs: ActivityCrossRefs,
+    #[serde(default, skip_serializing_if = "ActivityContext::is_empty")]
+    pub context: ActivityContext,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ActivityEvidenceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -107,6 +134,22 @@ pub struct ActivityItem {
     pub state_conflicts: Vec<ActivityStateConflict>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<ActivityNextAction>,
+}
+
+impl ActivityFilter {
+    pub fn matches(&self, item: &ActivityItem) -> bool {
+        self.task_url
+            .as_deref()
+            .is_none_or(|value| item.context.task_url.as_deref() == Some(value))
+            && self
+                .repository
+                .as_deref()
+                .is_none_or(|value| item.context.repository.as_deref() == Some(value))
+            && self.worktree.as_deref().is_none_or(|value| {
+                item.context.worktree.as_deref() == Some(value)
+                    || item.cwd.as_deref() == Some(value)
+            })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

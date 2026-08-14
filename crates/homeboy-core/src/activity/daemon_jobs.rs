@@ -1,6 +1,6 @@
 use super::{
-    action, is_active, ms_to_rfc3339, ActivityCollector, ActivityCrossRefs, ActivityEvidenceRef,
-    ActivityItem, ActivityNextAction, ActivityRunnerRefs, ActivityState,
+    action, is_active, ms_to_rfc3339, ActivityCollector, ActivityContext, ActivityCrossRefs,
+    ActivityEvidenceRef, ActivityItem, ActivityNextAction, ActivityRunnerRefs, ActivityState,
 };
 use crate::api_jobs::{self, Job, JobEvent};
 use crate::{paths, Result};
@@ -63,6 +63,7 @@ pub(super) fn item_from_job(store: &api_jobs::JobStore, job: Job) -> Result<Acti
             agent_task_run_id,
             runner_job_id: Some(job_id.clone()),
         },
+        context: ActivityContext::default(),
         artifacts: job
             .artifacts
             .into_iter()

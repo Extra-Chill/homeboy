@@ -194,6 +194,24 @@ pub(super) enum RunsCommand {
 
 #[derive(Args, Clone, Default)]
 pub struct RunsListArgs {
+    /// Project active and recent work from every activity source, including
+    /// connected runner jobs. Supports task identity filters rather than the
+    /// observation-store-only filters below.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "runner", "kind", "component_id", "rig", "scenario_id", "status", "running",
+            "since", "until", "id", "command_contains", "correlation", "include_mirrors",
+            "include_active_runner_jobs"
+        ]
+    )]
+    pub active: bool,
+    /// Match one durable task URL in the unified active projection.
+    #[arg(long, requires = "active")]
+    pub task_url: Option<String>,
+    /// Match one repository slug in the unified active projection.
+    #[arg(long, requires = "active")]
+    pub repo: Option<String>,
     /// Query runs from a connected execution runner daemon
     #[arg(long)]
     pub runner: Option<String>,
@@ -254,6 +272,7 @@ pub struct RunsListArgs {
 #[serde(tag = "variant", content = "payload", rename_all = "snake_case")]
 pub enum RunsOutput {
     List(RunsListOutput),
+    Active(Box<homeboy::core::activity::ActivityReport>),
     Distribution(RunsDistributionOutput),
     LatestRun(RunsLatestRunOutput),
     Compare(RunsCompareOutput),

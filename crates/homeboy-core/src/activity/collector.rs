@@ -158,6 +158,15 @@ fn merge_refs(existing: &mut ActivityItem, incoming: &ActivityItem) {
     if existing.runner.transport.is_none() {
         existing.runner.transport = incoming.runner.transport.clone();
     }
+    if existing.context.task_url.is_none() {
+        existing.context.task_url = incoming.context.task_url.clone();
+    }
+    if existing.context.repository.is_none() {
+        existing.context.repository = incoming.context.repository.clone();
+    }
+    if existing.context.worktree.is_none() {
+        existing.context.worktree = incoming.context.worktree.clone();
+    }
 }
 
 fn source_projection(item: &ActivityItem) -> ActivitySourceProjection {

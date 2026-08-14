@@ -33,7 +33,7 @@
 //! anything at all.
 
 use super::{
-    action, daemon_jobs, is_active, is_failure, ms_to_rfc3339, ActivityCollector,
+    action, daemon_jobs, is_active, is_failure, ms_to_rfc3339, ActivityCollector, ActivityContext,
     ActivityCrossRefs, ActivityItem, ActivityNextAction, ActivityRunnerFederation,
     ActivityRunnerRefs, ActivityRunnerSource, ActivityState,
 };
@@ -134,7 +134,7 @@ fn item_from_active_runner_job(job: ActiveRunnerJobSummary) -> ActivityItem {
         updated_at: Some(ms_to_rfc3339(job.updated_at_ms)),
         finished_at: None,
         command: Some(job.command.clone()),
-        cwd: job.cwd,
+        cwd: job.cwd.clone(),
         runner: ActivityRunnerRefs {
             runner_id: Some(job.runner_id.clone()),
             job_id: Some(job.job_id.clone()),
@@ -144,6 +144,10 @@ fn item_from_active_runner_job(job: ActiveRunnerJobSummary) -> ActivityItem {
             run_id: job.durable_run_id,
             agent_task_run_id,
             runner_job_id: Some(job.job_id.clone()),
+        },
+        context: ActivityContext {
+            worktree: job.cwd.clone(),
+            ..Default::default()
         },
         artifacts: Vec::new(),
         evidence: Vec::new(),

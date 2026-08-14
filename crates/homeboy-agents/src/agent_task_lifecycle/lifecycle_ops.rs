@@ -1168,6 +1168,16 @@ where
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
+    if let Some(task) = plan.tasks.first() {
+        metadata["activity_context"] = json!({
+            "task_url": task.workspace.task_url,
+            "repository": plan.group_key.as_deref()
+                .or(task.group_key.as_deref())
+                .or(task.workspace.component_id.as_deref())
+                .or(task.workspace.slug.as_deref()),
+            "worktree": task.workspace.root,
+        });
+    }
     let acceptance_requirement = plan
         .metadata
         .get("acceptance")

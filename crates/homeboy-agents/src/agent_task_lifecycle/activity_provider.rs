@@ -12,7 +12,7 @@ use homeboy_core::activity::agent_task_provider::{
     register_activity_agent_task_provider, ActivityAgentTaskProvider,
 };
 use homeboy_core::activity::{
-    is_active, is_failure, ActivityCrossRefs, ActivityEvidenceRef, ActivityItem,
+    is_active, is_failure, ActivityContext, ActivityCrossRefs, ActivityEvidenceRef, ActivityItem,
     ActivityNextAction, ActivityRunnerRefs, ActivityState,
 };
 
@@ -126,6 +126,7 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
             agent_task_run_id: Some(record.run_id.clone()),
             runner_job_id: job_id,
         },
+        context: activity_context(&record),
         artifacts: record
             .artifact_refs
             .into_iter()
@@ -159,6 +160,28 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
                     .as_ref()
                     .is_ok_and(plan_has_retry_materialization_identity),
         ),
+    }
+}
+
+fn activity_context(record: &AgentTaskRunRecord) -> ActivityContext {
+    let context = record.metadata.get("activity_context");
+    ActivityContext {
+        task_url: context
+            .and_then(|value| value.get("task_url"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
+        repository: context
+            .and_then(|value| value.get("repository"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
+        worktree: context
+            .and_then(|value| value.get("worktree"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| metadata_string(&record.metadata, &["remote_workspace"])),
     }
 }
 
@@ -231,6 +254,33 @@ mod tests {
         let actions = actions_for_agent_task("run-1", None, ActivityState::Failed, false);
 
         assert!(!actions.iter().any(|action| action.label == "retry"));
+    }
+
+    #[test]
+    fn task_identity_context_is_projected_from_the_durable_record() {
+        with_isolated_home(|_| {
+            let run_id = seed_record("run-activity-context");
+            let mut record = agent_task_lifecycle::exact_record(&run_id).expect("record");
+            record.metadata = serde_json::json!({
+                "activity_context": {
+                    "task_url": "https://example.test/issues/12146",
+                    "repository": "Extra-Chill/homeboy",
+                    "worktree": "homeboy@fix-12146"
+                }
+            });
+
+            let item = item_from_agent_task(record);
+
+            assert_eq!(
+                item.context.task_url.as_deref(),
+                Some("https://example.test/issues/12146")
+            );
+            assert_eq!(
+                item.context.repository.as_deref(),
+                Some("Extra-Chill/homeboy")
+            );
+            assert_eq!(item.context.worktree.as_deref(), Some("homeboy@fix-12146"));
+        });
     }
 
     #[test]

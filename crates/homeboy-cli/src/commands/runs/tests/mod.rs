@@ -97,6 +97,9 @@ fn run_list_filters_kind_component_rig_and_status() {
 
         let (output, _) = list_runs(
             RunsListArgs {
+                active: false,
+                task_url: None,
+                repo: None,
                 runner: None,
                 kind: Some("bench".to_string()),
                 component_id: Some("homeboy".to_string()),
@@ -137,6 +140,9 @@ fn run_list_reads_durable_record_without_reconciliation() {
 
         let (output, _) = list_runs(
             RunsListArgs {
+                active: false,
+                task_url: None,
+                repo: None,
                 runner: None,
                 kind: Some("bench".to_string()),
                 component_id: Some("homeboy".to_string()),
@@ -223,8 +229,41 @@ fn run_list_does_not_classify_terminal_runs_as_stale() {
     });
 }
 
+#[test]
+fn active_list_uses_the_unified_activity_projection_without_changing_runs_list() {
+    with_isolated_home(|_home| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let active = store
+            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+            .expect("active run");
+
+        let (output, _) = list_runs(
+            RunsListArgs {
+                active: true,
+                limit: 20,
+                ..list_args()
+            },
+            "runs.list",
+        )
+        .expect("active list");
+
+        let RunsOutput::Active(report) = output else {
+            panic!("expected unified activity output");
+        };
+        assert_eq!(report.schema, "homeboy/activity-report/v1");
+        assert_eq!(report.command, "runs.list_active");
+        assert!(report.items.iter().any(|item| item.id == active.id));
+
+        let (ordinary, _) = list_runs(list_args(), "runs.list").expect("ordinary list");
+        assert!(matches!(ordinary, RunsOutput::List(_)));
+    });
+}
+
 fn list_args() -> RunsListArgs {
     RunsListArgs {
+        active: false,
+        task_url: None,
+        repo: None,
         runner: None,
         kind: None,
         component_id: None,
@@ -2036,6 +2075,9 @@ fn bench_history_orders_and_filters_by_scenario() {
 
         let (output, _) = list_runs(
             RunsListArgs {
+                active: false,
+                task_url: None,
+                repo: None,
                 runner: None,
                 kind: Some("bench".to_string()),
                 component_id: Some("homeboy".to_string()),

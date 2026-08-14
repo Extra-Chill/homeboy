@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use super::{
-    action, is_active, metadata_string, ActivityCollector, ActivityCrossRefs, ActivityEvidenceRef,
-    ActivityItem, ActivityNextAction, ActivityRunnerRefs, ActivityState,
+    action, is_active, metadata_string, ActivityCollector, ActivityContext, ActivityCrossRefs,
+    ActivityEvidenceRef, ActivityItem, ActivityNextAction, ActivityRunnerRefs, ActivityState,
 };
 use crate::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use crate::Result;
@@ -80,6 +80,7 @@ fn item_from_run(store: &ObservationStore, run: RunRecord) -> Result<ActivityIte
             agent_task_run_id: None,
             runner_job_id: job_id,
         },
+        context: ActivityContext::default(),
         artifacts,
         evidence: Vec::new(),
         source_projections: Vec::new(),
