@@ -125,6 +125,10 @@ on:
         description: 'Optional cap on the number of changed-scope test files Homeboy may select for a Test phase. Positive integers enable the guard; empty disables it and leaves behaviour unchanged.'
         type: string
         default: ''
+      allow-oversized-test-scope:
+        description: 'Explicitly allow a duration-backed sharded Test plan whose estimated process duration exceeds test-timeout-seconds.'
+        type: string
+        default: 'false'
       cleanup-timeout-seconds:
         description: 'Maximum wall-clock time to terminate command descendants.'
         type: string
@@ -653,6 +657,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       test-matrix: ${{ steps.plan.outputs.matrix }}
+      budget-verdict: ${{ steps.plan.outputs.budget-verdict }}
+      budget-max-estimate-ms: ${{ steps.plan.outputs.budget-max-estimate-ms }}
+      budget-seconds: ${{ steps.plan.outputs.budget-seconds }}
+      budget-override: ${{ steps.plan.outputs.budget-override }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -746,10 +754,19 @@ jobs:
         env:
           TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
           TEST_SHARD_PLAN_FILE: ${{ github.workspace }}/homeboy-test-shard-plan.json
+          TEST_SCOPE_BUDGET_FILE: ${{ github.workspace }}/homeboy-test-budget.json
           TEST_SHARD_COUNT: ${{ inputs.test-shards }}
           TEST_COMMAND: ${{ needs.plan.outputs.test-command }}
+          TEST_SCOPE_SHARDS: ${{ inputs.test-shards }}
+          TEST_SCOPE_BUDGET_SECONDS: ${{ inputs.test-timeout-seconds }}
+          TEST_SCOPE_ALLOW_OVERRIDE: ${{ inputs.allow-oversized-test-scope }}
         run: |
+          bash .homeboy-action/scripts/core/preflight-test-scope-budget.sh
+          TEST_SHARD_COUNT="$(awk -F= '$1 == "shard-count" {print $2}' "${GITHUB_OUTPUT}")"
+          export TEST_SHARD_COUNT
           bash .homeboy-action/scripts/core/shard-tests.sh plan
+          TEST_SHARD_PLAN_FILE="${TEST_SHARD_PLAN_FILE}" bash .homeboy-action/scripts/core/preflight-test-scope-budget.sh verify
+          bash .homeboy-action/scripts/core/shard-tests.sh attach-budget
           echo "matrix=$(jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}')" >> "${GITHUB_OUTPUT}"
       - name: Write candidate Test inventory failure provenance
         if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
@@ -765,9 +782,12 @@ jobs:
           mkdir -p homeboy-test-inventory-failure
           inventory_payload="${RESULTS-}"
           [ -n "${inventory_payload}" ] || inventory_payload='{}'
-          jq -cn --arg schema 'homeboy/test-inventory-provenance/v1' --arg phase candidate --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg command "${COMMAND}" --arg inventory_outcome "${INVENTORY_OUTCOME}" --arg planner_outcome "${PLANNER_OUTCOME}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${inventory_payload}" \
-            '{schema:$schema,phase:$phase,repository:$repository,candidate_sha:$candidate_sha,command:$command,inventory_outcome:$inventory_outcome,planner_outcome:$planner_outcome,run_attempt:$run_attempt,results:$results}' > homeboy-test-inventory-failure/provenance.json
-          cp -R homeboy-ci-results homeboy-test-inventory-failure/homeboy-ci-results 2>/dev/null || true
+            jq -cn --arg schema 'homeboy/test-inventory-provenance/v1' --arg phase candidate --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg command "${COMMAND}" --arg inventory_outcome "${INVENTORY_OUTCOME}" --arg planner_outcome "${PLANNER_OUTCOME}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${inventory_payload}" \
+              '{schema:$schema,phase:$phase,repository:$repository,candidate_sha:$candidate_sha,command:$command,inventory_outcome:$inventory_outcome,planner_outcome:$planner_outcome,run_attempt:$run_attempt,results:$results}' > homeboy-test-inventory-failure/provenance.json
+            if [ -f homeboy-test-budget.json ]; then
+              cp homeboy-test-budget.json homeboy-test-inventory-failure/budget.json
+            fi
+            cp -R homeboy-ci-results homeboy-test-inventory-failure/homeboy-ci-results 2>/dev/null || true
       - name: Upload candidate Test inventory failure provenance
         if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
         uses: actions/upload-artifact@v7
@@ -783,6 +803,7 @@ jobs:
           path: |
             homeboy-test-inventory.json
             homeboy-test-shard-plan.json
+            homeboy-test-budget.json
           if-no-files-found: error
       - name: Fail candidate Test inventory generation
         if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
@@ -880,7 +901,7 @@ jobs:
         run: |
           mkdir -p differential-phase/candidate
           results="${RESULTS:-}"; [ -n "${results}" ] || results='{}'
-          jq -cn --arg phase candidate --arg shard_id "${SHARD_ID}" --arg command "${COMMAND}" --arg inventory_digest "$(jq -r .inventory_digest homeboy-test-shard-plan.json)" --arg plan_digest "$(jq -r .plan_digest homeboy-test-shard-plan.json)" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,shard_id:$shard_id,command:$command,inventory_digest:$inventory_digest,plan_digest:$plan_digest,run_attempt:$run_attempt,results:$results}' > differential-phase/candidate/manifest.json
+          jq -cn --arg phase candidate --arg shard_id "${SHARD_ID}" --arg command "${COMMAND}" --arg inventory_digest "$(jq -r .inventory_digest homeboy-test-shard-plan.json)" --arg plan_digest "$(jq -r .plan_digest homeboy-test-shard-plan.json)" --argjson budget "$(jq -c .budget homeboy-test-shard-plan.json)" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,shard_id:$shard_id,command:$command,inventory_digest:$inventory_digest,plan_digest:$plan_digest,budget:$budget,run_attempt:$run_attempt,results:$results}' > differential-phase/candidate/manifest.json
           cp -R homeboy-ci-results differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
       - if: always()
         uses: actions/upload-artifact@v7
@@ -1092,7 +1113,7 @@ jobs:
   policy:
     name: PR Policy
     needs: [reconcile, reconcile-test-shards, plan]
-    if: ${{ !inputs.contract-probe && always() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (inputs.test-shards == '1' || needs.reconcile-test-shards.result == 'success') }}
+    if: ${{ !inputs.contract-probe && always() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (needs.plan.outputs.test-shards-enabled != 'true' || needs.reconcile-test-shards.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

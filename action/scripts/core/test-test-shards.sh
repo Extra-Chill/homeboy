@@ -250,7 +250,7 @@ fi
 printf 'PASS: missing, mismatched, failed, and timed-out shards fail closed\n'
 
 grep -F 'needs: [reconcile, reconcile-test-shards, plan]' "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy does not wait for the sharded Test verdict and pinned plan\n'; exit 1; }
-grep -F "inputs.test-shards == '1' || needs.reconcile-test-shards.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy can bypass a failed sharded Test verdict\n'; exit 1; }
+grep -F "needs.reconcile-test-shards.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy can bypass the inventory-routed Test verdict\n'; exit 1; }
 # A FAILED upstream phase must still reach a verdict; a CANCELLED run must not.
 # Under always() the reconciliation job ran after cancellation, took the
 # inventory-failure branch, and failed on an artifact the cancelled plan job had

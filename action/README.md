@@ -40,18 +40,22 @@ or mismatched evidence fails closed. This DAG behavior is specific to the
 reusable workflow; direct composite-action callers keep the combined behavior.
 
 Set `test-shards` above `1` to use the generic Homeboy test inventory contract.
-The candidate Test command is first invoked with `HOMEBOY_TEST_INVENTORY_ONLY=1`;
+The candidate Test command is then invoked with `HOMEBOY_TEST_INVENTORY_ONLY=1`;
 the selected extension writes `homeboy-test-inventory.json` with schema
 `homeboy/test-inventory/v1`, stable test IDs, and optional `duration_ms` values.
-Each shard then receives a digest-bound `HOMEBOY_TEST_SHARD_MANIFEST`.
+Each shard receives a digest-bound `HOMEBOY_TEST_SHARD_MANIFEST`. Default and
+empty `test-shards` values retain the established unsharded Test path.
 
 Changed-scope resolution can map a tiny diff onto a huge test-file selection.
-Set `max-changed-test-files` to a positive integer to cap how many test files
-Homeboy may select before the Test phase runs; an oversized selection fails
-fast with a `changed_scope_selection_exceeds_cap` finding instead of consuming
-the test budget. The default leaves behaviour unchanged. The cap guards
-*selection size*, `test-timeout-seconds` guards *run time*, and `test-shards`
-partitions the selection to address both.
+Set `max-changed-test-files` to a positive integer to define the largest
+changed-scope Test selection permitted in one process. The reusable workflow
+`homeboy/test-inventory/v1` contains generic test IDs, not selected file counts
+or a test-to-file mapping. `max-changed-test-files` therefore remains enforced
+only by Homeboy's changed-file selection contract; sharding never reinterprets
+inventory entry count as files. Complete per-test `duration_ms` inventory
+evidence enables a post-plan budget check against `test-timeout-seconds`; the
+shipped durationless inventory contract reports budget fit as unknown. A shard
+count above available inventory tests is reduced to the available count.
 
 ```yaml
 name: CI
@@ -251,7 +255,9 @@ Use these outputs to gate downstream jobs:
 | `observation-window` | No | `24h` | Duration window passed to best-effort `homeboy runs export --since` for the separate matrix-safe observations artifact. |
 | `execution-timeout-seconds` | No | `1800` | Per-command wall-clock budget. The action writes liveness notices and returns timeout evidence when the budget expires. |
 | `test-timeout-seconds` | No | inherited / `1500` | Homeboy test-child budget. Direct action calls preserve `HOMEBOY_TEST_TIMEOUT_SECONDS` when omitted; the reusable workflow defaults to `1500`. Must leave cleanup margin below `execution-timeout-seconds`. |
-| `max-changed-test-files` | No | *(disabled)* | Cap on the number of changed-scope test files Homeboy may select for a Test phase. Positive integers enable the guard and fail fast with `changed_scope_selection_exceeds_cap` when a diff maps to more files; empty leaves behaviour unchanged. Guards selection size, where `test-timeout-seconds` guards run time and `test-shards` partitions the selection. |
+| `max-changed-test-files` | No | *(unset)* | Existing changed-scope file-selection cap, enforced by Homeboy. Generic Test inventory does not expose the file mapping needed to apply it per shard. |
+| `test-shards` | No | `1` | Number of deterministic Test shards. Empty and `1` preserve the unsharded path; integers above `1` activate inventory planning and cap preflight. |
+| `allow-oversized-test-scope` | No | `false` | Explicitly allow an opted-in sharded plan with complete duration evidence whose estimated process duration exceeds `test-timeout-seconds`. |
 | `cleanup-timeout-seconds` | No | `15` | Process-group teardown budget after a command finishes or times out. The action retains command logs and fails with diagnostics if cleanup cannot finish. |
 | `import-observations` | No | `false` | Download and best-effort import earlier `homeboy-observations-*` artifacts from the same workflow run before command execution. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |

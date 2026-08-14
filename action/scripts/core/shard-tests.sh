@@ -145,4 +145,16 @@ aggregate() (
   printf '{"%s":"%s"}\n' "${command}" "${aggregate_status}" > "${output}/results.json"
 )
 
-case "${1:-}" in plan) plan ;; aggregate) aggregate ;; *) echo "usage: $0 plan|aggregate" >&2; exit 2 ;; esac
+attach_budget() {
+  local plan="${TEST_SHARD_PLAN_FILE:?TEST_SHARD_PLAN_FILE is required}"
+  local budget="${TEST_SCOPE_BUDGET_FILE:?TEST_SCOPE_BUDGET_FILE is required}"
+  [ -f "${plan}" ] && [ -f "${budget}" ] || fail "Test shard plan and budget evidence are required."
+  jq -e '.schema == "homeboy/test-scope-budget/v1" and (.verdict == "fits" or .verdict == "unknown" or .verdict == "overridden") and (.max_estimate_ms == null or (.max_estimate_ms | type == "number" and . >= 0)) and (.budget_seconds | type == "number" and . > 0) and (.override | type == "boolean")' "${budget}" >/dev/null || fail "Test budget evidence is invalid."
+  local digest_value
+  jq --slurpfile budget "${budget}" 'del(.plan_digest) + {budget:$budget[0]}' "${plan}" > "${plan}.tmp"
+  digest_value="$(digest "$(jq -cS . "${plan}.tmp")")"
+  jq --arg digest "${digest_value}" '. + {plan_digest:$digest}' "${plan}.tmp" > "${plan}"
+  rm -f "${plan}.tmp"
+}
+
+case "${1:-}" in plan) plan ;; aggregate) aggregate ;; attach-budget) attach_budget ;; *) echo "usage: $0 plan|aggregate|attach-budget" >&2; exit 2 ;; esac
