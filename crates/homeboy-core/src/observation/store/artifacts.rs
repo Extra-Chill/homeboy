@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -124,51 +125,62 @@ impl ObservationStore {
     /// Backfill the stable opaque handle for legacy rows. The source identity is
     /// immutable (`run_id`, `artifact.id`), and the unique index makes a hash
     /// collision a hard integrity failure instead of resolving another artifact.
-    pub(super) fn backfill_artifact_handles(&self) -> Result<()> {
-        let mut statement = self.connection.prepare(
-            "SELECT id, run_id, metadata_json FROM artifacts WHERE artifact_handle IS NULL OR failure_diagnostic IS NULL",
-        ).map_err(sqlite_error("read artifact handle backfill rows"))?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(sqlite_error("query artifact handle backfill rows"))?;
-        for row in rows {
-            let (id, run_id, metadata_json) =
-                row.map_err(sqlite_error("collect artifact handle backfill rows"))?;
-            let handle = artifact_handle(&run_id, &id);
-            let metadata = serde_json::from_str::<serde_json::Value>(&metadata_json)
-                .unwrap_or(serde_json::Value::Null);
-            let diagnostic =
-                i64::from(metadata["failure_diagnostic"] == serde_json::Value::Bool(true));
-            let rank = metadata["failure_diagnostic_rank"]
-                .as_u64()
-                .unwrap_or_default()
-                .to_string();
-            let updated = self.connection.execute(
-                "UPDATE artifacts SET artifact_handle = COALESCE(artifact_handle, ?1), failure_diagnostic = ?2, failure_diagnostic_rank = ?3 WHERE id = ?4 AND run_id = ?5",
-                params![handle, diagnostic, rank, id, run_id],
-            ).map_err(sqlite_error("backfill artifact handle"))?;
-            if updated == 0 {
-                continue;
-            }
-        }
-        // Verify the index's collision boundary explicitly. This remains useful
-        // for stores created during a partial/manual migration.
-        let collisions: i64 = self.connection.query_row(
-            "SELECT COUNT(*) FROM (SELECT artifact_handle FROM artifacts WHERE artifact_handle IS NOT NULL GROUP BY artifact_handle HAVING COUNT(*) > 1)",
-            [], |row| row.get(0),
-        ).map_err(sqlite_error("verify artifact handle collisions"))?;
-        if collisions != 0 {
-            return Err(Error::internal_unexpected(
-                "artifact handle collision detected",
-            ));
-        }
-        Ok(())
+    pub(super) fn backfill_artifact_handles_with_retry(
+        &self,
+        mut on_retry: impl FnMut(),
+    ) -> Result<()> {
+        // This maintenance work uses its own zero-timeout connection. Retrying
+        // a five-second SQLite busy handler would turn the bounded retry policy
+        // into a roughly thirty-second startup stall.
+        let connection = schema::open_maintenance_connection(&self.path)?;
+        execute_with_retry_inner(
+            "backfill artifact handles".to_string(),
+            SQLITE_WRITE_MAX_ATTEMPTS,
+            SQLITE_WRITE_BASE_BACKOFF_MS,
+            |_, backoff_ms| {
+                on_retry();
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+            },
+            &mut || {
+                // Keep the read and updates in one retryable transaction. In
+                // rollback-journal mode a read-to-write upgrade
+                // can fail after another writer commits; retrying only UPDATE
+                // would leave that failure outside the recovery boundary.
+                let tx = connection.unchecked_transaction()?;
+                let mut statement = tx.prepare(
+                    "SELECT id, run_id, metadata_json FROM artifacts WHERE artifact_handle IS NULL OR failure_diagnostic IS NULL OR failure_diagnostic_rank IS NULL",
+                )?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(statement);
+
+                for (id, run_id, metadata_json) in rows {
+                    let metadata = serde_json::from_str::<serde_json::Value>(&metadata_json)
+                        .unwrap_or(serde_json::Value::Null);
+                    let diagnostic =
+                        i64::from(metadata["failure_diagnostic"] == serde_json::Value::Bool(true));
+                    let rank = metadata["failure_diagnostic_rank"]
+                        .as_u64()
+                        .unwrap_or_default()
+                        .to_string();
+                    // Only fill diagnostics if their source metadata is still
+                    // the snapshot we read. A concurrent metadata update must
+                    // never receive values derived from an older row.
+                    tx.execute(
+                        "UPDATE artifacts SET artifact_handle = COALESCE(artifact_handle, ?1), failure_diagnostic = CASE WHEN metadata_json = ?4 THEN COALESCE(failure_diagnostic, ?2) ELSE failure_diagnostic END, failure_diagnostic_rank = CASE WHEN metadata_json = ?4 THEN COALESCE(failure_diagnostic_rank, ?3) ELSE failure_diagnostic_rank END WHERE id = ?5 AND run_id = ?6",
+                        params![artifact_handle(&run_id, &id), diagnostic, rank, metadata_json, id, run_id],
+                    )?;
+                }
+                tx.commit()
+            },
+        )
     }
     /// Publish a run and all of its filesystem artifacts as one reader-visible unit.
     ///
@@ -420,15 +432,33 @@ impl ObservationStore {
             .collect()
     }
 
+    pub(super) fn reconcile_unfinished_artifact_publications_with_retry(
+        &self,
+        mut on_retry: impl FnMut(),
+    ) -> Result<()> {
+        let connection = schema::open_maintenance_connection(&self.path)?;
+        execute_with_retry_inner(
+            "reconcile unfinished artifact publications".to_string(),
+            SQLITE_WRITE_MAX_ATTEMPTS,
+            SQLITE_WRITE_BASE_BACKOFF_MS,
+            |_, backoff_ms| {
+                on_retry();
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+            },
+            &mut || Self::reconcile_unfinished_artifact_publications_on(&connection),
+        )
+    }
+
     /// Remove only expired publication-token paths. Final paths are immutable
     /// and token-scoped, so reclaiming an expired owner can never remove bytes
     /// selected by a competing publisher for the same logical artifact.
-    pub(super) fn reconcile_unfinished_artifact_publications(&self) -> Result<()> {
+    fn reconcile_unfinished_artifact_publications_on(
+        connection: &rusqlite::Connection,
+    ) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
-        let mut statement = self
-            .connection
-            .prepare("SELECT publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms FROM artifact_publication_intents WHERE lease_expires_at_ms IS NULL OR lease_expires_at_ms < ?1")
-            .map_err(sqlite_error("read unfinished artifact publications"))?;
+        let mut statement = connection.prepare(
+            "SELECT publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms FROM artifact_publication_intents WHERE lease_expires_at_ms IS NULL OR lease_expires_at_ms < ?1",
+        )?;
         let paths = statement
             .query_map([now], |row| {
                 Ok((
@@ -439,9 +469,9 @@ impl ObservationStore {
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<i64>>(5)?,
                 ))
-            })
-            .map_err(sqlite_error("query unfinished artifact publications"))?;
-        let paths = collect_rows(paths, "collect unfinished artifact publications")?;
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
         for (
             publication_id,
             artifact_id,
@@ -454,10 +484,10 @@ impl ObservationStore {
             // Revocation is the ownership boundary: delete the exact snapshot
             // first. A renewal that wins changes its lease and this CAS deletes
             // nothing, so this recovery pass must not touch either path.
-            let claimed = self.connection.execute(
+            let claimed = connection.execute(
                 "DELETE FROM artifact_publication_intents WHERE publication_id = ?1 AND artifact_id = ?2 AND ((owner_token IS NULL AND ?3 IS NULL) OR owner_token = ?3) AND ((lease_expires_at_ms IS NULL AND ?4 IS NULL) OR lease_expires_at_ms = ?4) AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms < ?5)",
                 params![publication_id, artifact_id, owner_token, lease_expires_at, now],
-            ).map_err(sqlite_error("claim expired artifact publication"))?;
+            )?;
             if claimed == 1 {
                 remove_publication_path(Path::new(&staging_path));
                 remove_publication_path(Path::new(&final_path));
@@ -2117,6 +2147,8 @@ mod tests {
     use crate::observation::{ArtifactViewerLink, NewRunRecord};
     use crate::test_support::with_isolated_home;
     use std::collections::BTreeSet;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     /// The preflight gates every publication path, so a healthy filesystem must
     /// stay silently healthy. A capacity gate that fails closed on a machine
@@ -2502,7 +2534,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_store_recovers_unfinished_journaled_finalization() {
+    fn bounded_reconciliation_recovers_unfinished_journaled_finalization() {
         with_isolated_home(|home| {
             let database = home.path().join("observation.sqlite");
             let store = ObservationStore::open_initialized_at(&database).expect("store");
@@ -2516,8 +2548,10 @@ mod tests {
             ).expect("journal intent");
             drop(store);
 
-            let recovered =
-                ObservationStore::open_initialized_at(&database).expect("recover store");
+            let recovered = ObservationStore::open_initialized_at(&database).expect("reopen store");
+            recovered
+                .reconcile_unfinished_artifact_publications_with_retry(|| {})
+                .expect("reconcile expired publication");
             assert!(!staging.exists());
             assert!(!final_path.exists());
             let intents: i64 = recovered
@@ -2533,7 +2567,123 @@ mod tests {
     }
 
     #[test]
-    fn opening_store_reclaims_v10_null_lease_intent_as_stale() {
+    fn lifecycle_open_does_not_wait_for_rollback_writer_maintenance_lock() {
+        with_isolated_home(|home| {
+            let database = home.path().join("observation.sqlite");
+            let setup = schema::open_connection(&database).expect("open schema");
+            schema::apply_migrations(&setup).expect("apply schema");
+            setup
+                .execute_batch("PRAGMA journal_mode=DELETE;")
+                .expect("use rollback journal mode");
+            setup
+                .execute(
+                    "INSERT INTO runs(id, kind, started_at, status, metadata_json) VALUES ('retry-run', 'agent-task', '2026-01-01T00:00:00Z', 'running', '{}')",
+                    [],
+                )
+                .expect("persist retry identity");
+            let staging = home.path().join("locked.staging");
+            let final_path = home.path().join("locked.final");
+            fs::write(&staging, b"staged").expect("staging bytes");
+            fs::write(&final_path, b"finalized before crash").expect("final bytes");
+            setup.execute(
+                "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES ('locked', 'artifact', ?1, ?2, 'dead-owner', 0)",
+                params![staging.display().to_string(), final_path.display().to_string()],
+            ).expect("journal intent");
+            drop(setup);
+
+            let writer = rusqlite::Connection::open(&database).expect("open locking connection");
+            writer
+                .execute_batch("BEGIN IMMEDIATE;")
+                .expect("hold rollback writer lock");
+            let (opened_tx, opened_rx) = mpsc::sync_channel(1);
+            let opener = std::thread::spawn(move || {
+                opened_tx.send(ObservationStore::open_initialized_for_lifecycle_at(
+                    &database,
+                ))
+            });
+
+            let opened = opened_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("lifecycle open must not wait for maintenance lock")
+                .expect("lifecycle open succeeds while maintenance is deferred");
+            assert!(opened
+                .get_run("retry-run")
+                .expect("read retry identity")
+                .is_some());
+            drop(opened);
+            writer
+                .execute_batch("COMMIT;")
+                .expect("release writer lock");
+            opener
+                .join()
+                .expect("lifecycle opener joined")
+                .expect("lifecycle open result sent");
+        });
+    }
+
+    #[test]
+    fn reconciliation_eventually_recovers_after_a_rollback_writer_lock() {
+        with_isolated_home(|home| {
+            let database = home.path().join("observation.sqlite");
+            let connection = schema::open_connection(&database).expect("open schema");
+            schema::apply_migrations(&connection).expect("apply schema");
+            connection
+                .execute_batch("PRAGMA journal_mode=DELETE;")
+                .expect("use rollback journal mode");
+            let store = ObservationStore {
+                connection,
+                path: database.clone(),
+                readonly: false,
+            };
+            let staging = home.path().join("retry.staging");
+            let final_path = home.path().join("retry.final");
+            fs::write(&staging, b"staged").expect("staging bytes");
+            fs::write(&final_path, b"finalized before crash").expect("final bytes");
+            store.connection.execute(
+                "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES ('retry', 'artifact', ?1, ?2, 'dead-owner', 0)",
+                params![staging.display().to_string(), final_path.display().to_string()],
+            ).expect("journal intent");
+            let writer = rusqlite::Connection::open(&database).expect("open locking connection");
+            writer
+                .execute_batch("BEGIN IMMEDIATE;")
+                .expect("hold rollback writer lock");
+
+            let (retry_started_tx, retry_started_rx) = mpsc::sync_channel(0);
+            let (release_retry_tx, release_retry_rx) = mpsc::sync_channel(0);
+            let worker = std::thread::spawn(move || {
+                store.reconcile_unfinished_artifact_publications_with_retry(|| {
+                    retry_started_tx.send(()).expect("report retry");
+                    release_retry_rx.recv().expect("release retry");
+                })
+            });
+            retry_started_rx
+                .recv()
+                .expect("reconciliation attempted while locked");
+            writer
+                .execute_batch("COMMIT;")
+                .expect("release writer lock");
+            release_retry_tx.send(()).expect("resume reconciliation");
+            worker
+                .join()
+                .expect("reconciliation worker joined")
+                .expect("reconciliation recovers after lock release");
+
+            assert!(!staging.exists());
+            assert!(!final_path.exists());
+            let check = rusqlite::Connection::open(database).expect("open check connection");
+            let intents: i64 = check
+                .query_row(
+                    "SELECT COUNT(*) FROM artifact_publication_intents WHERE publication_id = 'retry'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count recovered intents");
+            assert_eq!(intents, 0);
+        });
+    }
+
+    #[test]
+    fn bounded_reconciliation_reclaims_v10_null_lease_intent_as_stale() {
         with_isolated_home(|home| {
             let database = home.path().join("observation.sqlite");
             let store = ObservationStore::open_initialized_at(&database).expect("store");
@@ -2547,14 +2697,18 @@ mod tests {
             ).expect("legacy intent");
             drop(store);
 
-            ObservationStore::open_initialized_at(&database).expect("reopen migrated store");
+            let reopened =
+                ObservationStore::open_initialized_at(&database).expect("reopen migrated store");
+            reopened
+                .reconcile_unfinished_artifact_publications_with_retry(|| {})
+                .expect("reconcile legacy publication");
             assert!(!staging.exists());
             assert!(!final_path.exists());
         });
     }
 
     #[test]
-    fn opening_second_store_preserves_a_live_publication_lease() {
+    fn bounded_reconciliation_preserves_a_live_publication_lease() {
         with_isolated_home(|home| {
             let database = home.path().join("observation.sqlite");
             let store = ObservationStore::open_initialized_at(&database).expect("store");
@@ -2567,6 +2721,9 @@ mod tests {
             ).expect("journal live intent");
 
             let second = ObservationStore::open_initialized_at(&database).expect("second store");
+            second
+                .reconcile_unfinished_artifact_publications_with_retry(|| {})
+                .expect("reconcile live publication");
             assert!(staging.exists());
             let intents: i64 = second.connection.query_row(
                 "SELECT COUNT(*) FROM artifact_publication_intents WHERE publication_id = 'live'", [], |row| row.get(0),
@@ -2592,6 +2749,9 @@ mod tests {
             // Simulate a publisher paused past its lease while a second store
             // reclaims its exact intent and the already-renamed bytes.
             let reclaimer = ObservationStore::open_initialized_at(&database).expect("reclaimer");
+            reclaimer
+                .reconcile_unfinished_artifact_publications_with_retry(|| {})
+                .expect("reconcile expired publication");
             assert!(!staging.exists());
             assert!(!final_path.exists());
             let tx = reclaimer
