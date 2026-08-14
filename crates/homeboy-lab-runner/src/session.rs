@@ -416,6 +416,14 @@ pub enum RunnerFailureKind {
 }
 
 /// Bounded evidence retained when a direct runner connect cannot complete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerConnectFailureEvidenceRef {
+    pub schema_version: u8,
+    pub run_id: String,
+    pub artifact_id: String,
+    pub uri: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerConnectFailureEvidence {
     pub recovery_command: String,
@@ -440,6 +448,9 @@ pub struct RunnerConnectFailureEvidence {
     /// successful health observations are intentionally omitted.
     pub health_attempt_count: usize,
     pub health_attempts: Vec<String>,
+    /// Typed reference to complete redacted remote failure evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_evidence_ref: Option<RunnerConnectFailureEvidenceRef>,
 }
 
 #[derive(Debug, Clone, Serialize)]

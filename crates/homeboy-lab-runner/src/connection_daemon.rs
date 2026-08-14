@@ -107,6 +107,7 @@ pub(super) fn connect_remote_daemon(
                 durability_stage,
                 health_attempt_count: health_attempts.len(),
                 health_attempts,
+                failure_evidence_ref: None,
             });
             Box::new((report, exit_code))
         };

@@ -2020,6 +2020,7 @@ pub(super) fn failed_connect(
                 durability_stage: None,
                 health_attempt_count: 0,
                 health_attempts: Vec::new(),
+                failure_evidence_ref: None,
             }),
         },
         20,

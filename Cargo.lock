@@ -1076,6 +1076,7 @@ dependencies = [
  "glob",
  "glob-match",
  "homeboy-agents",
+ "homeboy-artifact-ref-contract",
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension",

@@ -1334,20 +1334,27 @@ fn connect_with_orphan_adoption_and_live_lease(
                     registry_lock_held: false,
                     daemon_recovery_capabilities,
                 })
-                .map_err(Error::internal_unexpected)
             },
-        )
-        .map_err(|error| error.message),
+        ),
     };
     let Ok(daemon) = daemon else {
+        let error = daemon.err().expect("failed daemon connection has an error");
+        let failure_evidence_ref = error
+            .details
+            .get("failure_evidence_ref")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
         let (mut report, exit_code) = failed_connect_after_recovery(
             runner_id,
             session_path,
             RunnerFailureKind::DaemonStartupFailure,
-            daemon.err().unwrap(),
+            error.message,
             leaseless_recovery,
             recovery_evidence,
         );
+        if let Some(evidence) = report.failure_evidence.as_mut() {
+            evidence.failure_evidence_ref = failure_evidence_ref;
+        }
         attach_state_loss_recovery(&mut report, state_loss_recovery);
         return Ok((report, exit_code));
     };
