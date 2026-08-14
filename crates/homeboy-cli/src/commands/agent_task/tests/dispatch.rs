@@ -1105,13 +1105,20 @@ fn cook_cwd_is_authoritative_when_provider_lookup_times_out() {
         })
         .expect("register linked worktree");
 
-        let provider = tempfile::NamedTempFile::new().expect("provider file");
-        std::fs::write(provider.path(), "#!/bin/sh\nsleep 2\n").expect("write provider");
-        let mut permissions = std::fs::metadata(provider.path())
+        // `into_temp_path` closes the write handle. A `NamedTempFile` keeps one
+        // open for its whole lifetime, and Linux refuses to `execve` a file that
+        // any process still holds open for writing -- ETXTBSY, surfaced as
+        // "Text file busy (os error 26)". The file stays alive and still
+        // self-deletes; only the descriptor goes away.
+        let provider = tempfile::NamedTempFile::new()
+            .expect("provider file")
+            .into_temp_path();
+        std::fs::write(&provider, "#!/bin/sh\nsleep 2\n").expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
             .expect("provider metadata")
             .permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
         let mut config = homeboy::core::defaults::HomeboyConfig::default();
         config.worktree_providers.insert(
             "timeout".to_string(),
@@ -1122,7 +1129,7 @@ fn cook_cwd_is_authoritative_when_provider_lookup_times_out() {
                 lookup_timeout_ms: 1,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.path().display().to_string()]),
+                    resolve: Some(vec![provider.display().to_string()]),
                     ..Default::default()
                 },
                 list_result_mapping: None,
@@ -1303,20 +1310,27 @@ fn cook_rejects_immediately_resolved_provider_destination_from_another_repositor
             .status()
             .expect("create linked worktree")
             .success());
-        let provider = tempfile::NamedTempFile::new().expect("provider file");
+        // `into_temp_path` closes the write handle. A `NamedTempFile` keeps one
+        // open for its whole lifetime, and Linux refuses to `execve` a file that
+        // any process still holds open for writing -- ETXTBSY, surfaced as
+        // "Text file busy (os error 26)". The file stays alive and still
+        // self-deletes; only the descriptor goes away.
+        let provider = tempfile::NamedTempFile::new()
+            .expect("provider file")
+            .into_temp_path();
         std::fs::write(
-            provider.path(),
+            &provider,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@foreign\",\"path\":\"{}\",\"branch\":\"fix/foreign\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
                 destination.display()
             ),
         )
         .expect("write provider");
-        let mut permissions = std::fs::metadata(provider.path())
+        let mut permissions = std::fs::metadata(&provider)
             .expect("provider metadata")
             .permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
         let mut config = homeboy::core::defaults::HomeboyConfig::default();
         config.worktree_providers.insert(
             "fixture".to_string(),
@@ -1327,10 +1341,7 @@ fn cook_rejects_immediately_resolved_provider_destination_from_another_repositor
                 lookup_timeout_ms: 10_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![
-                        provider.path().display().to_string(),
-                        "{handle}".to_string(),
-                    ]),
+                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(

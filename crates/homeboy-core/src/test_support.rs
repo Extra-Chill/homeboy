@@ -2331,7 +2331,8 @@ mod tests {
         );
     }
 
-    /// The runner must hand the test a temp root it can execute from (#12345).
+    /// The runner must hand the test a temp root it can execute from (#12345),
+    /// and that root must not sit inside the repository (#12377).
     ///
     /// It used to `unset TMPDIR TMP TEMP`, dropping every test onto the shared
     /// system `/tmp`. On a host that mounts `/tmp` noexec that is not a loud
@@ -2341,13 +2342,19 @@ mod tests {
     /// asserts against the real tool's output without ever reporting that its
     /// fixture did not exist.
     ///
+    /// The first fix put the root under `target/`, which is exec-capable by
+    /// construction but is inside a git checkout -- and code that walks up
+    /// looking for a repository root then escapes the temp directory and finds
+    /// the real one. So the root is now a PROBED system temp directory, and
+    /// `target/` is only the last resort. The runner reports which it chose.
+    ///
     /// Pinned host-independently by the TMPDIR value, not by probing /tmp: on a
     /// host where /tmp happens to be executable the old behavior would pass an
     /// execution-only check, and the regression would stay invisible exactly
     /// where CI runs.
     #[cfg(unix)]
     #[test]
-    fn hermetic_runner_provides_an_executable_temp_root() {
+    fn hermetic_runner_provides_an_executable_temp_root_outside_the_repository() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -2359,9 +2366,8 @@ mod tests {
             .args([
                 "sh",
                 "-c",
-                // Report the root, then prove an executable written into it
-                // actually runs.
-                r#"printf 'tmpdir=%s\ntmp=%s\ntemp=%s\n' "$TMPDIR" "$TMP" "$TEMP"
+                r#"printf 'tmpdir=%s\ntmp=%s\ntemp=%s\nsource=%s\n' \
+                     "$TMPDIR" "$TMP" "$TEMP" "$HOMEBOY_TEST_TMP_SOURCE"
                    printf '#!/bin/sh\necho fixture-executed\n' > "$TMPDIR/fixture"
                    chmod +x "$TMPDIR/fixture"
                    "$TMPDIR/fixture""#,
@@ -2375,29 +2381,24 @@ mod tests {
             .expect("run hermetic test runner");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let tmpdir = stdout
-            .lines()
-            .find_map(|line| line.strip_prefix("tmpdir="))
-            .expect("the runner must export TMPDIR");
+        let field = |name: &str| {
+            stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .unwrap_or_default()
+                .to_string()
+        };
+        let tmpdir = field("tmpdir=");
 
         assert!(
             !tmpdir.is_empty(),
             "TMPDIR must be set; unsetting it silently falls back to the shared \
              system /tmp: {stdout}"
         );
-        assert!(
-            Path::new(tmpdir).starts_with(workspace.join("target")),
-            "the temp root must live under this workspace's target directory, \
-             which is proven exec-capable because cargo runs test binaries from \
-             it. Got {tmpdir:?}"
-        );
         for spelling in ["tmp=", "temp="] {
-            let value = stdout
-                .lines()
-                .find_map(|line| line.strip_prefix(spelling))
-                .unwrap_or_default();
             assert_eq!(
-                value, tmpdir,
+                field(spelling),
+                tmpdir,
                 "all three temp spellings must name the same root, or code \
                  reading {spelling} lands somewhere else than code reading TMPDIR"
             );
@@ -2407,10 +2408,28 @@ mod tests {
             "an executable written into the temp root must run: {stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert_ne!(
+            Path::new(&tmpdir).parent(),
+            Some(Path::new("/tmp")),
+            "the root must be private to this invocation, not the shared system \
+             temp directory itself: {tmpdir}"
+        );
+
+        // The in-tree fallback exists for hosts where nothing else can execute.
+        // Wherever a system temp directory works, the root must stay outside the
+        // checkout -- a temp workspace nested in a git repo is not equivalent to
+        // one in /tmp, because repository-root walks escape it (#12377).
+        if field("source=") == "system" {
+            assert!(
+                !Path::new(&tmpdir).starts_with(workspace),
+                "a probed system temp root must not live inside the repository: {tmpdir}"
+            );
+        }
+
         assert!(
-            !Path::new(tmpdir).exists(),
+            !Path::new(&tmpdir).exists(),
             "the per-invocation temp root must be removed when the test exits, \
-             or it accumulates under target/: {tmpdir}"
+             or it accumulates: {tmpdir}"
         );
     }
 
