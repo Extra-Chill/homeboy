@@ -558,10 +558,12 @@ pub fn refresh_homeboy_binary(
     let promotion_lease =
         acquire_runner_binary_promotion(&options.runner_id, &promotion_candidate)?;
     // Materialization may have waited behind a newer refresh. Re-read every
-    // authority while holding the promotion lease so an old candidate cannot
-    // overwrite a newer controller selection or reconnect over its daemon.
+    // authority while holding the promotion lease. In particular, a daemon can
+    // connect while materialization runs, so reconnect decisions cannot use the
+    // pre-materialization status snapshot.
     promotion_lease.assert_generation()?;
-    let promotion_authorities = refresh_promotion_authorities(&plan.runner_id)?;
+    let post_lease_status = super::status(&plan.runner_id)?;
+    let promotion_authorities = refresh_promotion_authorities(&plan.runner_id, &post_lease_status)?;
     // Selection belongs to the controller-owned runner registry. It must be
     // persisted after the candidate has been verified, whether or not this
     // invocation also replaces the active daemon.
@@ -745,13 +747,10 @@ pub fn refresh_homeboy_binary(
     let updated_fields = bootstrap.updated_fields.clone();
     let rollback = bootstrap.rollback.clone();
 
-    // Re-read the session after selection as well. The pre-materialization
-    // record is not safe to use for a reconnect after a queued promotion.
-    let refresh_session = options
-        .reconnect
-        .then(|| super::connection::recorded_session(&plan.runner_id))
-        .transpose()?
-        .flatten();
+    // The status captured under the promotion lease is the reconnect authority:
+    // an old daemon that appeared while materializing must be retired, while a
+    // stale session for a disconnected runner must not block direct connect.
+    let refresh_session = reconnect_session_after_promotion(options.reconnect, &post_lease_status);
     let refresh_owned_lease = refresh_session.clone().and_then(refresh_owned_lease);
 
     let mut daemon_refreshed = false;
@@ -1029,7 +1028,19 @@ pub fn refresh_homeboy_binary(
                 probe_reconnected_admission_readiness(&plan.runner_id, identity_commit)
             {
                 daemon_refreshed = false;
-                phase_summary.push(refresh_phase("reconnect_transport", true, 0));
+                // The readiness probe can discover that the newly connected
+                // transport vanished. Never certify a transient connect as a
+                // successful reconnect when its postcondition is disconnected.
+                let transport_exit_code = reconnect_transport_exit_code(
+                    super::status(&plan.runner_id)
+                        .map(|status| status.is_connected())
+                        .unwrap_or(false),
+                );
+                phase_summary.push(refresh_phase(
+                    "reconnect_transport",
+                    true,
+                    transport_exit_code,
+                ));
                 phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
                 phase_summary.push(refresh_phase("admission_readiness", true, 1));
                 return Ok((
@@ -1229,6 +1240,32 @@ fn refresh_bootstrap_provenance(
 /// failure can require reconciliation without requiring another reconnect.
 fn reconnect_required_after_refresh(daemon_refreshed: bool) -> bool {
     !daemon_refreshed
+}
+
+/// A stale daemon is still a live transport that must be retired before its
+/// replacement starts. A disconnected status may retain an obsolete session
+/// record, but it has no transport to rotate.
+fn reconnect_rotates_existing_transport(status: &super::RunnerStatusReport) -> bool {
+    status.is_connected()
+}
+
+fn reconnect_session_after_promotion(
+    reconnect: bool,
+    status: &super::RunnerStatusReport,
+) -> Option<super::RunnerSession> {
+    (reconnect && reconnect_rotates_existing_transport(status))
+        .then(|| status.session.clone())
+        .flatten()
+}
+
+/// A successful reconnect phase is only valid while an authoritative status
+/// still observes an active transport.
+fn reconnect_transport_exit_code(connected: bool) -> i32 {
+    if connected {
+        0
+    } else {
+        1
+    }
 }
 
 /// A refresh rotates a live daemon but starts a disconnected runner directly.
@@ -1737,9 +1774,11 @@ struct RefreshPromotionAuthorities {
     configured_selected: Option<String>,
 }
 
-fn refresh_promotion_authorities(runner_id: &str) -> Result<RefreshPromotionAuthorities> {
+fn refresh_promotion_authorities(
+    runner_id: &str,
+    status: &super::RunnerStatusReport,
+) -> Result<RefreshPromotionAuthorities> {
     let runner = load(runner_id)?;
-    let status = super::status(runner_id)?;
     let configured_selected = runner
         .settings
         .homeboy_path
@@ -2823,14 +2862,39 @@ fn refresh_reconnect_failure(
     report: &super::RunnerConnectReport,
     daemon_identity_verification: Option<&str>,
 ) -> HomeboyBinaryRefreshFailure {
-    let mut failure = refresh_failure(plan, execution.clone(), 1);
-    failure.verification = Some(format!(
-        "reconnect failed after selection and the configured binary was restored: {}",
+    refresh_reconnect_failure_with_message(
+        plan,
+        execution,
         report
             .failure_message
             .as_deref()
             .or(daemon_identity_verification)
-            .unwrap_or("runner connect returned a non-zero exit code")
+            .unwrap_or("runner connect returned a non-zero exit code"),
+    )
+}
+
+/// Selection has already committed when reconnect fails. Keep that promotion
+/// evidence intact and offer the exact next lifecycle operation, rather than a
+/// retry that can rematerialize or select a different executable.
+fn refresh_reconnect_failure_with_message(
+    plan: &HomeboyBinaryRefreshPlan,
+    execution: &RunnerExecOutput,
+    reconnect_error: &str,
+) -> HomeboyBinaryRefreshFailure {
+    let mut failure = refresh_failure(plan, execution.clone(), 1);
+    failure.recovery_actions = vec![
+        homeboy_core::runner_execution_envelope::RunnerExecutionNextAction {
+            label: "reconnect_after_promotion".to_string(),
+            command: vec![
+                "homeboy".to_string(),
+                "runner".to_string(),
+                "connect".to_string(),
+                plan.runner_id.clone(),
+            ],
+        },
+    ];
+    failure.verification = Some(format!(
+        "reconnect failed after selection; the promoted configured binary remains selected: {reconnect_error}"
     ));
     failure
 }

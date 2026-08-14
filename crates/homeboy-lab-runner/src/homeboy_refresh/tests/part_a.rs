@@ -265,6 +265,51 @@ fn disconnected_refresh_connects_without_rotating_a_missing_daemon() {
     assert_eq!(operations.into_inner(), ["connect promoted binary"]);
 }
 
+/// #12418: reconnect behavior is selected from the authoritative post-lease
+/// transport state. A stale but connected daemon is still rotated; a retained
+/// record for a disconnected runner must not block connecting the promotion.
+#[test]
+fn reconnect_transport_state_matrix_preserves_disconnected_and_rotation_paths() {
+    let disconnected = refreshed_daemon_status(false, None);
+    let mut stale_connected = refreshed_daemon_status(true, Some("homeboy 0.294.0+oldcommit"));
+    stale_connected.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+        "lab",
+        "0.294.0".to_string(),
+        "0.294.0".to_string(),
+        Some("homeboy 0.294.0+oldcommit".to_string()),
+        Some("homeboy 0.294.0+newcommit".to_string()),
+    ));
+    let healthy_connected = refreshed_daemon_status(true, Some("homeboy 0.294.0+newcommit"));
+
+    assert!(
+        !reconnect_rotates_existing_transport(&disconnected),
+        "a disconnected runner starts the promoted binary directly"
+    );
+    assert_eq!(
+        reconnect_transport_exit_code(disconnected.is_connected()),
+        1,
+        "a disconnected runner cannot report reconnect transport success"
+    );
+    assert!(
+        reconnect_rotates_existing_transport(&stale_connected),
+        "a stale connected daemon is rotated before reconnect"
+    );
+    assert_eq!(
+        reconnect_transport_exit_code(stale_connected.is_connected()),
+        0,
+        "a stale but connected transport remains a completed reconnect phase"
+    );
+    assert!(
+        reconnect_rotates_existing_transport(&healthy_connected),
+        "a healthy connected daemon retains the established rotation behavior"
+    );
+    assert_eq!(
+        reconnect_transport_exit_code(healthy_connected.is_connected()),
+        0,
+        "a healthy connected transport remains a completed reconnect phase"
+    );
+}
+
 #[test]
 fn connected_refresh_rotates_before_connecting_the_promoted_binary() {
     let session = RunnerSession {
@@ -302,6 +347,63 @@ fn connected_refresh_rotates_before_connecting_the_promoted_binary() {
     assert_eq!(
         operations.into_inner(),
         ["disconnect existing daemon", "connect promoted binary"]
+    );
+}
+
+/// #12418: materialization begins from a disconnected observation, but another
+/// controller can connect the old daemon before this refresh obtains promotion
+/// ownership. The post-lease session must drive retirement, and active work
+/// remains owned by the draining generation rather than being interrupted.
+#[test]
+fn materialization_race_rotates_the_newly_connected_daemon_and_preserves_active_work() {
+    let materialization_snapshot = refreshed_daemon_status(false, None);
+    let mut post_lease_status = refreshed_daemon_status(true, Some("homeboy 0.294.0+oldcommit"));
+    let old_session = post_lease_status
+        .session
+        .as_mut()
+        .expect("post-materialization connection persists a session");
+    old_session.remote_daemon_lease_id = Some("lease-old".to_string());
+    old_session.remote_daemon_pid = Some(42);
+
+    assert!(
+        !reconnect_rotates_existing_transport(&materialization_snapshot),
+        "materialization began while the runner was disconnected"
+    );
+    let post_lease_session = reconnect_session_after_promotion(true, &post_lease_status)
+        .expect("the post-lease connected daemon is the one to retire");
+    assert_eq!(
+        post_lease_session.remote_daemon_lease_id.as_deref(),
+        Some("lease-old")
+    );
+
+    let operations = RefCell::new(Vec::new());
+    disconnect_before_reconnect(Some(&post_lease_session), |_| {
+        operations.borrow_mut().push("retire lease-old");
+        Ok(())
+    })
+    .expect("the daemon observed after materialization is retired before connect");
+    operations.borrow_mut().push("connect promoted binary");
+    assert_eq!(
+        operations.into_inner(),
+        ["retire lease-old", "connect promoted binary"]
+    );
+
+    let active_job = active_admission("active-job");
+    assert!(
+        should_rotate_daemon_generation(true, false, false),
+        "active work selects generation rotation instead of daemon replacement"
+    );
+    let mut generations = crate::RollingGenerations::new("lease-old", "old daemon");
+    generations.admit_job(&active_job.job_id);
+    assert_eq!(
+        generations.begin("lease-new", "promoted daemon"),
+        crate::RollingStart::Start
+    );
+    assert!(generations.activate("lease-new"));
+    assert_eq!(
+        generations.job_owner(&active_job.job_id),
+        Some("lease-old"),
+        "the old generation retains active work while the promoted generation admits new work"
     );
 }
 
