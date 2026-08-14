@@ -136,28 +136,34 @@ fn materialize_cook_attempt_with_stores_and_runtime(
     admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
     admit_runtime: impl FnOnce(&str) -> Result<Value>,
 ) -> Result<()> {
-    if lifecycle_store.record_exists(run_id)? {
-        return ensure_cook_attempt_index(recipe_store, lifecycle_store, cook_id, run_id);
-    }
-    let submission = match admission_status {
-        Some(project) => lifecycle_store.submit_plan_with_runtime_admission_status(
-            plan,
+    if !lifecycle_store.record_exists(run_id)? {
+        agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+            lifecycle_store,
+            cook_id,
             run_id,
-            project,
-            admit_runtime,
-        ),
-        None => lifecycle_store.submit_plan_with_runtime_admission(plan, run_id, admit_runtime),
-    };
-    match submission {
-        Ok(_) => ensure_cook_attempt_index(recipe_store, lifecycle_store, cook_id, run_id),
-        Err(error) => {
+        )?;
+        let submission = match admission_status {
+            Some(project) => lifecycle_store.submit_plan_with_runtime_admission_status(
+                plan,
+                run_id,
+                project,
+                admit_runtime,
+            ),
+            None => lifecycle_store.submit_plan_with_runtime_admission(plan, run_id, admit_runtime),
+        };
+        if let Err(error) = submission {
             // `submit_plan` persists admission failures before returning them.
             if lifecycle_store.record_exists(run_id)? {
                 ensure_cook_attempt_index(recipe_store, lifecycle_store, cook_id, run_id)?;
             }
-            Err(error)
+            return Err(error);
         }
     }
+    ensure_cook_attempt_index(recipe_store, lifecycle_store, cook_id, run_id)?;
+    // If cancellation won while this first attempt was being submitted, index
+    // it before cancelling so the durable child remains reachable by Cook ID.
+    agent_task_lifecycle::cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)?;
+    Ok(())
 }
 
 fn production_runtime_admission(

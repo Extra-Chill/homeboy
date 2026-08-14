@@ -26,7 +26,20 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     // after each mutation until the Cook alias is stable, so every attempt that
     // became authoritative during this operation receives cancellation too.
     for pass in 0..3 {
+        // Cancellation by Cook ID is idempotent once its indexed attempt has
+        // finished. Keep exact-run cancellation strict: an operator targeting
+        // that literal terminal attempt still receives the terminal-state error.
+        if resolved_run_id != requested_run_id {
+            let resolved_record = store::read_record(&resolved_run_id)?;
+            if resolved_record.state.is_terminal() {
+                return Ok(resolved_record);
+            }
+        }
         let record = cancel_resolved_run(&resolved_run_id, reason)?;
+        // A first child can have been submitted after reservation but before
+        // index publication. Cancel it through the reservation link so it
+        // cannot remain an unindexed queued record.
+        cancel_reserved_detached_cook_handoff_attempt_if_cancelled(&requested_run_id)?;
         if pass == 0 {
             run_after_initial_cancellation_for_test();
         }
@@ -749,6 +762,118 @@ mod tests {
                 homeboy_core::ErrorCode::ValidationInvalidArgument
             );
             assert!(!cook_index_exists(cook_id).expect("inspect absent Cook index"));
+        });
+    }
+
+    #[test]
+    fn cancellation_between_reservation_and_submission_cancels_the_reachable_child() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-reservation-switch-during-cancel";
+            let attempt_id = "cook-reservation-switch-during-cancel-attempt-1";
+            record_detached_cook_handoff_parent(cook_id).expect("persist handoff parent");
+            reserve_detached_cook_handoff_materialization(cook_id, attempt_id)
+                .expect("reserve materializing attempt");
+            cancel_run(cook_id, None).expect("cancel handoff before child submission");
+            let plan = AgentTaskPlan::new("reserved-index-switch-attempt", Vec::new());
+            submit_plan(&plan, Some(attempt_id)).expect("persist attempt");
+
+            record_cook_attempt(cook_id, 1, attempt_id)
+                .expect("reserved child remains publishable after cancellation");
+            assert!(
+                cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)
+                    .expect("cancel submitted reserved child"),
+                "the reservation reaches the child that was not present during parent cancellation"
+            );
+            assert!(cook_index_exists(cook_id).expect("inspect durable Cook index"));
+            assert_eq!(
+                exact_record(attempt_id)
+                    .expect("read durable child outcome")
+                    .state,
+                AgentTaskRunState::Cancelled
+            );
+            assert!(
+                !cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)
+                    .expect("replaying queued-child cancellation"),
+                "a replayed cancellation is a no-op after the queued child terminalizes"
+            );
+        });
+    }
+
+    #[test]
+    fn cancellation_during_index_publication_preserves_a_terminal_child() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-terminal-index-publication-race";
+            let attempt_id = "cook-terminal-index-publication-race-attempt-1";
+            record_detached_cook_handoff_parent(cook_id).expect("persist handoff parent");
+            reserve_detached_cook_handoff_materialization(cook_id, attempt_id)
+                .expect("reserve materializing attempt");
+            submit_plan(
+                &AgentTaskPlan::new("terminal-index-publication-race-attempt", Vec::new()),
+                Some(attempt_id),
+            )
+            .expect("persist attempt");
+            store::mutate_record(attempt_id, |record| {
+                set_run_state(record, AgentTaskRunState::Succeeded);
+                true
+            })
+            .expect("terminalize attempt before index publication");
+
+            install_after_initial_cancellation_for_test(move || {
+                record_cook_attempt(cook_id, 1, attempt_id)
+                    .expect("publish terminal reserved child during cancellation");
+            });
+            let cancelled = cancel_run(cook_id, None)
+                .expect("Cook cancellation converges after terminal index publication");
+
+            assert_eq!(cancelled.run_id, attempt_id);
+            assert_eq!(cancelled.state, AgentTaskRunState::Succeeded);
+            assert!(cook_index_exists(cook_id).expect("inspect durable Cook index"));
+        });
+    }
+
+    #[test]
+    fn repeated_cook_alias_cancellation_preserves_terminal_indexed_attempts() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            for (suffix, terminal_state) in [
+                ("succeeded", AgentTaskRunState::Succeeded),
+                ("failed", AgentTaskRunState::Failed),
+            ] {
+                let cook_id = format!("cook-terminal-reservation-{suffix}");
+                let attempt_id = format!("{cook_id}-attempt-1");
+                record_detached_cook_handoff_parent(&cook_id).expect("persist handoff parent");
+                reserve_detached_cook_handoff_materialization(&cook_id, &attempt_id)
+                    .expect("reserve materializing attempt");
+                submit_plan(
+                    &AgentTaskPlan::new(format!("{suffix}-attempt"), Vec::new()),
+                    Some(&attempt_id),
+                )
+                .expect("persist attempt");
+                store::mutate_record(&attempt_id, |record| {
+                    set_run_state(record, terminal_state.clone());
+                    true
+                })
+                .expect("terminalize reserved child");
+                record_cook_attempt(&cook_id, 1, &attempt_id)
+                    .expect("publish terminal child as the Cook alias");
+
+                for _ in 0..2 {
+                    let resolved = cancel_run(&cook_id, None)
+                        .expect("cancelling a Cook alias with a terminal child is idempotent");
+                    assert_eq!(resolved.run_id, attempt_id);
+                    assert_eq!(resolved.state, terminal_state);
+                }
+                assert_eq!(
+                    exact_record(&attempt_id)
+                        .expect("read terminal child")
+                        .state,
+                    terminal_state,
+                    "parent cancellation must preserve the terminal child"
+                );
+                assert!(
+                    cancel_exact_run(&attempt_id, None).is_err(),
+                    "direct cancellation retains strict terminal-run semantics"
+                );
+            }
         });
     }
 
