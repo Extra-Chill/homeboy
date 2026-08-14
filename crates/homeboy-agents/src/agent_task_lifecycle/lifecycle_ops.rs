@@ -2786,8 +2786,18 @@ pub fn record_run_aggregate(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    record_aggregate(&mut record, plan, aggregate)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_run_aggregate_in_store(&lifecycle_store, run_id, plan, aggregate)
+}
+
+pub(crate) fn record_run_aggregate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    aggregate: &AgentTaskAggregate,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
+    record_aggregate_in_store(lifecycle_store, &mut record, plan, aggregate)
 }
 
 /// Reproject terminal artifacts from controller-owned durable state. This is a

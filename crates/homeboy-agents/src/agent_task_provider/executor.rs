@@ -7,7 +7,18 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         request: AgentTaskRequest,
         context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
-        let mut request = match materialize_executor_request(request, &context) {
+        #[cfg(test)]
+        let materialized = match self.path_roots.as_ref() {
+            Some(roots) => materialize_executor_request_at_root(
+                request,
+                &context,
+                roots.artifacts().to_path_buf(),
+            ),
+            None => materialize_executor_request(request, &context),
+        };
+        #[cfg(not(test))]
+        let materialized = materialize_executor_request(request, &context);
+        let mut request = match materialized {
             Ok(request) => request,
             Err((request, path, error)) => {
                 return failure_outcome(
@@ -325,6 +336,7 @@ fn materialize_executor_request_at_root(
     context: &AgentTaskExecutionContext,
     root: PathBuf,
 ) -> Result<AgentTaskExecutorRequest, (AgentTaskRequest, PathBuf, std::io::Error)> {
+    let finalized_root = root.join("executor-finalized");
     let path = root
         .join("agent-task")
         .join("executor-artifacts")
@@ -337,11 +349,11 @@ fn materialize_executor_request_at_root(
     if let Err(error) = ensure_writable_directory(&path) {
         return Err((request, path, error));
     }
-    let artifacts_root_identity =
-        crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(
-            &path,
-        )
-        .map_err(|error| {
+    let artifacts_root_identity = crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture_with_finalized_root(
+        &path,
+        finalized_root,
+    )
+    .map_err(|error| {
             (
                 request.clone(),
                 path.clone(),

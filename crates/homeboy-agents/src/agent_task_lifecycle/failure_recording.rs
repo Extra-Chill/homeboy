@@ -719,8 +719,12 @@ pub(crate) fn record_aggregate_in_store(
         record.metadata["automatic_artifact_retention_inaccessible_roots"] =
             serde_json::Value::Array(retained_roots);
     }
-    crate::controller_scratch::register_outcome_resources(&record.run_id, &aggregate.outcomes)?;
-    crate::controller_scratch::finalize_run(&record.run_id)?;
+    crate::controller_scratch::register_outcome_resources_at(
+        &lifecycle_store.data_root(),
+        &record.run_id,
+        &aggregate.outcomes,
+    )?;
+    crate::controller_scratch::finalize_run_at(&lifecycle_store.data_root(), &record.run_id)?;
     lifecycle_store.write_aggregate_and_record(record, aggregate)?;
     record_terminal_artifact_projection_in_store(lifecycle_store, record, aggregate)?;
     update_cook_candidate_after_completion(record, aggregate, None)?;
