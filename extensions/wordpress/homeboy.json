@@ -81,6 +81,7 @@
       "bash scripts/lint/phpcs-warnings-gate-smoke.sh",
       "bash scripts/test/parse-test-failures-sidecar-smoke.sh",
       "bash scripts/test/parse-wp-codebox-artifacts-smoke.sh",
+      "bash scripts/test/test-inventory-smoke.sh",
       "bash scripts/validation/validate-playground-blueprint-smoke.sh",
       "node tests/audit-fanout-runtime-adapter.test.js",
       "node tests/block-quality-smoke.js",

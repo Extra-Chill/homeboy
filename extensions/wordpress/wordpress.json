@@ -1064,6 +1064,13 @@
       "file_extensions": ["php"],
       "inline_tests": false
     },
+    "inventory": {
+      "root_markers": ["composer.json", "readme.txt", "style.css"],
+      "fingerprint_names": ["composer.json", "composer.lock", "package.json", "package-lock.json"],
+      "fingerprint_extensions": ["php", "js", "jsx", "ts", "tsx", "sh"],
+      "fingerprint_skip_dirs": [".git", "vendor", "node_modules", "build", "dist", "target", ".homeboy-action"],
+      "runners": [{ "id": "wordpress", "version_command": ["php", "--version"] }]
+    },
     "secret_env_projections": [
       {
         "when": {
