@@ -104,7 +104,6 @@ pub(super) fn hash_bound_runner_command_evidence(
     LabRuntimeIdentity,
     Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
 )> {
-    let configured_identity = status.configured_job_binary_build_identity.as_deref()?;
     let session = status.session.as_ref()?;
     let session_identity = session.homeboy_build_identity.as_deref()?;
     let freshness = status.daemon_freshness.as_ref()?;
@@ -123,16 +122,19 @@ pub(super) fn hash_bound_runner_command_evidence(
         || freshness.pid != session.remote_daemon_pid
         || !hash_is_valid
         || daemon_capabilities.is_empty()
-        || configured_identity != session_identity
-        || freshness.daemon_build_identity.as_deref() != Some(configured_identity)
+        || status
+            .configured_job_binary_build_identity
+            .as_deref()
+            .is_some_and(|configured| configured != session_identity)
+        || freshness.daemon_build_identity.as_deref() != Some(session_identity)
     {
         return None;
     }
     Some((
         LabRuntimeIdentity {
-            build_identity: configured_identity.to_string(),
-            source_revision: build_commit(configured_identity)?.to_string(),
-            clean: !configured_identity.ends_with("-dirty"),
+            build_identity: session_identity.to_string(),
+            source_revision: build_commit(session_identity)?.to_string(),
+            clean: !session_identity.ends_with("-dirty"),
         },
         daemon_capabilities.to_vec(),
     ))

@@ -626,6 +626,7 @@ fn exact_immutable_daemon_supplies_command_capabilities_when_the_second_probe_is
     let hash = "a".repeat(64);
     let identity = "homeboy 0.348.6+b83a29fa4dea";
     let mut status = hash_bound_direct_status(identity);
+    status.configured_job_binary_build_identity = None;
     status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
         fresh: true,
         stale_reason_code: None,
@@ -658,10 +659,11 @@ fn exact_immutable_daemon_supplies_command_capabilities_when_the_second_probe_is
 }
 
 #[test]
-fn daemon_capabilities_do_not_substitute_for_a_different_configured_binary_hash() {
+fn daemon_capabilities_do_not_substitute_for_a_conflicting_configured_identity() {
     let hash = "a".repeat(64);
     let identity = "homeboy 0.348.6+b83a29fa4dea";
     let mut status = hash_bound_direct_status(identity);
+    status.configured_job_binary_build_identity = Some("homeboy 0.348.6+different".to_string());
     status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
         fresh: true,
         stale_reason_code: None,
@@ -671,7 +673,7 @@ fn daemon_capabilities_do_not_substitute_for_a_different_configured_binary_hash(
         recovery_evidence: None,
         ownership_evidence: None,
         adoption_command: None,
-        binary_hash: Some(hash),
+        binary_hash: Some(hash.clone()),
         daemon_version: Some("0.348.6".to_string()),
         daemon_build_identity: Some(identity.to_string()),
         runtime_paths: None,
@@ -682,7 +684,7 @@ fn daemon_capabilities_do_not_substitute_for_a_different_configured_binary_hash(
 
     assert!(super::super::metadata::hash_bound_runner_command_evidence(
         &status,
-        &format!("/runner/homeboy-{}/homeboy", "b".repeat(64)),
+        &format!("/runner/homeboy-{hash}/homeboy"),
         &homeboy_lab_runner_contract::required_lab_handoff_capabilities(),
     )
     .is_none());
