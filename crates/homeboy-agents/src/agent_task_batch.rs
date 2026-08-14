@@ -156,6 +156,12 @@ pub fn persist_fanout_run_batch(
     children: &[FanoutRunBatchChild],
     metadata: Value,
 ) -> Result<AgentTaskBatchRecord> {
+    validate_fanout_run_batch(fanout_id, children)?;
+    AgentTaskBatchStore::from_current_data_root()?
+        .persist_fanout_run_batch(fanout_id, plan_id, children, metadata)
+}
+
+fn validate_fanout_run_batch(fanout_id: &str, children: &[FanoutRunBatchChild]) -> Result<()> {
     if children.is_empty() {
         return Err(Error::validation_invalid_argument(
             "cooks",
@@ -164,7 +170,6 @@ pub fn persist_fanout_run_batch(
             None,
         ));
     }
-    let batch_id = sanitize_id(fanout_id);
     let mut seen = HashSet::new();
     for child in children {
         if !seen.insert(child.run_id.clone()) {
@@ -179,8 +184,20 @@ pub fn persist_fanout_run_batch(
             ));
         }
     }
-    with_batch_lock(fanout_id, || {
-        if let Ok(existing) = read_batch(fanout_id) {
+    Ok(())
+}
+
+fn persist_fanout_run_batch_in_store(
+    store: &AgentTaskBatchStore,
+    fanout_id: &str,
+    plan_id: &str,
+    children: &[FanoutRunBatchChild],
+    metadata: Value,
+) -> Result<AgentTaskBatchRecord> {
+    validate_fanout_run_batch(fanout_id, children)?;
+    let batch_id = sanitize_id(fanout_id);
+    store.with_batch_lock(fanout_id, || {
+        if let Ok(existing) = store.read_batch(fanout_id) {
             let expected_children = children
                 .iter()
                 .map(|child| (&child.task_id, &child.run_id))
@@ -218,14 +235,21 @@ pub fn persist_fanout_run_batch(
                 .collect(),
             metadata,
         };
-        write_batch(&record)?;
+        store.write_batch(&record)?;
         Ok(record)
     })
 }
 
 pub fn claim_fanout_run_batch(batch_id: &str) -> Result<Option<String>> {
-    with_batch_lock(batch_id, || {
-        let mut batch = read_batch(batch_id)?;
+    AgentTaskBatchStore::from_current_data_root()?.claim_fanout_run_batch(batch_id)
+}
+
+fn claim_fanout_run_batch_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+) -> Result<Option<String>> {
+    store.with_batch_lock(batch_id, || {
+        let mut batch = store.read_batch(batch_id)?;
         let abandoned = batch.state == AgentTaskBatchState::Admitting
             && batch.metadata["coordinator"]["heartbeat_at"]
                 .as_str()
@@ -253,13 +277,21 @@ pub fn claim_fanout_run_batch(batch_id: &str) -> Result<Option<String>> {
         );
         batch.state = AgentTaskBatchState::Admitting;
         batch.updated_at = Some(now_timestamp());
-        write_batch(&batch)?;
+        store.write_batch(&batch)?;
         Ok(Some(claim_id))
     })
 }
 
 pub fn heartbeat_fanout_run_batch(batch_id: &str, claim_id: &str) -> Result<()> {
-    mutate_batch(batch_id, |batch| {
+    AgentTaskBatchStore::from_current_data_root()?.heartbeat_fanout_run_batch(batch_id, claim_id)
+}
+
+fn heartbeat_fanout_run_batch_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+    claim_id: &str,
+) -> Result<()> {
+    store.mutate_batch(batch_id, |batch| {
         let coordinator = batch
             .metadata
             .get_mut("coordinator")
@@ -288,8 +320,19 @@ pub fn record_fanout_run_batch_failure(
     stage: &str,
     failure: Value,
 ) -> Result<()> {
-    with_batch_lock(batch_id, || {
-        let mut batch = read_batch(batch_id)?;
+    AgentTaskBatchStore::from_current_data_root()?
+        .record_fanout_run_batch_failure(batch_id, claim_id, stage, failure)
+}
+
+fn record_fanout_run_batch_failure_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+    claim_id: &str,
+    stage: &str,
+    failure: Value,
+) -> Result<()> {
+    store.with_batch_lock(batch_id, || {
+        let mut batch = store.read_batch(batch_id)?;
         if batch.metadata["coordinator"]["claim_id"].as_str() != Some(claim_id) {
             return Err(Error::validation_invalid_argument(
                 "claim_id",
@@ -314,7 +357,7 @@ pub fn record_fanout_run_batch_failure(
         }
         batch.state = AgentTaskBatchState::Failed;
         batch.updated_at = Some(now_timestamp());
-        write_batch(&batch)
+        store.write_batch(&batch)
     })
 }
 
@@ -363,7 +406,14 @@ pub fn record_fanout_run_batch_failed_admissions<'a>(
 }
 
 pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
-    let mut batch = read_batch(batch_id)?;
+    AgentTaskBatchStore::from_current_data_root()?.status(batch_id)
+}
+
+fn status_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+) -> Result<AgentTaskBatchStatusReport> {
+    let mut batch = store.read_batch(batch_id)?;
     if batch.metadata["terminal_failure"].is_object() {
         batch.state = AgentTaskBatchState::Failed;
         let commands = commands(&batch.batch_id);
@@ -931,74 +981,156 @@ fn now_timestamp() -> String {
     Utc::now().to_rfc3339()
 }
 
-fn batch_path(batch_id: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
-        .join("agent-task-batches")
-        .join(format!("{}.json", sanitize_id(batch_id))))
+#[derive(Clone, Debug)]
+struct AgentTaskBatchStore {
+    root: PathBuf,
+}
+
+impl AgentTaskBatchStore {
+    fn from_data_root(data_root: PathBuf) -> Self {
+        Self {
+            root: data_root.join("agent-task-batches"),
+        }
+    }
+
+    fn from_current_data_root() -> Result<Self> {
+        Ok(Self::from_data_root(paths::homeboy_data()?))
+    }
+
+    fn persist_fanout_run_batch(
+        &self,
+        fanout_id: &str,
+        plan_id: &str,
+        children: &[FanoutRunBatchChild],
+        metadata: Value,
+    ) -> Result<AgentTaskBatchRecord> {
+        persist_fanout_run_batch_in_store(self, fanout_id, plan_id, children, metadata)
+    }
+
+    fn claim_fanout_run_batch(&self, batch_id: &str) -> Result<Option<String>> {
+        claim_fanout_run_batch_in_store(self, batch_id)
+    }
+
+    fn heartbeat_fanout_run_batch(&self, batch_id: &str, claim_id: &str) -> Result<()> {
+        heartbeat_fanout_run_batch_in_store(self, batch_id, claim_id)
+    }
+
+    fn record_fanout_run_batch_failure(
+        &self,
+        batch_id: &str,
+        claim_id: &str,
+        stage: &str,
+        failure: Value,
+    ) -> Result<()> {
+        record_fanout_run_batch_failure_in_store(self, batch_id, claim_id, stage, failure)
+    }
+
+    fn status(&self, batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
+        status_in_store(self, batch_id)
+    }
+
+    fn record_child_finalization(
+        &self,
+        batch_id: &str,
+        child_run_id: &str,
+        finalization: Value,
+    ) -> Result<()> {
+        record_child_finalization_in_store(self, batch_id, child_run_id, finalization)
+    }
+
+    fn batch_path(&self, batch_id: &str) -> PathBuf {
+        self.root.join(format!("{}.json", sanitize_id(batch_id)))
+    }
+
+    fn write_batch(&self, record: &AgentTaskBatchRecord) -> Result<()> {
+        let path = self.batch_path(&record.batch_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+            })?;
+        }
+        let raw = serde_json::to_string_pretty(record).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("serialize agent-task batch {}", record.batch_id)),
+            )
+        })?;
+        let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
+        fs::write(&temporary, raw).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+        })?;
+        fs::rename(&temporary, &path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })
+    }
+
+    fn with_batch_lock<T>(
+        &self,
+        batch_id: &str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let path = self.batch_path(batch_id).with_extension("lock");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+            })?;
+        }
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            })?;
+        lock.lock_exclusive().map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        let result = operation();
+        let _ = FileExt::unlock(&lock);
+        result
+    }
+
+    fn mutate_batch<T>(
+        &self,
+        batch_id: &str,
+        operation: impl FnOnce(&mut AgentTaskBatchRecord) -> Result<T>,
+    ) -> Result<T> {
+        self.with_batch_lock(batch_id, || {
+            let mut batch = self.read_batch(batch_id)?;
+            let result = operation(&mut batch)?;
+            self.write_batch(&batch)?;
+            Ok(result)
+        })
+    }
+
+    fn read_batch(&self, batch_id: &str) -> Result<AgentTaskBatchRecord> {
+        let path = self.batch_path(batch_id);
+        let raw = fs::read_to_string(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        serde_json::from_str(&raw).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("parse agent-task batch {}", batch_id)),
+            )
+        })
+    }
 }
 
 fn write_batch(record: &AgentTaskBatchRecord) -> Result<()> {
-    let path = batch_path(&record.batch_id)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-        })?;
-    }
-    let raw = serde_json::to_string_pretty(record).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some(format!("serialize agent-task batch {}", record.batch_id)),
-        )
-    })?;
-    let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-    fs::write(&temporary, raw).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
-    })?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
-}
-
-fn with_batch_lock<T>(batch_id: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let path = batch_path(batch_id)?.with_extension("lock");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-        })?;
-    }
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    lock.lock_exclusive()
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    let result = operation();
-    let _ = FileExt::unlock(&lock);
-    result
+    AgentTaskBatchStore::from_current_data_root()?.write_batch(record)
 }
 
 fn mutate_batch<T>(
     batch_id: &str,
     operation: impl FnOnce(&mut AgentTaskBatchRecord) -> Result<T>,
 ) -> Result<T> {
-    with_batch_lock(batch_id, || {
-        let mut batch = read_batch(batch_id)?;
-        let result = operation(&mut batch)?;
-        write_batch(&batch)?;
-        Ok(result)
-    })
+    AgentTaskBatchStore::from_current_data_root()?.mutate_batch(batch_id, operation)
 }
 
 fn read_batch(batch_id: &str) -> Result<AgentTaskBatchRecord> {
-    let path = batch_path(batch_id)?;
-    let raw = fs::read_to_string(&path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    serde_json::from_str(&raw).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some(format!("parse agent-task batch {}", batch_id)),
-        )
-    })
+    AgentTaskBatchStore::from_current_data_root()?.read_batch(batch_id)
 }
 
 /// Read the persisted durable batch record. Used by the batch resume path to
@@ -1016,7 +1148,20 @@ pub fn record_child_finalization(
     child_run_id: &str,
     finalization: Value,
 ) -> Result<()> {
-    mutate_batch(batch_id, |batch| {
+    AgentTaskBatchStore::from_current_data_root()?.record_child_finalization(
+        batch_id,
+        child_run_id,
+        finalization,
+    )
+}
+
+fn record_child_finalization_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+    child_run_id: &str,
+    finalization: Value,
+) -> Result<()> {
+    store.mutate_batch(batch_id, |batch| {
         let metadata = match &mut batch.metadata {
             Value::Object(map) => map,
             other => {
@@ -1135,6 +1280,12 @@ mod tests {
         AgentTaskExecutionContext, AgentTaskExecutorAdapter,
     };
     use std::collections::HashMap;
+
+    fn batch_store() -> (tempfile::TempDir, AgentTaskBatchStore) {
+        let temp = tempfile::tempdir().expect("temporary batch data root");
+        let store = AgentTaskBatchStore::from_data_root(temp.path().to_path_buf());
+        (temp, store)
+    }
 
     #[test]
     fn batch_submit_persists_parent_and_child_durable_runs() {
@@ -1684,11 +1835,6 @@ mod tests {
 
     #[test]
     fn batch_submit_rejects_dependent_workflow_plans() {
-        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
-        // the shared lock) so these tests serialize against every other module
-        // that mutates the same env — a module-local lock only ordered this
-        // module's own tests and raced `with_isolated_home` users elsewhere.
-        let _home = homeboy_core::test_support::HomeGuard::new();
         let mut plan = AgentTaskPlan::new("workflow", vec![request("a"), request("b")]);
         plan.output_dependencies.insert(
             "b".to_string(),
@@ -1705,7 +1851,7 @@ mod tests {
 
     #[test]
     fn fanout_run_plan_persists_batch_record_readable_by_status() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, store) = batch_store();
         let children = vec![
             FanoutRunBatchChild {
                 task_id: "audit".to_string(),
@@ -1717,13 +1863,14 @@ mod tests {
             },
         ];
 
-        let record = persist_fanout_run_batch(
-            "rules-memory-gaps-20260721",
-            "rules-memory-gaps-20260721",
-            &children,
-            json!({ "source": "fanout-run-plan" }),
-        )
-        .expect("batch record persisted");
+        let record = store
+            .persist_fanout_run_batch(
+                "rules-memory-gaps-20260721",
+                "rules-memory-gaps-20260721",
+                &children,
+                json!({ "source": "fanout-run-plan" }),
+            )
+            .expect("batch record persisted");
 
         assert_eq!(record.batch_id, "rules-memory-gaps-20260721");
         assert_eq!(record.task_count, 2);
@@ -1731,7 +1878,9 @@ mod tests {
 
         // The exact failure from #9397: `fanout status <id>` could not read the
         // batch file because run-plan never wrote it. It is now readable.
-        let persisted = read_batch("rules-memory-gaps-20260721").expect("batch record readable");
+        let persisted = store
+            .read_batch("rules-memory-gaps-20260721")
+            .expect("batch record readable");
         assert_eq!(persisted.child_runs.len(), 2);
         assert_eq!(persisted.child_runs[0].run_id, "cook-audit");
         assert_eq!(persisted.child_runs[1].run_id, "cook-rules");
@@ -1743,7 +1892,6 @@ mod tests {
 
     #[test]
     fn fanout_run_plan_rejects_duplicate_child_run_ids() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
         let children = vec![
             FanoutRunBatchChild {
                 task_id: "a".to_string(),
@@ -1763,7 +1911,6 @@ mod tests {
 
     #[test]
     fn fanout_run_plan_rejects_empty_cooks() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
         let error = persist_fanout_run_batch("empty-batch", "empty-batch", &[], Value::Null)
             .expect_err("empty cooks rejected");
 
@@ -1772,30 +1919,36 @@ mod tests {
 
     #[test]
     fn fanout_run_plan_reuses_a_repaired_preflight_roster_without_overwriting_it() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "repair".to_string(),
             run_id: "repair-run".to_string(),
         }];
-        persist_fanout_run_batch("repair-wave", "repair-wave", &children, json!({}))
+        store
+            .persist_fanout_run_batch("repair-wave", "repair-wave", &children, json!({}))
             .expect("persist planning record");
-        let claim_id = claim_fanout_run_batch("repair-wave")
+        let claim_id = store
+            .claim_fanout_run_batch("repair-wave")
             .expect("claim")
             .expect("claim id");
-        record_fanout_run_batch_failure(
-            "repair-wave",
-            &claim_id,
-            "worktree_preflight",
-            json!({ "message": "worktree missing" }),
-        )
-        .expect("record preflight failure");
-        let failed = status("repair-wave").expect("preflight failure remains observable");
+        store
+            .record_fanout_run_batch_failure(
+                "repair-wave",
+                &claim_id,
+                "worktree_preflight",
+                json!({ "message": "worktree missing" }),
+            )
+            .expect("record preflight failure");
+        let failed = store
+            .status("repair-wave")
+            .expect("preflight failure remains observable");
         assert_eq!(failed.batch.state, AgentTaskBatchState::Failed);
         assert_eq!(failed.status, "failed");
         assert_eq!(failed.totals.failed, 1);
         assert!(failed.unavailable_child_runs.is_empty());
 
-        let replay = persist_fanout_run_batch("repair-wave", "repair-wave", &children, json!({}))
+        let replay = store
+            .persist_fanout_run_batch("repair-wave", "repair-wave", &children, json!({}))
             .expect("replay repaired roster");
 
         assert_eq!(replay.state, AgentTaskBatchState::Failed);
@@ -1805,20 +1958,25 @@ mod tests {
 
     #[test]
     fn fanout_run_plan_replay_preserves_an_interrupted_coordinator_state() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "interrupted".to_string(),
             run_id: "interrupted-run".to_string(),
         }];
-        persist_fanout_run_batch("interrupted-wave", "interrupted-wave", &children, json!({}))
+        store
+            .persist_fanout_run_batch("interrupted-wave", "interrupted-wave", &children, json!({}))
             .expect("persist planning record");
-        let mut interrupted = read_batch("interrupted-wave").expect("read planning record");
+        let mut interrupted = store
+            .read_batch("interrupted-wave")
+            .expect("read planning record");
         interrupted.metadata = json!({ "coordinator": { "stage": "admission" } });
-        write_batch(&interrupted).expect("record interruption checkpoint");
+        store
+            .write_batch(&interrupted)
+            .expect("record interruption checkpoint");
 
-        let replay =
-            persist_fanout_run_batch("interrupted-wave", "interrupted-wave", &children, json!({}))
-                .expect("idempotent replay");
+        let replay = store
+            .persist_fanout_run_batch("interrupted-wave", "interrupted-wave", &children, json!({}))
+            .expect("idempotent replay");
 
         assert_eq!(replay.metadata["coordinator"]["stage"], "admission");
         assert_eq!(replay.child_runs[0].run_id, "interrupted-run");
@@ -1826,136 +1984,168 @@ mod tests {
 
     #[test]
     fn fanout_run_plan_allows_only_one_coordinator_claim() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "only".to_string(),
             run_id: "only-run".to_string(),
         }];
-        persist_fanout_run_batch("claimed-wave", "claimed-wave", &children, json!({}))
+        store
+            .persist_fanout_run_batch("claimed-wave", "claimed-wave", &children, json!({}))
             .expect("persist planning record");
 
-        assert!(claim_fanout_run_batch("claimed-wave")
+        assert!(store
+            .claim_fanout_run_batch("claimed-wave")
             .expect("first claim")
             .is_some());
-        assert!(claim_fanout_run_batch("claimed-wave")
+        assert!(store
+            .claim_fanout_run_batch("claimed-wave")
             .expect("second claim is denied")
             .is_none());
         assert_eq!(
-            read_batch("claimed-wave").expect("claimed batch").state,
+            store
+                .read_batch("claimed-wave")
+                .expect("claimed batch")
+                .state,
             AgentTaskBatchState::Admitting
         );
     }
 
     #[test]
     fn fanout_run_plan_recovers_an_abandoned_coordinator_lease() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "lease".to_string(),
             run_id: "lease-run".to_string(),
         }];
-        persist_fanout_run_batch("expired-wave", "expired-wave", &children, json!({}))
+        store
+            .persist_fanout_run_batch("expired-wave", "expired-wave", &children, json!({}))
             .expect("persist planning record");
-        assert!(claim_fanout_run_batch("expired-wave")
+        assert!(store
+            .claim_fanout_run_batch("expired-wave")
             .expect("first claim")
             .is_some());
-        mutate_batch("expired-wave", |batch| {
-            batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
-            Ok(())
-        })
-        .expect("expire lease");
+        store
+            .mutate_batch("expired-wave", |batch| {
+                batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
+                Ok(())
+            })
+            .expect("expire lease");
 
-        assert!(claim_fanout_run_batch("expired-wave")
+        assert!(store
+            .claim_fanout_run_batch("expired-wave")
             .expect("recover abandoned claim")
             .is_some());
         assert_eq!(
-            read_batch("expired-wave").expect("reclaimed batch").state,
+            store
+                .read_batch("expired-wave")
+                .expect("reclaimed batch")
+                .state,
             AgentTaskBatchState::Admitting
         );
     }
 
     #[test]
     fn replacement_claim_rejects_a_stale_owner_failure() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "stale".to_string(),
             run_id: "stale-run".to_string(),
         }];
-        persist_fanout_run_batch("stale-wave", "stale-wave", &children, json!({}))
+        store
+            .persist_fanout_run_batch("stale-wave", "stale-wave", &children, json!({}))
             .expect("persist");
-        let old = claim_fanout_run_batch("stale-wave")
+        let old = store
+            .claim_fanout_run_batch("stale-wave")
             .expect("claim")
             .expect("claim id");
-        mutate_batch("stale-wave", |batch| {
-            batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
-            Ok(())
-        })
-        .expect("expire");
-        let replacement = claim_fanout_run_batch("stale-wave")
+        store
+            .mutate_batch("stale-wave", |batch| {
+                batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
+                Ok(())
+            })
+            .expect("expire");
+        let replacement = store
+            .claim_fanout_run_batch("stale-wave")
             .expect("replacement claim")
             .expect("replacement id");
 
-        assert!(
-            record_fanout_run_batch_failure("stale-wave", &old, "coordinator", json!({})).is_err()
-        );
-        heartbeat_fanout_run_batch("stale-wave", &replacement).expect("replacement heartbeat");
+        assert!(store
+            .record_fanout_run_batch_failure("stale-wave", &old, "coordinator", json!({}))
+            .is_err());
+        store
+            .heartbeat_fanout_run_batch("stale-wave", &replacement)
+            .expect("replacement heartbeat");
     }
 
     #[test]
     fn fresh_owned_heartbeat_prevents_reclaim_after_an_expired_prior_timestamp() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "live".to_string(),
             run_id: "live-run".to_string(),
         }];
-        persist_fanout_run_batch("live-wave", "live-wave", &children, json!({})).expect("persist");
-        let claim_id = claim_fanout_run_batch("live-wave")
+        store
+            .persist_fanout_run_batch("live-wave", "live-wave", &children, json!({}))
+            .expect("persist");
+        let claim_id = store
+            .claim_fanout_run_batch("live-wave")
             .expect("claim")
             .expect("claim id");
         // Simulate a coordinator whose initial lease would have expired, then
         // refresh it as the periodic worker does during a long batch run.
-        mutate_batch("live-wave", |batch| {
-            batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
-            Ok(())
-        })
-        .expect("age heartbeat");
-        heartbeat_fanout_run_batch("live-wave", &claim_id).expect("live heartbeat");
+        store
+            .mutate_batch("live-wave", |batch| {
+                batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
+                Ok(())
+            })
+            .expect("age heartbeat");
+        store
+            .heartbeat_fanout_run_batch("live-wave", &claim_id)
+            .expect("live heartbeat");
 
-        assert!(claim_fanout_run_batch("live-wave")
+        assert!(store
+            .claim_fanout_run_batch("live-wave")
             .expect("claim check")
             .is_none());
     }
 
     #[test]
     fn stale_heartbeat_cannot_change_replacement_owner() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "heartbeat".to_string(),
             run_id: "heartbeat-run".to_string(),
         }];
-        persist_fanout_run_batch("heartbeat-wave", "heartbeat-wave", &children, json!({}))
+        store
+            .persist_fanout_run_batch("heartbeat-wave", "heartbeat-wave", &children, json!({}))
             .expect("persist");
-        let old = claim_fanout_run_batch("heartbeat-wave")
+        let old = store
+            .claim_fanout_run_batch("heartbeat-wave")
             .expect("claim")
             .expect("claim id");
-        mutate_batch("heartbeat-wave", |batch| {
-            batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
-            Ok(())
-        })
-        .expect("expire");
-        let replacement = claim_fanout_run_batch("heartbeat-wave")
+        store
+            .mutate_batch("heartbeat-wave", |batch| {
+                batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
+                Ok(())
+            })
+            .expect("expire");
+        let replacement = store
+            .claim_fanout_run_batch("heartbeat-wave")
             .expect("replacement")
             .expect("replacement id");
 
-        assert!(heartbeat_fanout_run_batch("heartbeat-wave", &old).is_err());
+        assert!(store
+            .heartbeat_fanout_run_batch("heartbeat-wave", &old)
+            .is_err());
         assert_eq!(
-            read_batch("heartbeat-wave").expect("batch").metadata["coordinator"]["claim_id"],
+            store.read_batch("heartbeat-wave").expect("batch").metadata["coordinator"]["claim_id"],
             json!(replacement)
         );
     }
 
     #[test]
     fn concurrent_child_finalizations_preserve_both_receipts() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
+        let (_temp, store) = batch_store();
         let children = vec![
             FanoutRunBatchChild {
                 task_id: "a".to_string(),
@@ -1966,14 +2156,15 @@ mod tests {
                 run_id: "b-run".to_string(),
             },
         ];
-        persist_fanout_run_batch("finalize-wave", "finalize-wave", &children, json!({}))
+        store
+            .persist_fanout_run_batch("finalize-wave", "finalize-wave", &children, json!({}))
             .expect("persist planning record");
         std::thread::scope(|scope| {
             let first = scope.spawn(|| {
-                record_child_finalization("finalize-wave", "a-run", json!({ "attempt": 1 }))
+                store.record_child_finalization("finalize-wave", "a-run", json!({ "attempt": 1 }))
             });
             let second = scope.spawn(|| {
-                record_child_finalization("finalize-wave", "b-run", json!({ "attempt": 1 }))
+                store.record_child_finalization("finalize-wave", "b-run", json!({ "attempt": 1 }))
             });
             first
                 .join()
@@ -1984,7 +2175,7 @@ mod tests {
                 .expect("second finalization thread")
                 .expect("second finalization");
         });
-        let batch = read_batch("finalize-wave").expect("batch record");
+        let batch = store.read_batch("finalize-wave").expect("batch record");
         let finalizations = batch.metadata["child_finalizations"]
             .as_object()
             .expect("finalizations");
