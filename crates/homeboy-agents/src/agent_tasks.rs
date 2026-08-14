@@ -242,8 +242,8 @@ pub mod dispatch_service {
     };
     pub use super::super::agent_task_dispatch_service::{
         build_controller_dispatch_plan, controller_resolved_execution_policy, dispatch,
-        dispatch_with_provider_requirements, resolve_dispatch_request,
-        resolve_dispatch_request_with_default, run_dispatch_command,
+        dispatch_with_provider_requirements, resolve_cook_initial_provider_route,
+        resolve_dispatch_request, resolve_dispatch_request_with_default, run_dispatch_command,
         run_dispatch_command_with_provider_catalog, AgentTaskDispatchCommand,
         AgentTaskDispatchReport, AgentTaskDispatchRequest, DispatchCoreInputs,
         DISPATCH_RESULT_SCHEMA,

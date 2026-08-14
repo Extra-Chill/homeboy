@@ -2,6 +2,7 @@ use clap::Args;
 use serde_json::Value;
 
 use homeboy::agents::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
+use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
 use homeboy::agents::agent_tasks::finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
     AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
@@ -1117,6 +1118,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             0,
         ));
     }
+    let route = resolve_provider_route(&args, all_providers);
     let validated_provider = if args.validate_readiness {
         // Fall back to the configured default backend the same way Cook selection
         // does, so readiness validation does not demand a flag that policy already
@@ -1175,6 +1177,17 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
         })
         .cloned()
         .collect::<Vec<_>>();
+    let mut filtered_providers = filtered_providers;
+    if let Some(ProviderRoute::Resolved {
+        provider_id,
+        dispatchable,
+        ..
+    }) = route.as_ref()
+    {
+        for provider in &mut filtered_providers {
+            provider.default_backend = provider.id == *provider_id && *dispatchable;
+        }
+    }
     let providers: &[AgentTaskExecutorProvider] = &filtered_providers;
     let validated_provider_identity = validated_provider.as_ref();
     let validated_provider = validated_provider_identity.and_then(|(_, provider_id)| {
@@ -1233,9 +1246,9 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             },
             "operator_summary": {
                 "identity": "agent-task providers",
-                "state": if providers.is_empty() { "empty" } else { "available" },
+                "state": route.as_ref().map(ProviderRoute::state).unwrap_or(if providers.is_empty() { "empty" } else { "available" }),
                 "risk": if diagnostics.is_empty() { Vec::new() } else { vec![format!("{} discovery diagnostic(s)", diagnostics.len())] },
-                "next_action": full_command.clone(),
+                "next_action": route.as_ref().map(ProviderRoute::next_command).unwrap_or(full_command.clone()),
             },
             "truncation": {
                 "providers": { "shown": shown_providers.len(), "omitted": providers.len().saturating_sub(shown_providers.len()), "evidence_ref": "agent-task:provider-catalog", "full_command": full_command.clone() },
@@ -1252,6 +1265,8 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             "readiness_validation": readiness_validation_projection(
                 validated_provider_identity,
                 validated_provider,
+                route.as_ref(),
+                args.validate_readiness,
             ),
             "diagnostics": shown_diagnostics,
             "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
@@ -1329,7 +1344,125 @@ fn compact_provider(provider: &AgentTaskExecutorProvider) -> Value {
     })
 }
 
-fn live_dispatch_readiness(provider: Option<&AgentTaskExecutorProvider>) -> &'static str {
+#[derive(Debug, Clone)]
+enum ProviderRoute {
+    Resolved {
+        backend: String,
+        provider_id: String,
+        model: Option<String>,
+        dispatchable: bool,
+    },
+    Blocked {
+        reason: String,
+        next_command: String,
+    },
+    Ambiguous {
+        backend: String,
+        candidate_ids: Vec<String>,
+    },
+}
+
+impl ProviderRoute {
+    fn resolved(&self) -> Option<&Self> {
+        matches!(self, Self::Resolved { .. }).then_some(self)
+    }
+
+    fn state(&self) -> &'static str {
+        match self {
+            Self::Resolved {
+                dispatchable: true, ..
+            } => "ready",
+            Self::Resolved {
+                dispatchable: false,
+                ..
+            }
+            | Self::Blocked { .. } => "blocked",
+            Self::Ambiguous { .. } => "configuration_ambiguous",
+        }
+    }
+
+    fn next_command(&self) -> String {
+        match self {
+            Self::Resolved {
+                backend,
+                provider_id,
+                ..
+            } => format!(
+                "homeboy agent-task providers --backend {} --selector {} --validate-readiness",
+                shell_arg(backend),
+                shell_arg(provider_id),
+            ),
+            Self::Blocked { next_command, .. } => next_command.clone(),
+            Self::Ambiguous {
+                backend,
+                candidate_ids,
+            } => format!(
+                "homeboy agent-task providers --backend {} --selector {} --validate-readiness",
+                shell_arg(backend),
+                shell_arg(
+                    candidate_ids
+                        .first()
+                        .expect("ambiguous routes have candidates")
+                ),
+            ),
+        }
+    }
+}
+
+fn resolve_provider_route(
+    args: &ProvidersArgs,
+    providers: &[AgentTaskExecutorProvider],
+) -> Option<ProviderRoute> {
+    let command = agent_task_dispatch_service::AgentTaskDispatchCommand {
+        backend: args.backend.clone(),
+        selector: args.selector.clone(),
+        ..Default::default()
+    };
+    let route = match agent_task_dispatch_service::resolve_cook_initial_provider_route(command) {
+        Ok(route) => route,
+        Err(error) => {
+            return Some(ProviderRoute::Blocked {
+                reason: error.message,
+                next_command: "homeboy agent-task providers --catalog".to_string(),
+            });
+        }
+    };
+    match resolve_provider_for_backend(providers, &route.backend, route.selector.as_deref()) {
+        ProviderResolution::Resolved(provider) => Some(ProviderRoute::Resolved {
+            backend: route.backend,
+            provider_id: provider.id.clone(),
+            model: route.model,
+            dispatchable: provider_credential_readiness(provider).dispatchable,
+        }),
+        ProviderResolution::AmbiguousExtensionAlias { mut candidate_ids } => {
+            candidate_ids.sort();
+            Some(ProviderRoute::Ambiguous {
+                backend: route.backend,
+                candidate_ids,
+            })
+        }
+        ProviderResolution::NotFound | ProviderResolution::SelectorMismatch { .. } => {
+            Some(ProviderRoute::Blocked {
+                reason: format!(
+                    "Cook resolved backend `{}` but no provider matches its selector",
+                    route.backend
+                ),
+                next_command: format!(
+                    "homeboy agent-task providers --backend {} --full",
+                    shell_arg(&route.backend)
+                ),
+            })
+        }
+    }
+}
+
+fn live_dispatch_readiness(
+    provider: Option<&AgentTaskExecutorProvider>,
+    validation_requested: bool,
+) -> &'static str {
+    if !validation_requested {
+        return "not_requested";
+    }
     provider
         .filter(|provider| provider.readiness_invocation.is_some())
         .map(|_| "validated")
@@ -1339,15 +1472,35 @@ fn live_dispatch_readiness(provider: Option<&AgentTaskExecutorProvider>) -> &'st
 fn readiness_validation_projection(
     identity: Option<&(String, String)>,
     provider: Option<&AgentTaskExecutorProvider>,
+    route: Option<&ProviderRoute>,
+    validation_requested: bool,
 ) -> Value {
+    let resolved = route.and_then(ProviderRoute::resolved);
+    let (effective_backend, effective_provider_id, effective_model) = match resolved {
+        Some(ProviderRoute::Resolved {
+            backend,
+            provider_id,
+            model,
+            ..
+        }) => (Some(backend), Some(provider_id), model.as_ref()),
+        _ => (
+            identity.map(|(backend, _)| backend),
+            identity.map(|(_, provider_id)| provider_id),
+            None,
+        ),
+    };
     serde_json::json!({
-        "validated": identity.is_some(),
-        "effective_backend": identity.map(|(backend, _)| backend),
-        "effective_provider_id": identity.map(|(_, provider_id)| provider_id),
+        "validated": validation_requested && identity.is_some(),
+        "effective_backend": effective_backend,
+        "effective_provider_id": effective_provider_id,
+        "effective_model": effective_model,
         // Catalog discovery proves static configuration only. A live dispatch
         // probe is opt-in because providers own its request.
         "static_configuration": "declared",
-        "live_dispatch": live_dispatch_readiness(provider),
+        "live_dispatch": live_dispatch_readiness(provider, validation_requested),
+        "route_state": route.map(ProviderRoute::state),
+        "next_command": route.map(ProviderRoute::next_command),
+        "reason": match route { Some(ProviderRoute::Blocked { reason, .. }) => Some(reason), _ => None },
     })
 }
 
@@ -2106,11 +2259,15 @@ mod tests {
         }))
         .expect("unprobed provider");
 
-        assert_eq!(live_dispatch_readiness(Some(&probed)), "validated");
-        assert_eq!(live_dispatch_readiness(Some(&unprobed)), "unverified");
-        assert_eq!(live_dispatch_readiness(None), "unverified");
+        assert_eq!(live_dispatch_readiness(Some(&probed), true), "validated");
+        assert_eq!(live_dispatch_readiness(Some(&unprobed), true), "unverified");
+        assert_eq!(live_dispatch_readiness(None, true), "unverified");
+        assert_eq!(
+            live_dispatch_readiness(Some(&probed), false),
+            "not_requested"
+        );
         probed.readiness_invocation = None;
-        assert_eq!(live_dispatch_readiness(Some(&probed)), "unverified");
+        assert_eq!(live_dispatch_readiness(Some(&probed), true), "unverified");
     }
 
     #[test]
@@ -2125,7 +2282,8 @@ mod tests {
             "resolved.provider".to_string(),
         );
 
-        let projection = readiness_validation_projection(Some(&identity), Some(&provider));
+        let projection =
+            readiness_validation_projection(Some(&identity), Some(&provider), None, true);
 
         assert_eq!(projection["effective_backend"], "resolved-backend");
         assert_eq!(projection["effective_provider_id"], "resolved.provider");
