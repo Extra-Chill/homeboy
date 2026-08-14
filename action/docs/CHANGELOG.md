@@ -2,6 +2,13 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.12.1] - 2026-08-14
+
+### Changed
+- Gate releases on reusable workflow consumer
+- Preserve plain phase liveness
+- Bound CI phase annotations
+
 ## [2.12.0] - 2026-08-14
 
 ### Added
