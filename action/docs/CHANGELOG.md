@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.12.2] - 2026-08-14
+
+### Changed
+- Update timeout consumer contract
+- Publish self-contained timeout triage
+
 ## [2.12.1] - 2026-08-14
 
 ### Changed
