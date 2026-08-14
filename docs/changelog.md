@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.347.1] - 2026-08-14
+
+### Changed
+- remove ambient home isolation
+- parallelize ref materialization
+
+### Fixed
+- let the inventory profile own which runners are legal
+- bound health probes
+- bound provider commands
+- keep explicit cwd authoritative
+
 ## [0.347.0] - 2026-08-14
 
 ### Changed
