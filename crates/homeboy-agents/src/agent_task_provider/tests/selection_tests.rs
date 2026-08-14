@@ -526,8 +526,17 @@ fn provider_manifest_parses_runner_and_dependency_contracts() {
     );
 }
 
+fn extension_policy(id: &str, backend: &str) -> extension::ExtensionManifest {
+    serde_json::from_value(json!({
+        "name": id,
+        "version": "1.0.0",
+        "agent_task": { "default_backend": backend }
+    }))
+    .expect("extension manifest")
+}
+
 #[test]
-fn default_backend_ignores_provider_declaration() {
+fn provider_declarations_do_not_select_default_backend() {
     let (_request, mut provider_a) = request("task-a", "node provider-a.js".to_string());
     provider_a.backend = "first".to_string();
     let (_request, mut provider_b) = request("task-b", "node provider-b.js".to_string());
@@ -536,81 +545,61 @@ fn default_backend_ignores_provider_declaration() {
 
     let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
 
-    homeboy_core::test_support::with_isolated_home(|_| {
-        assert_eq!(executor.default_backend().unwrap(), None);
-    });
+    assert_eq!(
+        executor
+            .default_backend_with_policy(Vec::new(), &defaults::HomeboyConfig::default())
+            .unwrap(),
+        None
+    );
 }
 
 #[test]
 fn default_backend_uses_global_config_policy() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        defaults::save_config(&defaults::HomeboyConfig {
-            agent_task: defaults::AgentTaskConfig {
-                default_backend: Some("configured".to_string()),
-                ..defaults::AgentTaskConfig::default()
-            },
-            ..defaults::HomeboyConfig::default()
-        })
-        .expect("config saved");
+    let config = defaults::HomeboyConfig {
+        agent_task: defaults::AgentTaskConfig {
+            default_backend: Some("configured".to_string()),
+            ..defaults::AgentTaskConfig::default()
+        },
+        ..defaults::HomeboyConfig::default()
+    };
 
-        assert_eq!(default_backend().unwrap().as_deref(), Some("configured"));
-    });
+    assert_eq!(
+        default_backend_from_policy_sources(None, Vec::new(), || {
+            config.agent_task.default_backend.clone()
+        })
+        .unwrap()
+        .as_deref(),
+        Some("configured")
+    );
 }
 
 #[test]
 fn default_backend_uses_extension_policy() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        defaults::save_config(&defaults::HomeboyConfig {
-            agent_task: defaults::AgentTaskConfig {
-                default_backend: Some("global-policy".to_string()),
-                ..defaults::AgentTaskConfig::default()
-            },
-            ..defaults::HomeboyConfig::default()
-        })
-        .expect("config saved");
-        let extension_dir = home
-            .path()
-            .join(".config/homeboy/extensions/runtime-extension");
-        std::fs::create_dir_all(&extension_dir).expect("extension dir");
-        std::fs::write(
-            extension_dir.join("runtime-extension.json"),
-            json!({
-                "name": "Runtime Extension",
-                "version": "1.0.0",
-                "agent_task": { "default_backend": "extension-policy" }
-            })
-            .to_string(),
+    assert_eq!(
+        default_backend_from_policy_sources(
+            None,
+            vec![extension_policy("Runtime Extension", "extension-policy")],
+            || panic!("global config should remain lazy"),
         )
-        .expect("extension manifest");
-
-        assert_eq!(
-            default_backend().unwrap().as_deref(),
-            Some("extension-policy")
-        );
-    });
+        .unwrap()
+        .as_deref(),
+        Some("extension-policy")
+    );
 }
 
 #[test]
 fn default_backend_rejects_ambiguous_extension_policy() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        for (id, backend) in [("runtime-a", "backend-a"), ("runtime-b", "backend-b")] {
-            let extension_dir = home.path().join(format!(".config/homeboy/extensions/{id}"));
-            std::fs::create_dir_all(&extension_dir).expect("extension dir");
-            std::fs::write(
-                extension_dir.join(format!("{id}.json")),
-                json!({
-                    "name": id,
-                    "version": "1.0.0",
-                    "agent_task": { "default_backend": backend }
-                })
-                .to_string(),
-            )
-            .expect("extension manifest");
-        }
+    let error = default_backend_from_policy_sources(
+        None,
+        vec![
+            extension_policy("runtime-a", "backend-a"),
+            extension_policy("runtime-b", "backend-b"),
+        ],
+        || None,
+    )
+    .expect_err("ambiguous policy should fail");
 
-        let error = default_backend().expect_err("ambiguous policy should fail");
-        assert!(error.message.contains("ambiguous"));
-    });
+    assert!(error.message.contains("ambiguous"));
 }
 
 #[test]
@@ -636,51 +625,6 @@ fn default_backend_reads_component_scoped_extension_policy() {
         component_default_backend(&component).as_deref(),
         Some("component-policy")
     );
-}
-
-#[test]
-fn default_backend_ignores_provider_manifest_default_backend() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let runtime_dir = home
-            .path()
-            .join(".config/homeboy/agent-runtimes/standalone-runtime");
-        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
-        std::fs::write(
-            runtime_dir.join("standalone-runtime.json"),
-            json!({
-                "schema": agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
-                "id": "standalone-runtime",
-                "agent_task_executors": [{
-                    "schema": "homeboy/agent-task-executor-provider/v1",
-                    "id": "runtime.provider",
-                    "backend": "runtime-default",
-                    "default_backend": true,
-                    "invocation": { "argv": ["runtime-provider"] },
-                    "request_schema": AGENT_TASK_REQUEST_SCHEMA,
-                    "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
-                }]
-            })
-            .to_string(),
-        )
-        .expect("runtime manifest");
-
-        assert_eq!(default_backend().unwrap(), None);
-    });
-}
-
-#[test]
-fn default_backend_is_absent_without_provider_declaration() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let (_request, mut provider_a) = request("task-a", "node provider-a.js".to_string());
-        provider_a.backend = "first".to_string();
-        let (_request, mut provider_b) = request("task-b", "node provider-b.js".to_string());
-        provider_b.backend = "second".to_string();
-
-        let executor =
-            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
-
-        assert_eq!(executor.default_backend().unwrap(), None);
-    });
 }
 
 #[test]

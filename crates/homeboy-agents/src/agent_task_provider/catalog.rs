@@ -252,6 +252,17 @@ impl ExtensionProviderAgentTaskExecutor {
         default_backend_from_policy(None)
     }
 
+    #[cfg(test)]
+    pub(super) fn default_backend_with_policy(
+        &self,
+        extensions: Vec<extension::ExtensionManifest>,
+        config: &defaults::HomeboyConfig,
+    ) -> homeboy_core::Result<Option<String>> {
+        default_backend_from_policy_sources(None, extensions, || {
+            config.agent_task.default_backend.clone()
+        })
+    }
+
     pub fn required_extension_ids_for_plan(&self, plan: &AgentTaskPlan) -> Vec<String> {
         required_extension_ids_for_plan_with_providers(plan, &self.providers)
     }
@@ -618,16 +629,29 @@ pub fn provider_secret_sources_for_backend(
 }
 
 fn default_backend_from_policy(component_id: Option<&str>) -> homeboy_core::Result<Option<String>> {
-    if let Some(component_id) = component_id {
-        if let Ok(component) = component::load(component_id) {
-            if let Some(default_backend) = component_default_backend(&component) {
-                return Ok(Some(default_backend));
-            }
+    let component = component_id.and_then(|id| component::load(id).ok());
+    default_backend_from_policy_sources(
+        component.as_ref(),
+        extension::load_all_extensions().unwrap_or_default(),
+        || defaults::load_config().agent_task.default_backend,
+    )
+}
+
+pub(super) fn default_backend_from_policy_sources<F>(
+    component: Option<&component::Component>,
+    extensions: Vec<extension::ExtensionManifest>,
+    config_default: F,
+) -> homeboy_core::Result<Option<String>>
+where
+    F: FnOnce() -> Option<String>,
+{
+    if let Some(component) = component {
+        if let Some(default_backend) = component_default_backend(component) {
+            return Ok(Some(default_backend));
         }
     }
 
-    let extension_defaults: Vec<String> = extension::load_all_extensions()
-        .unwrap_or_default()
+    let extension_defaults: Vec<String> = extensions
         .into_iter()
         .filter_map(|manifest| {
             manifest
@@ -651,10 +675,7 @@ fn default_backend_from_policy(component_id: Option<&str>) -> homeboy_core::Resu
         return Ok(Some(default_backend));
     }
 
-    Ok(defaults::load_config()
-        .agent_task
-        .default_backend
-        .filter(|backend| !backend.trim().is_empty()))
+    Ok(config_default().filter(|backend| !backend.trim().is_empty()))
 }
 
 pub(super) fn component_default_backend(component: &component::Component) -> Option<String> {
