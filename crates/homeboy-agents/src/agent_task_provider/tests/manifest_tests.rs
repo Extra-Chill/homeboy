@@ -121,55 +121,49 @@ fn provider_manifest_defaults_executable_readiness_env_when_omitted() {
 }
 
 #[test]
-fn default_provider_catalog_reads_codex_invocation_argv() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let runtime_dir = home.path().join(".config/homeboy/agent-runtimes/codex");
-        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
-        std::fs::write(
-            runtime_dir.join("codex.json"),
-            json!({
-                "schema": homeboy_core::agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
-                "id": "codex",
-                "agent_task_executors": [{
-                    "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
-                    "id": "codex.agent-task-executor",
-                    "backend": "codex",
-                    "invocation": {
-                        "schema": homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA,
-                        "argv": ["codex-agent-task-executor", "--json"]
-                    }
-                }]
-            })
-            .to_string(),
-        )
-        .expect("runtime manifest");
+fn runtime_manifest_normalizes_codex_invocation_argv() {
+    let runtime_dir = "/runtime/codex";
+    let runtime: agent_runtime_manifest::AgentRuntimeManifest = serde_json::from_value(json!({
+        "schema": homeboy_core::agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
+        "id": "codex",
+        "runtime_path": runtime_dir,
+        "agent_task_executors": [{
+            "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+            "id": "codex.agent-task-executor",
+            "backend": "codex",
+            "invocation": {
+                "schema": homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA,
+                "argv": ["codex-agent-task-executor", "--json"]
+            }
+        }]
+    }))
+    .expect("runtime manifest");
+    let provider = discovery::agent_task_executor_providers_from_runtime_manifests(
+        vec![runtime],
+        &mut Vec::new(),
+    )
+    .into_iter()
+    .next()
+    .expect("codex provider discovered");
 
-        let catalog = AgentTaskProviderCatalog::discover();
-        let provider = catalog
-            .providers()
-            .iter()
-            .find(|provider| provider.id == "codex.agent-task-executor")
-            .expect("codex provider discovered");
+    assert!(provider.command.is_empty());
+    assert!(provider.command_argv.is_empty());
+    assert_eq!(
+        provider.invocation.schema.as_deref(),
+        Some(homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA)
+    );
+    assert_eq!(
+        provider.invocation.argv,
+        vec![
+            "codex-agent-task-executor".to_string(),
+            "--json".to_string()
+        ]
+    );
 
-        assert!(provider.command.is_empty());
-        assert!(provider.command_argv.is_empty());
-        assert_eq!(
-            provider.invocation.schema.as_deref(),
-            Some(homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA)
-        );
-        assert_eq!(
-            provider.invocation.argv,
-            vec![
-                "codex-agent-task-executor".to_string(),
-                "--json".to_string()
-            ]
-        );
-
-        let (program, args, cwd) = provider_command_parts(provider).expect("command parts");
-        assert_eq!(program, "codex-agent-task-executor");
-        assert_eq!(args, vec!["--json"]);
-        assert_eq!(cwd, None);
-    });
+    let (program, args, cwd) = provider_command_parts(&provider).expect("command parts");
+    assert_eq!(program, "codex-agent-task-executor");
+    assert_eq!(args, vec!["--json"]);
+    assert_eq!(cwd, None);
 }
 
 #[test]
