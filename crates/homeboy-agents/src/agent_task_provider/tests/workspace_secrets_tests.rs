@@ -24,55 +24,49 @@ fn provider_workspace_materialization_declares_cwd_git_checkout_requirement() {
 
 #[test]
 fn provider_default_secret_sources_resolve_required_env_without_duplicate_mapping() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let auth_path = temp.path().join("provider-auth.json");
-        fs::write(
-            &auth_path,
-            json!({
-                "tokens": {
-                    "access_token": "provider-owned-access-token",
-                    "refresh_token": "provider-owned-refresh-token"
+    let temp = tempfile::tempdir().expect("tempdir");
+    let auth_path = temp.path().join("provider-auth.json");
+    fs::write(
+        &auth_path,
+        json!({
+            "tokens": {
+                "access_token": "provider-owned-access-token",
+                "refresh_token": "provider-owned-refresh-token"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write auth");
+    let access = format!("HOMEBOY_TEST_ACCESS_{}", uuid::Uuid::new_v4());
+    let refresh = format!("HOMEBOY_TEST_REFRESH_{}", uuid::Uuid::new_v4());
+    let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
+    request.executor.config = json!({ "provider": "example-oauth" });
+    request.executor.secret_env = vec![access.clone(), refresh.clone()];
+    provider.provider_defaults.insert(
+        "example-oauth".to_string(),
+        json!({
+            "secret_env": request.executor.secret_env,
+            "secret_env_sources": {
+                access.clone(): {
+                    "source": "json-file",
+                    "path": auth_path,
+                    "field": "tokens.access_token"
+                },
+                refresh: {
+                    "source": "json-file",
+                    "path": auth_path,
+                    "field": "tokens.refresh_token"
                 }
-            })
-            .to_string(),
-        )
-        .expect("write auth");
-        let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
-        request.executor.config = json!({ "provider": "example-oauth" });
-        request.executor.secret_env = vec![
-            "EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string(),
-            "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
-        ];
-        provider.provider_defaults.insert(
-            "example-oauth".to_string(),
-            json!({
-                "secret_env": request.executor.secret_env,
-                "secret_env_sources": {
-                    "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
-                        "source": "json-file",
-                        "path": auth_path,
-                        "field": "tokens.access_token"
-                    },
-                    "EXAMPLE_PROVIDER_REFRESH_TOKEN": {
-                        "source": "json-file",
-                        "path": auth_path,
-                        "field": "tokens.refresh_token"
-                    }
-                }
-            }),
-        );
+            }
+        }),
+    );
 
-        let env = provider_command_env(&request, &provider).expect("provider env resolves");
+    let env = provider_command_env(&request, &provider).expect("provider env resolves");
 
-        assert!(env.contains(&(
-            "EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string(),
-            "provider-owned-access-token".to_string()
-        )));
-        let rendered = serde_json::to_string(&provider_secret_sources(&provider, Some(&request)))
-            .expect("sources json");
-        assert!(!rendered.contains("provider-owned-access-token"));
-    });
+    assert!(env.contains(&(access, "provider-owned-access-token".to_string())));
+    let rendered = serde_json::to_string(&provider_secret_sources(&provider, Some(&request)))
+        .expect("sources json");
+    assert!(!rendered.contains("provider-owned-access-token"));
 }
 
 #[test]
@@ -107,109 +101,93 @@ fn provider_secret_sources_for_providers_include_default_json_sources() {
 
 #[test]
 fn provider_default_secret_sources_accept_nested_json_sources() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let auth_path = temp.path().join("provider-auth.json");
-        fs::write(
-            &auth_path,
-            json!({
-                "provider": {
-                    "access": "provider-access-token",
-                    "refresh": "provider-refresh-token",
-                    "expires": 12345
+    let temp = tempfile::tempdir().expect("tempdir");
+    let auth_path = temp.path().join("provider-auth.json");
+    fs::write(
+        &auth_path,
+        json!({
+            "provider": {
+                "access": "provider-access-token",
+                "refresh": "provider-refresh-token",
+                "expires": 12345
+            }
+        })
+        .to_string(),
+    )
+    .expect("write auth");
+    let auth_path = auth_path.to_string_lossy().to_string();
+    let access = format!("HOMEBOY_TEST_ACCESS_{}", uuid::Uuid::new_v4());
+    let refresh = format!("HOMEBOY_TEST_REFRESH_{}", uuid::Uuid::new_v4());
+    let expires = format!("HOMEBOY_TEST_EXPIRES_{}", uuid::Uuid::new_v4());
+    let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
+    request.executor.config = json!({ "provider": "example-oauth" });
+    request.executor.secret_env = vec![access.clone(), refresh.clone(), expires.clone()];
+    provider.provider_defaults.insert(
+        "example-oauth".to_string(),
+        json!({
+            "secret_env": request.executor.secret_env,
+            "secret_env_sources": {
+                access: {
+                    "source": "json-file",
+                    "path": auth_path.clone(),
+                    "field": "provider.access"
+                },
+                refresh.clone(): {
+                    "source": "json-file",
+                    "path": auth_path.clone(),
+                    "field": "provider.refresh"
+                },
+                expires.clone(): {
+                    "source": "json-file",
+                    "path": auth_path.clone(),
+                    "field": "provider.expires"
                 }
-            })
-            .to_string(),
-        )
-        .expect("write auth");
-        let auth_path = auth_path.to_string_lossy().to_string();
-        let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
-        request.executor.config = json!({ "provider": "example-oauth" });
-        request.executor.secret_env = vec![
-            "EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string(),
-            "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
-            "EXAMPLE_PROVIDER_EXPIRES_AT".to_string(),
-        ];
-        provider.provider_defaults.insert(
-            "example-oauth".to_string(),
-            json!({
-                "secret_env": [
-                    "EXAMPLE_PROVIDER_ACCESS_TOKEN",
-                    "EXAMPLE_PROVIDER_REFRESH_TOKEN",
-                    "EXAMPLE_PROVIDER_EXPIRES_AT"
-                ],
-                "secret_env_sources": {
-                    "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
-                        "source": "json-file",
-                        "path": auth_path.clone(),
-                        "field": "provider.access"
-                    },
-                    "EXAMPLE_PROVIDER_REFRESH_TOKEN": {
-                        "source": "json-file",
-                        "path": auth_path.clone(),
-                        "field": "provider.refresh"
-                    },
-                    "EXAMPLE_PROVIDER_EXPIRES_AT": {
-                        "source": "json-file",
-                        "path": auth_path.clone(),
-                        "field": "provider.expires"
-                    }
-                }
-            }),
-        );
+            }
+        }),
+    );
 
-        let env = provider_command_env(&request, &provider).expect("provider env resolves");
+    let env = provider_command_env(&request, &provider).expect("provider env resolves");
 
-        assert!(env.contains(&(
-            "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
-            "provider-refresh-token".to_string()
-        )));
-        assert!(env.contains(&(
-            "EXAMPLE_PROVIDER_EXPIRES_AT".to_string(),
-            "12345".to_string()
-        )));
-    });
+    assert!(env.contains(&(refresh, "provider-refresh-token".to_string())));
+    assert!(env.contains(&(expires, "12345".to_string())));
 }
 
 #[test]
 fn provider_default_secret_sources_feed_secret_readiness_status() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let auth_path = temp.path().join("provider-auth.json");
-        fs::write(
-            &auth_path,
-            json!({
-                "tokens": {
-                    "access_token": "provider-owned-access-token"
+    let temp = tempfile::tempdir().expect("tempdir");
+    let auth_path = temp.path().join("provider-auth.json");
+    fs::write(
+        &auth_path,
+        json!({
+            "tokens": {
+                "access_token": "provider-owned-access-token"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write auth");
+    let access = format!("HOMEBOY_TEST_ACCESS_{}", uuid::Uuid::new_v4());
+    let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+    provider.provider_defaults.insert(
+        "example-oauth".to_string(),
+        json!({
+            "secret_env_sources": {
+                access.clone(): {
+                    "source": "json-file",
+                    "path": auth_path,
+                    "field": "tokens.access_token"
                 }
-            })
-            .to_string(),
-        )
-        .expect("write auth");
-        let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
-        provider.provider_defaults.insert(
-            "example-oauth".to_string(),
-            json!({
-                "secret_env_sources": {
-                    "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
-                        "source": "json-file",
-                        "path": auth_path,
-                        "field": "tokens.access_token"
-                    }
-                }
-            }),
-        );
-        let fallback_sources = provider_secret_sources_for_providers(&[provider]);
+            }
+        }),
+    );
+    let fallback_sources = provider_secret_sources_for_providers(&[provider]);
 
-        let status = crate::agent_task_secrets::secret_env_status_with_fallbacks(
-            &["EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string()],
-            &fallback_sources,
-        );
+    let status =
+        crate::agent_task_secrets::secret_env_status_with_fallbacks(&[access], &fallback_sources);
 
-        assert_eq!(status.len(), 1);
-        assert!(status[0].configured);
-        assert_eq!(status[0].source, "json-file");
-    });
+    assert_eq!(status.len(), 1);
+    assert!(status[0].configured);
+    assert_eq!(status[0].source, "json-file");
 }
 
 #[test]
