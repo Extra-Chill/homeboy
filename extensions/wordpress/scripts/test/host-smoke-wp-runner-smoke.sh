@@ -188,6 +188,11 @@ FAKE_CODEBOX_HANG="${TMPDIR}/fake-wp-codebox-hang.cjs"
 cat > "$FAKE_CODEBOX_HANG" <<'JS'
 #!/usr/bin/env node
 'use strict';
+const fs = require('fs');
+const { spawn } = require('child_process');
+const descendant = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1e9);'], { stdio: 'inherit' });
+fs.writeFileSync(process.env.FIXTURE_PIDS_PATH, JSON.stringify({ descendant: descendant.pid }));
+process.on('SIGTERM', () => process.exit(0));
 setTimeout(() => {}, 10000);
 JS
 
@@ -198,6 +203,7 @@ HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX_HANG" \
 HOMEBOY_WORDPRESS_HOST_SMOKE_TIMEOUT_SECONDS=1 \
 HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="tests/alpha-smoke.php" \
+FIXTURE_PIDS_PATH="${TMPDIR}/host-timeout-pids.json" \
 FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/direct-timeout.out" 2>&1
 timeout_exit=$?
@@ -210,6 +216,21 @@ fi
 assert_contains "${TMPDIR}/direct-timeout.out" "HOST_SMOKE_TIMEOUT:tests/alpha-smoke.php:phase=wp-codebox-recipe-run"
 assert_contains "${TMPDIR}/direct-timeout.out" "HOST_SMOKE_FAIL:tests/alpha-smoke.php:exit=124"
 assert_contains "${TMPDIR}/direct-timeout.out" "artifacts="
+assert_contains "${TMPDIR}/direct-timeout.out" '"schema":"homeboy/wp-codebox-timeout-diagnostics/v1"'
+assert_contains "${TMPDIR}/direct-timeout.out" '"phase":"wp-codebox-recipe-run"'
+assert_contains "${TMPDIR}/direct-timeout.out" '"selected":{"count":1,"items":["tests/alpha-smoke.php"]}'
+assert_contains "${TMPDIR}/direct-timeout.out" '"termination":{"result":"timeout"'
+host_descendant_pid="$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).descendant))' "${TMPDIR}/host-timeout-pids.json")"
+for _ in $(seq 1 200); do
+    if ! kill -0 "$host_descendant_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.025
+done
+if kill -0 "$host_descendant_pid" 2>/dev/null; then
+    echo "Expected timeout descendant ${host_descendant_pid} to be reaped" >&2
+    exit 1
+fi
 
 # --- Routing: the dispatcher routes *-smoke.php to this real-WP smoke backend
 # purely by file type (no test_backend toggle). A --file smoke run goes straight
