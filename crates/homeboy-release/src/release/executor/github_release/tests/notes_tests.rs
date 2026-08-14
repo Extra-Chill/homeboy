@@ -3,6 +3,7 @@
 use crate::release::types::ReleaseState;
 
 use super::super::gh_cli::GhCommandOutput;
+use super::super::notes::build_github_release_body;
 use super::super::{
     component_scoped_release_entries, create_failed_result, fallback_release_notes,
     AssociatedPullRequest, AssociatedPullRequestAuthor, GitHubReleaseBody,
@@ -172,14 +173,39 @@ fn release_body_source_label_distinguishes_generated_from_fallback() {
         body: "x".to_string(),
         generated_notes_ok: true,
         changelog_url: None,
+        source: "generated-notes".to_string(),
     };
     let fallback = GitHubReleaseBody {
         body: "x".to_string(),
         generated_notes_ok: false,
         changelog_url: None,
+        source: "changelog-fallback".to_string(),
     };
     assert_eq!(generated.source_label(), "generated-notes");
     assert_eq!(fallback.source_label(), "changelog-fallback");
+}
+
+#[test]
+fn exact_recovered_release_body_is_preferred_byte_for_byte() {
+    let state = ReleaseState {
+        exact_release_notes: Some(crate::release::types::ExactReleaseNotes {
+            body: "exact\nrelease\nbody\n".to_string(),
+            source: "artifact-source-authority".to_string(),
+        }),
+        ..Default::default()
+    };
+
+    let body = build_github_release_body(
+        &homeboy_core::component::Component::default(),
+        &test_repo(),
+        "v0.10.6",
+        &state,
+        Some("https://example/CHANGELOG.md"),
+        None,
+    );
+
+    assert_eq!(body.body, "exact\nrelease\nbody\n");
+    assert_eq!(body.source_label(), "artifact-source-authority");
 }
 
 #[test]

@@ -152,6 +152,7 @@ Write a source-authority manifest for assembled release artifacts
 | `--dir` | `<DIR>` | Directory containing the assembled publication files |
 | `--tag` | `<TAG>` | Prepared release tag |
 | `--commit` | `<COMMIT>` | Exact commit the prepared tag resolves to |
+| `--release-notes` | `<PATH>` | Exact persisted GitHub Release body to bind as a non-publication control artifact |
 
 ## `homeboy release contains`
 

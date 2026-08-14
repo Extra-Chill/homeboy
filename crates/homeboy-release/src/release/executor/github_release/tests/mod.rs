@@ -39,6 +39,7 @@ pub(super) fn test_body() -> GitHubReleaseBody {
         body: "## What's Changed\n\n**Full Changelog**: https://example/CHANGELOG.md".to_string(),
         generated_notes_ok: true,
         changelog_url: Some("https://example/CHANGELOG.md".to_string()),
+        source: "generated-notes".to_string(),
     }
 }
 

@@ -37,17 +37,14 @@ pub(crate) struct GitHubReleaseBody {
     pub generated_notes_ok: bool,
     /// The changelog URL embedded in the footer, when one was resolved.
     pub changelog_url: Option<String>,
+    pub(crate) source: String,
 }
 
 impl GitHubReleaseBody {
     /// Human/JSON-readable label distinguishing the body's provenance so
     /// operators can tell generated notes from the changelog fallback.
-    pub(crate) fn source_label(&self) -> &'static str {
-        if self.generated_notes_ok {
-            "generated-notes"
-        } else {
-            "changelog-fallback"
-        }
+    pub(crate) fn source_label(&self) -> &str {
+        &self.source
     }
 }
 
@@ -66,6 +63,14 @@ pub(crate) fn build_github_release_body(
     changelog_url: Option<&str>,
     notes_start_tag: Option<&str>,
 ) -> GitHubReleaseBody {
+    if let Some(exact) = &state.exact_release_notes {
+        return GitHubReleaseBody {
+            body: exact.body.clone(),
+            generated_notes_ok: false,
+            changelog_url: None,
+            source: exact.source.clone(),
+        };
+    }
     if component_release_notes_require_changelog_fallback(component) {
         homeboy_core::log_status!(
             "release",
@@ -83,6 +88,7 @@ pub(crate) fn build_github_release_body(
             ),
             generated_notes_ok: false,
             changelog_url: changelog_url.map(str::to_string),
+            source: "changelog-fallback".to_string(),
         };
     }
 
@@ -95,6 +101,7 @@ pub(crate) fn build_github_release_body(
                 body,
                 generated_notes_ok: true,
                 changelog_url: changelog_url.map(str::to_string),
+                source: "generated-notes".to_string(),
             }
         }
         Err(err) => {
@@ -107,6 +114,7 @@ pub(crate) fn build_github_release_body(
                 body: fallback_release_notes(state, changelog_url, tag),
                 generated_notes_ok: false,
                 changelog_url: changelog_url.map(str::to_string),
+                source: "changelog-fallback".to_string(),
             }
         }
     }
@@ -243,7 +251,7 @@ pub(super) fn persist_release_body(component: &Component, tag: &str, body: &str)
 }
 
 /// Relative path reserved for the exact GitHub Release body persisted by Homeboy.
-pub(crate) fn release_notes_path(tag: &str) -> String {
+pub fn release_notes_path(tag: &str) -> String {
     format!("build/{}-release-notes.md", safe_filename(tag))
 }
 

@@ -33,6 +33,7 @@ mod tagging;
 pub(crate) mod version_targets;
 
 pub(crate) use git_push::run_git_push;
+pub use github_release::release_notes_path;
 pub(crate) use github_release::release_notes_path as github_release_notes_path;
 pub(crate) use github_release::run_github_release;
 pub(crate) use package::{
