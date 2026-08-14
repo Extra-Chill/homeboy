@@ -78,7 +78,7 @@ fn revision_probe_timeout_diagnostic(
     })
 }
 
-fn agent_task_executor_providers_from_runtime_manifests(
+pub(super) fn agent_task_executor_providers_from_runtime_manifests(
     runtime_manifests: Vec<AgentRuntimeManifest>,
     diagnostics: &mut Vec<AgentRuntimeDiscoveryDiagnostic>,
 ) -> Vec<AgentTaskExecutorProvider> {

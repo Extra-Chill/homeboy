@@ -95,45 +95,34 @@ fn provider_runner_secret_env_contracts_are_applied_to_selected_plan_tasks() {
 
 #[test]
 fn discovers_agent_task_providers_from_agent_runtime_manifests() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let runtime_dir = home
-            .path()
-            .join(".config/homeboy/agent-runtimes/custom-runtime");
-        fs::create_dir_all(&runtime_dir).expect("runtime dir");
-        fs::write(
-            runtime_dir.join("custom-runtime.json"),
-            serde_json::to_string(&json!({
-                "schema": agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
-                "id": "custom-runtime",
-                "name": "Custom Runtime",
-                "version": "1.0.0",
-                "agent_task_executors": [{
-                    "schema": "homeboy/agent-task-executor-provider/v1",
-                    "id": "custom.runtime.executor",
-                    "backend": "custom",
-                    "invocation": { "argv": ["node", "{{runtime_path}}/runner.cjs"] },
-                    "request_schema": AGENT_TASK_REQUEST_SCHEMA,
-                    "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
-                }]
-            }))
-            .unwrap(),
-        )
-        .expect("runtime manifest");
+    let runtime_dir = "/runtime/custom-runtime";
+    let runtime: agent_runtime_manifest::AgentRuntimeManifest = serde_json::from_value(json!({
+        "schema": agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
+        "id": "custom-runtime",
+        "runtime_path": runtime_dir,
+        "agent_task_executors": [{
+            "schema": "homeboy/agent-task-executor-provider/v1",
+            "id": "custom.runtime.executor",
+            "backend": "custom",
+            "invocation": { "argv": ["node", "{{runtime_path}}/runner.cjs"] },
+            "request_schema": AGENT_TASK_REQUEST_SCHEMA,
+            "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
+        }]
+    }))
+    .expect("runtime manifest");
+    let providers = discovery::agent_task_executor_providers_from_runtime_manifests(
+        vec![runtime],
+        &mut Vec::new(),
+    );
 
-        let providers = discover_agent_task_executor_providers();
-
-        assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0].id, "custom.runtime.executor");
-        assert_eq!(providers[0].runtime_id.as_deref(), Some("custom-runtime"));
-        assert_eq!(
-            providers[0].runtime_path.as_deref(),
-            Some(runtime_dir.to_string_lossy().as_ref())
-        );
-        assert_eq!(
-            render_provider_command_display(&providers[0]),
-            format!("node {}/runner.cjs", runtime_dir.display())
-        );
-    });
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].id, "custom.runtime.executor");
+    assert_eq!(providers[0].runtime_id.as_deref(), Some("custom-runtime"));
+    assert_eq!(providers[0].runtime_path.as_deref(), Some(runtime_dir));
+    assert_eq!(
+        render_provider_command_display(&providers[0]),
+        format!("node {runtime_dir}/runner.cjs")
+    );
 }
 
 #[test]
