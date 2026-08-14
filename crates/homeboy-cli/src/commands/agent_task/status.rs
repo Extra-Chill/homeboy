@@ -44,6 +44,8 @@ use crate::commands::utils::watch::{
 const COMPACT_REF_LIMIT: usize = 12;
 const COMPACT_TASK_LIMIT: usize = 12;
 const COMPACT_TEXT_LIMIT: usize = 512;
+const COMPACT_ACTION_LIMIT: usize = 4;
+const COMPACT_ACTION_TEXT_LIMIT: usize = 256;
 const STATUS_WATCH_CHANGE_LIMIT: usize = 12;
 
 /// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
@@ -3939,10 +3941,15 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
                 "provider_executions_consumed",
                 "recovery_legal",
                 "recovery_reason",
-                "legal_actions",
-                "next_actions",
             ],
         );
+        for field in ["legal_actions", "next_actions"] {
+            if let Some(actions) = failure_context.get(field).and_then(Value::as_array) {
+                summary["failure_context"][field] = compact_action_samples(actions);
+                summary["failure_context"][format!("{field}_omitted")] =
+                    json!(actions.len().saturating_sub(COMPACT_ACTION_LIMIT));
+            }
+        }
         if let Some(diagnostic) = failure_context.get("diagnostic") {
             summary["failure_context"]["diagnostic"] = compact_cook_diagnostic(diagnostic);
         }
@@ -4062,6 +4069,38 @@ fn compact_fields(value: &Value, fields: &[&str]) -> Value {
     Value::Object(object)
 }
 
+/// Recovery actions are executable operator guidance, not evidence. Keep a
+/// small copyable sample in the default view and leave the complete list in the
+/// explicit `--full` report.
+fn compact_action_samples(actions: &[Value]) -> Value {
+    Value::Array(
+        actions
+            .iter()
+            .take(COMPACT_ACTION_LIMIT)
+            .map(|action| {
+                compact_fields_with_text_limit(
+                    action,
+                    &["action", "command"],
+                    COMPACT_ACTION_TEXT_LIMIT,
+                )
+            })
+            .collect(),
+    )
+}
+
+fn compact_fields_with_text_limit(value: &Value, fields: &[&str], text_limit: usize) -> Value {
+    let mut object = serde_json::Map::new();
+    for field in fields {
+        if let Some(value) = value.get(*field) {
+            object.insert(
+                (*field).to_string(),
+                bounded_value_with_limit(value, text_limit),
+            );
+        }
+    }
+    Value::Object(object)
+}
+
 fn bounded_failure_reasons(value: &Value) -> Value {
     Value::Array(
         value
@@ -4078,10 +4117,14 @@ fn bounded_failure_reasons(value: &Value) -> Value {
 }
 
 fn bounded_value(value: &Value) -> Value {
+    bounded_value_with_limit(value, COMPACT_TEXT_LIMIT)
+}
+
+fn bounded_value_with_limit(value: &Value, text_limit: usize) -> Value {
     match value {
-        Value::String(text) if text.chars().count() > COMPACT_TEXT_LIMIT => Value::String(format!(
+        Value::String(text) if text.chars().count() > text_limit => Value::String(format!(
             "{}...",
-            text.chars().take(COMPACT_TEXT_LIMIT).collect::<String>()
+            text.chars().take(text_limit).collect::<String>()
         )),
         _ => value.clone(),
     }
@@ -6590,6 +6633,63 @@ mod tests {
             "long prose must still be truncated to the compact budget"
         );
 
+        assert_eq!(compact_cook_report(report.clone(), true), report);
+    }
+
+    #[test]
+    fn compact_cook_report_bounds_recovery_action_samples_and_keeps_full_report() {
+        let actions = (0..(COMPACT_ACTION_LIMIT + 20))
+            .map(|index| {
+                json!({
+                    "action": format!("recover-{index}-{}", "a".repeat(COMPACT_ACTION_TEXT_LIMIT)),
+                    "command": format!("homeboy agent-task recover run-1 --note={}", "x".repeat(COMPACT_ACTION_TEXT_LIMIT * 4)),
+                    "private_evidence": "must only appear in --full"
+                })
+            })
+            .collect::<Vec<_>>();
+        let report = json!({
+            "schema": "homeboy/agent-task-cook/v1",
+            "cook_id": "cook-action-budget",
+            "latest_run_id": "run-1",
+            "status": "durable_failure",
+            "attempts": [],
+            "failure_context": {
+                "phase": "promotion",
+                "reason_code": "operation_in_progress",
+                "recovery_legal": true,
+                "recovery_reason": "choose a recovery command",
+                "legal_actions": actions,
+                "next_actions": actions
+            }
+        });
+
+        let compact = compact_cook_report(report.clone(), false);
+        let context = &compact["failure_context"];
+
+        for field in ["legal_actions", "next_actions"] {
+            assert_eq!(
+                context[field].as_array().unwrap().len(),
+                COMPACT_ACTION_LIMIT
+            );
+            assert_eq!(
+                context[format!("{field}_omitted")],
+                json!(20),
+                "the compact view must disclose every omitted recovery action"
+            );
+            assert!(context[field][0].get("private_evidence").is_none());
+            assert_eq!(
+                context[field][0]["command"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .count(),
+                COMPACT_ACTION_TEXT_LIMIT + 3
+            );
+        }
+        assert!(
+            serde_json::to_vec(&compact).unwrap().len() < 6 * 1024,
+            "large recovery lists must stay within the compact terminal-output budget"
+        );
         assert_eq!(compact_cook_report(report.clone(), true), report);
     }
 
