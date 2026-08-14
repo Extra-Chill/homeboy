@@ -616,8 +616,16 @@ fn valid_test_inventory_payload(
     inventory: &TestInventoryEvidence,
     binding: &TestInventoryBinding,
 ) -> Option<TestInventoryOutput> {
+    // The set of legal runner names belongs to the binding's InventoryProfile,
+    // not to this function. `expected_runner_fingerprint` below returns None for
+    // any runner the binding did not fingerprint, which rejects an unknown
+    // runner and additionally proves the declared fingerprint matches -- a
+    // strictly stronger check than a name allowlist. Hardcoding "cargo" |
+    // "nextest" here re-pinned the mechanism to Rust after #12396 made the rest
+    // of it extension-driven, so a declared runner such as "wordpress" was
+    // refused no matter what its profile said. (#12394)
     if inventory.schema != TEST_INVENTORY_SCHEMA
-        || !matches!(inventory.runner.as_str(), "cargo" | "nextest")
+        || inventory.runner.trim().is_empty()
         || !homeboy_engine_primitives::content_hash::is_sha256_hex(&inventory.runner_fingerprint)
         || !homeboy_engine_primitives::content_hash::is_sha256_hex(&inventory.workspace_fingerprint)
         || !homeboy_engine_primitives::content_hash::is_sha256_hex(&inventory.inventory_fingerprint)
@@ -4899,6 +4907,105 @@ mod inventory_profile_tests {
             Some(before),
             "a declared PHP source file must be covered by the fingerprint"
         );
+    }
+
+    /// A runner the binding fingerprinted is accepted even when it is not a
+    /// Rust one. #12396 made root resolution, fingerprinting, and runner
+    /// identity extension-driven, but the payload validator still carried a
+    /// `"cargo" | "nextest"` name allowlist, which refused any declared runner
+    /// and left the contract Rust-only in practice. (#12394)
+    #[test]
+    fn a_declared_non_rust_runner_is_accepted() {
+        let run = RunDir::create().expect("run dir");
+        let mut binding = super::tests::test_inventory_binding_for_test(run.path());
+        binding
+            .runner_fingerprints
+            .insert("wordpress".to_string(), "d".repeat(64));
+
+        let mut inventory = TestInventoryEvidence {
+            schema: TEST_INVENTORY_SCHEMA.to_string(),
+            runner: "wordpress".to_string(),
+            runner_fingerprint: "d".repeat(64),
+            workspace_fingerprint: binding.workspace_fingerprint.clone(),
+            tests: vec![TestInventoryTest {
+                id: "tests/plugin-smoke.php".to_string(),
+                package: "data-machine".to_string(),
+                target: "tests".to_string(),
+                target_kind: "smoke".to_string(),
+                name: "plugin-smoke".to_string(),
+                expected_outcome: Some("executed".to_string()),
+            }],
+            inventory_fingerprint: String::new(),
+            fallback_reason: None,
+        };
+        inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
+            &canonical_inventory_json(&inventory),
+        );
+
+        let accepted = valid_test_inventory_payload(&inventory, &binding)
+            .expect("a declared runner must be accepted");
+        assert_eq!(accepted.runner, "wordpress");
+        assert_eq!(accepted.test_count, 1);
+    }
+
+    /// Dropping the name allowlist must not weaken the check: a runner the
+    /// binding never fingerprinted is still refused, because
+    /// `expected_runner_fingerprint` has no entry to match against.
+    #[test]
+    fn an_undeclared_runner_is_still_refused_without_the_name_allowlist() {
+        let run = RunDir::create().expect("run dir");
+        let binding = super::tests::test_inventory_binding_for_test(run.path());
+
+        let mut inventory = TestInventoryEvidence {
+            schema: TEST_INVENTORY_SCHEMA.to_string(),
+            runner: "totally-undeclared".to_string(),
+            runner_fingerprint: "e".repeat(64),
+            workspace_fingerprint: binding.workspace_fingerprint.clone(),
+            tests: vec![TestInventoryTest {
+                id: "suite::one".to_string(),
+                package: "pkg".to_string(),
+                target: "target".to_string(),
+                target_kind: "test".to_string(),
+                name: "one".to_string(),
+                expected_outcome: Some("executed".to_string()),
+            }],
+            inventory_fingerprint: String::new(),
+            fallback_reason: None,
+        };
+        inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
+            &canonical_inventory_json(&inventory),
+        );
+
+        assert!(valid_test_inventory_payload(&inventory, &binding).is_none());
+    }
+
+    /// An empty runner name carries no identity at all.
+    #[test]
+    fn an_empty_runner_name_is_refused() {
+        let run = RunDir::create().expect("run dir");
+        let binding = super::tests::test_inventory_binding_for_test(run.path());
+
+        let mut inventory = TestInventoryEvidence {
+            schema: TEST_INVENTORY_SCHEMA.to_string(),
+            runner: "   ".to_string(),
+            runner_fingerprint: "f".repeat(64),
+            workspace_fingerprint: binding.workspace_fingerprint.clone(),
+            tests: vec![TestInventoryTest {
+                id: "suite::one".to_string(),
+                package: "pkg".to_string(),
+                target: "target".to_string(),
+                target_kind: "test".to_string(),
+                name: "one".to_string(),
+                expected_outcome: Some("executed".to_string()),
+            }],
+            inventory_fingerprint: String::new(),
+            fallback_reason: None,
+        };
+        inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
+            &canonical_inventory_json(&inventory),
+        );
+
+        assert!(valid_test_inventory_payload(&inventory, &binding).is_none());
     }
 
     /// An inventory may only claim a runner the binding fingerprinted.
