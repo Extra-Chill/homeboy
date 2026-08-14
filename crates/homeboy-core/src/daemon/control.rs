@@ -445,14 +445,79 @@ fn command_state_dir(cmdline: &str) -> CommandStateDir<'_> {
         return CommandStateDir::Ambiguous;
     };
 
-    // `ps` renders argv as whitespace-delimited text. A state-dir is exact only
-    // at the end of that rendering and without shell quoting or escaping.
-    if index + if *argument == "--state-dir" { 2 } else { 1 } != arguments.len()
-        || value.contains(['\'', '"', '\\'])
-    {
+    // Linux `ps -e` appends environment assignments after argv. Supervised
+    // daemons put state-dir last, so the first valid assignment also proves the
+    // argv boundary without treating ordinary trailing arguments as exact.
+    let value_end = index + if *argument == "--state-dir" { 2 } else { 1 };
+    let has_exact_boundary = value_end == arguments.len()
+        || arguments
+            .get(value_end)
+            .is_some_and(|argument| is_environment_assignment(argument));
+    if !has_exact_boundary || value.contains(['\'', '"', '\\']) {
         CommandStateDir::Ambiguous
     } else {
         CommandStateDir::Proven(value)
+    }
+}
+
+fn is_environment_assignment(argument: &str) -> bool {
+    let Some((name, _value)) = argument.split_once('=') else {
+        return false;
+    };
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+#[cfg(test)]
+mod command_state_dir_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_terminal_state_dir_before_linux_ps_environment_suffix() {
+        let command = "homeboy daemon serve --addr 127.0.0.1:0 --startup-token token --state-dir /home/chubes/.config/homeboy/daemon DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus HOME=/home/chubes";
+
+        assert!(matches!(
+            command_state_dir(command),
+            CommandStateDir::Proven("/home/chubes/.config/homeboy/daemon")
+        ));
+    }
+
+    #[test]
+    fn accepts_equals_state_dir_before_linux_ps_environment_suffix() {
+        let command = "homeboy daemon serve --state-dir=/tmp/generation HOME=/home/chubes";
+
+        assert!(matches!(
+            command_state_dir(command),
+            CommandStateDir::Proven("/tmp/generation")
+        ));
+    }
+
+    #[test]
+    fn rejects_ordinary_trailing_argv_after_state_dir() {
+        assert!(matches!(
+            command_state_dir("homeboy daemon serve --state-dir /tmp/generation trailing"),
+            CommandStateDir::Ambiguous
+        ));
+    }
+
+    #[test]
+    fn existing_daemon_with_ps_environment_suffix_is_unrelated_to_generation_store() {
+        let jobs_path = Path::new("/tmp/generation/jobs.json");
+        let candidate = parse_daemon_process_candidate(
+            "42 /usr/bin/homeboy /usr/bin/homeboy daemon serve --addr 127.0.0.1:0 --startup-token token --state-dir /tmp/conventional HOME=/home/chubes",
+            jobs_path,
+            None,
+        )
+        .expect("daemon candidate");
+
+        assert_eq!(
+            candidate.durable_store_path.as_deref(),
+            Some("/tmp/conventional/jobs.json")
+        );
+        assert_eq!(candidate.ownership, DaemonProcessOwnership::Unrelated);
     }
 }
 
