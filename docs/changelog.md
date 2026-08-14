@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.347.0] - 2026-08-14
+
+### Changed
+- lower the suppression ceiling to the actual 1129
+- root materialized failure records
+
+### Fixed
+- unify admission observations
+- bound changed-since terminal output
+
 ## [0.346.0] - 2026-08-14
 
 ### Added
