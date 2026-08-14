@@ -654,7 +654,8 @@ fn equivalent_refresh_waiter_reloads_the_owner_selection_after_promotion_handoff
             let _lease = acquire_runner_binary_promotion_with("lab", "0123456789ab", |event| {
                 queued_tx.send(event).expect("report queued owner")
             })?;
-            refresh_promotion_authorities("lab")?;
+            let status = crate::status("lab")?;
+            refresh_promotion_authorities("lab", &status)?;
             crate::load("lab")
         });
         let event = queued_rx
@@ -920,7 +921,7 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
                 ("identity_verification", "succeeded"),
                 ("bootstrap_promotion", "succeeded"),
                 ("configuration_promotion", "succeeded"),
-                ("reconnect_transport", "succeeded"),
+                ("reconnect_transport", "failed"),
                 ("daemon_identity_verification", "succeeded"),
                 ("admission_readiness", "failed"),
             ]
@@ -935,6 +936,16 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
             output.followup_commands,
             ["homeboy runner connect lab-local"]
         );
+        let failure = output.failure.expect("typed reconnect partial failure");
+        assert_eq!(
+            failure.recovery_actions[0].command,
+            ["homeboy", "runner", "connect", "lab-local"]
+        );
+        assert!(failure
+            .verification
+            .as_deref()
+            .expect("reconnect verification")
+            .contains("promoted configured binary remains selected"));
         assert!(output.bootstrap_provenance.is_some());
         assert_eq!(
             crate::load("lab-local")
@@ -948,7 +959,7 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
 }
 
 #[test]
-fn connected_refresh_blocker_preserves_the_newly_selected_binary() {
+fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
     test_support::with_isolated_home(|_| {
         let fixture = tempfile::tempdir().expect("fixture");
         let second_binary = fixture.path().join("second-homeboy");
@@ -1056,8 +1067,7 @@ fn connected_refresh_blocker_preserves_the_newly_selected_binary() {
                 ("identity_verification", "succeeded"),
                 ("bootstrap_promotion", "succeeded"),
                 ("configuration_promotion", "succeeded"),
-                ("disconnect", "succeeded"),
-                ("reconnect_transport", "succeeded"),
+                ("reconnect_transport", "failed"),
                 ("daemon_identity_verification", "succeeded"),
                 ("admission_readiness", "failed"),
             ]
