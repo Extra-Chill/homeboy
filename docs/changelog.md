@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.348.8] - 2026-08-14
+
+### Fixed
+- admit exact source in strict mode
+- derive identity from exact daemon bytes
+
 ## [0.348.7] - 2026-08-14
 
 ### Changed
