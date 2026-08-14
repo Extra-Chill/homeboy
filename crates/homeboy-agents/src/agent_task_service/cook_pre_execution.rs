@@ -226,6 +226,43 @@ fn ensure_cook_attempt_index(
         .map(|_| ())
 }
 
+/// Record a failure for an already materialized Cook attempt using its exact
+/// recipe and lifecycle roots.
+///
+/// `agent_task_lifecycle::status` is reconciliation, not a pure rooted read,
+/// so it is intentionally outside this exact-store seam.
+pub(crate) fn record_materialized_cook_pre_execution_failure_with_stores(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+    phase: &str,
+    error: &Error,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let recipe = recipe_store.load_recipe(cook_id)?;
+    let attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "durable cook recipe does not declare the run id",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let record = lifecycle_store.read_record(run_id)?;
+    let controller_plan = lifecycle_store.read_controller_plan(run_id)?;
+    super::cook_recipe::validate_recipe_attempt_record_with_controller_plan(
+        &recipe,
+        run_id,
+        &record,
+        &controller_plan,
+    )?;
+    lifecycle_store.record_pre_execution_failure(run_id, &attempt.plan, phase, error)
+}
+
 /// Recover the latest immutable recipe attempt into its lifecycle record and
 /// Cook index. This controller-only saga never prepares or dispatches a
 /// provider; it only makes a recipe that survived an interrupted initial write
@@ -726,5 +763,136 @@ mod tests {
                 .plan_id,
             "right-plan"
         );
+    }
+
+    #[test]
+    fn explicit_stores_record_divergent_pre_execution_failures_in_parallel() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_recipe_store = CookRecipeStore::new(left_context.path_roots());
+        let right_recipe_store = CookRecipeStore::new(right_context.path_roots());
+        let left_lifecycle_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+        let right_lifecycle_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+        let cook_id = "same-cook";
+        let run_id = "same-run";
+        let mut left_plan = plan("left-plan", "left");
+        left_plan.metadata = serde_json::json!({ "store": "left" });
+        let mut right_plan = plan("right-plan", "right");
+        right_plan.metadata = serde_json::json!({ "store": "right" });
+        left_recipe_store
+            .persist_recipe(&recipe(cook_id, run_id, left_plan.clone()))
+            .expect("persist left recipe");
+        right_recipe_store
+            .persist_recipe(&recipe(cook_id, run_id, right_plan.clone()))
+            .expect("persist right recipe");
+        let barrier = Arc::new(Barrier::new(2));
+
+        std::thread::scope(|scope| {
+            let left_barrier = Arc::clone(&barrier);
+            let recipe_store = left_recipe_store.clone();
+            let lifecycle_store = left_lifecycle_store.clone();
+            scope.spawn(move || {
+                materialize_cook_attempt_with_stores_and_admission(
+                    &recipe_store,
+                    &lifecycle_store,
+                    cook_id,
+                    run_id,
+                    &left_plan,
+                    |_| {
+                        left_barrier.wait();
+                        Ok(serde_json::json!({ "store": "left" }))
+                    },
+                )
+                .expect("materialize left");
+                record_materialized_cook_pre_execution_failure_with_stores(
+                    &recipe_store,
+                    &lifecycle_store,
+                    cook_id,
+                    run_id,
+                    "left_phase",
+                    &Error::validation_invalid_argument(
+                        "left_error",
+                        "left pre-execution failure",
+                        None,
+                        None,
+                    ),
+                )
+                .expect("record left failure");
+            });
+            let right_barrier = Arc::clone(&barrier);
+            let recipe_store = right_recipe_store.clone();
+            let lifecycle_store = right_lifecycle_store.clone();
+            scope.spawn(move || {
+                materialize_cook_attempt_with_stores_and_admission(
+                    &recipe_store,
+                    &lifecycle_store,
+                    cook_id,
+                    run_id,
+                    &right_plan,
+                    |_| {
+                        right_barrier.wait();
+                        Ok(serde_json::json!({ "store": "right" }))
+                    },
+                )
+                .expect("materialize right");
+                record_materialized_cook_pre_execution_failure_with_stores(
+                    &recipe_store,
+                    &lifecycle_store,
+                    cook_id,
+                    run_id,
+                    "right_phase",
+                    &Error::validation_invalid_argument(
+                        "right_error",
+                        "right pre-execution failure",
+                        None,
+                        None,
+                    ),
+                )
+                .expect("record right failure");
+            });
+        });
+
+        for (lifecycle_store, expected_plan, expected_phase, expected_code, expected_message) in [
+            (
+                &left_lifecycle_store,
+                "left-plan",
+                "left_phase",
+                "left_error",
+                "Invalid argument 'left_error': left pre-execution failure",
+            ),
+            (
+                &right_lifecycle_store,
+                "right-plan",
+                "right_phase",
+                "right_error",
+                "Invalid argument 'right_error': right pre-execution failure",
+            ),
+        ] {
+            let record = lifecycle_store.read_record(run_id).expect("read record");
+            let aggregate = lifecycle_store
+                .read_aggregate(run_id)
+                .expect("read aggregate");
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["phase"],
+                expected_phase
+            );
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["message"],
+                expected_message
+            );
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["failure_code"],
+                expected_code
+            );
+            assert_eq!(aggregate.plan_id, expected_plan);
+            assert_eq!(aggregate.totals.failed, 1);
+            assert_eq!(
+                lifecycle_store
+                    .read_controller_plan(run_id)
+                    .expect("read controller plan")
+                    .plan_id,
+                expected_plan
+            );
+        }
     }
 }
