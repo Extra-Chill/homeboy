@@ -406,221 +406,215 @@ mod tests {
 
     /// The exact shape the claude-code runtime publishes: one provider default
     /// that names its own required credential (#11479).
-    fn claude_code_shaped_provider() -> AgentTaskExecutorProvider {
+    fn claude_code_shaped_provider(
+        auth_path: Option<&std::path::Path>,
+    ) -> AgentTaskExecutorProvider {
+        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+        let secret_env_sources = auth_path.map_or_else(
+            || serde_json::json!({}),
+            |path| {
+                serde_json::json!({
+                    required.clone(): { "source": "json-file", "path": path, "field": "token" }
+                })
+            },
+        );
         provider(serde_json::json!({
             "id": "claude-code.agent-task-executor",
             "backend": "claude-code",
             "capabilities": ["cli_runtime", "provider_owned_auth"],
             "secret_env_requirements": [{
                 "source": "provider_default",
-                "env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+                "env": [required.clone()],
                 "when": { "any": [{ "path": "executor.config.provider", "equals": "claude-code" }] }
             }],
             "provider_defaults": {
                 "claude-code": {
                     "secret_env": [
-                        "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
-                        "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
-                        "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT"
+                        required.clone(),
+                        format!("{required}_ACCESS_TOKEN"),
+                        format!("{required}_EXPIRES_AT")
                     ],
-                    "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+                    "required_secret_env": [required.clone()],
                     "optional_secret_env": [
-                        "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
-                        "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT"
-                    ]
+                        format!("{required}_ACCESS_TOKEN"),
+                        format!("{required}_EXPIRES_AT")
+                    ],
+                    "secret_env_sources": secret_env_sources
                 }
             }
         }))
     }
 
+    fn required_credential(provider: &AgentTaskExecutorProvider) -> String {
+        sole_provider_default_required_secret_env(provider)
+            .into_iter()
+            .next()
+            .expect("required credential")
+    }
+
     #[test]
     fn a_provider_with_no_declared_credentials_stays_dispatchable() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let readiness = provider_credential_readiness(&provider(serde_json::json!({
-                "id": "local-shell.agent-task-executor",
-                "backend": "local-shell"
-            })));
+        let readiness = provider_credential_readiness(&provider(serde_json::json!({
+            "id": "local-shell.agent-task-executor",
+            "backend": "local-shell"
+        })));
 
-            assert!(
-                readiness.dispatchable,
-                "silence is not evidence of a missing credential"
-            );
-            assert!(readiness.missing.is_empty());
-            assert!(readiness.reason().is_none());
-        });
+        assert!(
+            readiness.dispatchable,
+            "silence is not evidence of a missing credential"
+        );
+        assert!(readiness.missing.is_empty());
+        assert!(readiness.reason().is_none());
     }
 
     #[test]
     fn a_sole_provider_default_required_credential_makes_an_unconfigured_provider_undispatchable() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let readiness = provider_credential_readiness(&claude_code_shaped_provider());
+        let provider = claude_code_shaped_provider(None);
+        let required = required_credential(&provider);
+        let readiness = provider_credential_readiness(&provider);
 
-            assert!(
-                !readiness.dispatchable,
-                "a backend whose required credential is absent is declared, not dispatchable"
-            );
-            assert_eq!(
-                readiness.missing,
-                vec!["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string()],
-                "the reason must name the exact credential"
-            );
-            assert_eq!(
-                readiness.reason().as_deref(),
-                Some("missing credential AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
-            );
-        });
+        assert!(
+            !readiness.dispatchable,
+            "a backend whose required credential is absent is declared, not dispatchable"
+        );
+        assert_eq!(
+            readiness.missing,
+            vec![required.clone()],
+            "the reason must name the exact credential"
+        );
+        assert_eq!(
+            readiness.reason(),
+            Some(format!("missing credential {required}"))
+        );
     }
 
     #[test]
     fn optional_companions_of_a_required_credential_are_not_treated_as_required() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let readiness = provider_credential_readiness(&claude_code_shaped_provider());
+        let readiness = provider_credential_readiness(&claude_code_shaped_provider(None));
 
-            // `secret_env` also lists the access token and expiry stamp. Those
-            // are derivable/optional; reporting them would make every provider
-            // that caches a token look broken.
-            assert!(
-                !readiness
-                    .missing
-                    .iter()
-                    .any(|env| env.contains("ACCESS_TOKEN") || env.contains("EXPIRES_AT")),
-                "only explicitly required credentials block dispatch: {:?}",
-                readiness.missing
-            );
-        });
+        // `secret_env` also lists the access token and expiry stamp. Those
+        // are derivable/optional; reporting them would make every provider
+        // that caches a token look broken.
+        assert!(
+            !readiness
+                .missing
+                .iter()
+                .any(|env| env.contains("ACCESS_TOKEN") || env.contains("EXPIRES_AT")),
+            "only explicitly required credentials block dispatch: {:?}",
+            readiness.missing
+        );
     }
 
     #[test]
     fn a_configured_credential_makes_the_provider_dispatchable() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            crate::agent_task_secrets::set_config_secret(
-                "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
-                "refresh-token-value",
-            )
-            .expect("store credential");
+        let auth = tempfile::NamedTempFile::new().expect("auth file");
+        std::fs::write(auth.path(), r#"{"token":"refresh-token-value"}"#).expect("write auth");
+        let provider = claude_code_shaped_provider(Some(auth.path()));
+        let readiness = provider_credential_readiness(&provider);
 
-            let readiness = provider_credential_readiness(&claude_code_shaped_provider());
-
-            assert!(
-                readiness.dispatchable,
-                "a configured credential must clear the preflight: {:?}",
-                readiness.missing
-            );
-            preflight_provider_credentials(&claude_code_shaped_provider())
-                .expect("configured credential dispatches");
-        });
+        assert!(
+            readiness.dispatchable,
+            "a configured credential must clear the preflight: {:?}",
+            readiness.missing
+        );
+        preflight_provider_credentials(&provider).expect("configured credential dispatches");
     }
 
     #[test]
     fn a_request_conditional_requirement_alone_does_not_block_dispatch() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            // Only a `when`-gated declaration: the plan-level preflight owns it
-            // once a request exists, so catalog status must not pre-judge it.
-            let readiness = provider_credential_readiness(&provider(serde_json::json!({
-                "id": "codex.agent-task-executor",
-                "backend": "codex",
-                "secret_env_requirements": [{
-                    "source": "provider_default",
-                    "env": ["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"],
-                    "when": { "any": [{ "path": "executor.config.provider", "equals": "codex" }] }
-                }]
-            })));
+        // Only a `when`-gated declaration: the plan-level preflight owns it
+        // once a request exists, so catalog status must not pre-judge it.
+        let readiness = provider_credential_readiness(&provider(serde_json::json!({
+            "id": "codex.agent-task-executor",
+            "backend": "codex",
+            "secret_env_requirements": [{
+                "source": "provider_default",
+                "env": ["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"],
+                "when": { "any": [{ "path": "executor.config.provider", "equals": "codex" }] }
+            }]
+        })));
 
-            assert!(readiness.dispatchable);
-            assert!(readiness.requirements.is_empty());
-        });
+        assert!(readiness.dispatchable);
+        assert!(readiness.requirements.is_empty());
     }
 
     #[test]
     fn an_unconditional_secret_env_requirement_blocks_dispatch() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let readiness = provider_credential_readiness(&provider(serde_json::json!({
-                "id": "example.agent-task-executor",
-                "backend": "example",
-                "secret_env_requirements": [{
-                    "source": "provider_default",
-                    "env": ["EXAMPLE_API_KEY"]
-                }]
-            })));
+        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+        let readiness = provider_credential_readiness(&provider(serde_json::json!({
+            "id": "example.agent-task-executor",
+            "backend": "example",
+            "secret_env_requirements": [{
+                "source": "provider_default",
+                "env": [required.clone()]
+            }]
+        })));
 
-            assert!(!readiness.dispatchable);
-            assert_eq!(readiness.missing, vec!["EXAMPLE_API_KEY".to_string()]);
-        });
+        assert!(!readiness.dispatchable);
+        assert_eq!(readiness.missing, vec![required]);
     }
 
     #[test]
     fn an_explicitly_optional_secret_requirement_does_not_block_dispatch() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let readiness = provider_credential_readiness(&provider(serde_json::json!({
-                "id": "example.agent-task-executor",
-                "backend": "example",
-                "secret_requirements": [{
-                    "name": "EXAMPLE_OPTIONAL_KEY",
-                    "required": false
-                }]
-            })));
+        let readiness = provider_credential_readiness(&provider(serde_json::json!({
+            "id": "example.agent-task-executor",
+            "backend": "example",
+            "secret_requirements": [{
+                "name": "EXAMPLE_OPTIONAL_KEY",
+                "required": false
+            }]
+        })));
 
-            assert!(readiness.dispatchable);
-            assert!(readiness.requirements.is_empty());
-        });
+        assert!(readiness.dispatchable);
+        assert!(readiness.requirements.is_empty());
     }
 
     #[test]
     fn multiple_provider_defaults_stay_request_scoped() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            // Which default runs is a request decision when more than one is
-            // declared, so nothing here is unconditionally required.
-            let readiness = provider_credential_readiness(&provider(serde_json::json!({
-                "id": "wordpress.codebox-agent-task-executor",
-                "backend": "wp-codebox",
-                "provider_defaults": {
-                    "openai": { "required_secret_env": ["OPENAI_API_KEY"] },
-                    "claude-code": { "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"] }
-                }
-            })));
+        // Which default runs is a request decision when more than one is
+        // declared, so nothing here is unconditionally required.
+        let readiness = provider_credential_readiness(&provider(serde_json::json!({
+            "id": "wordpress.codebox-agent-task-executor",
+            "backend": "wp-codebox",
+            "provider_defaults": {
+                "openai": { "required_secret_env": ["OPENAI_API_KEY"] },
+                "claude-code": { "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"] }
+            }
+        })));
 
-            assert!(readiness.dispatchable);
-            assert!(readiness.missing.is_empty());
-        });
+        assert!(readiness.dispatchable);
+        assert!(readiness.missing.is_empty());
     }
 
     #[test]
     fn the_preflight_error_is_a_configuration_failure_naming_the_credential() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let error = preflight_provider_credentials(&claude_code_shaped_provider())
-                .expect_err("a missing required credential must fail fast");
+        let provider = claude_code_shaped_provider(None);
+        let required = required_credential(&provider);
+        let error = preflight_provider_credentials(&provider)
+            .expect_err("a missing required credential must fail fast");
 
-            assert_eq!(error.details["field"], "provider_credentials");
-            assert!(
-                error
-                    .message
-                    .contains("AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"),
-                "{}",
-                error.message
-            );
-            let structured = error.details["tried"][0]
-                .as_str()
-                .expect("structured preflight hint");
-            assert!(structured.contains("provider_credential_preflight_failed"));
-            assert!(
-                structured.contains("\"failure_classification\":\"configuration\""),
-                "a credential gap is configuration, not a spent provider execution: {structured}"
-            );
-        });
+        assert_eq!(error.details["field"], "provider_credentials");
+        assert!(error.message.contains(&required), "{}", error.message);
+        let structured = error.details["tried"][0]
+            .as_str()
+            .expect("structured preflight hint");
+        assert!(structured.contains("provider_credential_preflight_failed"));
+        assert!(
+            structured.contains("\"failure_classification\":\"configuration\""),
+            "a credential gap is configuration, not a spent provider execution: {structured}"
+        );
     }
 
     #[test]
     fn backend_preflight_ignores_backends_that_do_not_resolve() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let providers = vec![claude_code_shaped_provider()];
+        let providers = vec![claude_code_shaped_provider(None)];
 
-            // Resolution failures belong to the runner-readiness validator; this
-            // preflight must not shadow them with a credential error.
-            preflight_provider_credentials_for_backend(&providers, "no-such-backend", None)
-                .expect("unresolvable backends are not this preflight's error");
+        // Resolution failures belong to the runner-readiness validator; this
+        // preflight must not shadow them with a credential error.
+        preflight_provider_credentials_for_backend(&providers, "no-such-backend", None)
+            .expect("unresolvable backends are not this preflight's error");
 
-            preflight_provider_credentials_for_backend(&providers, "claude-code", None)
-                .expect_err("a resolvable backend with a missing credential fails");
-        });
+        preflight_provider_credentials_for_backend(&providers, "claude-code", None)
+            .expect_err("a resolvable backend with a missing credential fails");
     }
 }
