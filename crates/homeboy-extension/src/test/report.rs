@@ -89,6 +89,7 @@ pub fn from_main_workflow_with_ci_context(
             failure,
             test_counts: result.test_counts,
             test_inventory: result.test_inventory,
+            test_inventory_rejection: result.test_inventory_rejection,
             // Carried through untouched. `test_phase_report` and
             // `test_phase_failure` below never read it: a slow suite must not
             // be able to change the phase verdict in either direction. (#10655)
@@ -126,6 +127,7 @@ pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i
             failure: None,
             test_counts: None,
             test_inventory: None,
+            test_inventory_rejection: None,
             test_durations: None,
             findings: None,
             coverage: None,
@@ -172,6 +174,7 @@ pub fn from_auto_fix_drift_workflow(
             failure: None,
             test_counts: None,
             test_inventory: None,
+            test_inventory_rejection: None,
             test_durations: None,
             findings: None,
             coverage: None,
@@ -319,6 +322,7 @@ mod tests {
             runner_exit_code: None,
             test_counts: Some(TestCounts::new(3, 1, 2, 0)),
             test_inventory: None,
+            test_inventory_rejection: None,
             test_durations: None,
             findings,
             failure_analysis_input: None,
@@ -344,6 +348,7 @@ mod tests {
             test_counts: Some(counts),
             test_inventory: None,
             test_durations: None,
+            test_inventory_rejection: None,
             findings: None,
             failure_analysis_input: None,
             coverage: None,
@@ -368,6 +373,7 @@ mod tests {
             test_counts: Some(TestCounts::new(0, 0, 0, 0)),
             test_inventory: None,
             test_durations: None,
+            test_inventory_rejection: None,
             findings: None,
             failure_analysis_input: None,
             coverage: None,
@@ -411,6 +417,30 @@ mod tests {
             "homeboy/test-inventory/v1"
         );
         assert_eq!(rendered["test_inventory"]["test_count"], 4);
+    }
+
+    #[test]
+    fn serializes_inventory_rejection_diagnostic() {
+        let mut workflow = workflow_result(None);
+        workflow.test_inventory_rejection = Some(
+            homeboy_extension_contract::test_results::TestInventoryRejection::RunnerFingerprintMismatch,
+        );
+
+        let (output, _) = from_main_workflow(workflow);
+        let rendered = serde_json::to_value(output).expect("inventory rejection serializes");
+
+        assert_eq!(
+            rendered["test_inventory_rejection"],
+            "runner_fingerprint_mismatch"
+        );
+    }
+
+    #[test]
+    fn omits_absent_inventory_rejection_from_the_command_schema() {
+        let (output, _) = from_main_workflow(workflow_result(None));
+        let rendered = serde_json::to_value(output).expect("test output serializes");
+
+        assert!(rendered.get("test_inventory_rejection").is_none());
     }
 
     #[test]
