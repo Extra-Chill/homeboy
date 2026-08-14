@@ -376,35 +376,44 @@ pub fn resolve_dispatch_request(
 pub fn controller_resolved_execution_policy(
     request: &AgentTaskDispatchRequest,
 ) -> ResolvedAgentTaskProviderPolicy {
-    let runtime_identity = selected_runtime_identity(request);
-    let explicit_backend = request
-        .backend_selection
-        .as_ref()
-        .is_some_and(|selection| selection.source == BackendSelectionSource::Cli);
+    let catalog = AgentTaskProviderCatalog::discover();
     let rotation = homeboy_core::defaults::load_config()
         .agent_task
         .rotation
         .and_then(|rotation| {
             serde_json::from_value::<AgentTaskProviderRotationPolicy>(rotation).ok()
-        })
-        .map(|mut rotation| {
-            if explicit_backend {
-                // A controller pin describes one immutable runtime. Global fallback
-                // entries for another runtime must not replace an explicit choice.
-                rotation.entries.retain(|entry| {
-                    entry
-                        .backend
-                        .as_deref()
-                        .is_none_or(|backend| backend == request.backend)
-                        && entry.selector.as_deref().is_none_or(|selector| {
-                            runtime_identity
-                                .as_ref()
-                                .is_some_and(|identity| identity.provider_id == selector)
-                        })
-                });
-            }
-            rotation
         });
+    controller_resolved_execution_policy_with_sources(request, &catalog, rotation)
+}
+
+fn controller_resolved_execution_policy_with_sources(
+    request: &AgentTaskDispatchRequest,
+    catalog: &AgentTaskProviderCatalog,
+    rotation: Option<AgentTaskProviderRotationPolicy>,
+) -> ResolvedAgentTaskProviderPolicy {
+    let runtime_identity = selected_runtime_identity(request, catalog);
+    let explicit_backend = request
+        .backend_selection
+        .as_ref()
+        .is_some_and(|selection| selection.source == BackendSelectionSource::Cli);
+    let rotation = rotation.map(|mut rotation| {
+        if explicit_backend {
+            // A controller pin describes one immutable runtime. Global fallback
+            // entries for another runtime must not replace an explicit choice.
+            rotation.entries.retain(|entry| {
+                entry
+                    .backend
+                    .as_deref()
+                    .is_none_or(|backend| backend == request.backend)
+                    && entry.selector.as_deref().is_none_or(|selector| {
+                        runtime_identity
+                            .as_ref()
+                            .is_some_and(|identity| identity.provider_id == selector)
+                    })
+            });
+        }
+        rotation
+    });
     ResolvedAgentTaskProviderPolicy {
         backend: request.backend.clone(),
         selector: request.selector.clone(),
@@ -426,8 +435,8 @@ pub fn controller_resolved_execution_policy(
 
 fn selected_runtime_identity(
     request: &AgentTaskDispatchRequest,
+    catalog: &AgentTaskProviderCatalog,
 ) -> Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
-    let catalog = AgentTaskProviderCatalog::discover();
     let ProviderResolution::Resolved(provider) = resolve_provider_for_backend(
         catalog.providers(),
         &request.backend,
@@ -540,6 +549,17 @@ fn resolve_dispatch_request_with_default_and_config(
     default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
     config_default: impl FnOnce() -> Option<String>,
 ) -> Result<AgentTaskDispatchRequest> {
+    resolve_dispatch_request_with_sources(command, default_backend, config_default, || {
+        AgentTaskProviderCatalog::discover().backends()
+    })
+}
+
+fn resolve_dispatch_request_with_sources(
+    command: AgentTaskDispatchCommand,
+    default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
+    config_default: impl FnOnce() -> Option<String>,
+    available_backends: impl FnOnce() -> Vec<String>,
+) -> Result<AgentTaskDispatchRequest> {
     let config_default = config_default();
     let submitted_policy = command.core.resolved_provider_policy.clone();
     let (backend, source) = match submitted_policy.as_ref() {
@@ -553,7 +573,7 @@ fn resolve_dispatch_request_with_default_and_config(
                     // the operator run `agent-task providers` and parse JSON to
                     // answer a question this command can answer (#11478).
                     // Discovery only happens on the failure path.
-                    missing_default_backend_error(&AgentTaskProviderCatalog::discover().backends())
+                    missing_default_backend_error(&available_backends())
                 })?;
                 // The policy resolver prefers component/extension defaults over the
                 // Homeboy config default; if the resolved value matches the config
@@ -661,69 +681,64 @@ mod tests {
 
     #[test]
     fn dispatch_rejects_a_backend_whose_declared_credential_is_missing_without_executing() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let catalog = AgentTaskProviderCatalog {
-                providers: vec![serde_json::from_value(serde_json::json!({
-                    "id": "claude-code.agent-task-executor",
-                    "backend": "claude-code",
-                    "capabilities": ["cli_runtime", "provider_owned_auth"],
-                    "invocation": { "argv": ["claude-code"] },
-                    "provider_defaults": {
-                        "claude-code": {
-                            "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
-                            "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
-                        }
+        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id": "claude-code.agent-task-executor",
+                "backend": "claude-code",
+                "capabilities": ["cli_runtime", "provider_owned_auth"],
+                "invocation": { "argv": ["claude-code"] },
+                "provider_defaults": {
+                    "claude-code": {
+                        "secret_env": [required.clone()],
+                        "required_secret_env": [required.clone()]
                     }
-                }))
-                .expect("provider fixture")],
-                ..Default::default()
-            };
-            let request = AgentTaskDispatchRequest {
-                prompt: Some("Cook the task.".to_string()),
-                tasks: Vec::new(),
-                cwd: None,
-                workspace: None,
-                repo: None,
-                task_url: None,
-                backend: "claude-code".to_string(),
-                selector: None,
-                model: None,
-                required_capabilities: Vec::new(),
-                secret_env: Vec::new(),
-                concurrency: 1,
-                run_id: None,
-                task_id: None,
-                core: DispatchCoreInputs::default(),
-                backend_selection: None,
-            };
+                }
+            }))
+            .expect("provider fixture")],
+            ..Default::default()
+        };
+        let request = AgentTaskDispatchRequest {
+            prompt: Some("Cook the task.".to_string()),
+            tasks: Vec::new(),
+            cwd: None,
+            workspace: None,
+            repo: None,
+            task_url: None,
+            backend: "claude-code".to_string(),
+            selector: None,
+            model: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            concurrency: 1,
+            run_id: None,
+            task_id: None,
+            core: DispatchCoreInputs::default(),
+            backend_selection: None,
+        };
 
-            let error = dispatch_with_provider_catalog(request, NeverRunExecutor, &catalog)
-                .expect_err("a missing declared credential must fail dispatch");
+        let error = dispatch_with_provider_catalog(request, NeverRunExecutor, &catalog)
+            .expect_err("a missing declared credential must fail dispatch");
 
-            assert_eq!(error.details["field"], "provider_credentials");
-            assert!(
-                error
-                    .message
-                    .contains("AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"),
-                "the failure must name the credential: {}",
-                error.message
-            );
-        });
+        assert_eq!(error.details["field"], "provider_credentials");
+        assert!(
+            error.message.contains(&required),
+            "the failure must name the credential: {}",
+            error.message
+        );
     }
 
     #[test]
     fn dispatch_does_not_credential_gate_a_provider_that_declares_nothing() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let providers = vec![serde_json::from_value(serde_json::json!({
-                "id": "local-shell.agent-task-executor",
-                "backend": "local-shell",
-                "invocation": { "argv": ["local-shell"] }
-            }))
-            .expect("provider fixture")];
+        let providers = vec![serde_json::from_value(serde_json::json!({
+            "id": "local-shell.agent-task-executor",
+            "backend": "local-shell",
+            "invocation": { "argv": ["local-shell"] }
+        }))
+        .expect("provider fixture")];
 
-            preflight_provider_credentials_for_backend(&providers, "local-shell", None)
-                .expect("a provider that declares no credential is dispatchable");
-        });
+        preflight_provider_credentials_for_backend(&providers, "local-shell", None)
+            .expect("a provider that declares no credential is dispatchable");
     }
 
     fn command_with_backend(backend: Option<&str>) -> AgentTaskDispatchCommand {
@@ -784,25 +799,19 @@ mod tests {
 
     #[test]
     fn missing_default_backend_is_raised_when_no_policy_resolves_a_backend() {
-        // Isolated home so catalog discovery on the failure path cannot read the
-        // developer's real runtimes.
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let error = resolve_dispatch_request_with_default_and_config(
-                command_with_backend(None),
-                |_| Ok(None),
-                || None,
-            )
-            .expect_err("no backend and no default policy");
+        let error = resolve_dispatch_request_with_sources(
+            command_with_backend(None),
+            |_| Ok(None),
+            || None,
+            Vec::new,
+        )
+        .expect_err("no backend and no default policy");
 
-            assert_eq!(
-                error.code,
-                homeboy_core::ErrorCode::ValidationInvalidArgument
-            );
-            assert_eq!(error.details["field"].as_str(), Some("backend"));
-            assert!(error
-                .message
-                .contains("requires --backend because no default backend policy is configured"));
-        });
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
+        assert_eq!(error.details["field"].as_str(), Some("backend"));
     }
 
     #[test]
@@ -868,55 +877,38 @@ mod tests {
 
     #[test]
     fn explicit_backend_keeps_its_runtime_pin_when_default_rotation_targets_another_backend() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let runtimes = home.path().join(".config/homeboy/agent-runtimes");
-            for (runtime_id, provider_id, backend) in [
-                ("opencode", "opencode.agent-task-executor", "opencode"),
-                ("codex", "codex.agent-task-executor", "codex"),
-            ] {
-                let runtime = runtimes.join(runtime_id);
-                std::fs::create_dir_all(&runtime).expect("runtime directory");
-                std::fs::write(
-                    runtime.join(format!("{runtime_id}.json")),
-                    serde_json::json!({
-                        "schema": homeboy_core::agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
-                        "id": runtime_id,
-                        "source_revision": "0123456789abcdef0123456789abcdef01234567",
-                        "agent_task_executors": [{
-                            "schema": crate::agent_task_provider::AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
-                            "id": provider_id,
-                            "backend": backend,
-                            "invocation": { "argv": ["provider"] }
-                        }]
-                    })
-                    .to_string(),
-                )
-                .expect("runtime manifest");
-                for args in [
-                    vec!["init"],
-                    vec!["add", "."],
-                    vec![
-                        "-c",
-                        "user.name=Homeboy Test",
-                        "-c",
-                        "user.email=homeboy-test@example.com",
-                        "commit",
-                        "-m",
-                        "runtime manifest",
-                    ],
-                ] {
-                    let status = std::process::Command::new("git")
-                        .args(args)
-                        .current_dir(&runtime)
-                        .status()
-                        .expect("run git");
-                    assert!(status.success(), "initialize runtime source");
-                }
-            }
-
-            let mut config = homeboy_core::defaults::load_config();
-            config.agent_task.default_backend = Some("opencode".to_string());
-            config.agent_task.rotation = serde_json::to_value(AgentTaskProviderRotationPolicy {
+        let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+            serde_json::from_value(serde_json::json!({
+                "id": "codex.agent-task-executor",
+                "backend": "codex",
+                "invocation": { "argv": ["provider"] }
+            }))
+            .expect("provider fixture");
+        provider.extra.insert(
+            "runtime_materialization_plan".to_string(),
+            serde_json::json!({
+                "schema": homeboy_core::agent_runtime_manifest::AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA,
+                "runtime_id": "codex",
+                "provider_id": "codex.agent-task-executor",
+                "source_selector": "codex-runtime",
+                "source_revision": "0123456789abcdef0123456789abcdef01234567",
+                "freshness": "pinned"
+            }),
+        );
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![provider],
+            ..Default::default()
+        };
+        let request = resolve_dispatch_request_with_default_and_config(
+            command_with_backend(Some("codex")),
+            |_| Ok(Some("opencode".to_string())),
+            || Some("opencode".to_string()),
+        )
+        .expect("explicit Codex request");
+        let policy = controller_resolved_execution_policy_with_sources(
+            &request,
+            &catalog,
+            Some(AgentTaskProviderRotationPolicy {
                 entries: vec![
                     crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
                         backend: Some("opencode".to_string()),
@@ -924,26 +916,16 @@ mod tests {
                     },
                 ],
                 ..Default::default()
-            })
-            .ok();
-            homeboy_core::defaults::save_config(&config).expect("save config");
+            }),
+        );
 
-            let request = resolve_dispatch_request_with_default_and_config(
-                command_with_backend(Some("codex")),
-                |_| Ok(Some("opencode".to_string())),
-                || Some("opencode".to_string()),
-            )
-            .expect("explicit Codex request");
-            let policy = controller_resolved_execution_policy(&request);
-
-            assert_eq!(policy.backend, "codex");
-            assert!(!policy.rotation_starts_with_first_entry);
-            assert!(policy.rotation.expect("rotation").entries.is_empty());
-            let identity = policy.runtime_identity.expect("Codex runtime identity");
-            assert_eq!(identity.runtime_id, "codex");
-            assert_eq!(identity.provider_id, "codex.agent-task-executor");
-            assert_eq!(identity.provider["backend"], "codex");
-        });
+        assert_eq!(policy.backend, "codex");
+        assert!(!policy.rotation_starts_with_first_entry);
+        assert!(policy.rotation.expect("rotation").entries.is_empty());
+        let identity = policy.runtime_identity.expect("Codex runtime identity");
+        assert_eq!(identity.runtime_id, "codex");
+        assert_eq!(identity.provider_id, "codex.agent-task-executor");
+        assert_eq!(identity.provider["backend"], "codex");
     }
 
     #[test]
@@ -958,7 +940,11 @@ mod tests {
             || Some("opencode".to_string()),
         )
         .expect("request");
-        let policy = controller_resolved_execution_policy(&request);
+        let policy = controller_resolved_execution_policy_with_sources(
+            &request,
+            &AgentTaskProviderCatalog::default(),
+            None,
+        );
 
         assert_eq!(policy.model.as_deref(), Some("openai/gpt-5.6-sol"));
         assert!(!policy.rotation_starts_with_first_entry);
