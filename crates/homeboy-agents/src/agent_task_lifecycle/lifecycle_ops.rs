@@ -928,7 +928,6 @@ impl RuntimeAdmissionEvidence for homeboy_core::controller_runtime::RuntimeAdmis
     }
 }
 
-#[cfg(test)]
 impl RuntimeAdmissionEvidence for Value {
     fn runtime(&self) -> Value {
         self.clone()
@@ -946,10 +945,14 @@ where
     F: FnOnce(&str) -> Result<A>,
     A: RuntimeAdmissionEvidence,
 {
-    submit_plan_with_runtime_admission_on_runner(
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    submit_plan_with_runtime_admission_in_store(
+        &lifecycle_store,
         plan,
         requested_run_id,
         execution_runner_id(),
+        None,
+        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
         admit_runtime,
     )
 }
@@ -964,11 +967,14 @@ where
     F: FnOnce(&str) -> Result<A>,
     A: RuntimeAdmissionEvidence,
 {
-    submit_plan_with_runtime_admission_on_runner_with_metadata(
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    submit_plan_with_runtime_admission_in_store(
+        &lifecycle_store,
         plan,
         requested_run_id,
         execution_runner_id,
         None,
+        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
         admit_runtime,
     )
 }
@@ -984,6 +990,32 @@ where
     F: FnOnce(&str) -> Result<A>,
     A: RuntimeAdmissionEvidence,
 {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    submit_plan_with_runtime_admission_in_store(
+        &lifecycle_store,
+        plan,
+        requested_run_id,
+        execution_runner_id,
+        submission_metadata,
+        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        admit_runtime,
+    )
+}
+
+pub(crate) fn submit_plan_with_runtime_admission_in_store<F, A>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+    execution_runner_id: Option<String>,
+    submission_metadata: Option<serde_json::Map<String, Value>>,
+    admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
+    admit_runtime: F,
+) -> Result<AgentTaskRunRecord>
+where
+    F: FnOnce(&str) -> Result<A>,
+    A: RuntimeAdmissionEvidence,
+{
+    let workspace_claim_store = lifecycle_store.workspace_claim_store();
     let mut normalized_plan = plan.clone();
     if normalized_plan.workspace_identity.is_none() {
         normalized_plan.workspace_identity = identity_for_plan(&normalized_plan)?;
@@ -992,8 +1024,11 @@ where
         .map(sanitize_run_id)
         .unwrap_or_else(default_run_id);
     if let Some(identity) = normalized_plan.workspace_identity.clone() {
-        normalized_plan.workspace_owner_lease =
-            Some(register_local_workspace_owner(identity, &run_id)?);
+        normalized_plan.workspace_owner_lease = Some(register_local_workspace_owner_in_store(
+            &workspace_claim_store,
+            identity,
+            &run_id,
+        )?);
         normalized_plan.workspace_lifecycle_revision = normalized_plan
             .workspace_owner_lease
             .as_ref()
@@ -1001,11 +1036,11 @@ where
             .lifecycle_revision;
     }
     let plan = &normalized_plan;
-    let plan_path = match store::write_plan(&run_id, plan) {
+    let plan_path = match lifecycle_store.write_controller_plan(&run_id, plan) {
         Ok(path) => path,
         Err(error) => {
             if let Some(lease) = plan.workspace_owner_lease.as_ref() {
-                let _ = release_local_workspace_owner(lease);
+                let _ = release_local_workspace_owner_in_store(&workspace_claim_store, lease);
             }
             return Err(error);
         }
@@ -1110,7 +1145,7 @@ where
         metadata,
     };
     let mut preserved_controller_runtime = None;
-    if let Ok(existing) = store::read_record(&run_id) {
+    if let Ok(existing) = lifecycle_store.read_record(&run_id) {
         // A runner may re-submit the plan after the controller reserved a
         // side-effect claim. Claims are durable exactly-once ownership, not
         // plan-derived state, so replacing the record must retain them.
@@ -1177,14 +1212,14 @@ where
             record.workspace_owner_lease = existing.workspace_owner_lease;
         }
     }
-    require_record_workspace_owner(&record)?;
-    store::write_record(&record)?;
+    require_record_workspace_owner_in_store(&workspace_claim_store, &record)?;
+    lifecycle_store.write_record(&record)?;
 
     // The queue is durable independently of this foreground controller. Status
     // and cancellation can therefore resolve a waiter after a restart.
-    if let Ok(admission) = homeboy_core::controller_runtime::admission_status(&run_id) {
+    if let Some(admission) = admission_status.and_then(|project| project(&run_id)) {
         record.metadata["controller_admission"] = admission;
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
     }
 
     match admit_runtime(&run_id) {
@@ -1192,7 +1227,7 @@ where
             // The admission claim checks this state under the queue lock. Read
             // it once more before recording runtime provenance or dispatching
             // any provider work in case cancellation won immediately after.
-            if let Ok(cancelled) = store::read_record(&run_id) {
+            if let Ok(cancelled) = lifecycle_store.read_record(&run_id) {
                 if cancelled.state.is_terminal() {
                     return Ok(cancelled);
                 }
@@ -1210,20 +1245,26 @@ where
                     [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                     admission.runtime();
             }
-            store::write_record(&record)?;
+            lifecycle_store.write_record(&record)?;
         }
         Err(error) => {
             // Cancellation is persisted before removing a queue entry. Do not
             // overwrite that terminal lifecycle state with a synthetic
             // pre-execution admission failure when the waiter wakes up.
-            if let Ok(cancelled) = store::read_record(&run_id) {
+            if let Ok(cancelled) = lifecycle_store.read_record(&run_id) {
                 if cancelled.state == AgentTaskRunState::Cancelled
                     || cancelled.metadata["controller_admission_cancellation_requested"] == true
                 {
                     return Ok(cancelled);
                 }
             }
-            record_pre_execution_failure(&run_id, plan, "controller_admission", &error)?;
+            record_pre_execution_failure_in_store(
+                lifecycle_store,
+                &run_id,
+                plan,
+                "controller_admission",
+                &error,
+            )?;
             return Err(error);
         }
     }

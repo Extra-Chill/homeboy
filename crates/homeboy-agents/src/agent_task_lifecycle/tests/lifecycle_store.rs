@@ -181,6 +181,64 @@ fn lifecycle_stores_isolate_same_run_record_writes_in_parallel() {
 }
 
 #[test]
+fn lifecycle_stores_submit_identical_run_ids_without_ambient_runtime() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let run_id = "same-submission";
+    let barrier = Arc::new(Barrier::new(2));
+
+    let mut left_plan = test_plan();
+    left_plan.plan_id = "left-submission-plan".to_string();
+    let mut right_plan = test_plan();
+    right_plan.plan_id = "right-submission-plan".to_string();
+
+    std::thread::scope(|scope| {
+        let left_store = left.clone();
+        let left_barrier = Arc::clone(&barrier);
+        scope.spawn(move || {
+            left_barrier.wait();
+            left_store
+                .submit_plan_with_runtime_admission(&left_plan, run_id, |_| {
+                    Ok(json!({ "store": "left" }))
+                })
+                .expect("submit left plan");
+        });
+        let right_store = right.clone();
+        let right_barrier = Arc::clone(&barrier);
+        scope.spawn(move || {
+            right_barrier.wait();
+            right_store
+                .submit_plan_with_runtime_admission(&right_plan, run_id, |_| {
+                    Ok(json!({ "store": "right" }))
+                })
+                .expect("submit right plan");
+        });
+    });
+
+    let left_record = left.read_record(run_id).expect("read left record");
+    let right_record = right.read_record(run_id).expect("read right record");
+    assert_eq!(
+        left.read_controller_plan(run_id).unwrap().plan_id,
+        "left-submission-plan"
+    );
+    assert_eq!(
+        right.read_controller_plan(run_id).unwrap().plan_id,
+        "right-submission-plan"
+    );
+    assert_eq!(left_record.plan_id, "left-submission-plan");
+    assert_eq!(right_record.plan_id, "right-submission-plan");
+    assert_eq!(left_record.metadata["controller_runtime"]["store"], "left");
+    assert_eq!(
+        right_record.metadata["controller_runtime"]["store"],
+        "right"
+    );
+    assert!(left_record.metadata.get("controller_admission").is_none());
+    assert!(right_record.metadata.get("controller_admission").is_none());
+}
+
+#[test]
 fn terminal_record_authority_is_written_only_below_its_lifecycle_root() {
     let left_context = homeboy_core::test_support::HermeticTestContext::new();
     let right_context = homeboy_core::test_support::HermeticTestContext::new();

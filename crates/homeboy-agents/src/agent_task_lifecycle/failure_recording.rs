@@ -9,8 +9,19 @@ pub fn record_pre_execution_failure(
     phase: &str,
     error: &Error,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_pre_execution_failure_in_store(&lifecycle_store, run_id, plan, phase, error)
+}
+
+pub(crate) fn record_pre_execution_failure_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    phase: &str,
+    error: &Error,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let mut record = store::read_record(&run_id)?;
+    let mut record = lifecycle_store.read_record(&run_id)?;
 
     // A transport/handoff error that arrives AFTER a provider attempt was
     // already dispatched (or completed) on a runner is not a pre-execution
@@ -21,7 +32,7 @@ pub fn record_pre_execution_failure(
     // controller reconciliation can adopt the completed candidate without
     // rerunning the provider.
     if record.has_recorded_provider_progress() {
-        return record_transport_follow_up_failure(record, phase, error);
+        return record_transport_follow_up_failure_in_store(lifecycle_store, record, phase, error);
     }
 
     let task_count = plan.tasks.len();
@@ -65,7 +76,8 @@ pub fn record_pre_execution_failure(
             ..AgentTaskQueueStatus::default()
         },
     };
-    let mut failed_record = record_aggregate(&mut record, plan, &aggregate)?;
+    let mut failed_record =
+        record_aggregate_in_store(lifecycle_store, &mut record, plan, &aggregate)?;
     let runner_id = failed_record.runner_id().map(str::to_string);
     let metadata = failed_record.ensure_metadata_object();
     if retryable {
@@ -93,7 +105,7 @@ pub fn record_pre_execution_failure(
             })).collect::<Vec<_>>(),
         }),
     );
-    store::write_record(&failed_record)?;
+    lifecycle_store.write_record(&failed_record)?;
     Ok(failed_record)
 }
 
@@ -105,6 +117,16 @@ pub fn record_pre_execution_failure(
 /// rerunning the provider. The failure stays `retryable` so recovery is
 /// attempted, and never regresses a terminal candidate to `Failed`.
 fn record_transport_follow_up_failure(
+    record: AgentTaskRunRecord,
+    phase: &str,
+    error: &Error,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_transport_follow_up_failure_in_store(&lifecycle_store, record, phase, error)
+}
+
+fn record_transport_follow_up_failure_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     mut record: AgentTaskRunRecord,
     phase: &str,
     error: &Error,
@@ -129,7 +151,7 @@ fn record_transport_follow_up_failure(
     // must not be reaped as a clean success when its follow-up failed.
     metadata.insert("candidate_preserved".to_string(), json!(true));
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -644,7 +666,17 @@ pub(crate) fn record_aggregate(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    let aggregate_path = store::aggregate_path(&record.run_id)?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_aggregate_in_store(&lifecycle_store, record, plan, aggregate)
+}
+
+pub(crate) fn record_aggregate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+    plan: &AgentTaskPlan,
+    aggregate: &AgentTaskAggregate,
+) -> Result<AgentTaskRunRecord> {
+    let aggregate_path = lifecycle_store.aggregate_path(&record.run_id);
     apply_aggregate_to_record(
         record,
         plan,
@@ -689,13 +721,22 @@ pub(crate) fn record_aggregate(
     }
     crate::controller_scratch::register_outcome_resources(&record.run_id, &aggregate.outcomes)?;
     crate::controller_scratch::finalize_run(&record.run_id)?;
-    store::write_aggregate_and_record(record, aggregate)?;
-    record_terminal_artifact_projection(record, aggregate)?;
+    lifecycle_store.write_aggregate_and_record(record, aggregate)?;
+    record_terminal_artifact_projection_in_store(lifecycle_store, record, aggregate)?;
     update_cook_candidate_after_completion(record, aggregate, None)?;
     Ok(record.clone())
 }
 
 pub(crate) fn record_terminal_artifact_projection(
+    record: &mut AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_terminal_artifact_projection_in_store(&lifecycle_store, record, aggregate)
+}
+
+fn record_terminal_artifact_projection_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
@@ -724,7 +765,7 @@ pub(crate) fn record_terminal_artifact_projection(
                         },
                     }),
                 );
-                return store::write_record(record);
+                return lifecycle_store.write_record(record);
             }
         }
     }
@@ -754,7 +795,7 @@ pub(crate) fn record_terminal_artifact_projection(
             );
         }
     }
-    store::write_record(record)
+    lifecycle_store.write_record(record)
 }
 
 /// Replace runner-local file references with controller-resolvable aggregate
