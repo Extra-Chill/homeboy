@@ -551,6 +551,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string()]),
@@ -915,6 +916,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![

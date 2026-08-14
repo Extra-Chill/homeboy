@@ -1695,6 +1695,7 @@ fn queue_create_uses_provider_lifecycle_with_per_child_metadata() {
                 kind: crate::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: crate::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![

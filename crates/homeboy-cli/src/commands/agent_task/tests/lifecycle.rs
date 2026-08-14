@@ -628,6 +628,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![
@@ -938,6 +939,7 @@ fn cook_continue_selects_a_recoverable_candidate_without_provider_redispatch() {
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![

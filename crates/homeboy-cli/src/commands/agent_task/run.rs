@@ -783,13 +783,18 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             homeboy::core::Error::internal_io(error.to_string(), Some(cwd.display().to_string()))
         })?;
         validate_cook_destination_identity(args, &path)?;
-        validate_cook_cwd_destination_identity(&path, to_worktree)?;
-        return Ok(serde_json::json!({
+        let logical_provider_provenance =
+            validate_cook_cwd_destination_identity(&path, to_worktree)?;
+        let mut provision = serde_json::json!({
             "action": "existing",
             "kind": "explicit_cwd",
             "handle": to_worktree,
             "path": path,
-        }));
+        });
+        if let Some(provenance) = logical_provider_provenance {
+            provision["logical_provider_provenance"] = provenance;
+        }
+        return Ok(provision);
     }
     let direct_path = Path::new(to_worktree);
     if direct_path.is_dir() {
@@ -827,6 +832,28 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     }
 
     let config = defaults::load_config();
+    // A command provider's answer is external, bounded, and retryable. Preserve
+    // the complete creation intent in the Cook plan and resolve it only after
+    // Cook has materialized its durable recipe/run identity.
+    if config.worktree_providers.values().any(|provider| {
+        provider.enabled
+            && provider.apply_enabled
+            && (provider.commands.resolve_identity.is_some()
+                || provider.commands.resolve.is_some()
+                || provider.commands.list.is_some())
+    }) {
+        return Ok(serde_json::json!({
+            "action": "lookup_pending",
+            "kind": "provider",
+            "handle": to_worktree,
+            "provision_intent": {
+                "repo": args.dispatch.repo,
+                "base": args.base,
+                "head": args.head,
+                "task_url": args.dispatch.task_url,
+            },
+        }));
+    }
     match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(to_worktree, &config) {
         Ok(identity) => {
             homeboy::core::worktree_providers::validate_task_worktree_root(
@@ -948,21 +975,28 @@ fn ensure_active_managed_cook_destination(to_worktree: &str) -> homeboy::core::R
 fn validate_cook_cwd_destination_identity(
     cwd: &Path,
     to_worktree: &str,
-) -> homeboy::core::Result<()> {
-    let destination = if Path::new(to_worktree).is_dir() {
-        std::fs::canonicalize(to_worktree)
+) -> homeboy::core::Result<Option<Value>> {
+    let (destination, logical_provider_provenance) = if Path::new(to_worktree).is_dir() {
+        std::fs::canonicalize(to_worktree).map(|path| (path, None))
     } else if let Some(record) =
         homeboy::core::worktree::resolve_workspace_ref_if_present(to_worktree)?
     {
         ensure_active_managed_cook_destination(to_worktree)?;
-        std::fs::canonicalize(record.path())
+        std::fs::canonicalize(record.path()).map(|path| (path, None))
     } else {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "to_worktree",
-            "--cwd requires --to-worktree to name the same existing local or registered worktree",
-            Some(to_worktree.to_string()),
-            None,
-        ));
+        // The supplied CWD is authoritative. An external handle must retain
+        // the complete canonical checkout basename, which is injective and
+        // avoids a provider lookup on this local authority boundary.
+        validate_logical_worktree_handle_path_relationship(cwd, to_worktree)?;
+        Ok((
+            cwd.to_path_buf(),
+            Some(serde_json::json!({
+                "schema": "homeboy/logical-worktree-handle-provenance/v1",
+                "handle": to_worktree,
+                "canonical_path": cwd,
+                "validation": "exact_handle_basename",
+            })),
+        ))
     }
     .map_err(|error| {
         homeboy::core::Error::internal_io(error.to_string(), Some(to_worktree.to_string()))
@@ -975,7 +1009,33 @@ fn validate_cook_cwd_destination_identity(
             None,
         ));
     }
-    Ok(())
+    Ok(logical_provider_provenance)
+}
+
+pub(crate) fn validate_logical_worktree_handle_path_relationship(
+    cwd: &Path,
+    handle: &str,
+) -> homeboy::core::Result<()> {
+    let basename = cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "cwd",
+                "--cwd must have a UTF-8 worktree basename",
+                Some(cwd.display().to_string()),
+                None,
+            )
+        })?;
+    if handle == basename {
+        return Ok(());
+    }
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "to_worktree",
+        "--cwd and --to-worktree must name the same linked task worktree",
+        Some(handle.to_string()),
+        None,
+    ))
 }
 
 pub(crate) fn resolve_cook_destination(
@@ -983,6 +1043,15 @@ pub(crate) fn resolve_cook_destination(
 ) -> homeboy::core::Result<AgentTaskCookArgs> {
     normalize_cook_repository_identity(&mut args)?;
     if args.to_worktree.is_some() {
+        return Ok(args);
+    }
+    if let Some(cwd) = args.dispatch.cwd.as_deref() {
+        let cwd = std::fs::canonicalize(cwd).map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(cwd.to_string()))
+        })?;
+        // A supplied checkout is the writable Cook authority. Preserve its
+        // canonical path instead of deriving an unrelated issue handle.
+        args.to_worktree = Some(cwd.display().to_string());
         return Ok(args);
     }
     let repo = args.dispatch.repo.as_deref().ok_or_else(|| {

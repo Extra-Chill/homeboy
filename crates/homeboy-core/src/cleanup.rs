@@ -2668,6 +2668,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     cleanup_preview: Some(vec![script, "dry_run".to_string()]),
@@ -2730,6 +2731,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     cleanup_apply: Some(vec![script, "apply".to_string()]),

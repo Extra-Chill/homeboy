@@ -33,7 +33,23 @@ the higher-level system model and core/extension boundary, see
 - `triage` — Triage priority-label configuration.
 - `agent_task` — Default backend, secret sources, provider rotation policy, and optional independently signed acceptance verification for agent-task dispatch. `acceptance_verifier` uses controller-owned `trust: { kind: hmac_sha256, key_id, key_env }`; Homeboy removes `key_env` from the verifier subprocess, verifies its base64 HMAC-SHA-256 over the canonical verdict binding, and stores the signature plus key ID with the durable run record.
 - `notifications` — Notification delivery policy for route-less completed operations.
-- `worktree_providers` — External worktree lifecycle providers keyed by provider ID. `lookup_timeout_ms` bounds read-only `list` and `resolve` commands. `resolve_path` gets one immediate retry after a supervised timeout, for a maximum of two attempts; all other completed and failed lookup outcomes retain their normal semantics. `commands.cleanup_preview_timeout_ms` and `commands.cleanup_apply_timeout_ms` independently bound cleanup preview and apply commands (each defaults to 30,000 milliseconds). A command provider that sets `commands.list` must also set `list_result_mapping`: JSONPath selectors for `items`, `handle`, `path`, `branch`, `dirty`, `unpushed`, and `primary`. `items` must resolve to one array; each item selector must resolve to exactly one value of its required type (strings for handle/path/branch, booleans for safety values). Homeboy does not infer response envelopes or safety values. Purpose-owned callers require `enabled`, `apply_enabled`, `commands.ensure`, and `settings.worktree_provider_lifecycle.<provider-id>.finalize`. They can use argv-only `commands.ensure` placeholders `{purpose}`, `{owner_run_ref}`, and `{cleanup_policy}`; the lifecycle finalizer expands `{handle}`, `{purpose}`, `{owner_run_ref}`, `{cleanup_policy}`, `{disposition}`, and stable `{idempotency_key}`. Providers must deduplicate finalization effects by that key because a stale lease may retry the invocation; this is not process-level exactly-once fencing.
+- `worktree_providers` — External worktree lifecycle providers keyed by provider ID. `lookup_timeout_ms` bounds read-only `list`, `resolve`, exact-identity, and safety commands (default: 10,000 milliseconds). `mutation_timeout_ms` bounds `ensure` and lifecycle finalization commands (default: 30,000 milliseconds; maximum: 900,000 milliseconds). `resolve_path` gets one immediate retry after a supervised timeout, for a maximum of two attempts; all other completed and failed lookup outcomes retain their normal semantics. `commands.cleanup_preview_timeout_ms` and `commands.cleanup_apply_timeout_ms` independently bound cleanup preview and apply commands (each defaults to 30,000 milliseconds). A command provider that sets `commands.list` must also set `list_result_mapping`: JSONPath selectors for `items`, `handle`, `path`, `branch`, `dirty`, `unpushed`, and `primary`. `items` must resolve to one array; each item selector must resolve to exactly one value of its required type (strings for handle/path/branch, booleans for safety values). Homeboy does not infer response envelopes or safety values. Purpose-owned callers require `enabled`, `apply_enabled`, `commands.ensure`, and `settings.worktree_provider_lifecycle.<provider-id>.finalize`. They can use argv-only `commands.ensure` placeholders `{purpose}`, `{owner_run_ref}`, and `{cleanup_policy}`; the lifecycle finalizer expands `{handle}`, `{purpose}`, `{owner_run_ref}`, `{cleanup_policy}`, `{disposition}`, and stable `{idempotency_key}`. Providers must deduplicate finalization effects by that key because a stale lease may retry the invocation; this is not process-level exactly-once fencing.
+
+Example provider with a nine-minute ensure/finalize budget while retaining short lookups:
+
+```json
+{
+  "worktree_providers": {
+    "workspace-service": {
+      "lookup_timeout_ms": 10000,
+      "mutation_timeout_ms": 540000,
+      "commands": {
+        "ensure": ["workspace-service", "ensure", "{handle}"]
+      }
+    }
+  }
+}
+```
 - `github_hosts` — Host-scoped environment for `gh` subprocesses, keyed by GitHub hostname. Component-level `github.hosts` entries override these global defaults.
 - `settings` — Generic extension and executor settings, addressed through `/settings/...`.
 - `release_gate` — Routing safety policy for release-gate hot commands.

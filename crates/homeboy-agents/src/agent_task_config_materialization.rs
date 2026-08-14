@@ -53,31 +53,35 @@ struct MaterializedRefPathEvidence {
 }
 
 pub fn materialize_provider_config_refs(config: Value) -> Result<Value> {
-    materialize_value(config)
+    materialize_provider_config_refs_in(config, &paths::homeboy_data()?)
 }
 
-fn materialize_value(value: Value) -> Result<Value> {
+fn materialize_provider_config_refs_in(config: Value, data_root: &Path) -> Result<Value> {
+    materialize_value(config, data_root)
+}
+
+fn materialize_value(value: Value, data_root: &Path) -> Result<Value> {
     match value {
         Value::Array(items) => items
             .into_iter()
-            .map(materialize_value)
+            .map(|value| materialize_value(value, data_root))
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
-        Value::Object(map) => materialize_object(map),
+        Value::Object(map) => materialize_object(map, data_root),
         other => Ok(other),
     }
 }
 
-fn materialize_object(mut map: Map<String, Value>) -> Result<Value> {
+fn materialize_object(mut map: Map<String, Value>, data_root: &Path) -> Result<Value> {
     let keys = map.keys().cloned().collect::<Vec<_>>();
     for key in keys {
         if let Some(value) = map.remove(&key) {
-            map.insert(key, materialize_value(value)?);
+            map.insert(key, materialize_value(value, data_root)?);
         }
     }
 
     if let Some(configured_ref) = configured_ref_from_map(&map)? {
-        let materialized = materialize_configured_ref(&configured_ref)?;
+        let materialized = materialize_configured_ref(&configured_ref, data_root)?;
         if ref_object_is_path_alias(&map) {
             return Ok(Value::String(materialized.path));
         }
@@ -148,9 +152,13 @@ fn ref_object_is_path_alias(map: &Map<String, Value>) -> bool {
         .all(|key| matches!(key.as_str(), "repo" | "ref" | "path_in_repo" | "pathInRepo"))
 }
 
-fn materialize_configured_ref(configured_ref: &ConfiguredRef) -> Result<MaterializedRef> {
+fn materialize_configured_ref(
+    configured_ref: &ConfiguredRef,
+    data_root: &Path,
+) -> Result<MaterializedRef> {
     let remote = resolve_repo_remote(&configured_ref.repo)?;
-    let checkout = materialized_checkout_path(&configured_ref.repo, &configured_ref.ref_name)?;
+    let checkout =
+        materialized_checkout_path(data_root, &configured_ref.repo, &configured_ref.ref_name);
     if checkout.join(".git").exists() {
         git::run_git(
             &checkout,
@@ -355,11 +363,11 @@ fn resolve_repo_remote(repo: &str) -> Result<String> {
     ))
 }
 
-fn materialized_checkout_path(repo: &str, ref_name: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
+fn materialized_checkout_path(data_root: &Path, repo: &str, ref_name: &str) -> PathBuf {
+    data_root
         .join(MATERIALIZATION_DIR)
         .join(slug(repo))
-        .join(slug(ref_name)))
+        .join(slug(ref_name))
 }
 
 fn checkout_ref(checkout: &Path, ref_name: &str) -> Result<String> {
@@ -509,175 +517,178 @@ fn slug(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::test_support::with_isolated_home;
 
     #[test]
     fn path_alias_refs_become_local_path_strings() {
-        with_isolated_home(|_| {
-            let repo = tempfile::tempdir().expect("repo");
-            init_repo(repo.path());
-            fs::create_dir_all(repo.path().join("plugin")).expect("plugin dir");
-            fs::write(repo.path().join("plugin/main.php"), "<?php").expect("plugin file");
-            commit_all(repo.path());
-            let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
-                .expect("head")
-                .trim()
-                .to_string();
+        let data = tempfile::tempdir().expect("data root");
+        let repo = tempfile::tempdir().expect("repo");
+        init_repo(repo.path());
+        fs::create_dir_all(repo.path().join("plugin")).expect("plugin dir");
+        fs::write(repo.path().join("plugin/main.php"), "<?php").expect("plugin file");
+        commit_all(repo.path());
+        let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
+            .expect("head")
+            .trim()
+            .to_string();
 
-            let config = serde_json::json!({
-                "provider_plugin_paths": [{
-                    "repo": repo.path().display().to_string(),
-                    "ref": head,
-                    "path_in_repo": "plugin"
-                }]
-            });
-
-            let materialized = materialize_provider_config_refs(config).expect("materialized");
-            let path = materialized["provider_plugin_paths"][0]
-                .as_str()
-                .expect("path string");
-            assert!(Path::new(path).join("main.php").is_file());
+        let config = serde_json::json!({
+            "provider_plugin_paths": [{
+                "repo": repo.path().display().to_string(),
+                "ref": head,
+                "path_in_repo": "plugin"
+            }]
         });
+
+        let materialized =
+            materialize_provider_config_refs_in(config, data.path()).expect("materialized");
+        let path = materialized["provider_plugin_paths"][0]
+            .as_str()
+            .expect("path string");
+        assert!(Path::new(path).join("main.php").is_file());
     }
 
     #[test]
     fn ref_objects_with_extra_fields_preserve_shape_and_gain_path() {
-        with_isolated_home(|_| {
-            let repo = tempfile::tempdir().expect("repo");
-            init_repo(repo.path());
-            fs::create_dir_all(repo.path().join("runtime")).expect("runtime dir");
-            fs::write(repo.path().join("runtime/bootstrap.php"), "<?php").expect("runtime file");
-            commit_all(repo.path());
-            let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
-                .expect("head")
-                .trim()
-                .to_string();
+        let data = tempfile::tempdir().expect("data root");
+        let repo = tempfile::tempdir().expect("repo");
+        init_repo(repo.path());
+        fs::create_dir_all(repo.path().join("runtime")).expect("runtime dir");
+        fs::write(repo.path().join("runtime/bootstrap.php"), "<?php").expect("runtime file");
+        commit_all(repo.path());
+        let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
+            .expect("head")
+            .trim()
+            .to_string();
 
-            let config = serde_json::json!({
-                "runtime_overlays": [{
-                    "name": "runtime-client",
-                    "repo": repo.path().display().to_string(),
-                    "ref": head,
-                    "path_in_repo": "runtime"
-                }]
-            });
-
-            let materialized = materialize_provider_config_refs(config).expect("materialized");
-            let overlay = &materialized["runtime_overlays"][0];
-            assert_eq!(overlay["name"], "runtime-client");
-            let path = overlay["path"].as_str().expect("path");
-            assert_eq!(overlay["materialized_path"], path);
-            assert!(Path::new(path).join("bootstrap.php").is_file());
+        let config = serde_json::json!({
+            "runtime_overlays": [{
+                "name": "runtime-client",
+                "repo": repo.path().display().to_string(),
+                "ref": head,
+                "path_in_repo": "runtime"
+            }]
         });
+
+        let materialized =
+            materialize_provider_config_refs_in(config, data.path()).expect("materialized");
+        let overlay = &materialized["runtime_overlays"][0];
+        assert_eq!(overlay["name"], "runtime-client");
+        let path = overlay["path"].as_str().expect("path");
+        assert_eq!(overlay["materialized_path"], path);
+        assert!(Path::new(path).join("bootstrap.php").is_file());
     }
 
     #[test]
     fn ref_setup_materializes_declared_readiness_evidence() {
-        with_isolated_home(|_| {
-            let repo = tempfile::tempdir().expect("repo");
-            init_repo(repo.path());
-            fs::create_dir_all(repo.path().join("runtime")).expect("runtime dir");
-            fs::write(
-                repo.path().join("runtime/setup.sh"),
-                "printf ready > ready.txt",
-            )
-            .expect("setup script");
-            commit_all(repo.path());
-            let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
-                .expect("head")
-                .trim()
-                .to_string();
+        let data = tempfile::tempdir().expect("data root");
+        let repo = tempfile::tempdir().expect("repo");
+        init_repo(repo.path());
+        fs::create_dir_all(repo.path().join("runtime")).expect("runtime dir");
+        fs::write(
+            repo.path().join("runtime/setup.sh"),
+            "printf ready > ready.txt",
+        )
+        .expect("setup script");
+        commit_all(repo.path());
+        let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
+            .expect("head")
+            .trim()
+            .to_string();
 
-            let config = serde_json::json!({
-                "runtime_overlays": [{
-                    "name": "runtime-client",
-                    "repo": repo.path().display().to_string(),
-                    "ref": head,
-                    "path_in_repo": "runtime",
-                    "setup": ["sh setup.sh"],
-                    "readiness": [{ "path": "ready.txt", "label": "setup marker" }],
-                    "conflicts": ["vendor/stale-runtime-copy"]
-                }]
-            });
-
-            let materialized = materialize_provider_config_refs(config).expect("materialized");
-            let overlay = &materialized["runtime_overlays"][0];
-            let path = overlay["path"].as_str().expect("path");
-            assert_eq!(
-                fs::read_to_string(Path::new(path).join("ready.txt")).unwrap(),
-                "ready"
-            );
-            let materialized_ref = &overlay["materialized_ref"];
-            assert_eq!(materialized_ref["setup"][0]["command"], "sh setup.sh");
-            assert_eq!(materialized_ref["setup"][0]["status"], 0);
-            assert_eq!(materialized_ref["readiness"][0]["label"], "setup marker");
-            assert_eq!(materialized_ref["readiness"][0]["exists"], true);
-            assert_eq!(materialized_ref["conflicts"][0]["exists"], false);
+        let config = serde_json::json!({
+            "runtime_overlays": [{
+                "name": "runtime-client",
+                "repo": repo.path().display().to_string(),
+                "ref": head,
+                "path_in_repo": "runtime",
+                "setup": ["sh setup.sh"],
+                "readiness": [{ "path": "ready.txt", "label": "setup marker" }],
+                "conflicts": ["vendor/stale-runtime-copy"]
+            }]
         });
+
+        let materialized =
+            materialize_provider_config_refs_in(config, data.path()).expect("materialized");
+        let overlay = &materialized["runtime_overlays"][0];
+        let path = overlay["path"].as_str().expect("path");
+        assert_eq!(
+            fs::read_to_string(Path::new(path).join("ready.txt")).unwrap(),
+            "ready"
+        );
+        let materialized_ref = &overlay["materialized_ref"];
+        assert_eq!(materialized_ref["setup"][0]["command"], "sh setup.sh");
+        assert_eq!(materialized_ref["setup"][0]["status"], 0);
+        assert_eq!(materialized_ref["readiness"][0]["label"], "setup marker");
+        assert_eq!(materialized_ref["readiness"][0]["exists"], true);
+        assert_eq!(materialized_ref["conflicts"][0]["exists"], false);
     }
 
     #[test]
     fn missing_readiness_probe_fails_closed() {
-        with_isolated_home(|_| {
-            let repo = tempfile::tempdir().expect("repo");
-            init_repo(repo.path());
-            fs::create_dir_all(repo.path().join("runtime")).expect("runtime dir");
-            fs::write(repo.path().join("runtime/bootstrap.txt"), "runtime").expect("runtime file");
-            commit_all(repo.path());
-            let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
-                .expect("head")
-                .trim()
-                .to_string();
+        let data = tempfile::tempdir().expect("data root");
+        let repo = tempfile::tempdir().expect("repo");
+        init_repo(repo.path());
+        fs::create_dir_all(repo.path().join("runtime")).expect("runtime dir");
+        fs::write(repo.path().join("runtime/bootstrap.txt"), "runtime").expect("runtime file");
+        commit_all(repo.path());
+        let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
+            .expect("head")
+            .trim()
+            .to_string();
 
-            let err = materialize_provider_config_refs(serde_json::json!({
+        let err = materialize_provider_config_refs_in(
+            serde_json::json!({
                 "runtime_overlays": [{
                     "repo": repo.path().display().to_string(),
                     "ref": head,
                     "path_in_repo": "runtime",
                     "readiness": ["vendor/autoload.php"]
                 }]
-            }))
-            .expect_err("missing readiness should fail");
+            }),
+            data.path(),
+        )
+        .expect_err("missing readiness should fail");
 
-            assert_eq!(err.code.as_str(), "validation.invalid_argument");
-            assert!(err.message.contains("missing 1 declared readiness path"));
-            assert!(err.message.contains(repo.path().to_string_lossy().as_ref()));
-        });
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("missing 1 declared readiness path"));
+        assert!(err.message.contains(repo.path().to_string_lossy().as_ref()));
     }
 
     #[test]
     fn present_conflict_probe_fails_closed() {
-        with_isolated_home(|_| {
-            let repo = tempfile::tempdir().expect("repo");
-            init_repo(repo.path());
-            fs::create_dir_all(repo.path().join("runtime/vendor/stale-runtime-copy"))
-                .expect("conflict dir");
-            fs::write(
-                repo.path()
-                    .join("runtime/vendor/stale-runtime-copy/package.txt"),
-                "conflict",
-            )
-            .expect("conflict file");
-            fs::write(repo.path().join("runtime/bootstrap.txt"), "runtime").expect("runtime file");
-            commit_all(repo.path());
-            let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
-                .expect("head")
-                .trim()
-                .to_string();
+        let data = tempfile::tempdir().expect("data root");
+        let repo = tempfile::tempdir().expect("repo");
+        init_repo(repo.path());
+        fs::create_dir_all(repo.path().join("runtime/vendor/stale-runtime-copy"))
+            .expect("conflict dir");
+        fs::write(
+            repo.path()
+                .join("runtime/vendor/stale-runtime-copy/package.txt"),
+            "conflict",
+        )
+        .expect("conflict file");
+        fs::write(repo.path().join("runtime/bootstrap.txt"), "runtime").expect("runtime file");
+        commit_all(repo.path());
+        let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
+            .expect("head")
+            .trim()
+            .to_string();
 
-            let err = materialize_provider_config_refs(serde_json::json!({
+        let err = materialize_provider_config_refs_in(
+            serde_json::json!({
                 "runtime_overlays": [{
                     "repo": repo.path().display().to_string(),
                     "ref": head,
                     "path_in_repo": "runtime",
                     "conflicts": ["vendor/stale-runtime-copy"]
                 }]
-            }))
-            .expect_err("present conflict should fail");
+            }),
+            data.path(),
+        )
+        .expect_err("present conflict should fail");
 
-            assert_eq!(err.code.as_str(), "validation.invalid_argument");
-            assert!(err.message.contains("contains 1 declared conflict path"));
-        });
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("contains 1 declared conflict path"));
     }
 
     fn init_repo(path: &Path) {

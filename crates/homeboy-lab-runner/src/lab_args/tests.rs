@@ -122,6 +122,7 @@ mod lab_source_path_tests {
                     kind: defaults::WorktreeProviderKind::Command,
                     apply_enabled: false,
                     lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
                     lookup_output_limit_bytes: 64 * 1024,
                     commands: defaults::WorktreeProviderCommands {
                         list: Some(vec![script.display().to_string()]),

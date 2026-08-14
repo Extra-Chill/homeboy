@@ -4062,7 +4062,77 @@ where
         .transpose()?;
     agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
     if cook_workspace_lookup_pending(&options.initial_plan) {
-        if let Err(error) = materialize_pending_cook_workspace(&mut options) {
+        report_cook_progress(
+            durable_observer,
+            &options.cook_id,
+            &options.initial_run_id,
+            "worktree_provider_lookup",
+            1,
+            Some("starting bounded provider workspace lookup"),
+        )?;
+        // Core owns process-tree supervision; Cook owns the durable lifecycle
+        // record. Keep that record live while the external provider command runs.
+        let (lookup_stop, lookup_wait) = mpsc::channel();
+        let lookup_cook_id = options.cook_id.clone();
+        let lookup_run_id = options.initial_run_id.clone();
+        let lookup_control =
+            homeboy_core::worktree_providers::WorktreeProviderCommandControl::default();
+        let heartbeat_control = lookup_control.clone();
+        let lookup_result = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let mut next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
+                loop {
+                    match lookup_wait.recv_timeout(COOK_PROVIDER_TERMINAL_POLL_INTERVAL) {
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                    if agent_task_lifecycle::status(&lookup_run_id)
+                        .ok()
+                        .is_some_and(|record| {
+                            record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                        })
+                    {
+                        heartbeat_control.cancel();
+                        break;
+                    }
+                    if Instant::now() >= next_heartbeat {
+                        next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
+                        let _ = report_cook_progress(
+                            durable_observer,
+                            &lookup_cook_id,
+                            &lookup_run_id,
+                            "worktree_provider_lookup",
+                            1,
+                            Some("bounded provider workspace lookup is still running"),
+                        );
+                    }
+                }
+            });
+            let result = homeboy_core::worktree_providers::with_worktree_provider_command_control(
+                lookup_control,
+                || materialize_pending_cook_workspace(&mut options),
+            );
+            let _ = lookup_stop.send(());
+            result
+        });
+        if let Err(error) = lookup_result {
+            if agent_task_lifecycle::status(&options.initial_run_id)
+                .ok()
+                .is_some_and(|record| {
+                    record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                })
+            {
+                return Ok(cook_report(CookReportInput {
+                    cook_id: options.cook_id.clone(),
+                    status: CookStatus::Cancelled.as_str(),
+                    disposition: CookDisposition::Terminal,
+                    attempts: Vec::new(),
+                    finalization: None,
+                    stop_reason: Some(error.to_string()),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&options.initial_run_id),
+                }));
+            }
             let error = with_pre_execution_phase(error, "worktree_provider_lookup");
             record_pre_execution_failure(
                 &options.initial_plan,
@@ -4467,6 +4537,7 @@ where
                 }
                 failed_dispatch_plan = Some(dispatch_plan.clone());
                 if let Some(dispatcher) = &options.attempt_dispatcher {
+                    admit_explicit_cook_workspace_before_provider(&options, &run_id)?;
                     dispatcher.dispatch_attempt(
                         dispatch_plan,
                         &run_id,
@@ -4474,6 +4545,7 @@ where
                     )
                 } else {
                     validate_cook_workspace(&options)?;
+                    admit_explicit_cook_workspace_before_provider(&options, &run_id)?;
                     let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
                     let heartbeat_run_id = run_id.clone();
                     let heartbeat_cook_id = cook_id.clone();
@@ -5646,7 +5718,11 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
                 ));
             }
         }
-        trusted_initial_cook_workspace(options, source)?.unwrap_or_else(|| source.to_path_buf())
+        if cook_uses_explicit_cwd_workspace(options) {
+            source.to_path_buf()
+        } else {
+            trusted_initial_cook_workspace(options, source)?.unwrap_or_else(|| source.to_path_buf())
+        }
     } else if std::path::Path::new(&options.to_worktree).is_dir() {
         std::path::Path::new(&options.to_worktree).to_path_buf()
     } else if let Some(record) =
@@ -5868,10 +5944,125 @@ fn trusted_initial_cook_workspace(
 
 fn preflight_initial_cook_workspace_provider(options: &AgentTaskCookServiceOptions) -> Result<()> {
     if let Some(source) = options.source_worktree_path.as_deref() {
+        if cook_uses_explicit_cwd_workspace(options) {
+            return Ok(());
+        }
         trusted_initial_cook_workspace(options, source)?;
         return Ok(());
     }
     crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)
+}
+
+fn cook_uses_explicit_cwd_workspace(options: &AgentTaskCookServiceOptions) -> bool {
+    options.initial_plan.tasks.first().is_some_and(|task| {
+        task.metadata
+            .pointer("/worktree_provision/kind")
+            .and_then(Value::as_str)
+            == Some("explicit_cwd")
+    })
+}
+
+fn admit_explicit_cook_workspace_before_provider(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+) -> Result<()> {
+    if !cook_uses_explicit_cwd_workspace(options) || cook_has_provider_execution(&options.cook_id)?
+    {
+        return Ok(());
+    }
+    let source = options.source_worktree_path.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace",
+            "explicit Cook workspace is missing its source path",
+            Some(options.to_worktree.clone()),
+            None,
+        )
+    })?;
+    let source = std::fs::canonicalize(source).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(source.display().to_string()))
+    })?;
+    let ignored_evidence = explicit_cook_evidence_paths(options, &source);
+    let status = homeboy_core::git::run_git(
+        &source,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        "verify explicitly targeted Cook checkout cleanliness",
+    )?;
+    let dirty_paths = status
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.strip_prefix("?? ").unwrap_or(entry))
+        .filter(|path| !ignored_evidence.iter().any(|evidence| evidence == path))
+        .collect::<Vec<_>>();
+    if !dirty_paths.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "explicit Cook checkout must be clean before its first provider execution",
+            Some(options.to_worktree.clone()),
+            None,
+        ));
+    }
+    if agent_task_lifecycle::run_record_exists(run_id)? {
+        agent_task_lifecycle::record_metadata_value(
+            run_id,
+            "explicit_cwd_cleanliness_admission",
+            serde_json::json!({
+                "schema": "homeboy/cook-explicit-cwd-cleanliness/v1",
+                "workspace": source,
+                "ignored_projected_evidence": ignored_evidence,
+                "provider_executions_before_admission": 0,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+/// A consumed provider execution is the durable boundary after which provider
+/// candidate changes are expected to remain in the explicit checkout.
+fn cook_has_provider_execution(cook_id: &str) -> Result<bool> {
+    if !agent_task_lifecycle::cook_index_exists(cook_id)? {
+        return Ok(false);
+    }
+    for attempt in agent_task_lifecycle::cook_index(cook_id)?.attempts {
+        if agent_task_lifecycle::exact_record(&attempt.run_id)
+            .ok()
+            .and_then(|record| {
+                record.metadata["provider_executions_consumed"]
+                    .as_u64()
+                    .or_else(|| {
+                        record.metadata["provider_executions"]
+                            .as_array()
+                            .map(|executions| executions.len() as u64)
+                    })
+            })
+            .is_some_and(|executions| executions > 0)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Evidence is projected by the controller before Cook dispatches. Admit only
+/// the exact durable projection paths, never an entire controller directory.
+fn explicit_cook_evidence_paths(
+    options: &AgentTaskCookServiceOptions,
+    workspace: &Path,
+) -> Vec<String> {
+    options
+        .initial_plan
+        .tasks
+        .iter()
+        .flat_map(|task| {
+            task.executor.config["evidence_inputs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|evidence| evidence["path"].as_str())
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter_map(|path| path.strip_prefix(workspace).ok().map(Path::to_path_buf))
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
 }
 
 fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
@@ -5898,21 +6089,32 @@ fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions)
                 .metadata
                 .pointer("/cook_provision/worktree_provider_id")
                 .and_then(Value::as_str)
-        })
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "worktree_provider",
-                "pending Cook workspace lookup is missing its persisted provider identity",
-                Some(options.to_worktree.clone()),
-                None,
-            )
-        })?;
+        });
     let config = homeboy_core::defaults::load_config();
-    let identity = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
-        &options.to_worktree,
-        provider_id,
-        &config,
-    )?;
+    let resolve = || {
+        match provider_id {
+        Some(provider_id) => homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+            &options.to_worktree,
+            provider_id,
+            &config,
+        ),
+        None => homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(
+            &options.to_worktree,
+            &config,
+        ),
+    }
+    };
+    let identity = match resolve() {
+        Ok(identity) => identity,
+        Err(error)
+            if provider_id.is_none()
+                && error.details["worktree_provider_lookup"] == "not_found" =>
+        {
+            provision_pending_cook_workspace(options, &config)?;
+            resolve()?
+        }
+        Err(error) => return Err(error),
+    };
     if identity.handle != options.to_worktree {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
@@ -5979,6 +6181,35 @@ fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions)
         Value::String("existing".to_string());
     options.source_worktree_path = Some(target);
     agent_task_lifecycle::persist_controller_plan(&options.initial_run_id, &options.initial_plan)
+}
+
+/// A deferred provider lookup can prove absence only after Cook owns a durable
+/// identity. In that case, execute the unchanged configured ensure contract and
+/// resolve its postcondition through the same provider boundary.
+fn provision_pending_cook_workspace(
+    options: &AgentTaskCookServiceOptions,
+    config: &homeboy_core::defaults::HomeboyConfig,
+) -> Result<()> {
+    let intent = &options.initial_plan.metadata["cook_provision"]["provision_intent"];
+    let required = |field: &str| {
+        intent.get(field).and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+            Error::validation_missing_argument(vec![format!(
+                "--{field} is required to create missing provider worktree `{}` after durable Cook admission",
+                options.to_worktree
+            )])
+        })
+    };
+    homeboy_core::worktree_providers::provision_apply_enabled_worktree_provider_from_config(
+        &homeboy_core::worktree_providers::WorktreeProviderCreateIntent {
+            handle: options.to_worktree.clone(),
+            repo: required("repo")?.to_string(),
+            base: required("base")?.to_string(),
+            head: required("head")?.to_string(),
+            task_url: required("task_url")?.to_string(),
+        },
+        config,
+    )?;
+    Ok(())
 }
 
 fn validate_pending_cook_repository_identity(plan: &AgentTaskPlan, target: &Path) -> Result<()> {

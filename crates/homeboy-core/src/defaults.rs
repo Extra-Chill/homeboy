@@ -455,15 +455,22 @@ pub struct WorktreeProviderConfig {
     pub apply_enabled: bool,
     #[serde(default)]
     pub commands: WorktreeProviderCommands,
-    /// Maximum time allowed for a provider's read-only `list` or `resolve`
-    /// command. This is intentionally separate from mutating provider actions.
+    /// Maximum time allowed for a read-only provider lookup, identity, or safety
+    /// command.
     #[serde(
         default = "default_worktree_provider_lookup_timeout_ms",
         deserialize_with = "deserialize_worktree_provider_lookup_timeout_ms"
     )]
     pub lookup_timeout_ms: u64,
-    /// Maximum output retained from a provider's read-only `list` or `resolve`
-    /// command. The configured result mapping receives the complete JSON payload.
+    /// Maximum time allowed for a mutating provider ensure or finalization
+    /// command. The default preserves the prior fixed 30-second bound.
+    #[serde(
+        default = "default_worktree_provider_mutation_timeout_ms",
+        deserialize_with = "deserialize_worktree_provider_mutation_timeout_ms"
+    )]
+    pub mutation_timeout_ms: u64,
+    /// Maximum output retained from one provider command. The configured result
+    /// mapping receives the complete JSON payload.
     #[serde(
         default = "default_worktree_provider_lookup_output_limit_bytes",
         deserialize_with = "deserialize_worktree_provider_lookup_output_limit_bytes"
@@ -478,6 +485,9 @@ pub struct WorktreeProviderConfig {
 const DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
 const MIN_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 1;
 const MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS: u64 = 30_000;
+const MIN_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS: u64 = 1;
+const MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS: u64 = 900_000;
 const DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 30_000;
 const MIN_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 1;
 const MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 300_000;
@@ -487,6 +497,10 @@ const MAX_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 fn default_worktree_provider_lookup_timeout_ms() -> u64 {
     DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
+}
+
+fn default_worktree_provider_mutation_timeout_ms() -> u64 {
+    DEFAULT_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS
 }
 
 fn default_worktree_provider_cleanup_timeout_ms() -> u64 {
@@ -518,6 +532,31 @@ pub fn validate_worktree_provider_lookup_timeout_ms(
     } else {
         Err(format!(
             "lookup_timeout_ms must be between {MIN_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS} and {MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS} milliseconds"
+        ))
+    }
+}
+
+fn deserialize_worktree_provider_mutation_timeout_ms<'de, D>(
+    deserializer: D,
+) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let timeout_ms = u64::deserialize(deserializer)?;
+    validate_worktree_provider_mutation_timeout_ms(timeout_ms).map_err(serde::de::Error::custom)?;
+    Ok(timeout_ms)
+}
+
+pub fn validate_worktree_provider_mutation_timeout_ms(
+    timeout_ms: u64,
+) -> std::result::Result<(), String> {
+    if (MIN_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS..=MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS)
+        .contains(&timeout_ms)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "mutation_timeout_ms must be between {MIN_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS} and {MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS} milliseconds"
         ))
     }
 }
@@ -1015,6 +1054,10 @@ mod tests {
             DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
         );
         assert_eq!(
+            config.worktree_providers["fixture"].mutation_timeout_ms,
+            DEFAULT_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS
+        );
+        assert_eq!(
             config.worktree_providers["fixture"]
                 .commands
                 .cleanup_preview_timeout_ms,
@@ -1036,6 +1079,14 @@ mod tests {
                 .pointer("/worktree_providers/fixture/lookup_timeout_ms"),
             Some(&serde_json::json!(
                 DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(&config)
+                .expect("config serializes")
+                .pointer("/worktree_providers/fixture/mutation_timeout_ms"),
+            Some(&serde_json::json!(
+                DEFAULT_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS
             ))
         );
         assert_eq!(
@@ -1072,6 +1123,25 @@ mod tests {
                 .to_string()
                 .contains("lookup_timeout_ms must be between"));
         }
+
+        for timeout_ms in [0, MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS + 1] {
+            let error = serde_json::from_value::<HomeboyConfig>(serde_json::json!({
+                "worktree_providers": {"fixture": {"mutation_timeout_ms": timeout_ms}}
+            }))
+            .expect_err("out-of-range mutation timeout is invalid");
+            assert!(error
+                .to_string()
+                .contains("mutation_timeout_ms must be between"));
+        }
+
+        let config: HomeboyConfig = serde_json::from_value(serde_json::json!({
+            "worktree_providers": {"fixture": {"mutation_timeout_ms": 540_000}}
+        }))
+        .expect("DMC's 540-second ensure budget is valid");
+        assert_eq!(
+            config.worktree_providers["fixture"].mutation_timeout_ms,
+            540_000
+        );
 
         for field in ["cleanup_preview_timeout_ms", "cleanup_apply_timeout_ms"] {
             for timeout_ms in [0, MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS + 1] {

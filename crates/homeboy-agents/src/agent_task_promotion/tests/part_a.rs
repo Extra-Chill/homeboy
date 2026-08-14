@@ -97,6 +97,7 @@ fn adopted_workspace_wins_over_a_rejecting_configured_provider() {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
                 lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
