@@ -75,6 +75,15 @@ jobs:
     secrets: inherit
 ```
 
+### Reusable Workflow Permissions
+
+The reusable workflow requests `contents: write`, `pull-requests: write`, and
+`issues: write`. Its caller must grant those permissions because GitHub rejects
+a called workflow that asks for a scope the caller did not grant before it
+schedules any jobs. The canonical minimal caller is maintained in
+[`fixtures/reusable-workflow-minimal-consumer.yml`](fixtures/reusable-workflow-minimal-consumer.yml)
+and is release-gated against `ci.yml`.
+
 ### Named-Phase Migration
 
 Existing direct action calls remain supported and preserve the combined
