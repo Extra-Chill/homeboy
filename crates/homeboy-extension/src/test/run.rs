@@ -1314,6 +1314,9 @@ fn run_main_test_workflow_inner(
     // single summary line — so the suite-level duration survives a timeout.
     let child_started = std::time::Instant::now();
     let output = runner
+        .env_remove_if(inventory_mode, "SCOPE_MODE")
+        .env_remove_if(inventory_mode, "HOMEBOY_CHANGED_SINCE")
+        .env_remove_if(inventory_mode, "HOMEBOY_CHANGED_TEST_FILES")
         .env_if(
             !inventory_mode && args.changed_since.is_some(),
             "SCOPE_MODE",
