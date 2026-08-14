@@ -1594,6 +1594,54 @@ pub fn home_env_guard() -> MutexGuard<'static, ()> {
     env_lock()
 }
 
+/// The libtest name of a test in `module_path`, for passing to `--exact`.
+///
+/// Several tests re-invoke their own binary to get a second process -- a lock
+/// holder, a lease claimant -- by naming the child test with `--exact`. Those
+/// names were written as string literals, and the crate extraction moved every
+/// module underneath them. A stale name does not error: libtest matches zero
+/// tests, prints `running 0 tests`, and exits 0. So the child appears to
+/// succeed while never running, and `assert!(status.success())` passes having
+/// proved nothing (#12373-adjacent; found via the one case that did fail,
+/// `daemon_operation_lock_recovers_after_owner_exits_without_drop`, whose parent
+/// waits on a file the child never writes).
+///
+/// Deriving the name removes the literal. libtest strips the crate segment from
+/// `module_path!()`, so `homeboy_core::daemon::daemon_test` is addressed as
+/// `daemon::daemon_test`.
+pub fn harness_test_name(module_path: &str, test: &str) -> String {
+    let module = module_path
+        .split_once("::")
+        .map(|(_crate_name, rest)| rest)
+        .unwrap_or(module_path);
+    format!("{module}::{test}")
+}
+
+/// Run one `#[ignore]`d test in this same binary as a child process, and prove
+/// it actually ran.
+///
+/// `status.success()` alone is not proof: a name that matches nothing also
+/// exits 0. The child's own summary line is the measurement.
+pub fn run_child_test(
+    command: &mut std::process::Command,
+    test_name: &str,
+) -> std::process::Output {
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("run child test {test_name}: {error}"));
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains("running 0 tests"),
+        "child test `{test_name}` matched nothing, so the assertion on its exit status \
+         would have passed without executing anything:\n{combined}"
+    );
+    output
+}
+
 /// Serializes tests that mutate or capture process-global environment state.
 pub fn env_lock() -> MutexGuard<'static, ()> {
     home_lock().lock().unwrap_or_else(|e| e.into_inner())
