@@ -48,6 +48,34 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Component path: ${COMPONENT_PATH:-$(pwd)}"
 fi
 
+# Inventory-only mode enumerates the suite without running any of it, so that
+# Homeboy can plan bounded shards. It must return before any runner is selected:
+# a producer that executed tests would defeat the point, and core deliberately
+# withholds the changed-scope environment here because an inventory is a
+# complete enumeration rather than a changed-test execution.
+#
+# The document is written by a Python producer, not by this shell, because the
+# `inventory_fingerprint` contract is literally Python's
+# `json.dumps(..., sort_keys=True, separators=(",", ":"))` byte layout, which
+# core reproduces by hand when it re-derives the fingerprint. (#12394)
+if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = "1" ]; then
+    if [ -z "${HOMEBOY_TEST_INVENTORY_FILE:-}" ]; then
+        echo "Error: HOMEBOY_TEST_INVENTORY_ONLY is set without HOMEBOY_TEST_INVENTORY_FILE." >&2
+        exit 2
+    fi
+    INVENTORY_TOOL="${SCRIPT_DIR}/test-inventory.py"
+    if [ ! -f "$INVENTORY_TOOL" ]; then
+        echo "Error: WordPress test inventory producer is missing: ${INVENTORY_TOOL}" >&2
+        exit 2
+    fi
+    exec python3 "$INVENTORY_TOOL" \
+        --project "$PLUGIN_PATH" \
+        --extension-path "$EXTENSION_PATH" \
+        --runner "${HOMEBOY_WORDPRESS_INVENTORY_RUNNER:-wordpress}" \
+        --package "${HOMEBOY_COMPONENT_ID:-wordpress}" \
+        --output "$HOMEBOY_TEST_INVENTORY_FILE"
+fi
+
 # WordPress tests run through the selected runtime backend against real
 # WordPress. The default suite is PHPUnit. Standalone smoke scripts are
 # diagnostic/operator targets and run only when selected explicitly with --file,
