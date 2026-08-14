@@ -64,6 +64,13 @@ pub fn run_repo_local_gate_task(request: &AgentTaskRequest) -> AgentTaskOutcome 
 }
 
 fn build_execution(request: &AgentTaskRequest) -> Result<RepoLocalGateExecution> {
+    build_execution_with_artifact_root(request, homeboy_core::artifacts::root)
+}
+
+fn build_execution_with_artifact_root(
+    request: &AgentTaskRequest,
+    resolve_artifact_root: impl FnOnce() -> Result<PathBuf>,
+) -> Result<RepoLocalGateExecution> {
     let config = &request.executor.config;
     let execution_kind = execution_kind(request).ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -114,7 +121,7 @@ fn build_execution(request: &AgentTaskRequest) -> Result<RepoLocalGateExecution>
     // report, not a directory to invent.
     let artifact_root = match config.get("artifact_root").and_then(Value::as_str) {
         Some(configured) => PathBuf::from(configured),
-        None => homeboy_core::artifacts::root()?
+        None => resolve_artifact_root()?
             .join("repo-local-gates")
             .join(safe_path_segment(&request.task_id)),
     };
@@ -514,37 +521,36 @@ mod tests {
 
     #[test]
     fn repo_local_gate_materializes_inputs_and_typed_outputs() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let script = temp.path().join("gate.mjs");
-            fs::write(
-                &script,
-                "import fs from 'node:fs'; const input = JSON.parse(fs.readFileSync(process.env.INPUT_PACKET_PATH, 'utf8')); fs.writeFileSync(process.env.GATE_RESULT_PATH, JSON.stringify({publish_allowed: input.ok}));",
-            )
-            .expect("write script");
-            let request = request(
-                temp.path(),
-                json!({
-                    "execution_kind": "repo_local_gate",
-                    "script": "gate.mjs",
-                    "inputs": { "input_packet": { "ok": true } },
-                    "artifact_outputs": {
-                        "gate_result": { "schema": "example/GateResult/v1", "type": "GateResult" }
-                    }
-                }),
-            );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("gate.mjs");
+        fs::write(
+            &script,
+            "import fs from 'node:fs'; const input = JSON.parse(fs.readFileSync(process.env.INPUT_PACKET_PATH, 'utf8')); fs.writeFileSync(process.env.GATE_RESULT_PATH, JSON.stringify({publish_allowed: input.ok}));",
+        )
+        .expect("write script");
+        let request = request(
+            temp.path(),
+            json!({
+                "execution_kind": "repo_local_gate",
+                "script": "gate.mjs",
+                "artifact_root": temp.path().join("gate-artifacts"),
+                "inputs": { "input_packet": { "ok": true } },
+                "artifact_outputs": {
+                    "gate_result": { "schema": "example/GateResult/v1", "type": "GateResult" }
+                }
+            }),
+        );
 
-            let outcome = run_repo_local_gate_task(&request);
+        let outcome = run_repo_local_gate_task(&request);
 
-            assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-            assert_eq!(outcome.outputs["gate_result"]["publish_allowed"], true);
-            assert_eq!(outcome.typed_artifacts.len(), 1);
-            assert_eq!(outcome.typed_artifacts[0].name, "gate_result");
-            assert_eq!(
-                outcome.typed_artifacts[0].artifact_schema.as_deref(),
-                Some("example/GateResult/v1")
-            );
-        });
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert_eq!(outcome.outputs["gate_result"]["publish_allowed"], true);
+        assert_eq!(outcome.typed_artifacts.len(), 1);
+        assert_eq!(outcome.typed_artifacts[0].name, "gate_result");
+        assert_eq!(
+            outcome.typed_artifacts[0].artifact_schema.as_deref(),
+            Some("example/GateResult/v1")
+        );
     }
 
     /// The default gate artifact root is derived from the configured artifact
@@ -554,57 +560,48 @@ mod tests {
     /// path that no cleanup surface could see.
     #[test]
     fn gate_artifact_root_defaults_under_the_configured_artifact_root() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().expect("tempdir");
-            fs::write(temp.path().join("gate.mjs"), "").expect("write script");
-            let request = request(
-                temp.path(),
-                json!({ "execution_kind": "repo_local_gate", "script": "gate.mjs" }),
-            );
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("gate.mjs"), "").expect("write script");
+        let request = request(
+            temp.path(),
+            json!({ "execution_kind": "repo_local_gate", "script": "gate.mjs" }),
+        );
+        let configured_root = temp.path().join("configured-artifacts");
 
-            let execution = build_execution(&request).expect("execution");
+        let execution =
+            build_execution_with_artifact_root(&request, || Ok(configured_root.clone()))
+                .expect("execution");
 
-            let expected = homeboy_core::artifacts::root()
-                .expect("artifact root")
-                .join("repo-local-gates")
-                .join("gate-task");
-            assert_eq!(execution.artifact_root, expected);
-            // The regression this guards is the pre-#11128 fallback shape, not
-            // "lives under the temp dir": an isolated test home is itself a temp
-            // directory, so a `starts_with(temp_dir())` check cannot tell the
-            // fallback apart from correct isolation and fails for every caller
-            // that sets one.
-            assert_ne!(
-                execution.artifact_root,
-                std::env::temp_dir()
-                    .join("homeboy-repo-local-gates")
-                    .join("gate-task"),
-                "gate artifacts must not fall back to the process temp dir"
-            );
-        });
+        let expected = configured_root.join("repo-local-gates").join("gate-task");
+        assert_eq!(execution.artifact_root, expected);
+        assert_ne!(
+            execution.artifact_root,
+            std::env::temp_dir()
+                .join("homeboy-repo-local-gates")
+                .join("gate-task"),
+            "gate artifacts must not fall back to the process temp dir"
+        );
     }
 
     /// An explicit `artifact_root` still wins over the artifact-root default,
     /// so an operator or caller that pins a location keeps it.
     #[test]
     fn explicit_gate_artifact_root_overrides_the_artifact_root_default() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().expect("tempdir");
-            fs::write(temp.path().join("gate.mjs"), "").expect("write script");
-            let pinned = temp.path().join("pinned-gate-artifacts");
-            let request = request(
-                temp.path(),
-                json!({
-                    "execution_kind": "repo_local_gate",
-                    "script": "gate.mjs",
-                    "artifact_root": pinned.display().to_string()
-                }),
-            );
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("gate.mjs"), "").expect("write script");
+        let pinned = temp.path().join("pinned-gate-artifacts");
+        let request = request(
+            temp.path(),
+            json!({
+                "execution_kind": "repo_local_gate",
+                "script": "gate.mjs",
+                "artifact_root": pinned.display().to_string()
+            }),
+        );
 
-            let execution = build_execution(&request).expect("execution");
+        let execution = build_execution(&request).expect("execution");
 
-            assert_eq!(execution.artifact_root, pinned);
-        });
+        assert_eq!(execution.artifact_root, pinned);
     }
 
     #[test]
