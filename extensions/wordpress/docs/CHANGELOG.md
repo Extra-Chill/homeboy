@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.48] - 2026-08-14
+
+### Fixed
+- resolve symlinked sibling helpers
+
 ## [3.34.47] - 2026-08-13
 
 ### Fixed
