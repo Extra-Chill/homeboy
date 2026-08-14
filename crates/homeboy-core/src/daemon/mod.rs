@@ -5640,15 +5640,20 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
 /// admission. Normal admissions take a shared lock; destructive recovery takes
 /// the exclusive side for its complete proof-and-signal interval.
 pub(super) fn acquire_daemon_job_admission_fence() -> Result<DaemonAdmissionFence> {
-    acquire_daemon_admission_lock(libc::LOCK_EX).map(DaemonAdmissionFence)
+    acquire_daemon_admission_lock(DaemonAdmissionLockMode::Exclusive).map(DaemonAdmissionFence)
 }
 
 pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let _guard = acquire_daemon_admission_lock(libc::LOCK_SH)?;
+    let _guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
     operation()
 }
 
-fn acquire_daemon_admission_lock(mode: libc::c_int) -> Result<File> {
+enum DaemonAdmissionLockMode {
+    Shared,
+    Exclusive,
+}
+
+fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> {
     let state = state_path()?;
     let parent = state
         .parent()
@@ -5672,13 +5677,50 @@ fn acquire_daemon_admission_lock(mode: libc::c_int) -> Result<File> {
             )
         })?;
     #[cfg(unix)]
-    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), mode) } != 0 {
+    if unsafe {
+        libc::flock(
+            std::os::fd::AsRawFd::as_raw_fd(&file),
+            match mode {
+                DaemonAdmissionLockMode::Shared => libc::LOCK_SH,
+                DaemonAdmissionLockMode::Exclusive => libc::LOCK_EX,
+            },
+        )
+    } != 0
+    {
         return Err(Error::internal_io(
             std::io::Error::last_os_error().to_string(),
             Some("lock daemon admission".to_string()),
         ));
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let flags = match mode {
+            DaemonAdmissionLockMode::Shared => 0,
+            DaemonAdmissionLockMode::Exclusive => LOCKFILE_EXCLUSIVE_LOCK,
+        };
+        if unsafe {
+            LockFileEx(
+                file.as_raw_handle(),
+                flags,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        } == 0
+        {
+            return Err(Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                Some("lock daemon admission".to_string()),
+            ));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = mode;
     Ok(file)
 }
@@ -5765,6 +5807,21 @@ impl Drop for DaemonAdmissionFence {
         #[cfg(unix)]
         unsafe {
             let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.0), libc::LOCK_UN);
+        }
+        #[cfg(windows)]
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+
+            let mut overlapped: OVERLAPPED = std::mem::zeroed();
+            let _ = UnlockFileEx(
+                self.0.as_raw_handle(),
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            );
         }
     }
 }
