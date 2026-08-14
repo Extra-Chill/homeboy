@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.35.2] - 2026-08-14
+
+### Changed
+- Bound WordPress timeout diagnostics
+
 ## [3.35.1] - 2026-08-14
 
 ### Fixed
