@@ -27,6 +27,8 @@ pub struct AgentTaskScheduler<E> {
     executor: Arc<E>,
     run_id: Option<String>,
     harvest_context: HarvestExecutionContext,
+    #[cfg(test)]
+    scratch_root: Option<std::path::PathBuf>,
 }
 
 impl<E> AgentTaskScheduler<E>
@@ -44,6 +46,8 @@ where
             executor: Arc::new(executor),
             run_id: None,
             harvest_context: HarvestExecutionContext::default(),
+            #[cfg(test)]
+            scratch_root: None,
         }
     }
 
@@ -54,6 +58,12 @@ where
 
     pub fn with_harvest_context(mut self, context: HarvestExecutionContext) -> Self {
         self.harvest_context = context;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_scratch_root(mut self, data_root: std::path::PathBuf) -> Self {
+        self.scratch_root = Some(data_root);
         self
     }
 
@@ -92,6 +102,12 @@ where
         // A scheduler without a durable run record still needs a private
         // controller-scratch namespace. Plan IDs are semantic labels and can
         // legitimately repeat across independent in-process executions.
+        #[cfg(test)]
+        let scratch_run_id = self
+            .run_id
+            .clone()
+            .unwrap_or_else(|| format!("ephemeral-{}", uuid::Uuid::new_v4()));
+        #[cfg(not(test))]
         let scratch_run_id = self
             .run_id
             .clone()
@@ -511,15 +527,29 @@ where
                 let source_workspace_root = request.workspace.root.clone();
                 let source_provenance = harvest_preflight.source_provenance;
                 #[cfg(test)]
-                let scratch_allocation = crate::controller_scratch::allocate_test_attempt;
+                let scratch = match self.scratch_root.as_ref() {
+                    Some(data_root) => crate::controller_scratch::allocate_test_attempt_at(
+                        data_root,
+                        &scratch_run_id,
+                        &plan.plan_id,
+                        &request.task_id,
+                        scheduled.attempt,
+                    ),
+                    None => crate::controller_scratch::allocate_test_attempt(
+                        &scratch_run_id,
+                        &plan.plan_id,
+                        &request.task_id,
+                        scheduled.attempt,
+                    ),
+                };
                 #[cfg(not(test))]
-                let scratch_allocation = crate::controller_scratch::allocate_attempt;
-                let scratch = match scratch_allocation(
+                let scratch = crate::controller_scratch::allocate_attempt(
                     &scratch_run_id,
                     &plan.plan_id,
                     &request.task_id,
                     scheduled.attempt,
-                ) {
+                );
+                let scratch = match scratch {
                     Ok(scratch) => scratch,
                     Err(error) => {
                         let outcome =

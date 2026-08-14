@@ -34,7 +34,10 @@ impl ExecutorArtifactRootIdentity {
         Self::capture_with_finalized_root(path, finalized_root)
     }
 
-    fn capture_with_finalized_root(path: &Path, finalized_root: PathBuf) -> Result<Self> {
+    pub(super) fn capture_with_finalized_root(
+        path: &Path,
+        finalized_root: PathBuf,
+    ) -> Result<Self> {
         let metadata = fs::symlink_metadata(path).map_err(|error| {
             Error::internal_io(
                 error.to_string(),

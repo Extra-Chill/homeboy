@@ -257,55 +257,45 @@ fn scheduler_dispatches_extension_provider_command() {
 
 #[test]
 fn executor_materializes_runner_local_artifacts_for_no_op_and_editing_requests() {
-    // The point of this test is that artifacts land in the runner-local root
-    // rather than the controller root, which an isolated home preserves: it
-    // just moves the runner root somewhere hermetic. Without it the test wrote
-    // a durable provider reservation into the developer's real Homeboy state
-    // and failed on every subsequent run with "provider execution was already
-    // reserved by an interrupted controller".
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let runner_root = homeboy_core::artifacts::root().expect("runner artifact root");
-        {
-            let controller_root = tempfile::tempdir().expect("controller root");
-            let command = format!(
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let runner_root = roots.artifacts().to_path_buf();
+    let controller_root = tempfile::tempdir().expect("controller root");
+    let command = format!(
             "node {}",
             script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let valid=path.isAbsolute(req.artifacts_path)&&fs.statSync(req.artifacts_path).isDirectory()&&req.artifacts_path_provenance.owner==='homeboy'&&req.artifacts_path_provenance.locality==='runner'&&!req.artifacts_path.startsWith(req.executor.config.controller_root); fs.writeFileSync(path.join(req.artifacts_path, req.task_id+'.txt'),'captured'); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:valid?(req.executor.config.no_op?'no_op':'succeeded'):'failed',summary:req.artifacts_path,artifacts:[]}));")
         );
-            let (mut no_op, provider) = request("task-no-op", command);
-            no_op.executor.config = json!({
-                "controller_root": controller_root.path(),
-                "no_op": true
-            });
-            let mut editing = no_op.clone();
-            editing.task_id = "task-editing".to_string();
-            editing.executor.config["no_op"] = json!(false);
-            let scheduler =
-                AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-                    provider,
-                ]))
-                .with_run_id("runner-local-artifact-run");
-
-            // Recording a provider execution is durable, so the run it belongs
-            // to has to exist before the scheduler dispatches it.
-            let plan = AgentTaskPlan::new("runner-local-artifact-plan", vec![no_op, editing]);
-            crate::agent_task_lifecycle::submit_plan(&plan, Some("runner-local-artifact-run"))
-                .expect("durable run record");
-            let aggregate = scheduler.run(plan);
-
-            assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::NoOp);
-            assert_eq!(
-                aggregate.outcomes[1].status,
-                AgentTaskOutcomeStatus::Succeeded
-            );
-            for outcome in &aggregate.outcomes {
-                let path = PathBuf::from(outcome.summary.as_deref().expect("artifacts path"));
-                assert!(path.starts_with(&runner_root));
-                assert!(!path.starts_with(controller_root.path()));
-                assert!(path.join(format!("{}.txt", outcome.task_id)).is_file());
-            }
-            assert_ne!(aggregate.outcomes[0].summary, aggregate.outcomes[1].summary);
-        }
+    let (mut no_op, provider) = request("task-no-op", command);
+    no_op.executor.config = json!({
+        "controller_root": controller_root.path(),
+        "no_op": true
     });
+    let mut editing = no_op.clone();
+    editing.task_id = "task-editing".to_string();
+    editing.executor.config["no_op"] = json!(false);
+    let scheduler = AgentTaskScheduler::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider])
+            .with_path_roots(roots.clone()),
+    )
+    .with_scratch_root(roots.data().to_path_buf());
+
+    let aggregate = scheduler.run(AgentTaskPlan::new(
+        "runner-local-artifact-plan",
+        vec![no_op, editing],
+    ));
+
+    assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::NoOp);
+    assert_eq!(
+        aggregate.outcomes[1].status,
+        AgentTaskOutcomeStatus::Succeeded
+    );
+    for outcome in &aggregate.outcomes {
+        let path = PathBuf::from(outcome.summary.as_deref().expect("artifacts path"));
+        assert!(path.starts_with(&runner_root));
+        assert!(!path.starts_with(controller_root.path()));
+        assert!(path.join(format!("{}.txt", outcome.task_id)).is_file());
+    }
+    assert_ne!(aggregate.outcomes[0].summary, aggregate.outcomes[1].summary);
 }
 
 #[test]
@@ -600,48 +590,51 @@ fn provider_sigkill_records_probable_oom_context() {
 
 #[test]
 fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let command = format!(
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let lifecycle_store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
+    let command = format!(
             "node {}",
             script("process.stderr.write('provider emitted diagnostics but no outcome'); process.exit(42);")
         );
-        let (request, provider) = request("task-empty-stdout-recorded", command);
-        let plan = AgentTaskPlan::new("plan-empty-stdout-recorded", vec![request]);
-        let run_id = "run-empty-provider-output";
-        let scheduler =
-            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-                provider,
-            ]))
-            .with_run_id(run_id);
+    let (request, provider) = request("task-empty-stdout-recorded", command);
+    let plan = AgentTaskPlan::new("plan-empty-stdout-recorded", vec![request]);
+    let run_id = "run-empty-provider-output";
+    let scheduler = AgentTaskScheduler::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider])
+            .with_path_roots(roots.clone()),
+    )
+    .with_scratch_root(roots.data().to_path_buf());
 
-        crate::agent_tasks::lifecycle::submit_plan(&plan, Some(run_id)).expect("submit plan");
-        crate::agent_tasks::lifecycle::mark_running(run_id).expect("mark running");
-        let aggregate = scheduler.run(plan.clone());
-        let record = crate::agent_tasks::lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
-            .expect("record aggregate");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+        .expect("submit plan");
+    let aggregate = scheduler.run(plan.clone());
+    let record = lifecycle_store
+        .record_run_aggregate(run_id, &plan, &aggregate)
+        .expect("record aggregate");
 
-        assert_eq!(
-            record.state,
-            crate::agent_task_lifecycle::AgentTaskRunState::Failed
-        );
-        assert_eq!(
-            aggregate.outcomes[0].status,
-            AgentTaskOutcomeStatus::ProviderError
-        );
-        assert_eq!(
-            aggregate.outcomes[0].diagnostics[0].class,
-            "agent_task.provider_empty_stdout"
-        );
-        assert!(aggregate.outcomes[0]
-            .evidence_refs
-            .iter()
-            .any(|reference| reference.kind == "executor-result"));
-        assert!(record.latest_executor_evidence.is_some());
-        assert!(record
-            .artifact_refs
-            .iter()
-            .any(|reference| reference.kind == "executor-result"));
-    });
+    assert_eq!(
+        record.state,
+        crate::agent_task_lifecycle::AgentTaskRunState::Failed
+    );
+    assert_eq!(
+        aggregate.outcomes[0].status,
+        AgentTaskOutcomeStatus::ProviderError
+    );
+    assert_eq!(
+        aggregate.outcomes[0].diagnostics[0].class,
+        "agent_task.provider_empty_stdout"
+    );
+    assert!(aggregate.outcomes[0]
+        .evidence_refs
+        .iter()
+        .any(|reference| reference.kind == "executor-result"));
+    assert!(record.latest_executor_evidence.is_some());
+    assert!(record
+        .artifact_refs
+        .iter()
+        .any(|reference| reference.kind == "executor-result"));
 }
 
 #[test]
@@ -926,62 +919,69 @@ fn provider_command_receives_executor_config_env() {
 
 #[test]
 fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let state = unique_state_path("scratch-attempts");
-        let state_path = state.to_string_lossy().replace('\\', "\\\\");
-        let command = format!(
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let state = unique_state_path("scratch-attempts");
+    let state_path = state.to_string_lossy().replace('\\', "\\\\");
+    let command = format!(
             "node {}",
             script(&format!(
                 "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let tmp=req.executor.config.runtime_env.TMPDIR; let entries=[]; try {{ entries=JSON.parse(fs.readFileSync('{state_path}','utf8')); }} catch (_) {{}} entries.push({{tmp,keep:req.executor.config.runtime_env.KEEP}}); fs.writeFileSync('{state_path}',JSON.stringify(entries)); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:entries.length===1?'failed':'succeeded',failure_classification:entries.length===1?'execution_failed':null,summary:tmp}}));"
             ))
         );
-        let (mut request, provider) = request("task-scratch-retry", command);
-        request.executor.config = json!({ "runtime_env": { "KEEP": "preserved" } });
-        let mut plan = AgentTaskPlan::new("plan-scratch-retry", vec![request]);
-        plan.options.retry.max_attempts = 2;
-        plan.options.retry.retryable_failure_classifications =
-            vec![AgentTaskFailureClassification::ExecutionFailed];
+    let (mut request, provider) = request("task-scratch-retry", command);
+    request.executor.config = json!({ "runtime_env": { "KEEP": "preserved" } });
+    let mut plan = AgentTaskPlan::new("plan-scratch-retry", vec![request]);
+    plan.options.retry.max_attempts = 2;
+    plan.options.retry.retryable_failure_classifications =
+        vec![AgentTaskFailureClassification::ExecutionFailed];
 
-        crate::agent_tasks::lifecycle::submit_plan(&plan, Some("run-scratch-retry"))
-            .expect("submit plan");
-        crate::agent_tasks::lifecycle::mark_running("run-scratch-retry").expect("mark running");
-        let aggregate =
-            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-                provider,
-            ]))
-            .with_run_id("run-scratch-retry")
-            .run(plan);
+    let aggregate = AgentTaskScheduler::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider])
+            .with_path_roots(roots.clone()),
+    )
+    .with_scratch_root(roots.data().to_path_buf())
+    .run(plan);
 
-        assert_eq!(aggregate.totals.succeeded, 1);
-        let attempts: Vec<Value> =
-            serde_json::from_str(&fs::read_to_string(&state).expect("attempt records"))
-                .expect("attempt JSON");
-        assert_eq!(attempts.len(), 2);
-        assert_eq!(attempts[0]["keep"], "preserved");
-        assert_eq!(attempts[1]["keep"], "preserved");
-        assert_ne!(attempts[0]["tmp"], attempts[1]["tmp"]);
-        for attempt in attempts {
-            let tmpdir = PathBuf::from(attempt["tmp"].as_str().expect("TMPDIR"));
-            assert!(tmpdir.is_dir());
-        }
-        let index: Value = serde_json::from_str(
-            &fs::read_to_string(
-                homeboy_core::paths::homeboy_data()
-                    .expect("homeboy data")
-                    .join("controller-scratch/test-indexes")
-                    .join("run-scratch-retry")
-                    .join("resources.json"),
-            )
-            .expect("scratch index"),
+    assert_eq!(aggregate.totals.succeeded, 1);
+    let attempts: Vec<Value> =
+        serde_json::from_str(&fs::read_to_string(&state).expect("attempt records"))
+            .expect("attempt JSON");
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["keep"], "preserved");
+    assert_eq!(attempts[1]["keep"], "preserved");
+    assert_ne!(attempts[0]["tmp"], attempts[1]["tmp"]);
+    for attempt in &attempts {
+        let tmpdir = PathBuf::from(attempt["tmp"].as_str().expect("TMPDIR"));
+        assert!(tmpdir.is_dir());
+    }
+    let first_tmpdir = PathBuf::from(attempts[0]["tmp"].as_str().expect("TMPDIR"));
+    let scratch_root =
+        fs::canonicalize(roots.data().join("controller-scratch/attempts")).expect("scratch root");
+    let scratch_run_id = first_tmpdir
+        .strip_prefix(scratch_root)
+        .expect("scratch root")
+        .components()
+        .next()
+        .expect("scratch run id")
+        .as_os_str();
+    let index: Value = serde_json::from_str(
+        &fs::read_to_string(
+            roots
+                .data()
+                .join("controller-scratch/test-indexes")
+                .join(scratch_run_id)
+                .join("resources.json"),
         )
-        .expect("scratch index JSON");
-        let resources = index["resources"].as_array().expect("scratch resources");
-        assert_eq!(resources.len(), 2);
-        assert_eq!(resources[0]["lifecycle_state"], "released");
-        assert_eq!(resources[0]["terminal_reason"], "retry");
-        assert_eq!(resources[1]["lifecycle_state"], "released");
-        assert_eq!(resources[1]["terminal_reason"], "succeeded");
-    });
+        .expect("scratch index"),
+    )
+    .expect("scratch index JSON");
+    let resources = index["resources"].as_array().expect("scratch resources");
+    assert_eq!(resources.len(), 2);
+    assert_eq!(resources[0]["lifecycle_state"], "released");
+    assert_eq!(resources[0]["terminal_reason"], "retry");
+    assert_eq!(resources[1]["lifecycle_state"], "released");
+    assert_eq!(resources[1]["terminal_reason"], "succeeded");
 }
 
 #[test]

@@ -90,7 +90,14 @@ pub fn allocate_attempt(
     task_id: &str,
     attempt: u32,
 ) -> Result<ControllerScratchAllocation> {
-    allocate_attempt_at_index(run_id, plan_id, task_id, attempt, index_path()?)
+    allocate_attempt_at_roots(
+        run_id,
+        plan_id,
+        task_id,
+        attempt,
+        paths::controller_scratch_store()?.join("attempts"),
+        index_path()?,
+    )
 }
 
 #[cfg(test)]
@@ -100,21 +107,39 @@ pub fn allocate_test_attempt(
     task_id: &str,
     attempt: u32,
 ) -> Result<ControllerScratchAllocation> {
-    let index_path = paths::homeboy_data()?.join(format!(
-        "controller-scratch/test-indexes/{}/resources.json",
-        paths::sanitize_path_segment(run_id)
-    ));
-    allocate_attempt_at_index(run_id, plan_id, task_id, attempt, index_path)
+    allocate_test_attempt_at(&paths::homeboy_data()?, run_id, plan_id, task_id, attempt)
 }
 
-fn allocate_attempt_at_index(
+#[cfg(test)]
+pub fn allocate_test_attempt_at(
+    data_root: &Path,
     run_id: &str,
     plan_id: &str,
     task_id: &str,
     attempt: u32,
+) -> Result<ControllerScratchAllocation> {
+    let index_path = data_root.join(format!(
+        "controller-scratch/test-indexes/{}/resources.json",
+        paths::sanitize_path_segment(run_id)
+    ));
+    allocate_attempt_at_roots(
+        run_id,
+        plan_id,
+        task_id,
+        attempt,
+        data_root.join("controller-scratch/attempts"),
+        index_path,
+    )
+}
+
+fn allocate_attempt_at_roots(
+    run_id: &str,
+    plan_id: &str,
+    task_id: &str,
+    attempt: u32,
+    root: PathBuf,
     index_path: PathBuf,
 ) -> Result<ControllerScratchAllocation> {
-    let root = paths::controller_scratch_store()?.join("attempts");
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -643,14 +668,37 @@ pub fn retained_storage_inventory() -> Result<Vec<ControllerScratchRetainedResou
 /// `metadata.controller_scratch` object or array. Providers own materializing
 /// the path; Homeboy owns its durable lifecycle and cleanup policy.
 pub fn register_outcome_resources(run_id: &str, outcomes: &[AgentTaskOutcome]) -> Result<()> {
-    let index_path = index_path()?;
+    register_outcome_resources_at_index(index_path()?, run_id, outcomes)
+}
+
+pub(crate) fn register_outcome_resources_at(
+    data_root: &Path,
+    run_id: &str,
+    outcomes: &[AgentTaskOutcome],
+) -> Result<()> {
+    register_outcome_resources_at_index(
+        data_root.join("controller-scratch/resources.json"),
+        run_id,
+        outcomes,
+    )
+}
+
+fn register_outcome_resources_at_index(
+    index_path: PathBuf,
+    run_id: &str,
+    outcomes: &[AgentTaskOutcome],
+) -> Result<()> {
     with_index_lock(&index_path, || {
-        register_outcome_resources_unlocked(run_id, outcomes)
+        register_outcome_resources_unlocked(&index_path, run_id, outcomes)
     })
 }
 
-fn register_outcome_resources_unlocked(run_id: &str, outcomes: &[AgentTaskOutcome]) -> Result<()> {
-    let mut index = read_index_unlocked()?;
+fn register_outcome_resources_unlocked(
+    index_path: &Path,
+    run_id: &str,
+    outcomes: &[AgentTaskOutcome],
+) -> Result<()> {
+    let mut index = read_index_at_unlocked(index_path)?;
     let mut changed = false;
     for outcome in outcomes {
         let values = outcome
@@ -741,7 +789,7 @@ fn register_outcome_resources_unlocked(run_id: &str, outcomes: &[AgentTaskOutcom
         }
     }
     if changed {
-        write_index_unlocked(&index)?;
+        write_index_at_unlocked(index_path, &index)?;
     }
     Ok(())
 }
@@ -749,12 +797,19 @@ fn register_outcome_resources_unlocked(run_id: &str, outcomes: &[AgentTaskOutcom
 /// Marks all resources owned by a terminal run as finalized, including failed
 /// and cancelled exits, so retention starts regardless of task outcome.
 pub fn finalize_run(run_id: &str) -> Result<()> {
-    let index_path = index_path()?;
-    with_index_lock(&index_path, || finalize_run_unlocked(run_id))
+    finalize_run_at_index(index_path()?, run_id)
 }
 
-fn finalize_run_unlocked(run_id: &str) -> Result<()> {
-    let mut index = read_index_unlocked()?;
+pub(crate) fn finalize_run_at(data_root: &Path, run_id: &str) -> Result<()> {
+    finalize_run_at_index(data_root.join("controller-scratch/resources.json"), run_id)
+}
+
+fn finalize_run_at_index(index_path: PathBuf, run_id: &str) -> Result<()> {
+    with_index_lock(&index_path, || finalize_run_unlocked(&index_path, run_id))
+}
+
+fn finalize_run_unlocked(index_path: &Path, run_id: &str) -> Result<()> {
+    let mut index = read_index_at_unlocked(index_path)?;
     let now = chrono::Utc::now().to_rfc3339();
     let mut changed = false;
     for resource in &mut index.resources {
@@ -788,7 +843,7 @@ fn finalize_run_unlocked(run_id: &str) -> Result<()> {
         }
     }
     if changed {
-        write_index_unlocked(&index)?;
+        write_index_at_unlocked(index_path, &index)?;
     }
     Ok(())
 }

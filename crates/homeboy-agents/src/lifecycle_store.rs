@@ -80,7 +80,7 @@ impl AgentTaskLifecycleStore {
         self.roots.data().join("homeboy.sqlite")
     }
 
-    fn data_root(&self) -> PathBuf {
+    pub(crate) fn data_root(&self) -> PathBuf {
         self.roots.data().to_path_buf()
     }
 
@@ -222,6 +222,15 @@ impl AgentTaskLifecycleStore {
 
     pub fn read_record(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         read_record_in_store(self, run_id)
+    }
+
+    pub(crate) fn record_run_aggregate(
+        &self,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+        aggregate: &AgentTaskAggregate,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_run_aggregate_in_store(self, run_id, plan, aggregate)
     }
 
     /// Check this store for one exact durable run identity without Cook alias
