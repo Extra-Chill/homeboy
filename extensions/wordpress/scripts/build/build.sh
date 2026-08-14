@@ -62,7 +62,8 @@ homeboy_resolve_context --component-alias PLUGIN_PATH
 # is generic Node.js behavior and lives in the nodejs extension, which is
 # installed alongside this one. Resolve via an explicit runtime override first,
 # then the sibling extension path.
-LOCAL_WORKSPACE_DEPS_HELPER="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${EXTENSION_PATH}/../nodejs/scripts/lib/local-workspace-deps.sh}"
+EXTENSION_COLLECTION_PATH="$(dirname "$EXTENSION_PATH")"
+LOCAL_WORKSPACE_DEPS_HELPER="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${EXTENSION_COLLECTION_PATH}/nodejs/scripts/lib/local-workspace-deps.sh}"
 
 # Output functions
 print_status() {
