@@ -462,26 +462,31 @@ pub fn fail_detached_cook_handoff_parent(
     Ok(record.unwrap_or(store::read_record(&cook_id)?))
 }
 
-fn complete_detached_cook_handoff_parent(cook_id: &str, attempt_run_id: &str) -> Result<()> {
+fn complete_detached_cook_handoff_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    attempt_run_id: &str,
+) -> Result<()> {
     let cook_id = sanitize_run_id(cook_id);
     let attempt_run_id = sanitize_run_id(attempt_run_id);
-    if store::read_record(&cook_id).is_err() {
+    if lifecycle_store.read_record(&cook_id).is_err() {
         return Ok(());
     }
-    let _ = store::mutate_record_locked_without_terminal_projection(&cook_id, |record| {
-        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
-            || record.state.is_terminal()
-            || record.metadata["detached_cook_handoff"]["state"] != "pending"
-        {
-            return false;
-        }
-        let metadata = record.ensure_metadata_object();
-        metadata["detached_cook_handoff"]["state"] = json!("redirected");
-        metadata["detached_cook_handoff"]["attempt_run_id"] = json!(attempt_run_id);
-        set_run_state(record, AgentTaskRunState::Succeeded);
-        record.updated_at = Some(now_timestamp());
-        true
-    })?;
+    let _ =
+        lifecycle_store.mutate_record_locked_without_terminal_projection(&cook_id, |record| {
+            if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
+                || record.state.is_terminal()
+                || record.metadata["detached_cook_handoff"]["state"] != "pending"
+            {
+                return false;
+            }
+            let metadata = record.ensure_metadata_object();
+            metadata["detached_cook_handoff"]["state"] = json!("redirected");
+            metadata["detached_cook_handoff"]["attempt_run_id"] = json!(attempt_run_id);
+            set_run_state(record, AgentTaskRunState::Succeeded);
+            record.updated_at = Some(now_timestamp());
+            true
+        })?;
     Ok(())
 }
 
@@ -3828,15 +3833,26 @@ pub fn record_cook_attempt(
     attempt: u32,
     run_id: &str,
 ) -> Result<AgentTaskCookIndex> {
-    let registration = homeboy_core::config::with_config_lock(|| {
-        let registration = record_cook_attempt_locked(cook_id, attempt, run_id)?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_attempt_in_store(&lifecycle_store, cook_id, attempt, run_id)
+}
+
+pub(crate) fn record_cook_attempt_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+) -> Result<AgentTaskCookIndex> {
+    let registration = lifecycle_store.with_config_lock(|| {
+        let registration =
+            record_cook_attempt_locked_in_store(lifecycle_store, cook_id, attempt, run_id)?;
         // The index is the handoff's ownership proof. Redirect its placeholder
         // while the index writer lock is held so an exit observer cannot fail
         // the parent between index publication and this transition.
-        complete_detached_cook_handoff_parent(cook_id, run_id)?;
+        complete_detached_cook_handoff_parent_in_store(lifecycle_store, cook_id, run_id)?;
         Ok(registration)
     })?;
-    let index = registration.project_terminal_after_unlock()?;
+    let index = registration.project_terminal_after_unlock_in_store(lifecycle_store)?;
     Ok(index)
 }
 
@@ -3846,9 +3862,19 @@ pub(crate) fn record_cook_attempt_locked(
     attempt: u32,
     run_id: &str,
 ) -> Result<CookAttemptRegistration> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_attempt_locked_in_store(&lifecycle_store, cook_id, attempt, run_id)
+}
+
+fn record_cook_attempt_locked_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+) -> Result<CookAttemptRegistration> {
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
-    if let Ok(parent) = store::read_record(&cook_id) {
+    if let Ok(parent) = lifecycle_store.read_record(&cook_id) {
         let handoff = &parent.metadata["detached_cook_handoff"];
         if handoff["cook_id"] == cook_id
             && (parent.state.is_terminal()
@@ -3864,8 +3890,8 @@ pub(crate) fn record_cook_attempt_locked(
         }
     }
     // Validate both durable ownership projections before changing either one.
-    store::validate_cook_index_attempt(&cook_id, attempt, &run_id)?;
-    let mut record = store::read_record(&run_id)?;
+    lifecycle_store.validate_cook_index_attempt(&cook_id, attempt, &run_id)?;
+    let mut record = lifecycle_store.read_record(&run_id)?;
     let recorded_cook_id = record.metadata.get("cook_id").and_then(Value::as_str);
     let recorded_attempt = record.metadata.get("cook_attempt").and_then(Value::as_u64);
     if recorded_cook_id.is_some_and(|value| value != cook_id)
@@ -3882,7 +3908,7 @@ pub(crate) fn record_cook_attempt_locked(
     let metadata = record.ensure_metadata_object();
     metadata.insert("cook_id".to_string(), json!(&cook_id));
     metadata.insert("cook_attempt".to_string(), json!(attempt));
-    if let Ok(parent) = store::read_record(&cook_id) {
+    if let Ok(parent) = lifecycle_store.read_record(&cook_id) {
         if let Some(supervisor) = parent.metadata["detached_cook_handoff"]
             .get("supervisor_job_id")
             .cloned()
@@ -3896,16 +3922,17 @@ pub(crate) fn record_cook_attempt_locked(
             );
         }
     }
-    let committed = store::write_record_locked_without_terminal_projection(&record)?;
+    let committed = lifecycle_store.write_record_locked_without_terminal_projection(&record)?;
     // Completion can precede Cook registration during handoff recovery. Re-read
     // its persisted aggregate after the Cook identity is durable, then commit the
     // attempt and substantive pointer in the same index write.
-    let candidate = store::read_aggregate(&committed.run_id)
+    let candidate = lifecycle_store
+        .read_aggregate(&committed.run_id)
         .ok()
         .and_then(|aggregate| {
             substantive_candidate_from_aggregate(&committed.run_id, attempt, &aggregate, None)
         });
-    let index = store::write_cook_index_attempt_locked(
+    let index = lifecycle_store.write_cook_index_attempt_locked(
         &cook_id,
         attempt,
         &committed.run_id,
@@ -3925,7 +3952,15 @@ pub(crate) struct CookAttemptRegistration {
 
 impl CookAttemptRegistration {
     pub(crate) fn project_terminal_after_unlock(self) -> Result<AgentTaskCookIndex> {
-        store::project_terminal_record_after_unlock(&self.run_id)?;
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+        self.project_terminal_after_unlock_in_store(&lifecycle_store)
+    }
+
+    pub(crate) fn project_terminal_after_unlock_in_store(
+        self,
+        lifecycle_store: &AgentTaskLifecycleStore,
+    ) -> Result<AgentTaskCookIndex> {
+        lifecycle_store.project_terminal_record_after_unlock(&self.run_id)?;
         Ok(self.index)
     }
 }
