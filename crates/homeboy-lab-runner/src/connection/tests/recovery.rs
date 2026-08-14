@@ -1663,6 +1663,11 @@ esac
         assert!(second.connected);
         assert_eq!(second.remote_daemon_pid, Some(4242));
         assert_eq!(
+            second.homeboy_build_identity.as_deref(),
+            Some("homeboy 0.284.0+test"),
+            "the replay report names the identity verified from the selected binary"
+        );
+        assert_eq!(
             std::fs::read_to_string(&generation_count).expect("generation count"),
             "1"
         );
@@ -1685,6 +1690,7 @@ fn normal_start_response_loss_replays_b_without_creating_c() {
         let generation_count = home.path().join("daemon-generations");
         let old_replay = home.path().join("old-replay");
         let selected_argv = home.path().join("selected-argv");
+        let release_selected_replay = home.path().join("release-selected-replay");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let health_requests = Arc::new(AtomicUsize::new(0));
@@ -1763,15 +1769,17 @@ case "$1 $2" in
   "daemon ensure-running")
     if [ "$3" = "--help" ]; then
       printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
-    else
-      printf '%s\n' "$@" > "{selected_argv}"
-      printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
+   else
+       printf '%s\n' "$@" > "{selected_argv}"
+       while [ ! -f "{release_selected_replay}" ]; do sleep 0.01; done
+       printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
     fi
     ;;
 esac
 "#,
                 address = address,
                 selected_argv = selected_argv.display(),
+                release_selected_replay = release_selected_replay.display(),
             ),
         )
         .expect("write selected Homeboy shim");
@@ -1831,9 +1839,32 @@ esac
         )
         .expect("select refreshed remote Homeboy");
 
-        let (second, second_exit) =
+        let replay = std::thread::spawn(|| {
             connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
-                .expect("second connect result");
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !selected_argv.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            selected_argv.exists(),
+            "the promoted executable must receive the replay before it is released"
+        );
+        let rebound: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(journal_dir.join("replacement-operation.json"))
+                .expect("rebound ensure-running journal"),
+        )
+        .expect("rebound ensure-running journal JSON");
+        assert_eq!(rebound["kind"], "ensure-running");
+        assert!(rebound["replay_command"].as_str().is_some_and(|command| {
+            command.starts_with(selected_daemon.to_str().expect("selected daemon path"))
+                && command.contains(&operation_id)
+        }));
+        std::fs::write(&release_selected_replay, "release").expect("release selected replay");
+        let (second, second_exit) = replay
+            .join()
+            .expect("replay thread")
+            .expect("second connect result");
         assert_eq!(
             second_exit, 0,
             "second connect failed: {:?}",
@@ -1841,6 +1872,20 @@ esac
         );
         assert!(second.connected);
         assert_eq!(second.remote_daemon_pid, Some(4242));
+        assert_eq!(
+            second.homeboy_build_identity.as_deref(),
+            Some("homeboy 0.284.0+test"),
+            "the report must name the identity verified from the promoted executable"
+        );
+        assert_eq!(
+            crate::load("local-runner")
+                .expect("load promoted runner")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            selected_daemon.to_str(),
+            "the promoted runner must retain the selected executable path"
+        );
         assert_eq!(
             std::fs::read_to_string(&generation_count).expect("B only start count"),
             "1",

@@ -468,6 +468,7 @@ fn command_environment_value<'a>(
     }) else {
         return CommandTextValue::Absent;
     };
+    let value = quoted_command_environment_value(value).unwrap_or(value);
     if value.trim().is_empty() || value.contains(['\'', '"', '\\']) {
         return CommandTextValue::Ambiguous;
     }
@@ -482,6 +483,17 @@ fn command_environment_value<'a>(
         Some(command) if *command == executable => CommandTextValue::Proven(value),
         Some(_) | None => CommandTextValue::Ambiguous,
     }
+}
+
+/// `ps` preserves shell quotes around a whitespace-free environment value on
+/// some platforms. A complete matching pair still identifies one argv token;
+/// partial quotes and values split by whitespace remain ambiguous.
+fn quoted_command_environment_value(value: &str) -> Option<&str> {
+    let quote = value.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"') || value.as_bytes().last().copied()? != quote {
+        return None;
+    }
+    value.get(1..value.len().checked_sub(1)?)
 }
 
 fn durable_store_path(state_dir: &Path) -> PathBuf {
