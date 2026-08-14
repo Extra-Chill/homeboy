@@ -973,9 +973,10 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
   const structuredExecution = validResults && results.summary.total > 0 && !stageFailure;
   const preservedAggregate = phpunitAggregate(preservedOutput);
   const preservedOutputReferenced = validResults && Array.isArray(results.rawLogReferences) && results.rawLogReferences.some((reference) => reference?.path === 'files/phpunit-output.log' && reference?.kind === 'phpunit-output');
-  const preservedOutputMatches = structuredExecution && preservedOutputReferenced && preservedAggregate?.total === results.summary.total && preservedAggregate.failed === results.summary.failed;
+  const preservedOutputMatches = structuredExecution && preservedOutputReferenced && phpunitSummaryMatches(preservedAggregate, results.summary);
+  const referencedOutput = structuredExecution ? await readMatchingPhpunitOutput(artifactDirectory, results) : '';
   const output = redactSecrets( structuredExecution
-    ? ((preservedOutputMatches && preservedOutput) || stageLog || structuredPhpunitOutputUnavailable(results, recipeRun))
+    ? ((preservedOutputMatches && preservedOutput) || referencedOutput || stageLog || structuredPhpunitOutputUnavailable(results, recipeRun))
     : extractPhpunitOutput(stdout, stderr, recipeRun) );
   await writeFile(phpunitOutputPath, output);
   const aggregate = phpunitAggregate(output);
@@ -983,11 +984,10 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     results = { schema: 'wp-codebox/test-results/v1', status: 'unknown', summary: aggregate || emptyTestSummary(), suites: [], rawLogReferences: [] };
   }
   if (results && typeof results === 'object') {
-    const summary = isObject(results.summary) ? results.summary : {};
     if (stageFailure) {
       results.summary = emptyTestSummary();
-    } else if (aggregate) {
-      results.summary = { ...summary, ...aggregate };
+    } else if (!structuredExecution && aggregate) {
+      results.summary = { ...results.summary, ...aggregate };
     }
     results.status = stageFailure ? 'failed' : normalizedTestStatus(results, aggregate, execution.status, validResults);
     const references = Array.isArray(results.rawLogReferences) ? results.rawLogReferences : [];
@@ -1198,6 +1198,58 @@ async function readPhpunitStageLog(artifactDirectory) {
     try { return await readFile(candidate, 'utf8'); } catch {}
   }
   return null;
+}
+async function readMatchingPhpunitOutput(artifactDirectory, results) {
+  const references = [
+    ...(Array.isArray(results.rawLogReferences) ? results.rawLogReferences : []),
+    ...(Array.isArray(results.suites) ? results.suites.flatMap((suite) => Array.isArray(suite?.rawLogReferences) ? suite.rawLogReferences : []) : []),
+  ];
+  const canonicalRoot = await realpath(artifactDirectory);
+  const seen = new Set();
+  for (const reference of references) {
+    if (!['phpunit-output', 'commands-log'].includes(reference?.kind) || typeof reference.path !== 'string' || seen.has(reference.path)) {
+      continue;
+    }
+    seen.add(reference.path);
+    if (path.isAbsolute(reference.path) || reference.path.includes('\\') || reference.path.split('/').includes('..')) {
+      continue;
+    }
+    const candidate = path.resolve(canonicalRoot, reference.path);
+    if (!candidate.startsWith(`${canonicalRoot}${path.sep}`)) {
+      continue;
+    }
+    try {
+      const stat = await lstat(candidate);
+      const canonical = await realpath(candidate);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8 * 1024 * 1024 || !canonical.startsWith(`${canonicalRoot}${path.sep}`)) {
+        continue;
+      }
+      const output = await readFile(canonical, 'utf8');
+      const aggregate = reference.kind === 'commands-log' ? phpunitCommandLogAggregate(output) : phpunitAggregate(output);
+      if (phpunitSummaryMatches(aggregate, results.summary)) {
+        return output;
+      }
+    } catch {}
+  }
+  return '';
+}
+function phpunitCommandLogAggregate(output) {
+  const sections = [...output.matchAll(/(?:^|\n---\n)(\[[^\]\n]+\]\s+wordpress\.phpunit\b[\s\S]*?)(?=\n---\n\[[^\]\n]+\]\s+\S|$)/g)]
+    .map((match) => phpunitAggregate(match[1]))
+    .filter(Boolean);
+  if (sections.length === 0) {
+    return phpunitAggregate(output);
+  }
+  return sections.reduce((aggregate, section) => ({
+    total: aggregate.total + section.total,
+    passed: aggregate.passed + section.passed,
+    failed: aggregate.failed + section.failed,
+    skipped: aggregate.skipped + section.skipped,
+    assertions: aggregate.assertions + section.assertions,
+  }), { total: 0, passed: 0, failed: 0, skipped: 0, assertions: 0 });
+}
+function phpunitSummaryMatches(aggregate, summary) {
+  return aggregate !== null && ['total', 'passed', 'failed', 'skipped'].every((key) => aggregate[key] === summary[key]);
 }
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
