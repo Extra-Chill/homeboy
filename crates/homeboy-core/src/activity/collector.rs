@@ -28,6 +28,11 @@ impl ActivityCollector {
             .or_insert(item);
     }
 
+    #[cfg(test)]
+    pub(crate) fn items(self, scope: ActivityScope, limit: usize) -> Vec<ActivityItem> {
+        self.items_filtered(scope, limit, &super::ActivityFilter::default())
+    }
+
     pub(crate) fn items_filtered(
         self,
         scope: ActivityScope,

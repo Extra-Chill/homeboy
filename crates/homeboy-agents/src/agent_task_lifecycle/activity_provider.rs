@@ -234,15 +234,16 @@ fn activity_context(record: &AgentTaskRunRecord) -> ActivityContext {
 }
 
 fn task_identity(task: &crate::agent_task::AgentTaskRequest) -> ActivityTaskIdentity {
+    let task_url = task.workspace.task_url.clone().or_else(|| {
+        task.source_refs
+            .iter()
+            .find(|source| source.kind == "task")
+            .or_else(|| task.source_refs.first())
+            .map(|source| source.uri.clone())
+    });
     ActivityTaskIdentity {
-        task_url: task.workspace.task_url.clone().or_else(|| {
-            task.source_refs
-                .iter()
-                .find(|source| source.kind == "task")
-                .or_else(|| task.source_refs.first())
-                .map(|source| source.uri.clone())
-        }),
-        repository: repository_from_task_url(task.workspace.task_url.as_deref()),
+        repository: repository_from_task_url(task_url.as_deref()),
+        task_url,
         worktree: task.workspace.root.clone(),
     }
 }

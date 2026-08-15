@@ -1174,7 +1174,7 @@ where
         .map(|task| {
             json!({
                 "task_url": task.workspace.task_url.clone().or_else(|| task.source_refs.iter().find(|source| source.kind == "task").or_else(|| task.source_refs.first()).map(|source| source.uri.clone())),
-                "repository": task.workspace.task_url.as_deref().and_then(|url| url.split("github.com/").nth(1)).and_then(|path| { let mut segments = path.split('/'); Some(format!("{}/{}", segments.next()?, segments.next()?)) }),
+                "repository": task.workspace.task_url.as_deref().or_else(|| task.source_refs.iter().find(|source| source.kind == "task").or_else(|| task.source_refs.first()).map(|source| source.uri.as_str())).and_then(|url| url.split("github.com/").nth(1)).and_then(|path| { let mut segments = path.split('/'); Some(format!("{}/{}", segments.next()?, segments.next()?)) }),
                 "worktree": task.workspace.root,
             })
         })
