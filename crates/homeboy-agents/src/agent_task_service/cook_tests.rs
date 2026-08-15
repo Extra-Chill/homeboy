@@ -1554,6 +1554,93 @@ fn pre_artifact_interruption_claim_isolated_store_pairs_recover_identical_ids() 
 }
 
 #[test]
+fn cook_spine_materializes_into_the_injected_stores_across_split_recipe_and_lifecycle_roots() {
+    let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
+    assert_ne!(recipe_context.data_dir(), lifecycle_context.data_dir());
+
+    let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
+
+    let cook_id = "split-root-spine-cook";
+    let run_id = "split-root-spine-run";
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = run_id.to_string();
+    // The candidate-group preflight is the first purely local boundary the spine
+    // reaches after materialization, so an ambiguous candidate group stops this
+    // Cook exactly there. Everything past it — the runtime generation pin, the
+    // dispatch loop's controller-plan and attempt writes — still reaches
+    // process-global lifecycle state and is not part of this seam yet (#7505).
+    let mut sibling = options.initial_plan.tasks[0].clone();
+    sibling.task_id = "sibling".to_string();
+    options.initial_plan.tasks.push(sibling);
+
+    // Seed only the run record, in the lifecycle root, so materialization never
+    // needs the ambient controller-runtime admission lock. The recipe and the
+    // Cook index below are the spine's own writes.
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&options.initial_plan, run_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("seed the run record in the lifecycle root");
+
+    let error = run_cook_with_boundaries_observed_inner_with_stores(
+        &recipe_store,
+        &lifecycle_store,
+        options,
+        UnusedExecutor,
+        DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+        None,
+        false,
+    )
+    .expect_err("the spine stops at its candidate-group preflight");
+    assert_eq!(error.details["field"], "group_key");
+
+    // The recipe landed under the recipe root.
+    assert!(recipe_store.recipe_exists(cook_id));
+    assert_eq!(
+        recipe_store
+            .load_recipe(cook_id)
+            .expect("read recipe in the recipe root")
+            .attempts[0]
+            .run_id,
+        run_id
+    );
+
+    // The run record and the Cook index landed under the lifecycle root.
+    assert_eq!(
+        lifecycle_store
+            .read_cook_index(cook_id)
+            .expect("read cook index in the lifecycle root")
+            .latest_run_id,
+        run_id
+    );
+    assert_eq!(
+        lifecycle_store
+            .read_record(run_id)
+            .expect("read run record in the lifecycle root")
+            .run_id,
+        run_id
+    );
+    assert!(lifecycle_store
+        .run_dir(run_id)
+        .starts_with(lifecycle_context.data_dir()));
+    assert!(lifecycle_store
+        .cook_index_path(cook_id)
+        .starts_with(lifecycle_context.data_dir()));
+
+    // The negatives: neither root holds the other's durable state, so the
+    // injected pair — not an ambient root — decided where every write went.
+    let recipe_root_lifecycle_store = AgentTaskLifecycleStore::new(recipe_context.path_roots());
+    assert!(!recipe_root_lifecycle_store
+        .record_exists(run_id)
+        .expect("no run record in the recipe root"));
+    assert!(!recipe_root_lifecycle_store.cook_index_exists(cook_id));
+    let lifecycle_root_recipe_store = CookRecipeStore::new(lifecycle_context.path_roots());
+    assert!(!lifecycle_root_recipe_store.recipe_exists(cook_id));
+}
+
+#[test]
 fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
     let _env_lock = homeboy_core::test_support::env_lock();
     let prior = std::env::var_os(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
