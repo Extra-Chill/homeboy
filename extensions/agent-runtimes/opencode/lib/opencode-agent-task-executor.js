@@ -416,6 +416,9 @@ function permissionWithExternalDirectoryAllowances(permission, patterns) {
 	return {
 		...rules,
 		external_directory: {
+			// Noninteractive runs cannot answer permission prompts. Deny unmatched
+			// paths explicitly, then let the exact task-owned paths below override it.
+			'*': 'deny',
 			...externalDirectory,
 			// OpenCode resolves matching rules in order, so these task-owned paths
 			// deliberately supersede inherited catch-all rules.
