@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use super::{
     action, is_active, metadata_string, ActivityCollector, ActivityContext, ActivityCrossRefs,
-    ActivityEvidenceRef, ActivityItem, ActivityNextAction, ActivityRunnerRefs, ActivityState,
+    ActivityEvidenceRef, ActivityFilter, ActivityItem, ActivityNextAction, ActivityRunnerRefs,
+    ActivityState,
 };
 use crate::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use crate::Result;
@@ -18,10 +19,14 @@ pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
     }
 }
 
-pub(super) fn collect(collector: &mut ActivityCollector, limit: usize) -> Result<()> {
+pub(super) fn collect(
+    collector: &mut ActivityCollector,
+    limit: usize,
+    filter: &ActivityFilter,
+) -> Result<()> {
     let store = ObservationStore::open_readonly()?;
     let mut records = store.list_runs(RunListFilter {
-        limit: Some(limit as i64),
+        limit: filter.is_empty().then_some(limit as i64),
         ..Default::default()
     })?;
     let listed_ids = records
@@ -30,14 +35,21 @@ pub(super) fn collect(collector: &mut ActivityCollector, limit: usize) -> Result
         .collect::<BTreeSet<_>>();
     // Recent terminal records are bounded for display, but active work is
     // always included before the canonical report applies its final limit.
+    let active = if filter.is_empty() {
+        store.list_active_runs_bounded(limit as i64)?
+    } else {
+        store.list_active_runs()?
+    };
     records.extend(
-        store
-            .list_active_runs_bounded(limit as i64)?
+        active
             .into_iter()
             .filter(|record| !listed_ids.contains(&record.id)),
     );
     for run in records {
-        collector.insert(item_from_run(&store, run)?);
+        let item = item_from_run(&store, run)?;
+        if filter.matches(&item) {
+            collector.insert(item);
+        }
     }
     Ok(())
 }

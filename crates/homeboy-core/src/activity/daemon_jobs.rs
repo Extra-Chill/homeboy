@@ -1,6 +1,7 @@
 use super::{
     action, is_active, ms_to_rfc3339, ActivityCollector, ActivityContext, ActivityCrossRefs,
-    ActivityEvidenceRef, ActivityItem, ActivityNextAction, ActivityRunnerRefs, ActivityState,
+    ActivityEvidenceRef, ActivityFilter, ActivityItem, ActivityNextAction, ActivityRunnerRefs,
+    ActivityState,
 };
 use crate::api_jobs::{self, Job, JobEvent};
 use crate::{paths, Result};
@@ -24,14 +25,17 @@ pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
     }
 }
 
-pub(super) fn collect(collector: &mut ActivityCollector) -> Result<()> {
+pub(super) fn collect(collector: &mut ActivityCollector, filter: &ActivityFilter) -> Result<()> {
     let path = paths::daemon_jobs_file()?;
     if !path.exists() {
         return Ok(());
     }
     let store = api_jobs::JobStore::open_without_reconciliation(path)?;
     for job in store.list() {
-        collector.insert(item_from_job(&store, job)?);
+        let item = item_from_job(&store, job)?;
+        if filter.matches(&item) {
+            collector.insert(item);
+        }
     }
     Ok(())
 }

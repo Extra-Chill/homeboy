@@ -52,6 +52,21 @@ pub struct ActivityCrossRefs {
 /// Stable task identity carried by sources that know the submitted work.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityContext {
+    /// Legacy single-task identity. Retained for existing persisted activity
+    /// consumers; new agent-task projections populate `identities`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    /// Every canonical task/destination identity represented by this activity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<ActivityTaskIdentity>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityTaskIdentity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,7 +77,10 @@ pub struct ActivityContext {
 
 impl ActivityContext {
     pub fn is_empty(&self) -> bool {
-        self.task_url.is_none() && self.repository.is_none() && self.worktree.is_none()
+        self.task_url.is_none()
+            && self.repository.is_none()
+            && self.worktree.is_none()
+            && self.identities.is_empty()
     }
 }
 
@@ -138,17 +156,35 @@ pub struct ActivityItem {
 
 impl ActivityFilter {
     pub fn matches(&self, item: &ActivityItem) -> bool {
+        self.is_empty()
+            || item
+                .context
+                .identities
+                .iter()
+                .any(|identity| self.matches_identity(identity))
+            || self.matches_identity(&ActivityTaskIdentity {
+                task_url: item.context.task_url.clone(),
+                repository: item.context.repository.clone(),
+                worktree: item.context.worktree.clone().or_else(|| item.cwd.clone()),
+            })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.task_url.is_none() && self.repository.is_none() && self.worktree.is_none()
+    }
+
+    fn matches_identity(&self, identity: &ActivityTaskIdentity) -> bool {
         self.task_url
             .as_deref()
-            .is_none_or(|value| item.context.task_url.as_deref() == Some(value))
+            .is_none_or(|value| identity.task_url.as_deref() == Some(value))
             && self
                 .repository
                 .as_deref()
-                .is_none_or(|value| item.context.repository.as_deref() == Some(value))
-            && self.worktree.as_deref().is_none_or(|value| {
-                item.context.worktree.as_deref() == Some(value)
-                    || item.cwd.as_deref() == Some(value)
-            })
+                .is_none_or(|value| identity.repository.as_deref() == Some(value))
+            && self
+                .worktree
+                .as_deref()
+                .is_none_or(|value| identity.worktree.as_deref() == Some(value))
     }
 }
 

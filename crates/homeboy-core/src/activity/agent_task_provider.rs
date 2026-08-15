@@ -12,7 +12,7 @@
 
 use serde_json::Value;
 
-use super::ActivityItem;
+use super::{ActivityFilter, ActivityItem};
 use crate::Result;
 
 /// Supplies the agent-task contribution to the activity report.
@@ -35,6 +35,17 @@ pub trait ActivityAgentTaskProvider: Send + Sync {
     /// walk the corpus twice (#10308). The health summary is serialized as JSON
     /// so core does not depend on the agent-task health type.
     fn agent_task_activity(&self, limit: usize) -> Result<(Vec<ActivityItem>, Value)>;
+
+    /// Project records matching an exact task identity before the caller applies
+    /// its display cap.
+    fn agent_task_activity_filtered(
+        &self,
+        limit: usize,
+        filter: &ActivityFilter,
+    ) -> Result<(Vec<ActivityItem>, Value)> {
+        let _ = filter;
+        self.agent_task_activity(limit)
+    }
 }
 
 struct NoopProvider;
@@ -62,9 +73,9 @@ pub(crate) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
     with_provider(|p| p.probe_by_id(id))
 }
 
-/// The agent-task activity items and record-health summary via the registered
-/// provider (or no items and an empty summary when the agent-task subsystem is
-/// absent).
-pub(crate) fn agent_task_activity(limit: usize) -> Result<(Vec<ActivityItem>, Value)> {
-    with_provider(|p| p.agent_task_activity(limit))
+pub(crate) fn agent_task_activity_filtered(
+    limit: usize,
+    filter: &ActivityFilter,
+) -> Result<(Vec<ActivityItem>, Value)> {
+    with_provider(|p| p.agent_task_activity_filtered(limit, filter))
 }

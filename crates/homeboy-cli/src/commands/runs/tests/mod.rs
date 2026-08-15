@@ -9,6 +9,8 @@ use super::{
     RunsListArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER,
 };
 
+use crate::cli_surface::Cli;
+use clap::Parser;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{
     NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
@@ -256,6 +258,37 @@ fn active_list_uses_the_unified_activity_projection_without_changing_runs_list()
 
         let (ordinary, _) = list_runs(list_args(), "runs.list").expect("ordinary list");
         assert!(matches!(ordinary, RunsOutput::List(_)));
+    });
+}
+
+#[test]
+fn active_list_identity_filters_parse_and_reject_observation_only_combinations() {
+    Cli::try_parse_from([
+        "homeboy",
+        "runs",
+        "list",
+        "--active",
+        "--task-url",
+        "https://example.test/issues/12146",
+        "--repo",
+        "Extra-Chill/homeboy",
+        "--workspace",
+        "homeboy@fix-12146",
+    ])
+    .expect("identity lookup parses");
+    assert!(Cli::try_parse_from(["homeboy", "runs", "list", "--task-url", "task"]).is_err());
+    assert!(Cli::try_parse_from(["homeboy", "runs", "list", "--active", "--running"]).is_err());
+}
+
+#[test]
+fn ordinary_runs_list_stays_in_its_existing_serialized_variant() {
+    with_isolated_home(|_| {
+        let output = list_runs(list_args(), "runs.list")
+            .expect("ordinary list")
+            .0;
+        let value = serde_json::to_value(output).expect("serialize ordinary list");
+        assert_eq!(value["variant"], "list");
+        assert_eq!(value["payload"]["command"], "runs.list");
     });
 }
 

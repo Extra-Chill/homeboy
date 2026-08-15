@@ -167,6 +167,11 @@ fn merge_refs(existing: &mut ActivityItem, incoming: &ActivityItem) {
     if existing.context.worktree.is_none() {
         existing.context.worktree = incoming.context.worktree.clone();
     }
+    for identity in &incoming.context.identities {
+        if !existing.context.identities.contains(identity) {
+            existing.context.identities.push(identity.clone());
+        }
+    }
 }
 
 fn source_projection(item: &ActivityItem) -> ActivitySourceProjection {
