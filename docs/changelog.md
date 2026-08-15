@@ -4,6 +4,67 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.349.0] - 2026-08-15
+
+### Added
+- add unified active projection
+
+### Changed
+- root Cook adoption recovery
+- exercise fd spawn race through executor
+- cover verified workspace spawn race
+- follow canonical handoff status
+- root Cook recipe recovery
+- bind Cook preparation stores
+- isolate scratch cleanup storage
+- inject scratch cleanup observations
+
+### Fixed
+- bound encoded source transfers
+- bind staged execution to workspace fd
+- verify staged workspace authority
+- stage oversized git sources by authority
+- preserve healthy preflight admission
+- protect active fanout admission
+- bound stalled fanout admission
+- mark busy terminal observations stale
+- bound observation status reads
+- tolerate transient runner metadata
+- version source package checks
+- diagnose source package limits
+- avoid recursive local supervision
+- coalesce dry-run planning
+- scope lab doctor provider readiness
+- preserve Cook attempts before provider start
+- admit ready default Lab Cook runner
+- diagnose runner cancellations
+- bind direct runner snapshots
+- exhaust observation identity pages
+- bound all compact enrichments
+- include global preview replay flags
+- preflight injected provider catalog
+- exhaust terminal identity scans
+- enforce compact output budget
+- derive preview replay units from clap
+- align provider readiness route
+- restore filtered collector compatibility
+- bound promotion recovery projections
+- make cook preview replay safe
+- resolve default provider readiness
+- retain joined projections for identity filters
+- bound compact recovery actions
+- harden cook preview isolation
+- filter active projection at sources
+- add compact cook preview
+- reconcile detached child admission leases
+- expire unattached child admissions
+- expire unattached detached admissions
+- persist detached admission before daemon startup
+- resolve explicit projects before inventory
+- allow registry publication opt-out
+- rate limit build progress
+- report component build progress
+
 ## [0.348.9] - 2026-08-15
 
 ### Changed
