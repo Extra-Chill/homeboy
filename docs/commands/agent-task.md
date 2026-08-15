@@ -188,6 +188,14 @@ Cook states the effective rotation on submission, e.g.
 `cook: rotation: 2 fallback provider(s), up to 3 provider execution(s)` or
 `cook: rotation: disabled (1 provider execution(s))`.
 
+The same submission also states the resolved wall-clock budget of one provider
+execution, e.g.
+`cook: provider timeout: 1200s per provider execution (override with --timeout-ms)`.
+It defaults to 1200000 ms (20 min) and is overridden per run with `--timeout-ms`.
+A provider still running at that deadline is cancelled and the attempt is
+classified `timeout`, so a task has to be sized against this number rather than
+discovered to exceed it.
+
 ### Command Policy
 
 An execution budget bounds *how long* a provider may run. A command policy

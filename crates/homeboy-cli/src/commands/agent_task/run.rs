@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
+use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider;
@@ -133,6 +134,32 @@ fn cook_resolved_policy_disclosure(max_attempts: u32, plan: &AgentTaskPlan) -> S
         budget.max_same_provider_retries,
         budget.max_provider_rotations,
         budget.max_provider_executions.max(max_attempts),
+    )
+}
+
+/// Operator-facing statement of the wall-clock budget one provider execution
+/// gets before it is cancelled at its deadline.
+///
+/// The budget was invisible: `--timeout-ms` documented only that it defaulted to
+/// "Homeboy's provider timeout", so the only way to learn the number was to
+/// spend a run discovering it — the deadline is named for the first time in a
+/// `failure_classification: "timeout"` report, long after the sizing decision
+/// that needed it (#12568). State it beside the retry budget, where the rest of
+/// the execution budget is already disclosed.
+fn cook_provider_timeout_disclosure(plan: &AgentTaskPlan) -> String {
+    let limits = plan.tasks.first().map(|task| &task.limits);
+    // Mirror the resolution the provider runner performs, including the
+    // task-level value `AgentTaskPlan::canonicalize` would otherwise copy down
+    // from plan options later.
+    let timeout_ms = effective_provider_timeout_ms(
+        limits
+            .and_then(|limits| limits.timeout_ms)
+            .or(plan.options.timeout_ms),
+        limits.and_then(|limits| limits.max_runtime_ms),
+    );
+    format!(
+        "cook: provider timeout: {}s per provider execution (override with --timeout-ms)",
+        timeout_ms / 1_000
     )
 }
 
@@ -2624,6 +2651,7 @@ where
             cook_resolved_policy_disclosure(args.max_attempts, &initial_plan)
         );
         eprintln!("{}", cook_rotation_disclosure(&initial_plan));
+        eprintln!("{}", cook_provider_timeout_disclosure(&initial_plan));
     }
     if let Some(provenance) = provenance {
         record_cook_argument_provenance(&mut initial_plan, provenance);
@@ -3851,8 +3879,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        cook_continuation_status, cook_report_with_continuation, cook_resolved_policy_disclosure,
-        durable_cook_identity_lines, preflight_continue_cook,
+        cook_continuation_status, cook_provider_timeout_disclosure, cook_report_with_continuation,
+        cook_resolved_policy_disclosure, durable_cook_identity_lines, preflight_continue_cook,
     };
     use crate::commands::agent_task::args::CookContinueArgs;
 
@@ -3889,6 +3917,29 @@ mod tests {
         assert_eq!(
             cook_resolved_policy_disclosure(2, &plan),
             "cook: retry policy: 1 initial execution, 1 same-provider remediation retry(ies), 2 rotation(s), 4 provider execution(s) maximum"
+        );
+    }
+
+    /// A budget nobody states is a budget an operator can only discover by
+    /// losing a run to it (#12568), so the preamble reports the resolved value —
+    /// the inherited default included.
+    #[test]
+    fn provider_timeout_disclosure_reports_the_resolved_budget() {
+        let mut plan = homeboy::agents::agent_task_scheduler::AgentTaskPlan::new("plan", vec![]);
+
+        assert_eq!(
+            cook_provider_timeout_disclosure(&plan),
+            format!(
+                "cook: provider timeout: {}s per provider execution (override with --timeout-ms)",
+                homeboy::agents::agent_task_timeout::DEFAULT_PROVIDER_TIMEOUT_MS / 1_000
+            ),
+            "the inherited default must be named, not left implicit"
+        );
+
+        plan.options.timeout_ms = Some(2_700_000);
+        assert_eq!(
+            cook_provider_timeout_disclosure(&plan),
+            "cook: provider timeout: 2700s per provider execution (override with --timeout-ms)"
         );
     }
 
