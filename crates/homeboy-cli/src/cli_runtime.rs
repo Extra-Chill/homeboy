@@ -1967,6 +1967,7 @@ fn is_runs_artifact_get_runner_option(args: &[String]) -> bool {
 
 struct ArgumentMigration {
     command: &'static str,
+    help_flag: &'static str,
     command_path: &'static [&'static str],
     historical_flags: &'static [&'static str],
     diagnostic: &'static str,
@@ -1974,6 +1975,7 @@ struct ArgumentMigration {
 
 const ARGUMENT_MIGRATIONS: &[ArgumentMigration] = &[ArgumentMigration {
     command: "homeboy agent-task cook",
+    help_flag: "--help-full",
     command_path: &["agent-task", "cook"],
     historical_flags: &["--provider", "--provider-id", "--dispatch-selector"],
     diagnostic: "executor selection now uses `--backend <backend>` and optional `--selector <provider-id>`.\n\
@@ -2076,8 +2078,8 @@ fn semantic_argument_migration_diagnostic(e: &clap::Error, argv: &[String]) -> O
     })?;
 
     Some(format!(
-        "error: historical executor selection flag '{argument}' is not supported\n\nhint: {}\n\nFor more information, try '{} --help'",
-        migration.diagnostic, migration.command
+        "error: historical executor selection flag '{argument}' is not supported\n\nhint: {}\n\nFor more information, try '{} {}'",
+        migration.diagnostic, migration.command, migration.help_flag
     ))
 }
 
