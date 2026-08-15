@@ -932,7 +932,18 @@ fn validate_runner_exec_snapshot_binding(
         .get("runner_job_id")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let snapshot_runner_id = snapshot.job.target_runner_id.as_deref().unwrap_or_default();
+    let snapshot_runner_id = snapshot
+        .job
+        .target_runner_id
+        .as_deref()
+        .or_else(|| {
+            snapshot
+                .job
+                .runner_job_projection
+                .as_ref()
+                .map(|projection| projection.runner_id.as_str())
+        })
+        .unwrap_or_default();
     if runner_id.is_empty()
         || runner_job_id.is_empty()
         || runner_id != snapshot_runner_id
