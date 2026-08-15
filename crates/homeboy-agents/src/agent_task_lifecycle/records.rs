@@ -577,7 +577,9 @@ impl AgentTaskRunRecord {
             return;
         }
 
-        if self.runner_job_id().is_some() && self.has_fresh_update() {
+        if self.has_fresh_update()
+            && (self.runner_job_id().is_some() || self.has_planned_runner_execution())
+        {
             return;
         }
 
@@ -736,6 +738,22 @@ impl AgentTaskRunRecord {
                     .num_minutes()
                     < homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES
             })
+    }
+
+    fn has_planned_runner_execution(&self) -> bool {
+        let execution = self.metadata.get("runner_execution_record");
+        execution
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            == Some("planned")
+            && execution
+                .and_then(|value| value.get("agent_task_run_id"))
+                .and_then(Value::as_str)
+                == Some(self.run_id.as_str())
+            && execution
+                .and_then(|value| value.get("runner_id"))
+                .and_then(Value::as_str)
+                .is_some_and(|runner_id| self.runner_id() == Some(runner_id))
     }
 
     /// A run is runner-backed when its durable record carries a runner id or
