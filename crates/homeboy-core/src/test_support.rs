@@ -2483,6 +2483,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn hermetic_runner_does_not_nest_under_an_outer_invocation_tmpdir() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let runner = workspace.join("scripts/nextest-hermetic-test-environment.sh");
+        let outer = tempfile::tempdir().expect("outer invocation tmpdir");
+        let output = Command::new("sh")
+            .arg(runner)
+            .args(["sh", "-c", "printf '%s' \"$TMPDIR\""])
+            .env("TMPDIR", outer.path())
+            .output()
+            .expect("run hermetic test runner");
+
+        assert!(output.status.success());
+        let selected = PathBuf::from(String::from_utf8(output.stdout).expect("UTF-8 tmpdir"));
+        assert!(
+            !selected.starts_with(outer.path()),
+            "test temp state must not be owned by the outer Homeboy invocation: {}",
+            selected.display()
+        );
+        assert!(
+            !selected.exists(),
+            "the per-test temp root must be removed after execution: {}",
+            selected.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn hermetic_runner_reaps_descendants_after_a_panicking_test_binary() {
         let temp = tempfile::tempdir().expect("tempdir");
         let descendant = temp.path().join("descendant.pid");
