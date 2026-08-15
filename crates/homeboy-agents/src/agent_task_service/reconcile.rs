@@ -98,7 +98,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
                 Err(error) => {
                     failed += 1;
                     runs.push(AgentTaskReconcileRun {
-                        run_id: run.run_id,
+                        run_id: run.run_id.clone(),
                         liveness,
                         source: run.source,
                         // The refresh is what failed, so the discovery
@@ -131,18 +131,50 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             });
             continue;
         }
+        if expired_detached_admission {
+            match agent_task_lifecycle::expire_detached_cook_admission(&run.run_id) {
+                Ok(true) => {
+                    reconciled += 1;
+                    runs.push(AgentTaskReconcileRun {
+                        run_id: run.run_id.clone(),
+                        liveness,
+                        source: run.source,
+                        authoritative_state: agent_task_lifecycle::status(&run.run_id)?.state,
+                        stale_reason: run.stale_reason,
+                        action: "reconciled",
+                        error: None,
+                    });
+                }
+                Ok(false) => runs.push(AgentTaskReconcileRun {
+                    run_id: run.run_id.clone(),
+                    liveness,
+                    source: run.source,
+                    authoritative_state: agent_task_lifecycle::status(&run.run_id)?.state,
+                    stale_reason: run.stale_reason,
+                    action: "no-op",
+                    error: None,
+                }),
+                Err(error) => {
+                    failed += 1;
+                    runs.push(AgentTaskReconcileRun {
+                        run_id: run.run_id,
+                        liveness,
+                        source: run.source,
+                        authoritative_state,
+                        stale_reason: run.stale_reason,
+                        action: "failed",
+                        error: Some(error.message),
+                    });
+                }
+            }
+            continue;
+        }
 
         let reason = run
             .stale_reason
             .clone()
             .unwrap_or_else(|| format!("reconciled stale-{} run", liveness.as_str()));
-        let result = if expired_detached_admission {
-            agent_task_lifecycle::expire_detached_cook_admission(&run.run_id).map(|_| {
-                agent_task_lifecycle::status(&run.run_id)
-                    .map(|record| record.state)
-                    .unwrap_or(authoritative_state)
-            })
-        } else if expired_handoff {
+        let result = if expired_handoff {
             // Handoff expiry answers whether it expired, not what state that
             // left behind; re-read the record for the post-mutation state.
             agent_task_lifecycle::expire_unaccepted_lab_handoff(&run.run_id).map(|_| {
@@ -251,6 +283,54 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                         error: None,
                     });
                 } else {
+                    let expired_detached_admission =
+                        agent_task_lifecycle::has_expired_detached_cook_admission(
+                            &refreshed,
+                            chrono::Utc::now(),
+                        );
+                    if expired_detached_admission {
+                        match agent_task_lifecycle::expire_detached_cook_admission(resolved_run_id)
+                        {
+                            Ok(true) => {
+                                reconciled += 1;
+                                runs.push(AgentTaskReconcileRun {
+                                    run_id: resolved_run_id.clone(),
+                                    liveness,
+                                    source: run.source,
+                                    authoritative_state: agent_task_lifecycle::status(
+                                        resolved_run_id,
+                                    )?
+                                    .state,
+                                    stale_reason: run.stale_reason,
+                                    action: "reconciled",
+                                    error: None,
+                                });
+                            }
+                            Ok(false) => runs.push(AgentTaskReconcileRun {
+                                run_id: resolved_run_id.clone(),
+                                liveness,
+                                source: run.source,
+                                authoritative_state: agent_task_lifecycle::status(resolved_run_id)?
+                                    .state,
+                                stale_reason: run.stale_reason,
+                                action: "no-op",
+                                error: None,
+                            }),
+                            Err(error) => {
+                                failed += 1;
+                                runs.push(AgentTaskReconcileRun {
+                                    run_id: resolved_run_id.clone(),
+                                    liveness,
+                                    source: run.source,
+                                    authoritative_state: refreshed.state,
+                                    stale_reason: run.stale_reason,
+                                    action: "failed",
+                                    error: Some(error.message),
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     let reason = run
                         .stale_reason
                         .clone()
