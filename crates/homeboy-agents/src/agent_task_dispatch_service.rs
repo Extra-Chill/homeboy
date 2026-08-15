@@ -388,13 +388,11 @@ pub fn controller_resolved_execution_policy(
     request: &AgentTaskDispatchRequest,
 ) -> ResolvedAgentTaskProviderPolicy {
     let catalog = AgentTaskProviderCatalog::discover();
-    let rotation = homeboy_core::defaults::load_config()
-        .agent_task
-        .rotation
-        .and_then(|rotation| {
-            serde_json::from_value::<AgentTaskProviderRotationPolicy>(rotation).ok()
-        });
-    controller_resolved_execution_policy_with_sources(request, &catalog, rotation)
+    controller_resolved_execution_policy_with_sources(
+        request,
+        &catalog,
+        configured_rotation_policy(),
+    )
 }
 
 /// Resolve the initial provider route using the same default and rotation
@@ -402,10 +400,31 @@ pub fn controller_resolved_execution_policy(
 pub fn resolve_cook_initial_provider_route(
     command: AgentTaskDispatchCommand,
 ) -> Result<AgentTaskInitialProviderRoute> {
+    let catalog = AgentTaskProviderCatalog::discover();
+    resolve_cook_initial_provider_route_with_catalog(command, &catalog)
+}
+
+/// Resolve Cook's initial route against a caller-supplied catalog. Controller
+/// preflight and provider introspection use this to share one exact selection.
+pub fn resolve_cook_initial_provider_route_with_catalog(
+    command: AgentTaskDispatchCommand,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<AgentTaskInitialProviderRoute> {
     let request = resolve_dispatch_request(command)?;
     Ok(initial_provider_route_from_policy(
-        controller_resolved_execution_policy(&request),
+        controller_resolved_execution_policy_with_sources(
+            &request,
+            catalog,
+            configured_rotation_policy(),
+        ),
     ))
+}
+
+fn configured_rotation_policy() -> Option<AgentTaskProviderRotationPolicy> {
+    homeboy_core::defaults::load_config()
+        .agent_task
+        .rotation
+        .and_then(|rotation| serde_json::from_value(rotation).ok())
 }
 
 /// Project the first invocation from a resolved provider policy. The dispatch

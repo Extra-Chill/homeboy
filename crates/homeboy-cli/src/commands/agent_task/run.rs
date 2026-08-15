@@ -1457,18 +1457,19 @@ pub(crate) fn validate_cook_request(args: &AgentTaskCookArgs) -> homeboy::core::
 pub(crate) fn preflight_cook_provider_credentials(
     args: &AgentTaskCookArgs,
 ) -> homeboy::core::Result<()> {
-    let dispatch = dispatch_args_for_cook(args);
-    let backend = match dispatch.backend.clone() {
-        Some(backend) => Some(backend),
-        None => provider::default_backend_for_component(dispatch.repo.as_deref())?,
-    };
-    let Some(backend) = backend else {
-        // No backend is resolvable yet; dispatch resolution reports that.
-        return Ok(());
-    };
+    let catalog = provider::AgentTaskProviderCatalog::discover();
+    preflight_cook_provider_credentials_with_catalog(dispatch_args_for_cook(args).into(), &catalog)
+}
+
+pub(crate) fn preflight_cook_provider_credentials_with_catalog(
+    dispatch: dispatch_service::AgentTaskDispatchCommand,
+    catalog: &provider::AgentTaskProviderCatalog,
+) -> homeboy::core::Result<()> {
+    let route =
+        dispatch_service::resolve_cook_initial_provider_route_with_catalog(dispatch, &catalog)?;
     provider::preflight_discovered_provider_credentials_for_backend(
-        &backend,
-        dispatch.selector.as_deref(),
+        &route.backend,
+        route.selector.as_deref(),
     )
 }
 

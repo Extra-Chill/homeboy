@@ -1106,9 +1106,15 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     } else {
         AgentTaskProviderCatalog::discover()
     };
+    providers_with_catalog(args, catalog)
+}
+
+fn providers_with_catalog(
+    args: ProvidersArgs,
+    catalog: AgentTaskProviderCatalog,
+) -> CmdResult<Value> {
     let catalog_version = catalog.version.clone();
-    let executor = ExtensionProviderAgentTaskExecutor::from_catalog(catalog);
-    let all_providers = executor.providers();
+    let all_providers = catalog.providers();
     if args.machine_catalog {
         return Ok((
             serde_json::json!({
@@ -1118,37 +1124,9 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             0,
         ));
     }
-    let route = resolve_provider_route(&args, all_providers);
+    let route = resolve_provider_route(&args, &catalog);
     let validated_provider = if args.validate_readiness {
-        // Fall back to the configured default backend the same way Cook selection
-        // does, so readiness validation does not demand a flag that policy already
-        // answers. `default_backend_for_component` resolves component, then
-        // extension, then Homeboy config `agent_task.default_backend` (#9651).
-        let resolved_backend = match args.backend.clone() {
-            Some(backend) => Some(backend),
-            None => homeboy::agents::agent_tasks::provider::default_backend_for_component(None)?,
-        };
-        let backend = resolved_backend.ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "backend",
-                "agent-task providers --validate-readiness requires --backend because no default backend policy is configured",
-                None,
-                Some(vec![
-                    "Pass the same --backend value that the agent-task cook command will use."
-                        .to_string(),
-                    "Or set agent_task.default_backend in component, extension, or Homeboy config policy so Cook and readiness validation agree."
-                        .to_string(),
-                ]),
-            )
-        })?;
-        homeboy::agents::agent_tasks::provider::validate_provider_runner_readiness_for_backend(
-            &backend,
-            args.selector.as_deref(),
-        )?;
-        match resolve_provider_for_backend(&all_providers, &backend, args.selector.as_deref()) {
-            ProviderResolution::Resolved(provider) => Some((backend, provider.id.clone())),
-            _ => None,
-        }
+        validate_effective_provider_route(route.as_ref(), &catalog)?
     } else {
         None
     };
@@ -1159,7 +1137,18 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     // display limit and buried the answer (#9654). `--catalog`/`--all` opts back
     // into the full catalog; an absent `--backend` still shows everything.
     let scoped_backend = scoped_provider_backend(args.backend.as_deref(), args.catalog);
-    let scoped_providers = scope_providers(all_providers, scoped_backend);
+    let mut presented_providers = all_providers.to_vec();
+    if let Some(ProviderRoute::Resolved {
+        provider_id,
+        dispatchable,
+        ..
+    }) = route.as_ref()
+    {
+        for provider in &mut presented_providers {
+            provider.default_backend = provider.id == *provider_id && *dispatchable;
+        }
+    }
+    let scoped_providers = scope_providers(&presented_providers, scoped_backend);
     let filtered_providers = scoped_providers
         .iter()
         .filter(|provider| {
@@ -1177,17 +1166,6 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
         })
         .cloned()
         .collect::<Vec<_>>();
-    let mut filtered_providers = filtered_providers;
-    if let Some(ProviderRoute::Resolved {
-        provider_id,
-        dispatchable,
-        ..
-    }) = route.as_ref()
-    {
-        for provider in &mut filtered_providers {
-            provider.default_backend = provider.id == *provider_id && *dispatchable;
-        }
-    }
     let providers: &[AgentTaskExecutorProvider] = &filtered_providers;
     let validated_provider_identity = validated_provider.as_ref();
     let validated_provider = validated_provider_identity.and_then(|(_, provider_id)| {
@@ -1208,7 +1186,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             .cloned()
             .collect()
     };
-    let diagnostics = executor.diagnostics();
+    let diagnostics = catalog.diagnostics();
     let shown_diagnostics = if args.full {
         diagnostics
             .iter()
@@ -1411,14 +1389,16 @@ impl ProviderRoute {
 
 fn resolve_provider_route(
     args: &ProvidersArgs,
-    providers: &[AgentTaskExecutorProvider],
+    catalog: &AgentTaskProviderCatalog,
 ) -> Option<ProviderRoute> {
     let command = agent_task_dispatch_service::AgentTaskDispatchCommand {
         backend: args.backend.clone(),
         selector: args.selector.clone(),
         ..Default::default()
     };
-    let route = match agent_task_dispatch_service::resolve_cook_initial_provider_route(command) {
+    let route = match agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
+        command, catalog,
+    ) {
         Ok(route) => route,
         Err(error) => {
             return Some(ProviderRoute::Blocked {
@@ -1427,7 +1407,11 @@ fn resolve_provider_route(
             });
         }
     };
-    match resolve_provider_for_backend(providers, &route.backend, route.selector.as_deref()) {
+    match resolve_provider_for_backend(
+        catalog.providers(),
+        &route.backend,
+        route.selector.as_deref(),
+    ) {
         ProviderResolution::Resolved(provider) => Some(ProviderRoute::Resolved {
             backend: route.backend,
             provider_id: provider.id.clone(),
@@ -1454,6 +1438,46 @@ fn resolve_provider_route(
             })
         }
     }
+}
+
+fn validate_effective_provider_route(
+    route: Option<&ProviderRoute>,
+    catalog: &AgentTaskProviderCatalog,
+) -> homeboy::core::Result<Option<(String, String)>> {
+    let Some(route) = route else {
+        return Ok(None);
+    };
+    let ProviderRoute::Resolved {
+        backend,
+        provider_id,
+        ..
+    } = route
+    else {
+        let reason = match route {
+            ProviderRoute::Blocked { reason, .. } => reason.clone(),
+            ProviderRoute::Ambiguous { backend, .. } => {
+                format!("Cook's effective backend `{backend}` requires --selector")
+            }
+            ProviderRoute::Resolved { .. } => unreachable!(),
+        };
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "backend",
+            reason,
+            None,
+            Some(vec![route.next_command()]),
+        ));
+    };
+    homeboy::agents::agent_tasks::provider::preflight_provider_credentials_for_backend(
+        catalog.providers(),
+        backend,
+        Some(provider_id),
+    )?;
+    homeboy::agents::agent_tasks::provider::validate_provider_runner_readiness_for_backend_with_catalog(
+        catalog,
+        backend,
+        Some(provider_id),
+    )?;
+    Ok(Some((backend.clone(), provider_id.clone())))
 }
 
 fn live_dispatch_readiness(
@@ -2212,6 +2236,190 @@ mod tests {
             }
         }))
         .expect("provider fixture")
+    }
+
+    fn providers_args() -> ProvidersArgs {
+        ProvidersArgs {
+            backend: None,
+            selector: None,
+            runtime: None,
+            status: None,
+            secret_env: Vec::new(),
+            validate_readiness: false,
+            refresh: false,
+            catalog: false,
+            full: false,
+            machine_catalog: false,
+        }
+    }
+
+    fn provider_catalog(providers: Vec<AgentTaskExecutorProvider>) -> AgentTaskProviderCatalog {
+        AgentTaskProviderCatalog {
+            providers,
+            ..Default::default()
+        }
+    }
+
+    fn provider(id: &str, backend: &str) -> AgentTaskExecutorProvider {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "backend": backend,
+        }))
+        .expect("provider fixture")
+    }
+
+    fn save_provider_policy(
+        default_backend: Option<&str>,
+        rotation: Option<homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy>,
+    ) {
+        let mut config = homeboy::core::defaults::load_config();
+        config.agent_task.default_backend = default_backend.map(str::to_string);
+        config.agent_task.rotation =
+            rotation.map(|rotation| serde_json::to_value(rotation).expect("serialize rotation"));
+        homeboy::core::defaults::save_config(&config).expect("save provider policy");
+    }
+
+    #[test]
+    fn providers_end_to_end_projects_configured_default_and_status_filters() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(Some("configured"), None);
+            let catalog = provider_catalog(vec![
+                provider("configured.provider", "configured"),
+                provider("other.provider", "other"),
+            ]);
+            let output = providers_with_catalog(providers_args(), catalog.clone())
+                .expect("output")
+                .0;
+            assert_eq!(output["operator_summary"]["state"], "ready");
+            assert_eq!(
+                output["readiness_validation"]["effective_provider_id"],
+                "configured.provider"
+            );
+            assert_eq!(output["providers"][0]["default_backend"], true);
+
+            let mut default_filter = providers_args();
+            default_filter.status = Some("default".to_string());
+            let output = providers_with_catalog(default_filter, catalog.clone())
+                .expect("default filter")
+                .0;
+            assert_eq!(output["scope"]["matched"], 1);
+            assert_eq!(output["providers"][0]["id"], "configured.provider");
+
+            let mut available_filter = providers_args();
+            available_filter.status = Some("available".to_string());
+            let output = providers_with_catalog(available_filter, catalog)
+                .expect("available filter")
+                .0;
+            assert_eq!(output["scope"]["matched"], 1);
+            assert_eq!(output["providers"][0]["id"], "other.provider");
+        });
+    }
+
+    #[test]
+    fn providers_end_to_end_uses_rotation_for_unavailable_default_and_live_validation() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(
+                Some("unavailable"),
+                Some(
+                    homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                        entries: vec![
+                            homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                backend: Some("fallback".to_string()),
+                                selector: Some("fallback.provider".to_string()),
+                                model: Some("fallback-model".to_string()),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ),
+            );
+            let mut unavailable = credential_declaring_provider();
+            unavailable.id = "unavailable.provider".to_string();
+            unavailable.backend = "unavailable".to_string();
+            let mut fallback = provider("fallback.provider", "fallback");
+            fallback.readiness_invocation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "argv": ["sh", "-c", "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                }))
+                .expect("readiness invocation"),
+            );
+            let catalog = provider_catalog(vec![unavailable, fallback]);
+            let mut args = providers_args();
+            args.validate_readiness = true;
+            let output = providers_with_catalog(args, catalog)
+                .expect("validated fallback")
+                .0;
+            assert_eq!(output["operator_summary"]["state"], "ready");
+            assert_eq!(
+                output["readiness_validation"]["effective_backend"],
+                "fallback"
+            );
+            assert_eq!(
+                output["readiness_validation"]["effective_provider_id"],
+                "fallback.provider"
+            );
+            assert_eq!(
+                output["readiness_validation"]["effective_model"],
+                "fallback-model"
+            );
+            assert_eq!(output["readiness_validation"]["live_dispatch"], "validated");
+        });
+    }
+
+    #[test]
+    fn providers_end_to_end_reports_ambiguous_and_missing_default_routes() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(Some("extension"), None);
+            let mut first = provider("first.provider", "first");
+            first.extension_id = Some("extension".to_string());
+            let mut second = provider("second.provider", "second");
+            second.extension_id = Some("extension".to_string());
+            let output =
+                providers_with_catalog(providers_args(), provider_catalog(vec![first, second]))
+                    .expect("ambiguous output")
+                    .0;
+            assert_eq!(
+                output["operator_summary"]["state"],
+                "configuration_ambiguous"
+            );
+
+            save_provider_policy(None, None);
+            let output = providers_with_catalog(providers_args(), provider_catalog(Vec::new()))
+                .expect("missing-default output")
+                .0;
+            assert_eq!(output["operator_summary"]["state"], "blocked");
+        });
+    }
+
+    #[test]
+    fn cook_credential_preflight_uses_the_same_rotated_provider_route() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(
+                Some("unavailable"),
+                Some(
+                    homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                        entries: vec![
+                            homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                backend: Some("fallback".to_string()),
+                                selector: Some("fallback.provider".to_string()),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ),
+            );
+            let mut unavailable = credential_declaring_provider();
+            unavailable.backend = "unavailable".to_string();
+            let catalog =
+                provider_catalog(vec![unavailable, provider("fallback.provider", "fallback")]);
+            super::super::run::preflight_cook_provider_credentials_with_catalog(
+                agent_task_dispatch_service::AgentTaskDispatchCommand::default(),
+                &catalog,
+            )
+            .expect("Cook must preflight the credential-ready rotation entry");
+        });
     }
 
     #[test]
