@@ -1249,6 +1249,23 @@ homeboy agent-task cancel "$run_id" --reason "not selected by controller"
 durable lifecycle store. It refuses to claim live provider cancellation for an
 active runner process until a provider-owned cancellation channel is available.
 
+Cancellation is only partly synchronous, so `cancel` reports what actually
+happened under `cancellation` rather than an unqualified success word. When the
+teardown is owned elsewhere — a controller-owned staging job, or a provider tree
+that is not reachable from this host — the command waits a bounded 15s for the
+durable record to converge and then reports one of:
+
+| `cancellation.outcome` | Meaning | Exit |
+| --- | --- | --- |
+| `cancelled` | The run is durably cancelled. | `0` |
+| `terminal_without_cancellation` | The run reached another terminal state first; that result is authoritative. | `0` |
+| `deferred_for_terminal_provider` | A provider had already reserved a terminal result, so cancellation was deliberately not applied and the run stays joinable for that import. | `0` |
+| `cancellation_requested` | Cancellation is durably accepted, but the run had not reached a terminal state when the bound expired. | `124` |
+
+`cancellation_requested` carries the run id, the wait accounting, and a
+`status_command` to check convergence. The bound means `cancel` always returns:
+it never prints a terminal-sounding word and then blocks.
+
 ## Component Contracts
 
 Agent-task plans may declare generic top-level `component_contracts`. Homeboy
