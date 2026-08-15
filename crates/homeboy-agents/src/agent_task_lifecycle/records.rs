@@ -529,16 +529,18 @@ impl AgentTaskRunRecord {
         &self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
-        self.state == AgentTaskRunState::Queued
-            && self.lab_handoff.as_ref().is_some_and(|handoff| {
-                handoff.is_valid()
-                    && handoff.state == AgentTaskLabHandoffState::Pending
-                    && handoff
-                        .acceptance_deadline_at
-                        .as_deref()
-                        .and_then(parse_rfc3339)
-                        .is_some_and(|deadline| deadline <= now)
-            })
+        matches!(
+            self.state,
+            AgentTaskRunState::Queued | AgentTaskRunState::Running
+        ) && self.lab_handoff.as_ref().is_some_and(|handoff| {
+            handoff.is_valid()
+                && handoff.state == AgentTaskLabHandoffState::Pending
+                && handoff
+                    .acceptance_deadline_at
+                    .as_deref()
+                    .and_then(parse_rfc3339)
+                    .is_some_and(|deadline| deadline <= now)
+        })
     }
 
     pub(crate) fn record_runner_metadata(&mut self, reclaimed_stale: bool) {
@@ -558,11 +560,26 @@ impl AgentTaskRunRecord {
     }
 
     pub(crate) fn annotate_stale_running(&mut self) {
-        if self.state != AgentTaskRunState::Running || self.owner_process_is_running() {
+        if self.state != AgentTaskRunState::Running {
             return;
         }
 
-        if self.runner_job_id().is_some() && self.has_fresh_update() {
+        // A reverse-broker job may begin before the daemon's accepted job/PID
+        // projection arrives. Its complete, unexpired submission intent remains
+        // the authoritative owner during that narrow handoff window.
+        // Its PID belongs to the runner host, so this controller cannot use a
+        // local PID probe to disprove that ownership.
+        if super::has_live_pending_runner_submission_intent(self, chrono::Utc::now()) {
+            return;
+        }
+
+        if self.owner_process_is_running() {
+            return;
+        }
+
+        if self.has_fresh_update()
+            && (self.runner_job_id().is_some() || self.has_planned_runner_execution())
+        {
             return;
         }
 
@@ -721,6 +738,22 @@ impl AgentTaskRunRecord {
                     .num_minutes()
                     < homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES
             })
+    }
+
+    pub(crate) fn has_planned_runner_execution(&self) -> bool {
+        let execution = self.metadata.get("runner_execution_record");
+        execution
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            == Some("planned")
+            && execution
+                .and_then(|value| value.get("agent_task_run_id"))
+                .and_then(Value::as_str)
+                == Some(self.run_id.as_str())
+            && execution
+                .and_then(|value| value.get("runner_id"))
+                .and_then(Value::as_str)
+                .is_some_and(|runner_id| self.runner_id() == Some(runner_id))
     }
 
     /// A run is runner-backed when its durable record carries a runner id or

@@ -384,14 +384,7 @@ fn patch_sha256(contents: impl AsRef<[u8]>) -> String {
 
 fn attempt_patch_path(running: &RunningTask, kind: &str) -> Result<PathBuf, HarvestError> {
     let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
-    #[cfg(test)]
-    let root = running.scratch.path.clone();
-    #[cfg(not(test))]
-    let root =
-        homeboy_core::artifacts::root().map_err(|error| HarvestError::ArtifactDirectory {
-            path: PathBuf::from("<artifact-root>"),
-            message: error.message,
-        })?;
+    let root = super::artifact_root_for_running(running)?;
     let dir = root
         .join("agent-task")
         .join("attempt-patches")
@@ -926,6 +919,7 @@ mod committed_harvest_tests {
             source_workspace_root: None,
             _attempt_workspace: None,
             run_id: Some("committed-harvest-test".to_string()),
+            artifact_root: None,
             artifact_nonce: "test-artifact".to_string(),
             task_base_sha: Some(base),
             source_provenance: None,
@@ -1055,6 +1049,7 @@ mod committed_harvest_tests {
             source_workspace_root: None,
             _attempt_workspace: None,
             run_id: Some("metadata-exclude-test".to_string()),
+            artifact_root: None,
             artifact_nonce: "test-artifact".to_string(),
             task_base_sha: Some(base),
             source_provenance: None,
@@ -1283,6 +1278,7 @@ mod committed_harvest_tests {
             source_workspace_root: Some(source.display().to_string()),
             _attempt_workspace: None,
             run_id: Some("reaped-harvest-test".to_string()),
+            artifact_root: None,
             artifact_nonce: "test-artifact".to_string(),
             task_base_sha: Some(base),
             source_provenance: None,

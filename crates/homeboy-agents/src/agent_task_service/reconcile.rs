@@ -505,6 +505,77 @@ mod tests {
     }
 
     #[test]
+    fn the_daemon_tick_preserves_a_fresh_planned_runner_submission() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-tick-planned-runner";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+            agent_task_lifecycle::record_lab_offload_phase(
+                run_id,
+                "homeboy-lab",
+                "materializing",
+                None,
+                None,
+                None,
+                Some(&plan),
+            )
+            .expect("planned runner submission recorded");
+
+            // The production daemon tick runs before the Lab can return the
+            // accepted job identity. It must observe the materializing proxy's
+            // fresh planned-execution transition, not cancel it as ownerless.
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("tick pass");
+
+            assert_eq!(report["reconciled"], 0, "{report}");
+            let refreshed = agent_task_lifecycle::status(run_id).expect("refreshed");
+            assert_eq!(
+                refreshed.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+            assert!(refreshed.metadata.get("stale_running").is_none());
+            assert!(refreshed.metadata.get("cancel_reason").is_none());
+
+            let accepted = agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: "homeboy-lab",
+                    runner_job_id: "delayed-daemon-job",
+                    remote_workspace: "/runner/workspace/homeboy",
+                    remote_command: &[],
+                },
+            )
+            .expect("delayed daemon identity bound");
+            assert_eq!(accepted.runner_job_id(), Some("delayed-daemon-job"));
+
+            let orphan_run_id = "reconcile-tick-ownerless-runner";
+            orphaned_running_run(orphan_run_id);
+            agent_task_lifecycle::rewrite_record_for_test(orphan_run_id, |record| {
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_pid");
+            })
+            .expect("owner identity removed");
+            let stale = agent_task_lifecycle::status(orphan_run_id)
+                .expect("PID-less owner is projected stale before daemon reconciliation");
+            assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("ownerless tick pass");
+            assert_eq!(report["reconciled"], 1, "{report}");
+            let terminal = agent_task_lifecycle::status(orphan_run_id).expect("ownerless run");
+            assert_eq!(
+                terminal.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(terminal.metadata["cancel_reason"], "missing_runner_pid");
+        });
+    }
+
+    #[test]
     fn a_reconciled_run_reports_the_state_it_was_left_in() {
         // The `reconciled` branch used to hardcode `Running` — reporting the
         // state of a run it had just cancelled, which made the whole report

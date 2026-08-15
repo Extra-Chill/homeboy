@@ -1578,6 +1578,111 @@ fn is_builtin_subcommand(name: &str) -> bool {
     crate::command_contract::registered_command(name).is_some()
 }
 
+#[derive(Debug, serde::Serialize)]
+struct LabInventoryAdmissionDiagnostic {
+    observed_state: String,
+    observed_at_ms: u128,
+    source_freshness: Option<String>,
+    refresh_attempted: bool,
+    refreshed_state: Option<String>,
+    refreshed_at_ms: Option<u128>,
+    terminal_reason: &'static str,
+    refresh_error_code: Option<String>,
+    refresh_error: Option<String>,
+}
+
+/// Resolve the inventory used by a terminal resource-policy placement decision.
+/// A stale projection gets one runner-owned live refresh; a fresh empty result
+/// is already authoritative enough to refuse without opening another probe.
+fn resolve_terminal_lab_inventory<F>(
+    observed: crate::runner::runners::LabRunnerReadiness,
+    observed_at_ms: u128,
+    refresh: F,
+) -> (
+    crate::runner::runners::LabRunnerReadiness,
+    LabInventoryAdmissionDiagnostic,
+)
+where
+    F: FnOnce() -> crate::core::Result<(crate::runner::runners::LabRunnerReadiness, u128)>,
+{
+    use crate::runner::runners::LabRunnerReadinessState;
+
+    let observed_state = observed.state.as_str().to_string();
+    let source_freshness = Some(observed_state.clone());
+    if observed.state != LabRunnerReadinessState::Stale {
+        return (
+            observed,
+            LabInventoryAdmissionDiagnostic {
+                observed_state,
+                observed_at_ms,
+                source_freshness,
+                refresh_attempted: false,
+                refreshed_state: None,
+                refreshed_at_ms: None,
+                terminal_reason: "no_ready_capacity",
+                refresh_error_code: None,
+                refresh_error: None,
+            },
+        );
+    }
+
+    match refresh() {
+        Ok((refreshed, refreshed_at_ms)) => {
+            let terminal_reason = if refreshed.state == LabRunnerReadinessState::ConnectedReady {
+                "ready_after_refresh"
+            } else if refreshed.state == LabRunnerReadinessState::Stale {
+                "inventory_stale"
+            } else {
+                "no_ready_capacity"
+            };
+            let refreshed_state = Some(refreshed.state.as_str().to_string());
+            (
+                refreshed,
+                LabInventoryAdmissionDiagnostic {
+                    observed_state,
+                    observed_at_ms,
+                    source_freshness,
+                    refresh_attempted: true,
+                    refreshed_state,
+                    refreshed_at_ms: Some(refreshed_at_ms),
+                    terminal_reason,
+                    refresh_error_code: None,
+                    refresh_error: None,
+                },
+            )
+        }
+        Err(error) => {
+            let timed_out = error.code == crate::core::ErrorCode::RemoteCommandTimeout;
+            let refresh_error_code = error.code.as_str().to_string();
+            (
+                observed,
+                LabInventoryAdmissionDiagnostic {
+                    observed_state,
+                    observed_at_ms,
+                    source_freshness,
+                    refresh_attempted: true,
+                    refreshed_state: None,
+                    refreshed_at_ms: Some(unix_timestamp_ms()),
+                    terminal_reason: if timed_out {
+                        "refresh_timeout"
+                    } else {
+                        "refresh_failed"
+                    },
+                    refresh_error_code: Some(refresh_error_code),
+                    refresh_error: Some(error.message),
+                },
+            )
+        }
+    }
+}
+
+fn unix_timestamp_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 fn preflight_hot_command(
     cli: &Cli,
     output_file: Option<&str>,
@@ -1590,10 +1695,13 @@ fn preflight_hot_command(
             } else {
                 None
             };
+            // Timestamp the projection after it has completed; it describes the
+            // exact inventory consumed by the terminal placement decision.
+            let lab_inventory_observed_at_ms = unix_timestamp_ms();
+            let mut lab_inventory_diagnostic = None;
             // A cached/projection-based inventory is enough for normal routing,
-            // but not for refusing portable work on a hot controller. Refresh
-            // the bounded, read-only admission facts once before rejection so
-            // an idle connected runner is not hidden behind stale inventory.
+            // but not for a terminal local-resource refusal. A stale inventory
+            // receives exactly one bounded runner-owned refresh before placement.
             if hot_command.lab_offload_supported
                 && cli.runner.is_none()
                 && !matches!(cli.placement, crate::cli_surface::Placement::Local)
@@ -1603,12 +1711,20 @@ fn preflight_hot_command(
                     lab_readiness.as_ref(),
                 )
                 .is_some()
-                && lab_readiness.as_ref().is_some_and(|readiness| {
-                    readiness.state
-                        != crate::runner::runners::LabRunnerReadinessState::ConnectedReady
-                })
             {
-                lab_readiness = crate::runner::refresh_lab_runner_readiness_for_admission().ok();
+                if let Some(observed) = lab_readiness.take() {
+                    let (resolved, diagnostic) = resolve_terminal_lab_inventory(
+                        observed,
+                        lab_inventory_observed_at_ms,
+                        || {
+                            let refreshed =
+                                crate::runner::refresh_lab_runner_readiness_for_admission()?;
+                            Ok((refreshed, unix_timestamp_ms()))
+                        },
+                    );
+                    lab_readiness = Some(resolved);
+                    lab_inventory_diagnostic = Some(diagnostic);
+                }
             }
             // An explicit runner is a routing decision, not a default-runner
             // fallback. Let Lab offload report any runner-specific readiness or
@@ -1733,7 +1849,7 @@ fn preflight_hot_command(
             }
             resource_policy::capture_context(resource_policy_context);
             if let Some(warning) = warning.as_ref() {
-                if let Some(err) = resource_policy::non_interactive_preflight_error(
+                if let Some(mut err) = resource_policy::non_interactive_preflight_error(
                     warning,
                     cli.placement.is_explicit_local_override() || runner_hosted,
                     is_interactive_shell(),
@@ -1752,6 +1868,10 @@ fn preflight_hot_command(
                     }),
                     runner_admits_offload || auto_local_capacity_fallback,
                 ) {
+                    if let Some(diagnostic) = lab_inventory_diagnostic {
+                        err.details["lab_inventory_admission"] = serde_json::to_value(diagnostic)
+                            .expect("Lab inventory admission diagnostic serializes");
+                    }
                     if review_test_deferred_workload_eligible(cli, warning, runner_admits_offload) {
                         return None;
                     }
@@ -2173,6 +2293,245 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn lab_readiness(
+        state: crate::runner::runners::LabRunnerReadinessState,
+    ) -> crate::runner::runners::LabRunnerReadiness {
+        crate::runner::runners::LabRunnerReadiness {
+            state,
+            selected_runner_id: (state
+                == crate::runner::runners::LabRunnerReadinessState::ConnectedReady)
+                .then(|| "lab-a".to_string()),
+            available_runner_ids: (state
+                == crate::runner::runners::LabRunnerReadinessState::ConnectedReady)
+                .then(|| vec!["lab-a".to_string()])
+                .unwrap_or_default(),
+            reasons: Vec::new(),
+            remediation_commands: Vec::new(),
+        }
+    }
+
+    fn hot_resources() -> crate::commands::resources::DoctorOutput {
+        use crate::commands::resources::{
+            DoctorOutput, LoadSummary, ProcessSummary, ResourceRecommendation, RigLeaseSummary,
+        };
+
+        DoctorOutput {
+            command: "self.resources",
+            recommendation: ResourceRecommendation::Warm,
+            load: LoadSummary {
+                one: Some(4.0),
+                five: Some(4.0),
+                fifteen: Some(4.0),
+                cpu_count: 2,
+                recommendation: ResourceRecommendation::Warm,
+            },
+            memory: None,
+            processes: ProcessSummary {
+                relevant_count: 0,
+                top_cpu: Vec::new(),
+                top_rss: Vec::new(),
+                recommendation: ResourceRecommendation::Ok,
+            },
+            rig_leases: RigLeaseSummary {
+                active_count: 0,
+                concurrency_limit: None,
+                leases: Vec::new(),
+                recommendation: ResourceRecommendation::Ok,
+            },
+            notes: Vec::new(),
+        }
+    }
+
+    fn cook_hot_command() -> resource_policy::HotCommand {
+        resource_policy::HotCommand {
+            label: "agent-task cook/run-plan/retry --run",
+            lab_offload_supported: true,
+            lab_offload_unsupported_reason: None,
+            allows_warm_runner_coordination: true,
+            offload_only_when_hot: false,
+        }
+    }
+
+    #[test]
+    fn stale_inventory_refreshes_once_and_routes_newly_ready_capacity() {
+        let (resolved, diagnostic) = resolve_terminal_lab_inventory(
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Stale),
+            100,
+            || {
+                Ok((
+                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::ConnectedReady),
+                    200,
+                ))
+            },
+        );
+
+        assert_eq!(
+            resolved.state,
+            crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+        );
+        assert_eq!(resolved.selected_runner_id.as_deref(), Some("lab-a"));
+        assert!(diagnostic.refresh_attempted);
+        assert_eq!(diagnostic.observed_at_ms, 100);
+        assert_eq!(diagnostic.source_freshness.as_deref(), Some("stale"));
+        assert_eq!(diagnostic.refreshed_at_ms, Some(200));
+        assert_eq!(diagnostic.terminal_reason, "ready_after_refresh");
+    }
+
+    #[test]
+    fn stale_inventory_refresh_to_empty_reports_confirmed_no_ready_capacity() {
+        let (resolved, diagnostic) = resolve_terminal_lab_inventory(
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Stale),
+            100,
+            || {
+                Ok((
+                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked),
+                    200,
+                ))
+            },
+        );
+
+        assert_eq!(
+            resolved.state,
+            crate::runner::runners::LabRunnerReadinessState::CapacityBlocked
+        );
+        assert_eq!(
+            diagnostic.refreshed_state.as_deref(),
+            Some("capacity_blocked")
+        );
+        assert_eq!(diagnostic.terminal_reason, "no_ready_capacity");
+    }
+
+    #[test]
+    fn stale_inventory_refresh_timeout_is_reported_without_local_fallback() {
+        let (resolved, diagnostic) = resolve_terminal_lab_inventory(
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Stale),
+            100,
+            || {
+                Err(crate::core::Error::new(
+                    crate::core::ErrorCode::RemoteCommandTimeout,
+                    "runner stopped answering",
+                    serde_json::Value::Null,
+                ))
+            },
+        );
+
+        assert_eq!(
+            resolved.state,
+            crate::runner::runners::LabRunnerReadinessState::Stale
+        );
+        assert_eq!(diagnostic.terminal_reason, "refresh_timeout");
+        assert!(diagnostic.refresh_attempted);
+        assert_eq!(
+            diagnostic.refresh_error_code.as_deref(),
+            Some("remote.command_timeout")
+        );
+        assert!(diagnostic.refresh_error.is_some());
+    }
+
+    #[test]
+    fn fresh_empty_inventory_does_not_open_a_refresh_probe() {
+        let (resolved, diagnostic) = resolve_terminal_lab_inventory(
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked),
+            100,
+            || -> crate::core::Result<_> { panic!("fresh inventory must not refresh") },
+        );
+
+        assert_eq!(
+            resolved.state,
+            crate::runner::runners::LabRunnerReadinessState::CapacityBlocked
+        );
+        assert!(!diagnostic.refresh_attempted);
+        assert_eq!(diagnostic.observed_at_ms, 100);
+        assert_eq!(diagnostic.terminal_reason, "no_ready_capacity");
+    }
+
+    #[test]
+    fn preflight_resource_policy_routes_stale_inventory_to_refreshed_lab_capacity() {
+        let resources = hot_resources();
+        let (readiness, diagnostic) = resolve_terminal_lab_inventory(
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Stale),
+            100,
+            || {
+                Ok((
+                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::ConnectedReady),
+                    200,
+                ))
+            },
+        );
+
+        assert_eq!(diagnostic.terminal_reason, "ready_after_refresh");
+        assert!(resource_policy::admits_warm_runner_coordination(
+            cook_hot_command(),
+            &resources,
+            readiness.selected_runner_id.as_deref(),
+            Some(&readiness),
+        ));
+
+        // This is the exact routing capture boundary used by
+        // `preflight_hot_command`: the refreshed selection must survive beyond
+        // admission and become the auto-placement input consumed by dispatch.
+        resource_policy::reset_captured_context_for_test();
+        let warning = resource_policy::evaluate_with_runner_hint(
+            cook_hot_command(),
+            &resources,
+            Some(&readiness),
+        );
+        resource_policy::capture_context(resource_policy::resource_policy_context_from_evaluation(
+            cook_hot_command(),
+            &resources,
+            warning.as_ref(),
+            false,
+            false,
+            Some(&readiness),
+            false,
+        ));
+        let captured = resource_policy::captured_context().expect("preflight routing capture");
+        assert_eq!(
+            captured.runner_selection.runner_id.as_deref(),
+            Some("lab-a")
+        );
+        assert_eq!(captured.runner_selection.reason, "default_lab_runner");
+        resource_policy::reset_captured_context_for_test();
+    }
+
+    #[test]
+    fn preflight_resource_policy_keeps_timeout_and_fresh_empty_local_fallback_closed() {
+        let resources = hot_resources();
+        let (timed_out, timeout_diagnostic) = resolve_terminal_lab_inventory(
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Stale),
+            100,
+            || {
+                Err(crate::core::Error::new(
+                    crate::core::ErrorCode::RemoteCommandTimeout,
+                    "runner stopped answering",
+                    serde_json::Value::Null,
+                ))
+            },
+        );
+        let (fresh_empty, fresh_diagnostic) = resolve_terminal_lab_inventory(
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked),
+            300,
+            || -> crate::core::Result<_> { panic!("fresh inventory must not refresh") },
+        );
+
+        assert_eq!(timeout_diagnostic.terminal_reason, "refresh_timeout");
+        assert_eq!(fresh_diagnostic.terminal_reason, "no_ready_capacity");
+        for readiness in [&timed_out, &fresh_empty] {
+            assert!(!resource_policy::admits_warm_runner_coordination(
+                cook_hot_command(),
+                &resources,
+                readiness.selected_runner_id.as_deref(),
+                Some(readiness),
+            ));
+            assert!(!resource_policy::admits_auto_local_capacity_fallback(
+                cook_hot_command(),
+                &resources,
+                Some(readiness),
+                crate::cli_surface::Placement::Auto,
+            ));
+        }
+    }
 
     #[test]
     fn command_identity_uses_the_resolved_top_level_and_nested_path() {

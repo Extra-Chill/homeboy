@@ -12,6 +12,7 @@ use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
+use crate::agent_task_service::reconcile_stale_active_runs;
 use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
@@ -745,6 +746,125 @@ fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secr
             .expect("broker JSON");
         assert!(!persisted.contains("secret-value"));
         assert!(lookups.lock().expect("lookup log").is_empty());
+    });
+}
+
+#[test]
+fn pending_submission_owns_running_proxy_until_job_projection_arrives() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        let store = JobStore::default();
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let lookups = Arc::new(Mutex::new(Vec::new()));
+        let _runner = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
+            store: store.clone(),
+            submitted: Arc::clone(&submitted),
+            lookups: Arc::clone(&lookups),
+            fail_after_accept_once: Arc::new(Mutex::new(false)),
+        }));
+        let run_id = "delayed-runner-job-projection";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("record controller proxy");
+        let request = replay_request(run_id, &command);
+        record_lab_offload_submission_request(run_id, &request)
+            .expect("persist pending broker request");
+        let accepted_job = store
+            .submit_remote_runner_job(request)
+            .expect("broker accepts before response projection");
+        rewrite_record_for_test(run_id, |record| {
+            set_run_state(record, AgentTaskRunState::Running);
+            record.tasks[0].state = AgentTaskState::Running;
+            // This is a runner-host PID. It cannot be probed by the controller.
+            record.metadata["runner_pid"] = json!(u32::MAX);
+        })
+        .expect("simulate runner start before projection");
+
+        assert_eq!(
+            reconcile_stale_active_runs(false)
+                .expect("remote PID does not make pending submission stale")
+                .considered,
+            0
+        );
+
+        let mut cancelled_job = accepted_job.clone();
+        cancelled_job.status = homeboy_core::api_jobs::JobStatus::Cancelled;
+        let expected_job_id = accepted_job.id.to_string();
+        let _cancel = crate::agent_task_lifecycle::cancellation::test_cancel_hook::install(
+            Box::new(move |runner_id, runner_job_id, durable_run_id| {
+                assert_eq!(runner_id, "homeboy-lab");
+                assert_eq!(runner_job_id, expected_job_id);
+                assert_eq!(durable_run_id, run_id);
+                Ok((cancelled_job.clone(), Vec::new()))
+            }),
+        );
+        let cancelled = cancel_run(run_id, Some("operator cancellation"))
+            .expect("cancellation binds and cancels accepted broker job");
+        assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            cancelled.runner_job_id(),
+            Some(accepted_job.id.to_string().as_str())
+        );
+        assert_eq!(
+            cancelled.metadata["live_cancellation"]["cancellation"],
+            "runner_job_cancel"
+        );
+        assert_eq!(lookups.lock().expect("submission lookup").len(), 1);
+        assert!(submitted.lock().expect("replay submissions").is_empty());
+    });
+}
+
+#[test]
+fn expired_running_submission_retains_typed_handoff_rejection() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        let _runner = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
+            store: JobStore::default(),
+            submitted: Arc::new(Mutex::new(Vec::new())),
+            lookups: Arc::new(Mutex::new(Vec::new())),
+            fail_after_accept_once: Arc::new(Mutex::new(false)),
+        }));
+        let run_id = "expired-running-submission";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("record controller proxy");
+        record_lab_offload_submission_request(run_id, &replay_request(run_id, &command))
+            .expect("persist pending broker request");
+        rewrite_record_for_test(run_id, |record| {
+            set_run_state(record, AgentTaskRunState::Running);
+            record.tasks[0].state = AgentTaskState::Running;
+            record
+                .lab_handoff
+                .as_mut()
+                .expect("pending handoff")
+                .acceptance_deadline_at =
+                Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
+        })
+        .expect("simulate rejected runner submission");
+
+        let expired = status(run_id).expect("expired handoff is terminalized");
+        assert_eq!(expired.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            expired.metadata["cancel_reason"],
+            EXPIRED_LAB_HANDOFF_REASON
+        );
+        assert_eq!(expired.metadata["phase"], "handoff_rejected");
     });
 }
 

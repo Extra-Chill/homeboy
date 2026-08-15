@@ -3,6 +3,16 @@ use crate::error::{Error, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+thread_local! {
+    static DISCOVERY_PATHS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_discovery_paths_for_test() -> Vec<PathBuf> {
+    DISCOVERY_PATHS.with(|paths| std::mem::take(&mut *paths.borrow_mut()))
+}
+
 /// Read a `homeboy.json` portable config from a repo directory.
 pub(crate) fn read_portable_config(repo_path: &Path) -> Result<Option<Value>> {
     let config_path = repo_path.join("homeboy.json");
@@ -267,6 +277,8 @@ pub fn discover_from_portable(dir: &Path) -> Option<Component> {
 }
 
 pub fn try_discover_from_portable(dir: &Path) -> Result<Option<Component>> {
+    #[cfg(test)]
+    DISCOVERY_PATHS.with(|paths| paths.borrow_mut().push(dir.to_path_buf()));
     let Some(portable) = read_portable_config(dir)? else {
         return Ok(None);
     };

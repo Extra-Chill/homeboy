@@ -47,7 +47,7 @@ pub use config::{
 };
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,
-    reconcile_standalone_registration, registered, registered_by_id,
+    reconcile_standalone_registration, registered, registered_by_id, registered_by_local_path,
     write_standalone_component_config, write_standalone_registration, ComponentReconcileReport,
 };
 pub use model::{Component, ComponentLifecycle, ComponentManagedExecution};

@@ -72,8 +72,10 @@ pub(crate) fn has_expired_pending_runner_submission_intent(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    record.state == AgentTaskRunState::Queued
-        && record.runner_job_id().is_none()
+    matches!(
+        record.state,
+        AgentTaskRunState::Queued | AgentTaskRunState::Running
+    ) && record.runner_job_id().is_none()
         && record.lab_handoff.as_ref().is_some_and(|handoff| {
             handoff.state == AgentTaskLabHandoffState::Pending
                 && handoff.authority == AgentTaskLabHandoffAuthority::Controller
@@ -92,7 +94,15 @@ pub(crate) fn has_expired_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
 }
 
 fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) -> bool {
-    if record.state != AgentTaskRunState::Queued || record.runner_job_id().is_some() {
+    // The reverse broker can start the runner-side workload before its accepted
+    // job projection reaches this controller record. That transient `Running`
+    // record is still submission-owned until the acceptance deadline, not an
+    // ownerless process that stale reconciliation may cancel.
+    if !matches!(
+        record.state,
+        AgentTaskRunState::Queued | AgentTaskRunState::Running
+    ) || record.runner_job_id().is_some()
+    {
         return false;
     }
     let Some(handoff) = record.lab_handoff.as_ref().filter(|handoff| {
