@@ -337,13 +337,14 @@ pub fn explicit_runner_controller_notice(
 }
 
 /// Cook keeps durable coordination, promotion, and gates on the controller,
-/// but its provider attempt can be pinned to Lab. An explicitly selected ready
-/// runner lets the controller admit that lightweight coordination under warm or
-/// hot CPU load, while memory and process pressure remain local safety gates.
+/// but its provider attempt can run on a selected Lab runner. A ready explicit
+/// or automatically selected runner lets the controller admit that lightweight
+/// coordination under warm or hot CPU load, while memory and process pressure
+/// remain local safety gates.
 pub fn admits_warm_runner_coordination(
     command: HotCommand,
     resources: &DoctorOutput,
-    explicit_runner: Option<&str>,
+    selected_runner: Option<&str>,
     lab_readiness: Option<&LabRunnerReadiness>,
 ) -> bool {
     command.allows_warm_runner_coordination
@@ -356,7 +357,7 @@ pub fn admits_warm_runner_coordination(
             .as_ref()
             .is_none_or(|memory| memory.recommendation == ResourceRecommendation::Ok)
         && resources.processes.recommendation == ResourceRecommendation::Ok
-        && explicit_runner.is_some_and(|runner_id| {
+        && selected_runner.is_some_and(|runner_id| {
             lab_readiness.is_some_and(|readiness| {
                 readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
                     && readiness
@@ -1121,13 +1122,13 @@ mod tests {
     }
 
     #[test]
-    fn runner_pinned_cook_coordination_admits_an_explicit_ready_runner_on_warm_or_hot_controller() {
+    fn automatic_cook_coordination_admits_a_ready_runner_on_warm_or_hot_controller() {
         let cli = Cli::parse_from([
             "homeboy",
-            "--runner",
-            "homeboy-lab",
             "agent-task",
             "cook",
+            "--cwd",
+            "/workspace/homeboy@fix-12503-auto-ready-lab",
             "--prompt",
             "implement the fix",
             "--to-worktree",
@@ -1136,7 +1137,7 @@ mod tests {
             "cargo test --locked",
         ]);
         let command = hot_command(&cli.command).expect("cook is resource managed");
-        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert_eq!(cli.runner, None);
         let ready = ready_lab();
 
         for recommendation in [ResourceRecommendation::Warm, ResourceRecommendation::Hot] {
@@ -1164,6 +1165,33 @@ mod tests {
             Some("missing-lab"),
             Some(&ready),
         ));
+    }
+
+    #[test]
+    fn automatic_cook_refusal_names_when_no_runner_is_eligible() {
+        let command = lab_supported_hot("agent-task cook/run-plan/retry --run");
+        let unavailable = LabRunnerReadiness {
+            state: crate::runner::runners::LabRunnerReadinessState::ConnectedIneligible,
+            selected_runner_id: None,
+            available_runner_ids: Vec::new(),
+            reasons: vec!["all connected runners are at capacity".to_string()],
+            remediation_commands: vec!["homeboy runner status homeboy-lab".to_string()],
+        };
+        let resources = coordination_resources();
+
+        assert!(!admits_warm_runner_coordination(
+            command,
+            &resources,
+            unavailable.selected_runner_id.as_deref(),
+            Some(&unavailable),
+        ));
+        let warning = evaluate_with_runner_hint(command, &resources, Some(&unavailable))
+            .expect("hot controller warns");
+        let error = non_interactive_preflight_error(&warning, false, false, None, false)
+            .expect("no eligible runner refuses local execution");
+        assert!(error.message.contains("connected_ineligible"));
+        assert!(error.message.contains("homeboy runner status homeboy-lab"));
+        assert_eq!(error.details["run_created"], false);
     }
 
     #[test]
