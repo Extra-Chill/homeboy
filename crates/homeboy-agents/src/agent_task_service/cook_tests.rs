@@ -6729,7 +6729,7 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
         let result = run_cook(options, UnusedExecutor).expect("cook records transport retries");
 
         assert_eq!(result.exit_code, 1);
-        assert_eq!(result.value.status, "retries_exhausted");
+        assert_eq!(result.value.status, "pre_execution_failure");
         assert_eq!(result.value.attempts.len(), 2);
         assert_eq!(dispatches.load(Ordering::SeqCst), 2);
         assert_eq!(result.value.history_run_ids.len(), 2);
@@ -6737,7 +6737,16 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
             result.value.history_run_ids[0],
             "cook-retryable-transport-attempt-1"
         );
-        assert!(result.value.history_run_ids[1].starts_with("cook-retryable-transport-attempt-2-"));
+        assert!(result.value.history_run_ids[1]
+            .starts_with("cook-retryable-transport-attempt-1-transport-retry"));
+        assert!(result
+            .value
+            .attempts
+            .iter()
+            .all(|attempt| attempt.attempt == 1));
+        let recipe = super::super::load_recipe(cook_id).expect("transport retries are durable");
+        assert_eq!(recipe.attempts.len(), 2);
+        assert!(recipe.attempts.iter().all(|attempt| attempt.attempt == 1));
         for run_id in &result.value.history_run_ids {
             let record = agent_task_lifecycle::status(run_id).expect("retry attempt exists");
             assert!(record.provider_handles.is_empty());

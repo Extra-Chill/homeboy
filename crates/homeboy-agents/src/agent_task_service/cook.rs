@@ -104,6 +104,21 @@ const RETRY_DISPATCH_CLAIM_LEASE: std::time::Duration = std::time::Duration::fro
 const PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
 
+/// Transport retries recover controller-to-runner delivery, not semantic work.
+/// One replacement gives a transient interruption one fresh connection while a
+/// persistent infrastructure defect remains visible for repair.
+const MAX_TRANSPORT_RETRIES_PER_ATTEMPT: usize = 1;
+
+fn transport_retry_available(store: &CookRecipeStore, cook_id: &str, attempt: u32) -> Result<bool> {
+    Ok(store
+        .load_recipe(cook_id)?
+        .attempts
+        .iter()
+        .filter(|recorded| recorded.attempt == attempt)
+        .count()
+        <= MAX_TRANSPORT_RETRIES_PER_ATTEMPT)
+}
+
 /// Durable operation key for the dispatch of one retry attempt. A retry is
 /// one-per-generated-`run_id`, so the next run id is the stable identity (#8357).
 fn retry_dispatch_operation_key(next_run_id: &str) -> String {
@@ -241,7 +256,7 @@ fn claim_pre_artifact_interruption_retry(
     plan: &AgentTaskPlan,
 ) -> Result<Option<(u32, String)>> {
     let store = CookRecipeStore::from_current_data_root()?;
-    claim_pre_artifact_interruption_retry_with_store(&store, cook_id, attempt, run_id, plan)
+    claim_pre_artifact_interruption_retry_with_store(&store, cook_id, attempt, run_id, plan, false)
 }
 
 fn claim_pre_artifact_interruption_retry_with_store(
@@ -250,15 +265,20 @@ fn claim_pre_artifact_interruption_retry_with_store(
     attempt: u32,
     run_id: &str,
     plan: &AgentTaskPlan,
+    replace_semantic_attempt: bool,
 ) -> Result<Option<(u32, String)>> {
-    let next_attempt = attempt.checked_add(1).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "cook_recipe.attempts",
-            "durable cook attempt sequence is exhausted",
-            Some(cook_id.to_string()),
-            None,
-        )
-    })?;
+    let next_attempt = if replace_semantic_attempt {
+        attempt
+    } else {
+        attempt.checked_add(1).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "durable cook attempt sequence is exhausted",
+                Some(cook_id.to_string()),
+                None,
+            )
+        })?
+    };
     let operation_key = pre_artifact_interruption_operation_key(run_id);
     let recipe_next_attempt = || {
         store.load_recipe(cook_id).map(|recipe| {
@@ -276,8 +296,16 @@ fn claim_pre_artifact_interruption_retry_with_store(
         PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE,
     )? {
         agent_task_lifecycle::ClaimOutcome::Acquired => {
-            let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
-            store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
+            let next_run_id = if replace_semantic_attempt {
+                format!("{run_id}-transport-retry")
+            } else {
+                agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt)
+            };
+            if replace_semantic_attempt {
+                store.record_recipe_attempt_replacement(cook_id, run_id, &next_run_id)?;
+            } else {
+                store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
+            }
             agent_task_lifecycle::complete_cook_operation(
                 run_id,
                 &operation_key,
@@ -4364,7 +4392,8 @@ where
     } else {
         max_attempts
     };
-    for attempt in first_attempt..=attempt_limit {
+    let mut attempt = first_attempt;
+    while attempt <= attempt_limit {
         // Attempt boundary. Checked before any provider work is dispatched, so
         // an expired budget costs nothing further and the attempt that would
         // have run is never started rather than started and killed.
@@ -4802,21 +4831,24 @@ where
                         Some(&run_id),
                     ));
                 }
-                if attempt == max_attempts {
-                    return Ok(cook_report(CookReportInput {
+                if !transport_retry_available(store, &cook_id, attempt)? {
+                    return Ok(pre_execution_failure_report(
                         cook_id,
-                        status: "retries_exhausted",
-                        disposition: CookDisposition::Terminal,
                         attempts,
-                        finalization: None,
-                        stop_reason: Some(error.to_string()),
-                        exit_code: 1,
-                        invocation_latest_run_id: Some(&run_id),
-                    }));
+                        pre_execution_failure,
+                        Error::validation_invalid_argument(
+                            "transport_retry",
+                            format!(
+                                "pre-provider transport retry is exhausted for semantic Cook attempt {attempt}; repair the runner or controller transport before continuing"
+                            ),
+                            Some(run_id.clone()),
+                            None,
+                        ),
+                        Some(&run_id),
+                    ));
                 }
-                let next_attempt = attempt + 1;
-                let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, next_attempt);
-                store.record_recipe_attempt(&cook_id, next_attempt, &next_run_id, &plan)?;
+                let next_run_id = format!("{run_id}-transport-retry");
+                store.record_recipe_attempt_replacement(&cook_id, &run_id, &next_run_id)?;
                 materialize_cook_attempt_with_store(store, &cook_id, &next_run_id, &plan)?;
                 run_id = next_run_id;
                 next_plan = Some(plan);
@@ -4892,7 +4924,9 @@ where
                     promotion: None,
                     feedback: None,
                 });
-                if attempt >= max_attempts {
+                let replace_semantic_attempt =
+                    phase == PreArtifactInterruptionPhase::BeforeProviderStart;
+                if !replace_semantic_attempt && attempt >= max_attempts {
                     return Ok(pre_artifact_interruption_report(
                         cook_id,
                         attempts,
@@ -4921,12 +4955,33 @@ where
                         1,
                     ));
                 }
+                if replace_semantic_attempt && !transport_retry_available(store, &cook_id, attempt)?
+                {
+                    return Ok(pre_artifact_interruption_report(
+                        cook_id,
+                        attempts,
+                        &run_id,
+                        phase,
+                        format!(
+                            "attempt {attempt} stopped before provider start after its bounded transport retry; repair the runner or controller transport before continuing"
+                        ),
+                        1,
+                    ));
+                }
                 match claim_pre_artifact_interruption_retry_with_store(
-                    store, &cook_id, attempt, &run_id, &plan,
+                    store,
+                    &cook_id,
+                    attempt,
+                    &run_id,
+                    &plan,
+                    replace_semantic_attempt,
                 )? {
-                    Some((_next_attempt, next_run_id)) => {
+                    Some((next_attempt, next_run_id)) => {
                         run_id = next_run_id;
                         next_plan = Some(plan);
+                        if !replace_semantic_attempt {
+                            attempt = next_attempt;
+                        }
                         continue;
                     }
                     None => {
@@ -5539,7 +5594,10 @@ where
                 )? {
                     CookFollowUpDispatch::Dispatched {
                         run_id: next_run_id,
-                    } => run_id = next_run_id,
+                    } => {
+                        run_id = next_run_id;
+                        attempt = attempt.saturating_add(1);
+                    }
                     CookFollowUpDispatch::BudgetExhausted { reason } => {
                         return Ok(cook_report(CookReportInput {
                             cook_id,
