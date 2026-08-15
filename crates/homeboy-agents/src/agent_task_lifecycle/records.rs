@@ -529,16 +529,18 @@ impl AgentTaskRunRecord {
         &self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
-        self.state == AgentTaskRunState::Queued
-            && self.lab_handoff.as_ref().is_some_and(|handoff| {
-                handoff.is_valid()
-                    && handoff.state == AgentTaskLabHandoffState::Pending
-                    && handoff
-                        .acceptance_deadline_at
-                        .as_deref()
-                        .and_then(parse_rfc3339)
-                        .is_some_and(|deadline| deadline <= now)
-            })
+        matches!(
+            self.state,
+            AgentTaskRunState::Queued | AgentTaskRunState::Running
+        ) && self.lab_handoff.as_ref().is_some_and(|handoff| {
+            handoff.is_valid()
+                && handoff.state == AgentTaskLabHandoffState::Pending
+                && handoff
+                    .acceptance_deadline_at
+                    .as_deref()
+                    .and_then(parse_rfc3339)
+                    .is_some_and(|deadline| deadline <= now)
+        })
     }
 
     pub(crate) fn record_runner_metadata(&mut self, reclaimed_stale: bool) {
@@ -558,7 +560,20 @@ impl AgentTaskRunRecord {
     }
 
     pub(crate) fn annotate_stale_running(&mut self) {
-        if self.state != AgentTaskRunState::Running || self.owner_process_is_running() {
+        if self.state != AgentTaskRunState::Running {
+            return;
+        }
+
+        // A reverse-broker job may begin before the daemon's accepted job/PID
+        // projection arrives. Its complete, unexpired submission intent remains
+        // the authoritative owner during that narrow handoff window.
+        // Its PID belongs to the runner host, so this controller cannot use a
+        // local PID probe to disprove that ownership.
+        if super::has_live_pending_runner_submission_intent(self, chrono::Utc::now()) {
+            return;
+        }
+
+        if self.owner_process_is_running() {
             return;
         }
 
