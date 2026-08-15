@@ -653,6 +653,7 @@ impl AgentTaskScheduleSupport {
         outcomes: &mut Vec<AgentTaskOutcome>,
         events: &mut Vec<AgentTaskProgressEvent>,
         executor: &E,
+        lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
     ) where
         E: AgentTaskExecutorAdapter,
     {
@@ -689,12 +690,20 @@ impl AgentTaskScheduleSupport {
 
             let mut task = running.remove(index);
             if let Some(run_id) = task.run_id.as_deref() {
-                let _ = crate::agent_task_lifecycle::record_provider_execution_terminal(
-                    run_id,
-                    &task.task_id,
-                    task.attempt,
-                    "timed_out",
-                );
+                let _ = match lifecycle_store {
+                    Some(store) => store.record_provider_execution_terminal(
+                        run_id,
+                        &task.task_id,
+                        task.attempt,
+                        "timed_out",
+                    ),
+                    None => crate::agent_task_lifecycle::record_provider_execution_terminal(
+                        run_id,
+                        &task.task_id,
+                        task.attempt,
+                        "timed_out",
+                    ),
+                };
             }
             let mut outcome =
                 deferred_timeout_outcome(&task.task_id, timeout_ms, "scheduler_timeout");

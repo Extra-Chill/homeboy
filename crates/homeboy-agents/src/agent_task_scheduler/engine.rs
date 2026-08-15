@@ -1,6 +1,6 @@
 use homeboy_engine_primitives::content_hash;
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Instant;
@@ -27,6 +27,7 @@ pub struct AgentTaskScheduler<E> {
     executor: Arc<E>,
     run_id: Option<String>,
     harvest_context: HarvestExecutionContext,
+    lifecycle_store: Option<crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
     #[cfg(test)]
     scratch_root: Option<std::path::PathBuf>,
 }
@@ -46,6 +47,7 @@ where
             executor: Arc::new(executor),
             run_id: None,
             harvest_context: HarvestExecutionContext::default(),
+            lifecycle_store: None,
             #[cfg(test)]
             scratch_root: None,
         }
@@ -58,6 +60,14 @@ where
 
     pub fn with_harvest_context(mut self, context: HarvestExecutionContext) -> Self {
         self.harvest_context = context;
+        self
+    }
+
+    pub(crate) fn with_lifecycle_store(
+        mut self,
+        lifecycle_store: crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    ) -> Self {
+        self.lifecycle_store = Some(lifecycle_store);
         self
     }
 
@@ -526,29 +536,43 @@ where
                     .or(harvest_preflight.base_sha.clone());
                 let source_workspace_root = request.workspace.root.clone();
                 let source_provenance = harvest_preflight.source_provenance;
-                #[cfg(test)]
-                let scratch = match self.scratch_root.as_ref() {
-                    Some(data_root) => crate::controller_scratch::allocate_test_attempt_at(
-                        data_root,
+                let scratch = if let Some(lifecycle_store) = self.lifecycle_store.as_ref() {
+                    crate::controller_scratch::allocate_attempt_at(
+                        &lifecycle_store.data_root(),
                         &scratch_run_id,
                         &plan.plan_id,
                         &request.task_id,
                         scheduled.attempt,
-                    ),
-                    None => crate::controller_scratch::allocate_test_attempt(
-                        &scratch_run_id,
-                        &plan.plan_id,
-                        &request.task_id,
-                        scheduled.attempt,
-                    ),
+                    )
+                } else {
+                    #[cfg(test)]
+                    {
+                        match self.scratch_root.as_ref() {
+                            Some(data_root) => crate::controller_scratch::allocate_test_attempt_at(
+                                data_root,
+                                &scratch_run_id,
+                                &plan.plan_id,
+                                &request.task_id,
+                                scheduled.attempt,
+                            ),
+                            None => crate::controller_scratch::allocate_test_attempt(
+                                &scratch_run_id,
+                                &plan.plan_id,
+                                &request.task_id,
+                                scheduled.attempt,
+                            ),
+                        }
+                    }
+                    #[cfg(not(test))]
+                    {
+                        crate::controller_scratch::allocate_attempt(
+                            &scratch_run_id,
+                            &plan.plan_id,
+                            &request.task_id,
+                            scheduled.attempt,
+                        )
+                    }
                 };
-                #[cfg(not(test))]
-                let scratch = crate::controller_scratch::allocate_attempt(
-                    &scratch_run_id,
-                    &plan.plan_id,
-                    &request.task_id,
-                    scheduled.attempt,
-                );
                 let scratch = match scratch {
                     Ok(scratch) => scratch,
                     Err(error) => {
@@ -644,9 +668,13 @@ where
                 };
 
                 if let Some(run_id) = self.run_id.as_deref() {
-                    match crate::agent_task_lifecycle::reserve_provider_execution(
-                        run_id, &request, attempt,
-                    ) {
+                    let reservation = match self.lifecycle_store.as_ref() {
+                        Some(store) => store.reserve_provider_execution(run_id, &request, attempt),
+                        None => crate::agent_task_lifecycle::reserve_provider_execution(
+                            run_id, &request, attempt,
+                        ),
+                    };
+                    match reservation {
                         Ok(crate::agent_task_lifecycle::ProviderExecutionReservation::Acquired) => {}
                         Ok(crate::agent_task_lifecycle::ProviderExecutionReservation::AlreadyReserved) => {
                             let outcome = scratch_allocation_failure(
@@ -719,6 +747,10 @@ where
                     source_workspace_root,
                     _attempt_workspace: attempt_workspace.clone(),
                     run_id: self.run_id.clone(),
+                    artifact_root: self
+                        .lifecycle_store
+                        .as_ref()
+                        .map(|store| store.artifact_root()),
                     artifact_nonce: uuid::Uuid::new_v4().to_string(),
                     task_base_sha,
                     source_provenance,
@@ -759,6 +791,7 @@ where
                 &mut outcomes,
                 &mut events,
                 self.executor.as_ref(),
+                self.lifecycle_store.as_ref(),
             );
 
             if running.is_empty() {
@@ -815,14 +848,23 @@ where
                             AgentTaskOutcomeStatus::CandidateRecoverable => "candidate_recoverable",
                             _ => "failed",
                         };
-                        if let Err(error) =
-                            crate::agent_task_lifecycle::record_provider_execution_terminal(
+                        let terminal = match self.lifecycle_store.as_ref() {
+                            Some(store) => store.record_provider_execution_terminal(
                                 run_id,
                                 &outcome.task_id,
                                 result.attempt,
                                 terminal_state,
-                            )
-                        {
+                            ),
+                            None => {
+                                crate::agent_task_lifecycle::record_provider_execution_terminal(
+                                    run_id,
+                                    &outcome.task_id,
+                                    result.attempt,
+                                    terminal_state,
+                                )
+                            }
+                        };
+                        if let Err(error) = terminal {
                             outcome.status = AgentTaskOutcomeStatus::Failed;
                             outcome.failure_classification =
                                 Some(AgentTaskFailureClassification::ExecutionFailed);
@@ -1149,13 +1191,20 @@ where
                         &outcome,
                     );
                     if let Some(run_id) = running_task.run_id.as_deref() {
-                        let _ =
-                            crate::agent_task_lifecycle::record_provider_execution_cleanup_elapsed(
+                        let _ = match self.lifecycle_store.as_ref() {
+                            Some(store) => store.record_provider_execution_cleanup_elapsed(
                                 run_id,
                                 &outcome.task_id,
                                 result.attempt,
                                 provider_completed_at.elapsed().as_millis() as u64,
-                            );
+                            ),
+                            None => crate::agent_task_lifecycle::record_provider_execution_cleanup_elapsed(
+                                run_id,
+                                &outcome.task_id,
+                                result.attempt,
+                                provider_completed_at.elapsed().as_millis() as u64,
+                            ),
+                        };
                     }
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                     if candidate_completion == AgentTaskCandidateCompletionPolicy::FirstGreen
@@ -1198,6 +1247,7 @@ where
                             &mut outcomes,
                             &mut events,
                             self.executor.as_ref(),
+                            self.lifecycle_store.as_ref(),
                         );
                         break;
                     }
@@ -1371,6 +1421,7 @@ pub(super) struct RunningTask {
     /// thread holds a clone so timeout finalization cannot race provider I/O.
     pub(super) _attempt_workspace: Option<Arc<AttemptWorkspace>>,
     pub(super) run_id: Option<String>,
+    pub(super) artifact_root: Option<std::path::PathBuf>,
     pub(super) artifact_nonce: String,
     /// Workspace HEAD captured immediately before the executor runs. It bounds
     /// any committed patch candidate to this dispatch attempt.
@@ -1406,11 +1457,7 @@ pub(super) fn deferred_cleanup_action_artifact(
     running: &RunningTask,
 ) -> Result<AgentTaskArtifact, HarvestError> {
     let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
-    let directory = homeboy_core::artifacts::root()
-        .map_err(|error| HarvestError::ArtifactDirectory {
-            path: Path::new("<artifact-root>").to_path_buf(),
-            message: error.message,
-        })?
+    let directory = artifact_root_for_running(running)?
         .join("agent-task")
         .join("deferred-cleanup")
         .join(homeboy_core::paths::sanitize_path_segment(run_id));
@@ -1452,6 +1499,23 @@ pub(super) fn deferred_cleanup_action_artifact(
         sha256: Some(content_hash::sha256_hex(&content)),
         metadata: serde_json::json!({ "run_id": running.run_id, "task_id": running.task_id, "attempt": running.attempt }),
     })
+}
+
+pub(super) fn artifact_root_for_running(running: &RunningTask) -> Result<PathBuf, HarvestError> {
+    if let Some(root) = running.artifact_root.as_ref() {
+        return Ok(root.clone());
+    }
+    #[cfg(test)]
+    {
+        Ok(running.scratch.path.clone())
+    }
+    #[cfg(not(test))]
+    {
+        homeboy_core::artifacts::root().map_err(|error| HarvestError::ArtifactDirectory {
+            path: Path::new("<artifact-root>").to_path_buf(),
+            message: error.message,
+        })
+    }
 }
 
 pub(super) fn complete_deferred_cleanup_recovery(
