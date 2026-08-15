@@ -33,6 +33,7 @@ await writeFile(cli, `#!/usr/bin/env node
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 const args = process.argv.slice(2);
+if (args.includes('--version')) { process.stdout.write('0.20.0'); process.exit(0); }
 if (args[0] === 'recipe' && args[1] === 'build') {
   fs.writeFileSync(args[args.indexOf('--output') + 1], '{"schema":"wp-codebox/workspace-recipe/v1"}');
   process.exit(0);

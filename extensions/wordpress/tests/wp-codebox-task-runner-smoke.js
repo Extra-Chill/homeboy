@@ -29,12 +29,17 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
-function createFixtureWpCodebox(root) {
+function createFixtureWpCodebox(root, version = '0.20.0') {
+  fs.mkdirSync(root, { recursive: true });
   const binPath = path.join(root, 'fixture-wp-codebox.js');
   fs.writeFileSync(binPath, `#!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
 const capturePath = process.env.FIXTURE_WP_CODEBOX_CAPTURE;
+if (process.argv.includes('--version')) {
+  process.stdout.write(${JSON.stringify(version)});
+  process.exit(0);
+}
 const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
 const inputPath = inputArg ? inputArg.slice('--input-file='.length) : process.argv[process.argv.indexOf('--input-file') + 1];
 const input = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
@@ -88,6 +93,7 @@ function runTaskRunner(request, args, env) {
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-task-runner-'));
 try {
   const capturePath = path.join(root, 'capture.json');
+  const isolatedRuntimeEnv = { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(root, 'missing-managed-runtime') };
   const fixtureWpCodebox = createFixtureWpCodebox(root);
   const providerPluginPath = path.join(root, 'example-provider');
   const workspaceRoot = path.join(root, 'workspace');
@@ -112,10 +118,37 @@ try {
     },
   };
 
+  const staleCapturePath = path.join(root, 'stale-capture.json');
+  const staleWpCodebox = createFixtureWpCodebox(path.join(root, 'stale'), '0.19.0');
+  const stale = runTaskRunner(request, [
+    '--wp-codebox-bin', staleWpCodebox,
+    '--artifacts', path.join(root, 'stale-artifacts'),
+  ], { ...isolatedRuntimeEnv, FIXTURE_WP_CODEBOX_CAPTURE: staleCapturePath, OPENCODE_API_KEY: 'redacted-test-key' });
+  assert.equal(stale.status, 1, stale.stderr || stale.stdout);
+  const stalePayload = JSON.parse(stale.stdout);
+  assert.equal(stalePayload.diagnostics[0].class, 'codebox.preflight.wp_codebox_version_too_old', stale.stdout);
+  assert.equal(stalePayload.diagnostics[0].data.selected.version, '0.19.0');
+  assert.equal(stalePayload.diagnostics[0].data.required_version, '0.20.0');
+  assert.equal(fs.existsSync(staleCapturePath), false, 'a rejected runtime must not start a recipe');
+
+  const environmentalPrecedence = runTaskRunner(request, [
+    '--artifacts', path.join(root, 'environmental-precedence-artifacts'),
+  ], {
+    ...isolatedRuntimeEnv,
+    HOMEBOY_WP_CODEBOX_BIN: staleWpCodebox,
+    WP_CODEBOX_BIN: fixtureWpCodebox,
+    FIXTURE_WP_CODEBOX_CAPTURE: path.join(root, 'environmental-precedence-capture.json'),
+    OPENCODE_API_KEY: 'redacted-test-key',
+  });
+  assert.equal(environmentalPrecedence.status, 1, environmentalPrecedence.stderr || environmentalPrecedence.stdout);
+  const environmentalPrecedencePayload = JSON.parse(environmentalPrecedence.stdout);
+  assert.equal(environmentalPrecedencePayload.diagnostics[0].data.selected.path, staleWpCodebox);
+  assert.equal(fs.existsSync(path.join(root, 'environmental-precedence-capture.json')), false, 'the first explicit environment override must win before a recipe starts');
+
   const normalized = runTaskRunner(request, [
     '--wp-codebox-bin', fixtureWpCodebox,
     '--artifacts', path.join(root, 'artifacts'),
-  ], { FIXTURE_WP_CODEBOX_CAPTURE: capturePath, OPENCODE_API_KEY: 'redacted-test-key' });
+  ], { ...isolatedRuntimeEnv, FIXTURE_WP_CODEBOX_CAPTURE: capturePath, OPENCODE_API_KEY: 'redacted-test-key' });
   assert.equal(normalized.status, 0, normalized.stderr || normalized.stdout);
   const normalizedPayload = JSON.parse(normalized.stdout);
   assert.equal(normalizedPayload.success, true);
@@ -135,7 +168,7 @@ try {
     '--wp-codebox-bin', fixtureWpCodebox,
     '--mount', `${workspaceRoot}:/wordpress/wp-content/plugins/example:readwrite`,
     '--artifacts', path.join(root, 'contract-artifacts'),
-  ], { FIXTURE_WP_CODEBOX_CAPTURE: contractCanaryCapture, OPENCODE_API_KEY: 'redacted-test-key' });
+  ], { ...isolatedRuntimeEnv, FIXTURE_WP_CODEBOX_CAPTURE: contractCanaryCapture, OPENCODE_API_KEY: 'redacted-test-key' });
   assert.equal(contractCanary.status, 0, contractCanary.stderr || contractCanary.stdout);
   const contractInput = readJson(contractCanaryCapture).input;
   assert.equal(contractInput.schema, 'wp-codebox/run-agent-task/v1');

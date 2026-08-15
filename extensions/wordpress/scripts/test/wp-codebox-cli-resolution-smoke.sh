@@ -213,6 +213,13 @@ else
     fail "the adapter does not consume the exported argv contract"
 fi
 
+if grep -q 'preflightWpCodeboxCommand(wpCodeboxCommand())' "${ADAPTER}" \
+    && ! grep -q 'selectWpCodeboxRuntime' "${ADAPTER}"; then
+    pass "the adapter preflights the exported argv without reselecting a CLI"
+else
+    fail "the adapter does not preflight the exported argv directly"
+fi
+
 # --- 6. setup prunes a stale wrapper whose target is gone -------------------
 
 PRUNE_BIN_DIR="${TMP_ROOT}/prune-bin"

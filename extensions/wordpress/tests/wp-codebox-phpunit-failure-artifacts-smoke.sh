@@ -35,6 +35,11 @@ cat > "$FAKE_BIN" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ "${1:-}" = "--version" ]; then
+	printf '0.20.0\n'
+	exit 0
+fi
+
 if [ "${1:-}" = "commands" ]; then
 	exit 0
 fi

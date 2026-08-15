@@ -29,6 +29,10 @@ const fakeBin = path.join(tempRoot, 'fake-wp-codebox.cjs');
 const artifactRoot = path.join(tempRoot, 'artifacts');
 
 fs.writeFileSync(fakeBin, `#!/usr/bin/env node
+if (process.argv.includes('--version')) {
+  process.stdout.write('0.20.0');
+  process.exit(0);
+}
 const fs = require('node:fs');
 const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
 const input = JSON.parse(fs.readFileSync(inputArg.slice('--input-file='.length), 'utf8'));

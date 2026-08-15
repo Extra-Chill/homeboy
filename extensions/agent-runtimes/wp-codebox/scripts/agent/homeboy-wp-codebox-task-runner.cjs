@@ -35,10 +35,10 @@ const {
   codeboxRunAgentTaskInvocation,
 } = require('../../lib/codebox-run-agent-task-contract');
 const {
-  wpCodeboxBinaryDiagnostic,
   wpCodeboxProviderPluginPathsFromEnv,
   wpCodeboxResolveCommand,
 } = require('../../lib/wp-codebox-adapter-descriptor');
+const { preflightWpCodeboxRuntime } = require('../../lib/wp-codebox-runtime-selection');
 const {
   RuntimeOverlayProfileError,
   runtimeOverlayProfileReadinessDiagnostics,
@@ -307,21 +307,21 @@ function requestTimeoutMs(request) {
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
 }
 
-function configuredBinaryFailurePayload(input, artifacts, diagnostic) {
+function runtimeVersionFailurePayload(input, artifacts, preflight) {
   return {
     success: false,
     schema: 'wp-codebox/agent-task-run/v1',
     status: 'failed',
     failure_classification: 'execution_failed',
-    summary: diagnostic.message,
+    summary: `WP Codebox ${preflight.selected.path || 'runtime'} does not satisfy required version >=${preflight.required_version}.`,
     artifacts,
     task_input: input,
-    diagnostics: [diagnostic],
-    metadata: {
-      phase: 'codebox.config',
-      wp_codebox_bin: diagnostic.data.wp_codebox_bin,
-      reason: diagnostic.data.reason,
-    },
+    diagnostics: [{
+      class: `codebox.preflight.${preflight.reason}`,
+      message: preflight.remediation,
+      data: { candidates: preflight.candidates, selected: preflight.selected, required_version: preflight.required_version },
+    }],
+    metadata: { phase: 'codebox.preflight', wp_codebox_runtime: preflight },
   };
 }
 
@@ -2125,10 +2125,9 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
   }
 
   const input = runnerInput(request, artifacts);
-  const wpCodeboxBin = input.wp_codebox_bin || process.env.HOMEBOY_WP_CODEBOX_BIN || '';
-  const binaryDiagnostic = wpCodeboxBinaryDiagnostic(wpCodeboxBin);
-  if (binaryDiagnostic) {
-    process.stdout.write(`${JSON.stringify(configuredBinaryFailurePayload(input, artifacts, binaryDiagnostic), null, 2)}\n`);
+  const runtimePreflight = preflightWpCodeboxRuntime({ bin: input.wp_codebox_bin, strictBin: Boolean(input.wp_codebox_bin) });
+  if (!runtimePreflight.ready) {
+    process.stdout.write(`${JSON.stringify(runtimeVersionFailurePayload(input, artifacts, runtimePreflight), null, 2)}\n`);
     return 1;
   }
 
@@ -2161,7 +2160,7 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
   );
   const args = invocation.args.map((arg) => arg === '--input-file={{input_file}}' ? `--input-file=${inputPath}` : arg);
 
-  const resolved = wpCodeboxResolveCommand(wpCodeboxBin, args);
+  const resolved = wpCodeboxResolveCommand(runtimePreflight.selected.path, args);
   const timeoutMs = requestTimeoutMs(request);
   const evidencePath = writePreflightEvidence(artifacts, {
     schema: 'homeboy/wp-codebox-task-runner-preflight/v1',
