@@ -12,12 +12,13 @@ use super::super::cook_promotion::{
     canonical_cook_patch_artifact_id, canonical_cook_recovery_run_id, cook_finalization_options,
     cook_promotion_argv, cook_report, finalize_cook_pr_with_backend,
     finalize_or_load_cook_pr_with_backend, moving_base_recovery_for_run,
-    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
-    persist_manual_finalization_intent, persist_manual_finalization_receipt,
-    persisted_promotion_for_attempt, prepare_manual_finalization_identity,
-    record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
-    CookReportInput, MovingBaseCookRecovery,
+    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
+    moving_base_recovery_report, next_moving_base_recovery, persist_manual_finalization_intent,
+    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
+    prepare_manual_finalization_identity, record_replacement_gate_proof,
+    recover_cook_pr_with_backend, recover_moving_base_cook_candidate,
+    refreshed_moving_base_recovery, selected_candidate_task_id, CookReportInput,
+    MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::persist_initial_recipe;
 use super::*;
@@ -1024,6 +1025,7 @@ impl CookSideEffectService for CanonicalSelectionSideEffects {
 
     fn recover_moving_base(
         &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
         _options: &AgentTaskCookServiceOptions,
         _recovery: &MovingBaseCookRecovery,
     ) -> Result<AgentTaskPromotionReport> {
@@ -1821,6 +1823,62 @@ fn moving_base_recovery_refreshes_authenticated_candidate_before_retrying_finali
         "rebased"
     );
     assert_eq!(refreshed.base_movements, 0);
+}
+
+#[test]
+fn moving_base_recovery_isolates_identical_attempts_across_explicit_stores() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_recipe_store = CookRecipeStore::new(left_context.path_roots());
+    let right_recipe_store = CookRecipeStore::new(right_context.path_roots());
+    let left_lifecycle_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_lifecycle_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let cook_id = "same-moving-base-cook";
+    let run_id = "same-moving-base-run";
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = run_id.to_string();
+
+    for (recipe_store, lifecycle_store, blocker) in [
+        (&left_recipe_store, &left_lifecycle_store, "left blocker"),
+        (&right_recipe_store, &right_lifecycle_store, "right blocker"),
+    ] {
+        recipe_store.persist_initial_recipe(&options).unwrap();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&options.initial_plan, run_id, |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        lifecycle_store
+            .mutate_record(run_id, |record| {
+                record.metadata["cook_id"] = serde_json::json!(cook_id);
+                true
+            })
+            .unwrap();
+        let mut recovery = moving_base_recovery_from_promotion(cook_id, run_id, promotion(run_id));
+        recovery.blocker = blocker.to_string();
+        lifecycle_store
+            .record_cook_moving_base_recovery(run_id, serde_json::to_value(recovery).unwrap())
+            .unwrap();
+    }
+
+    let left =
+        moving_base_recovery_for_run_with_stores(&left_recipe_store, &left_lifecycle_store, run_id)
+            .unwrap()
+            .expect("left recovery");
+    let right = moving_base_recovery_for_run_with_stores(
+        &right_recipe_store,
+        &right_lifecycle_store,
+        run_id,
+    )
+    .unwrap()
+    .expect("right recovery");
+
+    assert_eq!(left.blocker, "left blocker");
+    assert_eq!(right.blocker, "right blocker");
+    assert_ne!(
+        left_lifecycle_store.run_dir(run_id),
+        right_lifecycle_store.run_dir(run_id)
+    );
 }
 
 #[test]
@@ -10713,6 +10771,45 @@ fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
         assert_eq!(replayed.source.run_id, first.source.run_id);
         assert_eq!(replayed.patch_artifact.id, first.patch_artifact.id);
     });
+}
+
+#[test]
+fn promotion_claim_and_replay_isolate_identical_ids_across_lifecycle_stores() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let cook_id = "same-cook-promote-claim";
+    let run_id = "same-run-promote-claim";
+    let options = promotion_claim_options(cook_id, run_id);
+    let operation_key = promotion_operation_key(run_id);
+
+    for store in [&left_store, &right_store] {
+        store
+            .submit_plan_with_runtime_admission(
+                &AgentTaskPlan::new(cook_id, Vec::new()),
+                run_id,
+                |_| Ok(serde_json::json!({})),
+            )
+            .unwrap();
+        store
+            .record_promotion(run_id, serde_json::to_value(promotion(run_id)).unwrap())
+            .unwrap();
+
+        let first = promote_with_operation_claim_in_store(store, &options, run_id).unwrap();
+        let replayed = promote_with_operation_claim_in_store(store, &options, run_id).unwrap();
+        assert_eq!(replayed.patch_artifact.id, first.patch_artifact.id);
+        assert_eq!(
+            store
+                .operation_claim(run_id, &operation_key)
+                .unwrap()
+                .expect("rooted promotion claim")
+                .state,
+            agent_task_lifecycle::ClaimState::Completed
+        );
+    }
+
+    assert_ne!(left_store.run_dir(run_id), right_store.run_dir(run_id));
 }
 
 #[test]

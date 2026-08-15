@@ -4466,7 +4466,15 @@ const COOK_CANDIDATE_SELECTION_WINDOW: usize = 64;
 /// attempt has candidate bytes, retain the legacy latest attempt for old runs.
 pub fn select_cook_candidate(cook_id: &str) -> Result<AgentTaskCookCandidateSelection> {
     let index = cook_index(cook_id)?;
-    select_cook_candidate_from_index(cook_id, index)
+    select_cook_candidate_from_index(cook_id, index, None)
+}
+
+pub(crate) fn select_cook_candidate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<AgentTaskCookCandidateSelection> {
+    let index = lifecycle_store.read_cook_index(&sanitize_run_id(cook_id))?;
+    select_cook_candidate_from_index(cook_id, index, Some(lifecycle_store))
 }
 
 pub fn select_cook_candidate_from_attempts(
@@ -4486,15 +4494,17 @@ pub fn select_cook_candidate_from_attempts(
             latest_substantive_candidate: None,
             attempts,
         },
+        None,
     )
 }
 
 fn select_cook_candidate_from_index(
     cook_id: &str,
     index: AgentTaskCookIndex,
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
 ) -> Result<AgentTaskCookCandidateSelection> {
     if let Some(candidate) = index.latest_substantive_candidate.as_ref() {
-        if substantive_candidate(&candidate.run_id).as_ref()
+        if substantive_candidate_in_store(&candidate.run_id, lifecycle_store).as_ref()
             == Some(&(candidate.task_id.clone(), candidate.artifact_id.clone()))
         {
             return Ok(AgentTaskCookCandidateSelection {
@@ -4524,7 +4534,9 @@ fn select_cook_candidate_from_index(
     let mut skipped_newer_run_ids = Vec::new();
     let mut skipped_newer_attempts = Vec::new();
     for attempt in attempts.iter().take(COOK_CANDIDATE_SELECTION_WINDOW) {
-        if let Some((task_id, artifact_id)) = substantive_candidate(&attempt.run_id) {
+        if let Some((task_id, artifact_id)) =
+            substantive_candidate_in_store(&attempt.run_id, lifecycle_store)
+        {
             return Ok(AgentTaskCookCandidateSelection {
                 schema: "homeboy/agent-task-cook-candidate-selection/v1".to_string(),
                 cook_id: index.cook_id,
@@ -4683,14 +4695,28 @@ fn substantive_candidate_from_aggregate(
 }
 
 fn substantive_candidate(run_id: &str) -> Option<(String, String)> {
+    substantive_candidate_in_store(run_id, None)
+}
+
+fn substantive_candidate_in_store(
+    run_id: &str,
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
+) -> Option<(String, String)> {
     // Candidate recovery is a bounded scan. Avoid the aggregate reader's
     // reconciliation path when this controller record never projected one.
-    let record = exact_record(run_id).ok()?;
+    let record = match lifecycle_store {
+        Some(store) => store.read_record(run_id).ok()?,
+        None => exact_record(run_id).ok()?,
+    };
     let aggregate_path = record.aggregate_path?;
     if !std::path::Path::new(&aggregate_path).exists() {
         return None;
     }
-    let Ok(aggregate) = store::read_aggregate(run_id) else {
+    let aggregate = match lifecycle_store {
+        Some(store) => store.read_aggregate(run_id),
+        None => store::read_aggregate(run_id),
+    };
+    let Ok(aggregate) = aggregate else {
         return None;
     };
     substantive_candidate_in_aggregate(run_id, &aggregate)
@@ -5252,8 +5278,17 @@ pub fn record_cook_moving_base_recovery(
     run_id: &str,
     recovery: Value,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_moving_base_recovery_in_store(&lifecycle_store, run_id, recovery)
+}
+
+pub(crate) fn record_cook_moving_base_recovery_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    recovery: Value,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         if record.metadata.get("cook_moving_base_recovery") == Some(&recovery) {
             return false;
         }
@@ -5265,13 +5300,21 @@ pub fn record_cook_moving_base_recovery(
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }
 
 pub fn clear_cook_moving_base_recovery(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    clear_cook_moving_base_recovery_in_store(&lifecycle_store, run_id)
+}
+
+pub(crate) fn clear_cook_moving_base_recovery_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let Some(metadata) = record.metadata.as_object_mut() else {
             return false;
         };
@@ -5283,6 +5326,6 @@ pub fn clear_cook_moving_base_recovery(run_id: &str) -> Result<AgentTaskRunRecor
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }

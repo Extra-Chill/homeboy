@@ -158,7 +158,10 @@ impl AgentTaskLifecycleStore {
     }
 
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
-        ObservationStore::open_initialized_for_lifecycle_at(self.observation_db_path())
+        ObservationStore::open_initialized_for_lifecycle_at_roots(
+            self.observation_db_path(),
+            self.artifact_root(),
+        )
     }
 
     pub fn open_observation_readonly(&self) -> Result<ObservationStore> {
@@ -243,6 +246,38 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub fn fail_cook_operation(
+        &self,
+        run_id: &str,
+        operation_key: &str,
+        result: Value,
+    ) -> Result<()> {
+        super::operation_claims::fail_cook_operation_in_store(self, run_id, operation_key, result)
+    }
+
+    pub(crate) fn aggregate_source_exact(&self, run_id: &str) -> Result<(String, PathBuf)> {
+        let record = self.read_record(run_id)?;
+        record.aggregate_path.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!(
+                    "agent-task run '{}' has no aggregate artifact yet",
+                    record.run_id
+                ),
+                Some(record.run_id.clone()),
+                None,
+            )
+        })?;
+        let aggregate = self.read_aggregate(&record.run_id)?;
+        let raw = serde_json::to_string_pretty(&aggregate).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("serialize agent-task aggregate {}", record.run_id)),
+            )
+        })?;
+        Ok((raw, self.aggregate_path(&record.run_id)))
+    }
+
     pub fn operation_claim(
         &self,
         run_id: &str,
@@ -265,6 +300,21 @@ impl AgentTaskLifecycleStore {
 
     pub fn record_promotion(&self, run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
         super::lifecycle_ops::record_promotion_in_store(self, run_id, promotion)
+    }
+
+    pub(crate) fn record_cook_moving_base_recovery(
+        &self,
+        run_id: &str,
+        recovery: Value,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_cook_moving_base_recovery_in_store(self, run_id, recovery)
+    }
+
+    pub(crate) fn clear_cook_moving_base_recovery(
+        &self,
+        run_id: &str,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::clear_cook_moving_base_recovery_in_store(self, run_id)
     }
 
     pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {
@@ -327,6 +377,13 @@ impl AgentTaskLifecycleStore {
 
     pub fn read_cook_index(&self, cook_id: &str) -> Result<AgentTaskCookIndex> {
         read_cook_index_in_store(self, cook_id)
+    }
+
+    pub(crate) fn select_cook_candidate(
+        &self,
+        cook_id: &str,
+    ) -> Result<super::AgentTaskCookCandidateSelection> {
+        super::lifecycle_ops::select_cook_candidate_in_store(self, cook_id)
     }
 
     pub(crate) fn update_cook_index(
