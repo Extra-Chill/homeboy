@@ -2403,6 +2403,7 @@ mod tests {
                             homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
                                 backend: Some("fallback".to_string()),
                                 selector: Some("fallback.provider".to_string()),
+                                model: Some("fallback-model".to_string()),
                                 ..Default::default()
                             },
                         ],
@@ -2412,13 +2413,28 @@ mod tests {
             );
             let mut unavailable = credential_declaring_provider();
             unavailable.backend = "unavailable".to_string();
-            let catalog =
-                provider_catalog(vec![unavailable, provider("fallback.provider", "fallback")]);
-            super::super::run::preflight_cook_provider_credentials_with_catalog(
+            let credential = format!("HOMEBOY_ROTATED_FALLBACK_{}", uuid::Uuid::new_v4());
+            let mut fallback = provider("fallback.provider", "fallback");
+            fallback.provider_defaults.insert(
+                "fallback".to_string(),
+                serde_json::json!({ "required_secret_env": [credential.clone()] }),
+            );
+            let catalog = provider_catalog(vec![unavailable, fallback]);
+            let route =
+                agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
+                    agent_task_dispatch_service::AgentTaskDispatchCommand::default(),
+                    &catalog,
+                )
+                .expect("resolve rotated Cook route");
+            assert_eq!(route.backend, "fallback");
+            assert_eq!(route.selector.as_deref(), Some("fallback.provider"));
+            assert_eq!(route.model.as_deref(), Some("fallback-model"));
+            let error = super::super::run::preflight_cook_provider_credentials_with_catalog(
                 agent_task_dispatch_service::AgentTaskDispatchCommand::default(),
                 &catalog,
             )
-            .expect("Cook must preflight the credential-ready rotation entry");
+            .expect_err("injected fallback credential must be preflighted without rediscovery");
+            assert!(error.message.contains(&credential), "{error}");
         });
     }
 

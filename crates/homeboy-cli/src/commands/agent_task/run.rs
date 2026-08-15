@@ -1467,7 +1467,8 @@ pub(crate) fn preflight_cook_provider_credentials_with_catalog(
 ) -> homeboy::core::Result<()> {
     let route =
         dispatch_service::resolve_cook_initial_provider_route_with_catalog(dispatch, &catalog)?;
-    provider::preflight_discovered_provider_credentials_for_backend(
+    provider::preflight_provider_credentials_for_backend(
+        catalog.providers(),
         &route.backend,
         route.selector.as_deref(),
     )
