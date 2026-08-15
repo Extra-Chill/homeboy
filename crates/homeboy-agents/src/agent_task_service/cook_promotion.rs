@@ -18,10 +18,10 @@ use homeboy_engine_primitives::content_hash;
 use homeboy_engine_primitives::shell::quote_args;
 
 use crate::agent_task_finalization::{
-    finalize_pr_with_backend, preflight_pr_with_backend, validate_publication_intent,
-    AgentTaskPrEvidence, AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
-    AgentTaskPrFinalizationReport, AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship,
-    AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
+    finalize_pr_with_backend, finalize_pr_with_backend_in_store, preflight_pr_with_backend,
+    validate_publication_intent, AgentTaskPrEvidence, AgentTaskPrFinalizationBackend,
+    AgentTaskPrFinalizationOptions, AgentTaskPrFinalizationReport, AgentTaskPrRuntimeGuardrails,
+    AgentTaskPrSourceRelationship, AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
@@ -1643,8 +1643,27 @@ pub(crate) fn finalize_or_load_cook_pr_with_store(
     successful_run_id: &str,
     promotion: &AgentTaskPromotionReport,
 ) -> Result<Value> {
-    finalize_or_load_cook_pr_with_backend_with_store(
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    finalize_or_load_cook_pr_with_stores(
         store,
+        &lifecycle_store,
+        options,
+        successful_run_id,
+        promotion,
+    )
+}
+
+pub(crate) fn finalize_or_load_cook_pr_with_stores(
+    store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+) -> Result<Value> {
+    finalize_or_load_cook_pr_with_backend_with_stores(
+        store,
+        lifecycle_store,
         options,
         successful_run_id,
         promotion,
@@ -1677,14 +1696,37 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_store<
     promotion: &AgentTaskPromotionReport,
     backend: &mut B,
 ) -> Result<Value> {
-    let finalization = finalize_cook_pr_with_backend_with_store(
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    finalize_or_load_cook_pr_with_backend_with_stores(
         store,
+        &lifecycle_store,
+        options,
+        successful_run_id,
+        promotion,
+        backend,
+    )
+}
+
+pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
+    B: AgentTaskPrFinalizationBackend,
+>(
+    store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    backend: &mut B,
+) -> Result<Value> {
+    let finalization = finalize_cook_pr_with_backend_with_stores(
+        store,
+        lifecycle_store,
         options,
         successful_run_id,
         promotion,
         backend,
     )?;
-    agent_task_lifecycle::record_cook_finalization(successful_run_id, finalization.clone())?;
+    lifecycle_store.record_cook_finalization(successful_run_id, finalization.clone())?;
     Ok(finalization)
 }
 
@@ -1705,6 +1747,26 @@ pub(crate) fn finalize_cook_pr_with_backend_with_store<B: AgentTaskPrFinalizatio
     promotion: &AgentTaskPromotionReport,
     backend: &mut B,
 ) -> Result<Value> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    finalize_cook_pr_with_backend_with_stores(
+        store,
+        &lifecycle_store,
+        options,
+        successful_run_id,
+        promotion,
+        backend,
+    )
+}
+
+pub(crate) fn finalize_cook_pr_with_backend_with_stores<B: AgentTaskPrFinalizationBackend>(
+    store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    backend: &mut B,
+) -> Result<Value> {
     let mut promotion = promotion.clone();
     promotion.normalize_gate_outcome();
     if !promotion.finalization_eligible(options.gates.accept_inherited_failures) {
@@ -1715,18 +1777,19 @@ pub(crate) fn finalize_cook_pr_with_backend_with_store<B: AgentTaskPrFinalizatio
             None,
         ));
     }
-    let finalization = cook_finalization_options_with_store(
+    let finalization = cook_finalization_options_with_stores(
         store,
+        lifecycle_store,
         options,
         successful_run_id,
         &promotion,
         Vec::new(),
     )?;
-    crate::agent_task_lifecycle::record_promotion(
+    lifecycle_store.record_promotion(
         successful_run_id,
         serde_json::to_value(&promotion).unwrap_or(Value::Null),
     )?;
-    finalize_pr_with_backend(finalization, backend)
+    finalize_pr_with_backend_in_store(finalization, backend, lifecycle_store)
         .map(|report| serde_json::to_value(report).unwrap_or(Value::Null))
 }
 
@@ -1742,6 +1805,26 @@ pub(crate) fn cook_finalization_options(
 
 pub(crate) fn cook_finalization_options_with_store(
     store: &super::cook_recipe::CookRecipeStore,
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    overrides: Vec<AgentTaskReviewOverride>,
+) -> Result<AgentTaskPrFinalizationOptions> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    cook_finalization_options_with_stores(
+        store,
+        &lifecycle_store,
+        options,
+        successful_run_id,
+        promotion,
+        overrides,
+    )
+}
+
+pub(crate) fn cook_finalization_options_with_stores(
+    store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,
     successful_run_id: &str,
     promotion: &AgentTaskPromotionReport,
@@ -1781,8 +1864,13 @@ pub(crate) fn cook_finalization_options_with_store(
                 None,
             )
         })?;
-    let mut review_dossier =
-        cook_review_dossier_with_store(store, options, promotion, successful_run_id)?;
+    let mut review_dossier = cook_review_dossier_with_stores(
+        store,
+        lifecycle_store,
+        options,
+        promotion,
+        successful_run_id,
+    )?;
     review_dossier.overrides = overrides;
     // A non-empty option is an explicit operator disclosure. Otherwise retain
     // the validated review form's process statement as durable PR provenance.
@@ -1843,7 +1931,8 @@ pub(crate) fn cook_finalization_options_with_store(
             runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
             changed_public_contracts: Vec::new(),
             public_contract_evidence: None,
-            lifecycle: crate::agent_task_lifecycle::status(successful_run_id)
+            lifecycle: lifecycle_store
+                .read_record(successful_run_id)
                 .ok()
                 .map(|record| record.lifecycle),
         },
@@ -2594,8 +2683,9 @@ fn validate_manual_preflight_report(
     })
 }
 
-fn cook_review_dossier_with_store(
+fn cook_review_dossier_with_stores(
     store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
@@ -2609,7 +2699,7 @@ fn cook_review_dossier_with_store(
         .and_then(Value::as_str);
     let implementation_promotion = source_run_id
         .map(|run_id| {
-            persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
+            persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?.ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "promotion.provenance.cook_follow_up.source_run_id",
                     "form-only finalization requires its source attempt's persisted promotion",
@@ -2669,10 +2759,11 @@ fn cook_review_dossier_with_store(
     // A form-only follow-up owns reviewer metadata, not the candidate it carries
     // forward. Resolve the persisted Cook lineage so that follow-up prose cannot
     // erase the implementation attempt that produced the delivered patch.
-    let terminal_form = review_form_for_finalization(successful_run_id)?;
+    let terminal_form = review_form_for_finalization_in_store(lifecycle_store, successful_run_id)?;
     let verified_commands = terminal_form.verify_against_promotion(verification_promotion)?;
-    let lineage = cook_ai_lineage_with_store(
+    let lineage = cook_ai_lineage_with_stores(
         store,
+        lifecycle_store,
         options,
         terminal_promotion,
         successful_run_id,
@@ -2706,7 +2797,8 @@ fn cook_review_dossier_with_store(
     ];
     // Form-only continuations may substitute the implementation promotion for
     // candidate metadata; the persisted terminal record remains recovery proof.
-    if let Some(replacement) = agent_task_lifecycle::status(successful_run_id)
+    if let Some(replacement) = lifecycle_store
+        .read_record(successful_run_id)
         .ok()
         .and_then(|record| {
             record
@@ -2790,8 +2882,11 @@ struct CookAttemptExecution {
     review_form_only: bool,
 }
 
-fn selected_outcome_for_attempt(run_id: &str) -> Result<crate::agent_task::AgentTaskOutcome> {
-    let aggregate = agent_task_lifecycle::read_aggregate(run_id)?;
+fn selected_outcome_for_attempt_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<crate::agent_task::AgentTaskOutcome> {
+    let aggregate = lifecycle_store.read_aggregate(run_id)?;
     aggregate
         .selected_outcome()
         .cloned()
@@ -2815,9 +2910,12 @@ fn selected_outcome_for_attempt(run_id: &str) -> Result<crate::agent_task::Agent
 /// recipe or finalization flags. A pre-provider adopted source has task context
 /// but no executed model; any attempt used as an execution is validated by its
 /// caller before disclosure.
-fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
-    let plan = agent_task_lifecycle::load_plan(run_id)?;
-    let record = agent_task_lifecycle::exact_record(run_id)?;
+fn cook_attempt_execution_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<CookAttemptExecution> {
+    let plan = lifecycle_store.read_controller_plan(run_id)?;
+    let record = lifecycle_store.read_record(run_id)?;
     if let Some(task) = plan.tasks.iter().find(|task| {
         agent_task_lifecycle::candidate_adoption_recovery_outcome(&record, task).is_some()
     }) {
@@ -2843,7 +2941,7 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
             review_form_only: false,
         });
     }
-    let outcome = selected_outcome_for_attempt(run_id)?;
+    let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
     let task = plan
         .tasks
         .iter()
@@ -2917,8 +3015,9 @@ fn required_execution_model(execution: &CookAttemptExecution, run_id: &str) -> R
     })
 }
 
-fn cook_ai_lineage_with_store(
+fn cook_ai_lineage_with_stores(
     store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
@@ -2942,7 +3041,7 @@ fn cook_ai_lineage_with_store(
     // Preserve the byte-for-byte single-attempt output. Multi-attempt form-only
     // recovery instead makes each authenticated role visible to reviewers.
     if terminal_index == 0 {
-        let execution = cook_attempt_execution(successful_run_id)?;
+        let execution = cook_attempt_execution_in_store(lifecycle_store, successful_run_id)?;
         let model = required_execution_model(&execution, successful_run_id)?;
         return Ok(CookAiLineage {
             summary: terminal_form.summary.clone(),
@@ -2953,7 +3052,7 @@ fn cook_ai_lineage_with_store(
             used_for: terminal_form.used_for.clone(),
         });
     }
-    let terminal = cook_attempt_execution(successful_run_id)?;
+    let terminal = cook_attempt_execution_in_store(lifecycle_store, successful_run_id)?;
     let terminal_model = required_execution_model(&terminal, successful_run_id)?;
     if !terminal.review_form_only {
         return Err(Error::validation_invalid_argument(
@@ -2995,7 +3094,7 @@ fn cook_ai_lineage_with_store(
             None,
         ));
     }
-    let implementation = cook_attempt_execution(&implementation.run_id)?;
+    let implementation = cook_attempt_execution_in_store(lifecycle_store, &implementation.run_id)?;
     let changed = promotion
         .changed_files
         .iter()
@@ -3058,10 +3157,11 @@ fn cook_ai_lineage_with_store(
 /// of the reviewer-facing prose. Its absence/invalidity here is an invariant
 /// violation (the gate would have looped), surfaced as a hard error rather than
 /// silently falling back to machine-templated prose.
-fn review_form_for_finalization(
+fn review_form_for_finalization_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<crate::agent_task_review_dossier::AiFilledReviewForm> {
-    let outcome = selected_outcome_for_attempt(run_id)?;
+    let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
     let form = crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
         &outcome.outputs,
     )?

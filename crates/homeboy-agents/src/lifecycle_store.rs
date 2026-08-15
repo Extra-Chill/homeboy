@@ -302,6 +302,14 @@ impl AgentTaskLifecycleStore {
         super::lifecycle_ops::record_promotion_in_store(self, run_id, promotion)
     }
 
+    pub(crate) fn record_cook_finalization(
+        &self,
+        run_id: &str,
+        finalization: Value,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_cook_finalization_in_store(self, run_id, finalization)
+    }
+
     pub(crate) fn record_cook_moving_base_recovery(
         &self,
         run_id: &str,
