@@ -23,6 +23,7 @@ TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 DEPENDENCY_DIR="${TMP_ROOT}/fixture-dependency"
+DECLARATION_DIR="${TMP_ROOT}/declarations"
 mkdir -p "${DEPENDENCY_DIR}/src/Identity" "${DEPENDENCY_DIR}/vendor/acme" "${DEPENDENCY_DIR}/tests"
 
 cat > "${DEPENDENCY_DIR}/fixture-dependency.php" <<'PHP'
@@ -30,7 +31,14 @@ cat > "${DEPENDENCY_DIR}/fixture-dependency.php" <<'PHP'
 /**
  * Plugin Name: Fixture Dependency
  */
-require_once __DIR__ . '/src/Identity/class-fixture-identity.php';
+final class Fixture_Entrypoint_Class {
+    public function identity(): string {
+        return 'fixture';
+    }
+}
+
+$GLOBALS['fixture_dependency_bootstrapped'] = true;
+require_once 'core/abstraction.php';
 PHP
 
 # WordPress file naming, PSR-4-incompatible: no path convention derives the FQCN.
@@ -71,7 +79,7 @@ for helper in homeboy_resolve_phpstan_dependency_signature_files homeboy_emit_de
     fi
 done
 
-entries="$(homeboy_emit_dependency_class_map_entries "$DEPENDENCY_DIR")"
+entries="$(homeboy_emit_dependency_class_map_entries "$DEPENDENCY_DIR" "$DECLARATION_DIR")"
 
 if ! grep -qP '^FixtureAPI\\Core\\Identity\\Fixture_Materialized_Identity\t' <<< "$entries"; then
     echo "FAIL: namespaced dependency class must be indexed with its fully-qualified name" >&2
@@ -80,10 +88,22 @@ if ! grep -qP '^FixtureAPI\\Core\\Identity\\Fixture_Materialized_Identity\t' <<<
 fi
 
 mapped_file="$(grep -P '^FixtureAPI\\Core\\Identity\\Fixture_Materialized_Identity\t' <<< "$entries" | head -1 | cut -f2)"
-if [ "$mapped_file" != "${DEPENDENCY_DIR}/src/Identity/class-fixture-identity.php" ]; then
-    echo "FAIL: class must map to its declaring file, got: ${mapped_file}" >&2
+if [[ "$mapped_file" != "${DECLARATION_DIR}/"*.php ]]; then
+    echo "FAIL: class must map to a generated declaration file, got: ${mapped_file}" >&2
     exit 1
 fi
+
+entrypoint_file="$(grep -P '^Fixture_Entrypoint_Class\t' <<< "$entries" | head -1 | cut -f2)"
+if [ ! -f "$entrypoint_file" ]; then
+    echo "FAIL: entrypoint class must map to a generated declaration file" >&2
+    printf '%s\n' "$entries" >&2
+    exit 1
+fi
+
+# Loading a discovered class must not execute the dependency file. The original
+# entrypoint has a relative require that deterministically fatals outside its
+# runtime bootstrap context.
+php -r 'require $argv[1]; $instance = new Fixture_Entrypoint_Class(); exit($instance->identity() === "fixture" && empty($GLOBALS["fixture_dependency_bootstrapped"]) ? 0 : 1);' "$entrypoint_file"
 
 if grep -q 'Acme\\Vendored' <<< "$entries"; then
     echo "FAIL: vendored dependency classes must not be indexed" >&2

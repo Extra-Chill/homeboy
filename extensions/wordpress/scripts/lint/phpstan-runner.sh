@@ -140,6 +140,7 @@ PHPSTAN_BASE_CONFIG="$PHPSTAN_DEFAULT_CONFIG"
 PHPSTAN_LEVEL_SOURCE="extension-default"
 COMPONENT_BASELINE="${PLUGIN_PATH}/phpstan-baseline.neon"
 COMPOSITE_AUTOLOAD=""
+COMPOSITE_AUTOLOAD_DIR=""
 DEPENDENCY_CONFIG=""
 SCOPED_CONTEXT_CONFIG=""
 
@@ -711,14 +712,21 @@ fi
 # (`class-wp-agent-materialized-identity.php`) rather than PSR-4, so no path
 # convention can derive the mapping — the declarations have to be indexed.
 #
-# Emits `<fqcn> => <file>` pairs by tokenizing each dependency source once.
+# Emits `<fqcn> => <declaration-only-file>` pairs by tokenizing each dependency
+# source once. The generated files preserve class bodies for PHPStan reflection
+# without executing plugin entrypoints or other top-level runtime bootstrap.
 # Tokenizing is used rather than a regex so commented-out or string-literal
 # occurrences of `class Foo` cannot poison the map.
 homeboy_emit_dependency_class_map_entries() {
     local dependency_path="$1"
+    local declaration_dir="$2"
 
     homeboy_resolve_phpstan_dependency_signature_files "$dependency_path" \
         | "${HOMEBOY_PHP_BIN:-php}" -r '
+            $declarationDir = $argv[1] ?? "";
+            if ($declarationDir === "" || (!is_dir($declarationDir) && !mkdir($declarationDir, 0700, true))) {
+                exit(1);
+            }
             $stdin = fopen("php://stdin", "r");
             while (false !== ($file = fgets($stdin))) {
                 $file = trim($file);
@@ -734,43 +742,112 @@ homeboy_emit_dependency_class_map_entries() {
                     continue;
                 }
                 $namespace = "";
+                $namespaceDepth = 0;
+                $imports = [];
+                $scopeDepth = 0;
                 $count = count($tokens);
                 for ($i = 0; $i < $count; $i++) {
                     $token = $tokens[$i];
                     if (!is_array($token)) {
+                        if ($token === "{") {
+                            $scopeDepth++;
+                        } elseif ($token === "}") {
+                            $scopeDepth--;
+                        }
                         continue;
                     }
                     if ($token[0] === T_NAMESPACE) {
                         $namespace = "";
+                        $imports = [];
                         for ($j = $i + 1; $j < $count; $j++) {
                             if (is_array($tokens[$j]) && in_array($tokens[$j][0], array(T_STRING, T_NAME_QUALIFIED), true)) {
                                 $namespace .= $tokens[$j][1];
                             } elseif ($tokens[$j] === ";" || $tokens[$j] === "{") {
+                                $namespaceDepth = $tokens[$j] === "{" ? $scopeDepth + 1 : $scopeDepth;
                                 break;
                             }
                         }
                         continue;
                     }
-                    if (!in_array($token[0], array(T_CLASS, T_INTERFACE, T_TRAIT), true)) {
+                    if ($token[0] === T_USE && $scopeDepth === $namespaceDepth) {
+                        $import = "";
+                        for ($j = $i; $j < $count; $j++) {
+                            $import .= is_array($tokens[$j]) ? $tokens[$j][1] : $tokens[$j];
+                            if ($tokens[$j] === ";") {
+                                $imports[] = trim($import);
+                                $i = $j;
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    $declarationTokens = array(T_CLASS, T_INTERFACE, T_TRAIT);
+                    if (defined("T_ENUM")) {
+                        $declarationTokens[] = T_ENUM;
+                    }
+                    if (!in_array($token[0], $declarationTokens, true)) {
                         continue;
                     }
                     // Skip anonymous classes and `::class` constant fetches.
                     if ($i > 0 && is_array($tokens[$i - 1]) && $tokens[$i - 1][0] === T_DOUBLE_COLON) {
                         continue;
                     }
+                    $name = "";
                     for ($j = $i + 1; $j < $count; $j++) {
                         if (is_array($tokens[$j]) && $tokens[$j][0] === T_STRING) {
-                            $fqcn = ($namespace !== "" ? $namespace . "\\" : "") . $tokens[$j][1];
-                            echo $fqcn . "\t" . $file . "\n";
+                            $name = $tokens[$j][1];
                             break;
                         }
                         if ($tokens[$j] === "(" || $tokens[$j] === "{") {
                             break;
                         }
                     }
+                    if ($name === "") {
+                        continue;
+                    }
+
+                    $start = $i;
+                    while ($start > 0 && is_array($tokens[$start - 1]) && in_array($tokens[$start - 1][0], array(T_WHITESPACE, T_COMMENT, T_DOC_COMMENT, T_ABSTRACT, T_FINAL, defined("T_READONLY") ? T_READONLY : -1), true)) {
+                        $start--;
+                    }
+                    $declaration = "";
+                    $braceDepth = 0;
+                    $opened = false;
+                    for ($j = $start; $j < $count; $j++) {
+                        $piece = is_array($tokens[$j]) ? $tokens[$j][1] : $tokens[$j];
+                        $declaration .= $piece;
+                        if ($piece === "{") {
+                            $braceDepth++;
+                            $opened = true;
+                        } elseif ($piece === "}") {
+                            $braceDepth--;
+                            if ($opened && $braceDepth === 0) {
+                                break;
+                            }
+                        }
+                    }
+                    if (!$opened || $braceDepth !== 0) {
+                        continue;
+                    }
+
+                    $fqcn = ($namespace !== "" ? $namespace . "\\" : "") . $name;
+                    $target = $declarationDir . "/" . sha1($file . "\0" . $fqcn) . ".php";
+                    $stub = "<?php\n";
+                    if ($namespace !== "") {
+                        $stub .= "namespace " . $namespace . ";\n";
+                    }
+                    if ($imports !== []) {
+                        $stub .= implode("\n", $imports) . "\n";
+                    }
+                    $stub .= $declaration . "\n";
+                    if (file_put_contents($target, $stub) === false) {
+                        continue;
+                    }
+                    echo $fqcn . "\t" . $target . "\n";
+                    $i = $j;
                 }
             }
-        ' 2>/dev/null
+        ' "$declaration_dir" 2>/dev/null
 }
 
 generate_composite_autoload() {
@@ -779,6 +856,8 @@ generate_composite_autoload() {
     local component_prefixed_autoload="${PLUGIN_PATH}/vendor_prefixed/autoload.php"
 
     tmpfile=$(homeboy_mktemp 'homeboy-phpstan-autoload.XXXXXX')
+    COMPOSITE_AUTOLOAD_DIR="${tmpfile}.d"
+    mkdir -p "$COMPOSITE_AUTOLOAD_DIR"
 
     {
         printf '%s\n' '<?php'
@@ -828,7 +907,7 @@ generate_composite_autoload() {
                     "$(printf '%s' "$fqcn" | jq -Rsa .)" \
                     "$(printf '%s' "$class_file" | jq -Rsa .)"
                 class_map_entries=$((class_map_entries + 1))
-            done < <(homeboy_emit_dependency_class_map_entries "$dependency_path")
+            done < <(homeboy_emit_dependency_class_map_entries "$dependency_path" "$COMPOSITE_AUTOLOAD_DIR")
         done <<< "$autoloaderless_dependencies"
         printf '%s\n' '];'
         printf '%s\n' 'if ($homeboyDependencyClassMap !== []) {'
@@ -849,10 +928,13 @@ generate_composite_autoload() {
 
 cleanup_composite_autoload() {
     [ -n "$COMPOSITE_AUTOLOAD" ] && rm -f "$COMPOSITE_AUTOLOAD"
+    [ -n "$COMPOSITE_AUTOLOAD_DIR" ] && rm -rf "$COMPOSITE_AUTOLOAD_DIR"
     COMPOSITE_AUTOLOAD=""
+    COMPOSITE_AUTOLOAD_DIR=""
 }
 
 COMPOSITE_AUTOLOAD=$(generate_composite_autoload)
+COMPOSITE_AUTOLOAD_DIR="${COMPOSITE_AUTOLOAD}.d"
 
 if [ -f "$COMPOSITE_AUTOLOAD" ]; then
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -1093,7 +1175,9 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
             $criticalIdentifiers = explode("|", $criticalPattern);
 
             $totals = $json["totals"] ?? [];
-            $errorCount = $totals["file_errors"] ?? 0;
+            $fileErrorCount = $totals["file_errors"] ?? 0;
+            $globalErrors = $json["errors"] ?? [];
+            $errorCount = $fileErrorCount + count($globalErrors);
             $fileCount = count($json["files"] ?? []);
 
             if ($errorCount === 0) exit;
@@ -1165,6 +1249,14 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                     echo "\n";
 
                     $identifiers[$identifier] = ($identifiers[$identifier] ?? 0) + 1;
+                }
+            }
+
+            if (!$criticalOnly && $globalErrors !== []) {
+                echo "  PHPStan:\n";
+                foreach ($globalErrors as $message) {
+                    echo "    " . (is_string($message) ? $message : json_encode($message)) . "\n\n";
+                    $identifiers["internal"] = ($identifiers["internal"] ?? 0) + 1;
                 }
             }
 
@@ -1248,7 +1340,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         echo "$json_output" | php -r '
             require $argv[3];
             $json = json_decode(file_get_contents("php://stdin"), true);
-            if (!$json || empty($json["files"])) {
+            if (!$json || (empty($json["files"]) && empty($json["errors"]))) {
                 file_put_contents($argv[2], "[]");
                 exit;
             }
@@ -1288,6 +1380,24 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                         "excerpt" => $readExcerpt($filePath, $line),
                     ];
                 }
+            }
+            foreach ($json["errors"] ?? [] as $globalIndex => $globalError) {
+                $message = is_string($globalError) ? $globalError : json_encode($globalError, JSON_UNESCAPED_SLASHES);
+                $code = stripos((string) $message, "internal error") !== false ? "phpstan.internal" : "phpstan.global";
+                $findings[] = [
+                    "id" => "phpstan::" . $code . "::" . $globalIndex,
+                    "tool" => "phpstan",
+                    "file" => null,
+                    "line" => null,
+                    "column" => null,
+                    "severity" => "error",
+                    "code" => $code,
+                    "rule" => $code,
+                    "category" => "phpstan",
+                    "message" => $message . " (" . $code . ")",
+                    "fixable" => false,
+                    "excerpt" => null,
+                ];
             }
             $findings = homeboy_assign_stable_lint_fingerprints($findings);
             file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");

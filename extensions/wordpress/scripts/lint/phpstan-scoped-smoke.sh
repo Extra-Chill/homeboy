@@ -74,6 +74,10 @@ if [ "${PHPSTAN_EMIT_ERROR:-}" = "1" ]; then
     printf '{"totals":{"errors":1,"file_errors":1},"files":{"%s/main.php":{"errors":1,"messages":[{"message":"Call to an undefined function missing_function().","line":1,"identifier":"function.notFound"}]}}}\n' "${HOMEBOY_COMPONENT_PATH}"
     exit 1
 fi
+if [ "${PHPSTAN_EMIT_GLOBAL_ERROR:-}" = "1" ]; then
+    printf '%s\n' '{"totals":{"errors":1,"file_errors":0},"files":{},"errors":["Internal error: Failed opening required core/abstraction.php while analysing fixture/content.php"]}'
+    exit 1
+fi
 printf '%s\n' '{"totals":{"errors":0,"file_errors":0},"files":{}}'
 SH
 chmod +x "${EXTENSION_DIR}/vendor/bin/phpstan"
@@ -303,6 +307,46 @@ expected = {
 for key, value in expected.items():
     assert finding.get(key) == value, (key, finding)
 assert "source" not in finding, finding
+assert finding.get("fingerprint"), finding
+PY
+
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
+HOMEBOY_COMPONENT_ID="phpstan-smoke" \
+HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
+PHPSTAN_ARGS_FILE="$ARGS_FILE" \
+PHPSTAN_CALLS_FILE="$CALLS_FILE" \
+PHPSTAN_CONFIG_CAPTURE="$CONFIG_CAPTURE" \
+PHPSTAN_AUTOLOAD_CAPTURE="$AUTOLOAD_CAPTURE" \
+PHPSTAN_EMIT_GLOBAL_ERROR=1 \
+_HOMEBOY_PHPSTAN_FINDINGS_FILE="$FINDINGS_FILE" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
+HOMEBOY_SUMMARY_MODE=1 \
+"$RUNNER" >"$OUTPUT_FILE"
+phpstan_global_error_status=$?
+set -e
+
+if [ "$phpstan_global_error_status" -eq 0 ]; then
+    echo "FAIL: PHPStan global error fixture should fail" >&2
+    cat "$OUTPUT_FILE" >&2
+    exit 1
+fi
+
+assert_file_contains "$OUTPUT_FILE" "Failed opening required core/abstraction.php" "PHPStan global error is visible in summary output"
+python3 - "$FINDINGS_FILE" <<'PY'
+import json
+import sys
+
+findings = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(findings) == 1, findings
+finding = findings[0]
+assert finding["tool"] == "phpstan", finding
+assert finding["code"] == "phpstan.internal", finding
+assert finding["file"] is None, finding
+assert finding["line"] is None, finding
+assert "Failed opening required core/abstraction.php" in finding["message"], finding
 assert finding.get("fingerprint"), finding
 PY
 
