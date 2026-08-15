@@ -74,12 +74,12 @@ pub fn route_after_parse_with_provenance(
         }
     }
 
-    // A locally-placed fanout wave asking to detach gets the same verdict, for
-    // the same reason. The flag was advertised on `fanout cook-batch` and
-    // `fanout run-plan` but every gate that acted on it tested for Cook, so a
-    // local wave accepted a flag promising the caller could disconnect and then
-    // blocked that caller for hours. This either serves the request or refuses
-    // it explicitly; it never ignores it.
+    // A controller-owned fanout wave asking to detach gets the same verdict,
+    // regardless of the placement selected for its provider attempts. The flag
+    // was advertised on `fanout cook-batch` and `fanout run-plan` but every gate
+    // that acted on it tested for Cook, so a wave accepted a flag promising the
+    // caller could disconnect and then blocked that caller for hours. This
+    // either serves the request or refuses it explicitly; it never ignores it.
     if let Some(exit_code) =
         local_detach_fanout::intercept_local_detached_fanout(cli, normalized_args, runner_side)?
     {
