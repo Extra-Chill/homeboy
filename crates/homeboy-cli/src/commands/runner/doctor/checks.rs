@@ -241,6 +241,51 @@ pub fn overall_status(checks: &[RunnerCheck]) -> RunnerDoctorStatus {
     }
 }
 
+pub fn lab_offload_status(
+    checks: &[RunnerCheck],
+    eligible_provider_ids: &[String],
+) -> (RunnerDoctorStatus, types::RunnerDoctorProviderReadiness) {
+    let mut ready_for = eligible_provider_ids.to_vec();
+    let mut blocked_for = Vec::new();
+    let mut has_runner_error = false;
+    let mut has_warning = false;
+
+    for check in checks {
+        if check.status == RunnerDoctorStatus::Warning {
+            has_warning = true;
+        }
+        if check.status != RunnerDoctorStatus::Error {
+            continue;
+        }
+        let Some(provider_id) = check.details.get("provider_id") else {
+            has_runner_error = true;
+            continue;
+        };
+        if eligible_provider_ids.iter().any(|id| id == provider_id) {
+            ready_for.retain(|id| id != provider_id);
+            if !blocked_for.contains(provider_id) {
+                blocked_for.push(provider_id.clone());
+            }
+        }
+    }
+
+    let status = if has_runner_error || (!eligible_provider_ids.is_empty() && ready_for.is_empty())
+    {
+        RunnerDoctorStatus::Error
+    } else if has_warning {
+        RunnerDoctorStatus::Warning
+    } else {
+        RunnerDoctorStatus::Ok
+    };
+    (
+        status,
+        types::RunnerDoctorProviderReadiness {
+            ready_for,
+            blocked_for,
+        },
+    )
+}
+
 pub(super) fn ok_with_details(
     id: impl Into<String>,
     message: String,

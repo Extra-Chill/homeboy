@@ -78,7 +78,20 @@ pub fn run_with_options(
     // process-local capability answer, so the next execution preflight probes
     // the exact command environment rather than replaying stale remediation.
     runner::observe_runner_capabilities(runner_id);
-    report.status = checks::overall_status(&report.checks);
+    if options.scope == RunnerDoctorScope::LabOffload {
+        let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
+        let eligible_provider_ids = probes::eligible_provider_ids(
+            catalog.providers(),
+            options.agent_backend.as_deref(),
+            options.agent_selector.as_deref(),
+        );
+        let (status, provider_readiness) =
+            checks::lab_offload_status(&report.checks, &eligible_provider_ids);
+        report.status = status;
+        report.provider_readiness = Some(provider_readiness);
+    } else {
+        report.status = checks::overall_status(&report.checks);
+    }
     let exit_code = report.status.operational_exit_code();
     Ok((report, exit_code))
 }

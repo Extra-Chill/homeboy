@@ -204,6 +204,7 @@ pub fn report(
         diagnostics: None,
         daemon_recovery: None,
         admission_summary: None,
+        provider_readiness: None,
         repairs: Vec::new(),
     }
 }

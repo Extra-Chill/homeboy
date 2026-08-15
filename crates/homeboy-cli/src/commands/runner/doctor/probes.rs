@@ -393,8 +393,31 @@ pub fn provider_readiness_checks(
 ) -> Vec<RunnerCheck> {
     contracts
         .iter()
-        .filter_map(|contract| provider_readiness_check(client, contract))
+        .filter_map(|contract| {
+            provider_readiness_check(client, contract).map(|mut check| {
+                check
+                    .details
+                    .entry("provider_id".to_string())
+                    .or_insert_with(|| contract.provider_id.clone());
+                check
+            })
+        })
         .collect()
+}
+
+pub fn eligible_provider_ids(
+    providers: &[AgentTaskExecutorProvider],
+    selected_backend: Option<&str>,
+    selected_provider_id: Option<&str>,
+) -> Vec<String> {
+    selected_provider_executor_resolution_providers(
+        providers,
+        selected_backend,
+        selected_provider_id,
+    )
+    .into_iter()
+    .map(|provider| provider.id.clone())
+    .collect()
 }
 
 pub fn local_provider_executor_resolution_checks(
