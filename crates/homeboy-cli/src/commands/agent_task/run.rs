@@ -171,14 +171,6 @@ pub(crate) fn preview_cook(
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
     let (args, provision) = resolve_cook_preview_destination(args)?;
-    if !args.provider_evidence_inputs.is_empty() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "provider-evidence",
-            "preview cannot project --provider-evidence without a Cook workspace; run the replay command to materialize the evidence",
-            None,
-            None,
-        ));
-    }
     let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
         args.to_worktree
             .as_deref()
@@ -196,7 +188,43 @@ pub(crate) fn preview_cook(
     )?;
     preflight_cook_provider_credentials(&args)?;
 
-    let mut plan = compile_cook_plan(&args, provision)?;
+    // Preview binds evidence to the same resolved workspace, but only projects
+    // its read-only paths. Cook alone performs the later secure copy.
+    let mut compile_args = args.clone();
+    compile_args.provider_evidence_inputs.clear();
+    let workspace = provision["path"]
+        .as_str()
+        .expect("preview local workspace")
+        .to_string();
+    let evidence = if !args.provider_evidence_inputs.is_empty() {
+        let mut dispatch = dispatch_args_for_cook(&args);
+        resolve_dispatch_prompt(&mut dispatch)?;
+        validate_provider_evidence_inputs(
+            &args.provider_evidence_inputs,
+            dispatch.prompt.as_deref(),
+        )?;
+        compile_args.dispatch.prompt = dispatch.prompt;
+        let evidence =
+            projected_provider_evidence(&args.provider_evidence_inputs, Some(&workspace))?;
+        rewrite_provider_evidence_prompt(
+            &mut compile_args.dispatch.prompt,
+            &args.provider_evidence_inputs,
+            Some(&workspace),
+        );
+        Some(evidence)
+    } else {
+        None
+    };
+    let mut plan = compile_cook_plan(&compile_args, provision)?;
+    if let Some(evidence) = evidence {
+        for task in &mut plan.tasks {
+            if !task.executor.config.is_object() {
+                task.executor.config = serde_json::json!({});
+            }
+            task.executor.config["evidence_inputs"] = serde_json::to_value(&evidence)
+                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+        }
+    }
     resolve_cook_execution_budget(&args, &mut plan)?;
     plan.metadata["gate_contract_validation"] = serde_json::to_value(gate_contract_validation)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
@@ -216,7 +244,7 @@ pub(crate) fn preview_cook(
                 "worktree": args.to_worktree,
                 "base": args.base,
                 "head": args.head,
-                "placement": "none (preview)",
+                "placement": preview_placement_policy(),
                 "provider": executor,
                 "gates": {
                     "public": args.gates.verify.len(),
@@ -230,7 +258,7 @@ pub(crate) fn preview_cook(
                 },
             },
             "replay_argv": replay.argv,
-            "replay_omissions": replay.omissions,
+            "replay_requires": replay.requires,
         }),
         0,
     ))
@@ -242,7 +270,7 @@ const MAX_PREVIEW_REPLAY_BYTES: usize = 16 * 1024;
 #[derive(Debug)]
 struct PreviewReplayArgv {
     argv: Vec<String>,
-    omissions: Vec<String>,
+    requires: Vec<String>,
 }
 
 fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
@@ -302,7 +330,44 @@ fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
 }
 
 fn redact_preview_replay_argv(argv: impl IntoIterator<Item = String>) -> PreviewReplayArgv {
+    let units = clap_replay_units(argv.into_iter().collect());
+    let mut replay = Vec::new();
+    let mut requires = Vec::new();
+    let mut bytes = 0;
+    for unit in units {
+        let unit_bytes = unit.iter().map(String::len).sum::<usize>();
+        if replay.len() + unit.len() > MAX_PREVIEW_REPLAY_ARGS
+            || bytes + unit_bytes > MAX_PREVIEW_REPLAY_BYTES
+        {
+            requires.push("replay was truncated at the safety budget; re-add omitted complete flag/value units from the original command".to_string());
+            break;
+        }
+        let (unit, requirement) = redact_replay_unit(unit);
+        replay.extend(unit);
+        bytes += unit_bytes;
+        if let Some(requirement) = requirement {
+            requires.push(requirement);
+        }
+    }
+    PreviewReplayArgv {
+        argv: replay,
+        requires,
+    }
+}
+
+fn clap_replay_units(argv: Vec<String>) -> Vec<Vec<String>> {
     const VALUE_FLAGS: &[&str] = &[
+        "--prompt",
+        "--goal",
+        "--repo",
+        "--task-url",
+        "--to-worktree",
+        "--cwd",
+        "--workspace",
+        "--verify",
+        "--verify-file",
+        "--private-verify",
+        "--private-verify-file",
         "--gate-env",
         "--provider-config",
         "--client-context",
@@ -310,42 +375,117 @@ fn redact_preview_replay_argv(argv: impl IntoIterator<Item = String>) -> Preview
         "--provider-argv",
         "--provider-command",
         "--runner-env",
+        "--secret-env",
+        "--backend",
+        "--selector",
+        "--model",
+        "--base",
+        "--head",
     ];
-    let mut replay = Vec::new();
-    let mut omissions = Vec::new();
-    let mut redact_next = None;
-    let mut bytes = 0;
-    for value in argv {
-        if replay.len() == MAX_PREVIEW_REPLAY_ARGS || bytes + value.len() > MAX_PREVIEW_REPLAY_BYTES
-        {
-            omissions.push("replay argv was truncated at the preview safety budget; re-add omitted non-secret arguments from the original command".to_string());
-            break;
-        }
-        if let Some(flag) = redact_next.take() {
-            replay.push(format!("<redacted:{flag}>"));
-            omissions.push(format!("{flag} was redacted; replace its placeholder with the original value before replaying"));
-        } else if let Some((flag, _)) = value.split_once('=') {
-            if VALUE_FLAGS.contains(&flag) {
-                replay.push(format!("{flag}=<redacted:{flag}>"));
-                omissions.push(format!("{flag} was redacted; replace its placeholder with the original value before replaying"));
-            } else {
-                redact_next = VALUE_FLAGS
-                    .contains(&value.as_str())
-                    .then_some(value.clone());
-                replay.push(value);
-            }
+    let mut units = Vec::new();
+    let mut index = 0;
+    while index < argv.len() {
+        let value = &argv[index];
+        if value == "--preview" {
+            index += 1;
+        } else if let Some((_flag, _)) = value.split_once('=') {
+            units.push(vec![value.clone()]);
+            index += 1;
+        } else if VALUE_FLAGS.contains(&value.as_str()) && index + 1 < argv.len() {
+            units.push(vec![value.clone(), argv[index + 1].clone()]);
+            index += 2;
         } else {
-            redact_next = VALUE_FLAGS
-                .contains(&value.as_str())
-                .then_some(value.clone());
-            replay.push(value);
+            units.push(vec![value.clone()]);
+            index += 1;
         }
-        bytes += replay.last().map_or(0, String::len);
     }
-    PreviewReplayArgv {
-        argv: replay,
-        omissions,
+    units
+}
+
+fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
+    let flag = unit
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default()
+        .split('=')
+        .next()
+        .unwrap_or_default();
+    let value = unit
+        .get(1)
+        .map(String::as_str)
+        .or_else(|| unit[0].split_once('=').map(|(_, value)| value));
+    let sensitive = flag == "--private-verify"
+        || flag == "--private-verify-file"
+        || flag == "--gate-env"
+        || flag == "--runner-env"
+        || flag == "--lab-env-json"
+        || matches!(
+            flag,
+            "--provider-config" | "--client-context" | "--provider-command"
+        ) && value.is_some_and(sensitive_payload)
+        || flag == "--provider-argv" && value.is_some_and(sensitive_payload);
+    if !sensitive {
+        return (unit, None);
     }
+    let placeholder = if flag == "--gate-env" {
+        "REDACTED=<redacted:--gate-env>".to_string()
+    } else {
+        format!("<redacted:{flag}>")
+    };
+    let replay = if unit.len() == 2 {
+        vec![flag.to_string(), placeholder]
+    } else {
+        vec![format!("{flag}={placeholder}")]
+    };
+    (replay, Some(format!("{flag} was redacted; replace its parseable placeholder with the original value before replaying")))
+}
+
+fn sensitive_payload(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "api_key",
+        "apikey",
+        "bearer",
+        "authorization",
+    ]
+    .iter()
+    .any(|needle| value.contains(needle))
+}
+
+fn preview_placement_policy() -> Value {
+    let argv = std::env::args().collect::<Vec<_>>();
+    preview_placement_policy_from_argv(&argv)
+}
+
+fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
+    let placement = argv
+        .iter()
+        .enumerate()
+        .find_map(|(index, value)| {
+            value
+                .strip_prefix("--placement=")
+                .map(str::to_string)
+                .or_else(|| {
+                    (value == "--placement")
+                        .then(|| argv.get(index + 1).cloned())
+                        .flatten()
+                })
+        })
+        .unwrap_or_else(|| "auto".to_string());
+    let runner = argv.iter().enumerate().find_map(|(index, value)| {
+        value
+            .strip_prefix("--runner=")
+            .map(str::to_string)
+            .or_else(|| {
+                (value == "--runner")
+                    .then(|| argv.get(index + 1).cloned())
+                    .flatten()
+            })
+    });
+    serde_json::json!({ "requested": placement, "runner": runner, "route_executed": false })
 }
 
 #[cfg(test)]
@@ -456,7 +596,7 @@ mod preview_tests {
     }
 
     #[test]
-    fn preview_replay_redacts_sensitive_values_and_has_a_fixed_budget() {
+    fn preview_replay_redacts_sensitive_values_and_preserves_ordinary_provider_argv() {
         let replay = redact_preview_replay_argv(std::iter::once("homeboy".to_string()).chain([
             "agent-task".to_string(),
             "cook".to_string(),
@@ -464,23 +604,84 @@ mod preview_tests {
             "TOKEN=secret-value".to_string(),
             "--provider-config".to_string(),
             r#"{"token":"secret-value"}"#.to_string(),
+            "--private-verify".to_string(),
+            "printf secret-value".to_string(),
+            "--provider-argv".to_string(),
+            "ordinary-provider-argument".to_string(),
             "--runner-env=TOKEN=secret-value".to_string(),
         ]));
         assert!(
             !replay.argv.join(" ").contains("secret-value"),
             "{replay:?}"
         );
-        assert_eq!(replay.argv[4], "<redacted:--gate-env>");
+        assert_eq!(replay.argv[4], "REDACTED=<redacted:--gate-env>");
         assert_eq!(replay.argv[6], "<redacted:--provider-config>");
-        assert_eq!(replay.argv[7], "--runner-env=<redacted:--runner-env>");
-        assert_eq!(replay.omissions.len(), 3);
+        assert_eq!(replay.argv[7], "--private-verify");
+        assert_eq!(replay.argv[8], "<redacted:--private-verify>");
+        assert_eq!(replay.argv[10], "ordinary-provider-argument");
+        assert_eq!(replay.argv[11], "--runner-env=<redacted:--runner-env>");
+        assert_eq!(replay.requires.len(), 4);
+        Cli::try_parse_from(&replay.argv).expect("redacted replay remains parseable");
+    }
+
+    #[test]
+    fn preview_replay_truncates_only_at_parseable_clap_unit_boundaries() {
+        let argv = std::iter::once("homeboy".to_string())
+            .chain(["agent-task".to_string(), "cook".to_string()])
+            .chain(
+                (0..MAX_PREVIEW_REPLAY_ARGS)
+                    .flat_map(|index| ["--verify".to_string(), format!("true-{index}")]),
+            )
+            .collect::<Vec<_>>();
+        let replay = redact_preview_replay_argv(argv);
+        assert!(replay.argv.len() < MAX_PREVIEW_REPLAY_ARGS);
+        assert!(replay
+            .requires
+            .iter()
+            .any(|item| item.contains("safety budget")));
+        for boundary in (3..=replay.argv.len()).step_by(2) {
+            Cli::try_parse_from(&replay.argv[..boundary])
+                .unwrap_or_else(|error| panic!("boundary {boundary} is not parseable: {error}"));
+        }
+    }
+
+    #[test]
+    fn preview_reports_requested_placement_without_executing_a_route() {
+        let policy = preview_placement_policy_from_argv(&[
+            "homeboy".to_string(),
+            "--placement=lab-or-local".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ]);
+        assert_eq!(policy["requested"], "lab-or-local");
+        assert_eq!(policy["route_executed"], false);
+    }
+
+    #[test]
+    fn read_only_evidence_projection_uses_the_resolved_workspace_path() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source = tempfile::NamedTempFile::new().expect("evidence");
+        std::fs::write(source.path(), "evidence").expect("write evidence");
+        let evidence = vec![AgentTaskProviderEvidenceInput {
+            id: "issue".to_string(),
+            source: source.path().display().to_string(),
+        }];
+        validate_provider_evidence_inputs(&evidence, Some("Read the evidence."))
+            .expect("validate evidence");
+        let projected = projected_provider_evidence(&evidence, workspace.path().to_str())
+            .expect("project read-only evidence path");
+        assert!(projected[0]["path"]
+            .as_str()
+            .expect("projection path")
+            .starts_with(workspace.path().to_str().expect("workspace path")));
+        assert!(projected[0]["read_only"].as_bool().expect("read-only flag"));
 
         let bounded = redact_preview_replay_argv(
             (0..MAX_PREVIEW_REPLAY_ARGS + 1).map(|index| format!("arg-{index}")),
         );
         assert_eq!(bounded.argv.len(), MAX_PREVIEW_REPLAY_ARGS);
         assert!(bounded
-            .omissions
+            .requires
             .iter()
             .any(|item| item.contains("safety budget")));
     }
