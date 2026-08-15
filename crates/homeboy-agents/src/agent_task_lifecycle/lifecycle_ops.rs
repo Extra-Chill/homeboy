@@ -5168,8 +5168,17 @@ pub fn record_acceptance_verdict_with_feedback(
 /// Persist the controller publication result separately from promotion so a
 /// resumed cook can prove finalization already completed before it publishes.
 pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_finalization_in_store(&lifecycle_store, run_id, finalization)
+}
+
+pub(crate) fn record_cook_finalization_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    finalization: Value,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         if record.metadata.get("cook_finalization") == Some(&finalization) {
             return false;
         }
@@ -5181,7 +5190,7 @@ pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<Age
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }
 

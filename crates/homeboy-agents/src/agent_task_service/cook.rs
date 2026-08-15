@@ -48,7 +48,7 @@ use super::cook_pre_execution::{
 use super::cook_promotion::promote_or_load_attempt;
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
-    finalize_or_load_cook_pr_with_store, is_moving_base_finalization_error,
+    finalize_or_load_cook_pr_with_stores, is_moving_base_finalization_error,
     moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
     moving_base_recovery_report, next_moving_base_recovery, persisted_promotion_for_attempt,
     promote_or_load_attempt_in_store, recover_moving_base_cook_candidate_in_store,
@@ -510,12 +510,23 @@ fn finalize_with_operation_claim(
         &AgentTaskPromotionReport,
     ) -> Result<Value>,
 ) -> Result<Value> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    finalize_with_operation_claim_in_store(&lifecycle_store, options, run_id, promotion, finalize)
+}
+
+fn finalize_with_operation_claim_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    finalize: &mut dyn FnMut(
+        &AgentTaskCookServiceOptions,
+        &str,
+        &AgentTaskPromotionReport,
+    ) -> Result<Value>,
+) -> Result<Value> {
     let operation_key = finalization_operation_key(run_id, promotion);
-    match agent_task_lifecycle::claim_cook_operation(
-        run_id,
-        &operation_key,
-        FINALIZATION_CLAIM_LEASE,
-    )? {
+    match lifecycle_store.claim_cook_operation(run_id, &operation_key, FINALIZATION_CLAIM_LEASE)? {
         // A completed claim only proves an earlier publication. Re-run the
         // idempotent finalizer so a later force-push or PR-head mutation cannot
         // be returned as a still-valid publication.
@@ -532,7 +543,7 @@ fn finalize_with_operation_claim(
             let finalization = match finalize(options, run_id, promotion) {
                 Ok(finalization) => finalization,
                 Err(error) => {
-                    agent_task_lifecycle::fail_cook_operation(
+                    lifecycle_store.fail_cook_operation(
                         run_id,
                         &operation_key,
                         bounded_error_diagnostic(&error),
@@ -540,7 +551,7 @@ fn finalize_with_operation_claim(
                     return Err(error);
                 }
             };
-            agent_task_lifecycle::complete_cook_operation(
+            lifecycle_store.complete_cook_operation(
                 run_id,
                 &operation_key,
                 finalization.clone(),
@@ -740,6 +751,7 @@ pub(crate) trait CookSideEffectService {
     /// finalizing.
     fn finalize(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
         promotion: &AgentTaskPromotionReport,
@@ -755,7 +767,12 @@ pub(crate) struct DefaultCookSideEffects<F> {
 
 impl<F> DefaultCookSideEffects<F>
 where
-    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+    F: FnMut(
+        &AgentTaskLifecycleStore,
+        &AgentTaskCookServiceOptions,
+        &str,
+        &AgentTaskPromotionReport,
+    ) -> Result<Value>,
 {
     pub(crate) fn new(finalize: F) -> Self {
         Self { finalize }
@@ -764,7 +781,12 @@ where
 
 impl<F> CookSideEffectService for DefaultCookSideEffects<F>
 where
-    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+    F: FnMut(
+        &AgentTaskLifecycleStore,
+        &AgentTaskCookServiceOptions,
+        &str,
+        &AgentTaskPromotionReport,
+    ) -> Result<Value>,
 {
     fn promote(
         &mut self,
@@ -785,11 +807,20 @@ where
 
     fn finalize(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
         promotion: &AgentTaskPromotionReport,
     ) -> Result<Value> {
-        finalize_with_operation_claim(options, run_id, promotion, &mut self.finalize)
+        finalize_with_operation_claim_in_store(
+            lifecycle_store,
+            options,
+            run_id,
+            promotion,
+            &mut |options, run_id, promotion| {
+                (self.finalize)(lifecycle_store, options, run_id, promotion)
+            },
+        )
     }
 }
 
@@ -846,6 +877,7 @@ where
 
     fn finalize(
         &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
         promotion: &AgentTaskPromotionReport,
@@ -3601,9 +3633,10 @@ pub fn run_cook_with_store<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    let side_effects = DefaultCookSideEffects::new(|options, run_id, promotion| {
-        finalize_or_load_cook_pr_with_store(store, options, run_id, promotion)
-    });
+    let side_effects =
+        DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
+            finalize_or_load_cook_pr_with_stores(store, lifecycle_store, options, run_id, promotion)
+        });
     run_cook_with_boundaries_with_store(store, options, executor, side_effects)
 }
 
@@ -3615,7 +3648,9 @@ where
     E: AgentTaskExecutorAdapter + Clone,
 {
     let store = CookRecipeStore::from_current_data_root()?;
-    let side_effects = DefaultCookSideEffects::new(finalize_or_load_cook_pr);
+    let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
+        finalize_or_load_cook_pr(options, run_id, promotion)
+    });
     run_cook_with_boundaries_observed_policy_with_store(
         &store,
         options,
@@ -3637,7 +3672,9 @@ pub fn run_cook_with_durable_observer<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    let side_effects = DefaultCookSideEffects::new(finalize_or_load_cook_pr);
+    let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
+        finalize_or_load_cook_pr(options, run_id, promotion)
+    });
     run_cook_with_boundaries_observed(options, executor, side_effects, Some(observer))
 }
 
@@ -3658,13 +3695,15 @@ pub(crate) fn run_cook_with_finalizer_with_store<E, F>(
     store: &CookRecipeStore,
     options: AgentTaskCookServiceOptions,
     executor: E,
-    finalize: F,
+    mut finalize: F,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
     E: AgentTaskExecutorAdapter + Clone,
     F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
-    let side_effects = DefaultCookSideEffects::new(finalize);
+    let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
+        finalize(options, run_id, promotion)
+    });
     run_cook_with_boundaries_with_store(store, options, executor, side_effects)
 }
 
@@ -5476,39 +5515,43 @@ where
                     attempt,
                     None,
                 )?;
-                let finalization = match side_effects.finalize(&options, &run_id, &promotion) {
-                    Ok(finalization) => {
-                        if active_moving_base_recovery.is_some() {
-                            lifecycle_store.clear_cook_moving_base_recovery(&run_id)?;
+                let finalization =
+                    match side_effects.finalize(&lifecycle_store, &options, &run_id, &promotion) {
+                        Ok(finalization) => {
+                            if active_moving_base_recovery.is_some() {
+                                lifecycle_store.clear_cook_moving_base_recovery(&run_id)?;
+                            }
+                            finalization
                         }
-                        finalization
-                    }
-                    Err(error) if is_moving_base_finalization_error(&error) => {
-                        let recovery = next_moving_base_recovery(
-                            active_moving_base_recovery.unwrap_or_else(|| {
-                                moving_base_recovery_from_promotion(&cook_id, &run_id, promotion)
-                            }),
-                            error.to_string(),
-                        );
-                        lifecycle_store.record_cook_moving_base_recovery(
-                            &run_id,
-                            serde_json::to_value(&recovery)
-                                .map_err(|error| Error::internal_json(error.to_string(), None))?,
-                        )?;
-                        if recovery.base_movements < 3 {
-                            store.enqueue_terminal_continuation(&cook_id, &run_id)?;
+                        Err(error) if is_moving_base_finalization_error(&error) => {
+                            let recovery = next_moving_base_recovery(
+                                active_moving_base_recovery.unwrap_or_else(|| {
+                                    moving_base_recovery_from_promotion(
+                                        &cook_id, &run_id, promotion,
+                                    )
+                                }),
+                                error.to_string(),
+                            );
+                            lifecycle_store.record_cook_moving_base_recovery(
+                                &run_id,
+                                serde_json::to_value(&recovery).map_err(|error| {
+                                    Error::internal_json(error.to_string(), None)
+                                })?,
+                            )?;
+                            if recovery.base_movements < 3 {
+                                store.enqueue_terminal_continuation(&cook_id, &run_id)?;
+                            }
+                            let continuation_queued = recovery.base_movements < 3;
+                            return Ok(moving_base_recovery_report(
+                                cook_id,
+                                attempts,
+                                recovery,
+                                continuation_queued,
+                                Some(&run_id),
+                            ));
                         }
-                        let continuation_queued = recovery.base_movements < 3;
-                        return Ok(moving_base_recovery_report(
-                            cook_id,
-                            attempts,
-                            recovery,
-                            continuation_queued,
-                            Some(&run_id),
-                        ));
-                    }
-                    Err(error) if error.message.contains("awaiting_acceptance") => {
-                        return Ok(cook_report(CookReportInput {
+                        Err(error) if error.message.contains("awaiting_acceptance") => {
+                            return Ok(cook_report(CookReportInput {
                             cook_id,
                             status: "awaiting_acceptance",
                             disposition: CookDisposition::Terminal,
@@ -5529,9 +5572,9 @@ where
                             exit_code: 1,
                             invocation_latest_run_id: Some(&run_id),
                         }));
-                    }
-                    Err(error) => return Err(error),
-                };
+                        }
+                        Err(error) => return Err(error),
+                    };
                 let final_status = finalization["status"]
                     .as_str()
                     .unwrap_or("unknown")
@@ -5567,7 +5610,8 @@ where
                         attempt,
                         Some("accepted inherited baseline-red gate"),
                     )?;
-                    let finalization = side_effects.finalize(&options, &run_id, &promotion)?;
+                    let finalization =
+                        side_effects.finalize(&lifecycle_store, &options, &run_id, &promotion)?;
                     let final_status = finalization["status"]
                         .as_str()
                         .unwrap_or("unknown")
