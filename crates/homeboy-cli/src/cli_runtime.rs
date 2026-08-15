@@ -1623,7 +1623,8 @@ fn preflight_hot_command(
                 resource_policy::admits_warm_runner_coordination(
                     hot_command,
                     &resources,
-                    cli.runner.as_deref(),
+                    selected_lab_runner
+                        .filter(|_| !matches!(cli.placement, crate::cli_surface::Placement::Local)),
                     lab_readiness.as_ref(),
                 )
             } else {
