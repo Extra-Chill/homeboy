@@ -260,14 +260,19 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
         status_stdout.contains("\"admission_state\": \"failed\""),
         "an abandoned admission must terminalize truthfully: {status_stdout}"
     );
-    assert!(
-        status_stdout.contains("\"state\": \"failed\""),
+    let status: serde_json::Value =
+        serde_json::from_str(&status_stdout).expect("status is structured JSON");
+    assert_eq!(status["subject_state"], "failed", "{status_stdout}");
+    assert_eq!(
+        status["data"]["metadata"]["task_count"], 0,
         "{status_stdout}"
     );
-    assert!(
-        status_stdout.contains("\"tasks\": []")
-            && status_stdout.contains("\"max_attempts\": 0")
-            && status_stdout.contains("\"exited_before_handoff\""),
+    assert_eq!(
+        status["data"]["metadata"]["provider_executions_consumed"], 0,
+        "{status_stdout}"
+    );
+    assert_eq!(
+        status["data"]["metadata"]["detached_cook_handoff"]["state"], "exited_before_handoff",
         "{status_stdout}"
     );
 }
@@ -377,13 +382,16 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
         assert!(status.status.success(), "{status_stdout}");
         let terminal = serde_json::from_str::<serde_json::Value>(&status_stdout)
             .ok()
-            .and_then(|status| {
-                status
-                    .pointer("/data/state")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .is_some_and(|state| matches!(state.as_str(), "succeeded" | "failed" | "cancelled"));
+            .is_some_and(|status| {
+                [
+                    "/data/state",
+                    "/data/child_run_state",
+                    "/data/lifecycle/execution/state",
+                ]
+                .iter()
+                .filter_map(|pointer| status.pointer(pointer).and_then(serde_json::Value::as_str))
+                .any(|state| matches!(state, "succeeded" | "failed" | "cancelled"))
+            });
         if terminal {
             break;
         }
