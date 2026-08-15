@@ -103,6 +103,79 @@ impl<'a> CookExecutionPreparation<'a> {
             error,
         )
     }
+
+    pub(crate) fn recover_with_admission(
+        &self,
+        cook_or_attempt_id: &str,
+        admit_runtime: impl FnOnce(&str) -> Result<Value>,
+        reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<Option<agent_task_lifecycle::AgentTaskRunRecord>> {
+        self.recover_with_runtime(
+            cook_or_attempt_id,
+            None,
+            admit_runtime,
+            reconcile_reserved_cancellation,
+        )
+    }
+
+    fn recover_with_runtime(
+        &self,
+        cook_or_attempt_id: &str,
+        admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
+        admit_runtime: impl FnOnce(&str) -> Result<Value>,
+        reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<Option<agent_task_lifecycle::AgentTaskRunRecord>> {
+        let recipe = match self.recipe_store.load_recipe(cook_or_attempt_id) {
+            Ok(recipe) => recipe,
+            Err(recipe_error) => match self
+                .recipe_store
+                .load_recipe_for_attempt(cook_or_attempt_id)?
+            {
+                Some(recipe) => recipe,
+                None => return Err(recipe_error),
+            },
+        };
+        let run_id = if recipe.cook_id == cook_or_attempt_id {
+            recipe
+                .attempts
+                .last()
+                .expect("validated recipe has an attempt")
+                .run_id
+                .clone()
+        } else {
+            cook_or_attempt_id.to_string()
+        };
+        let attempt = recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == run_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cook_or_attempt_id",
+                    "requested run is absent from its immutable Cook recipe",
+                    Some(run_id.clone()),
+                    None,
+                )
+            })?;
+
+        self.materialize_with_runtime(
+            &recipe.cook_id,
+            &attempt.run_id,
+            &attempt.plan,
+            admission_status,
+            admit_runtime,
+            reconcile_reserved_cancellation,
+        )?;
+        let record = self.lifecycle_store.read_record(&attempt.run_id)?;
+        let controller_plan = self.lifecycle_store.read_controller_plan(&attempt.run_id)?;
+        super::cook_recipe::validate_recipe_attempt_record_with_controller_plan(
+            &recipe,
+            &attempt.run_id,
+            &record,
+            &controller_plan,
+        )?;
+        Ok(Some(record))
+    }
 }
 
 /// Persist the controller-owned initial attempt before transport preparation so
@@ -334,42 +407,14 @@ fn record_materialized_cook_pre_execution_failure(
 pub fn recover_recipe_attempt(
     cook_or_attempt_id: &str,
 ) -> Result<Option<agent_task_lifecycle::AgentTaskRunRecord>> {
-    let recipe = match super::cook_recipe::load_recipe(cook_or_attempt_id) {
-        Ok(recipe) => recipe,
-        Err(recipe_error) => match super::cook_recipe::load_recipe_for_attempt(cook_or_attempt_id)?
-        {
-            Some(recipe) => recipe,
-            None => return Err(recipe_error),
-        },
-    };
-    let run_id = if recipe.cook_id == cook_or_attempt_id {
-        recipe
-            .attempts
-            .last()
-            .expect("validated recipe has an attempt")
-            .run_id
-            .clone()
-    } else {
-        cook_or_attempt_id.to_string()
-    };
-    let attempt = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == run_id)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_or_attempt_id",
-                "requested run is absent from its immutable Cook recipe",
-                Some(run_id.clone()),
-                None,
-            )
-        })?;
-
-    let store = CookRecipeStore::from_current_data_root()?;
-    materialize_cook_attempt_with_store(&store, &recipe.cook_id, &attempt.run_id, &attempt.plan)?;
-    let record = agent_task_lifecycle::exact_record(&attempt.run_id)?;
-    super::cook_recipe::validate_recipe_attempt_record(&recipe, &attempt.run_id, &record)?;
-    Ok(Some(record))
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    CookExecutionPreparation::new(&recipe_store, &lifecycle_store).recover_with_runtime(
+        cook_or_attempt_id,
+        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        production_runtime_admission(&lifecycle_store),
+        reconcile_reserved_cancellation,
+    )
 }
 
 pub(crate) fn retryable_pre_execution_failure(
@@ -706,6 +751,108 @@ mod tests {
                 metadata: Value::Null,
             }],
         )
+    }
+
+    #[test]
+    fn explicit_preparations_recover_identical_recipe_ids_in_parallel() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_recipe_store = CookRecipeStore::new(left_context.path_roots());
+        let right_recipe_store = CookRecipeStore::new(right_context.path_roots());
+        let left_lifecycle_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+        let right_lifecycle_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+        let cook_id = "same-recovery-cook";
+        let run_id = "same-recovery-run";
+        let barrier = Arc::new(Barrier::new(2));
+        let mut left_plan = plan("left-recovery-plan", "left");
+        left_plan.metadata = serde_json::json!({ "store": "left" });
+        let mut right_plan = plan("right-recovery-plan", "right");
+        right_plan.metadata = serde_json::json!({ "store": "right" });
+        left_recipe_store
+            .persist_recipe(&recipe(cook_id, run_id, left_plan))
+            .expect("persist left recipe");
+        right_recipe_store
+            .persist_recipe(&recipe(cook_id, run_id, right_plan))
+            .expect("persist right recipe");
+
+        let (left_record, right_record) = std::thread::scope(|scope| {
+            let left_barrier = Arc::clone(&barrier);
+            let left_recipe_store = left_recipe_store.clone();
+            let left_lifecycle_store = left_lifecycle_store.clone();
+            let left = scope.spawn(move || {
+                CookExecutionPreparation::new(&left_recipe_store, &left_lifecycle_store)
+                    .recover_with_admission(
+                        cook_id,
+                        |_| {
+                            left_barrier.wait();
+                            Ok(serde_json::json!({ "store": "left" }))
+                        },
+                        |received_cook_id| {
+                            assert_eq!(
+                                left_lifecycle_store
+                                    .read_cook_index(received_cook_id)
+                                    .expect("left recovered index")
+                                    .latest_run_id,
+                                run_id
+                            );
+                            Ok(())
+                        },
+                    )
+                    .expect("recover left")
+                    .expect("left record")
+            });
+            let right_barrier = Arc::clone(&barrier);
+            let right_recipe_store = right_recipe_store.clone();
+            let right_lifecycle_store = right_lifecycle_store.clone();
+            let right = scope.spawn(move || {
+                CookExecutionPreparation::new(&right_recipe_store, &right_lifecycle_store)
+                    .recover_with_admission(
+                        run_id,
+                        |_| {
+                            right_barrier.wait();
+                            Ok(serde_json::json!({ "store": "right" }))
+                        },
+                        |received_cook_id| {
+                            assert_eq!(
+                                right_lifecycle_store
+                                    .read_cook_index(received_cook_id)
+                                    .expect("right recovered index")
+                                    .latest_run_id,
+                                run_id
+                            );
+                            Ok(())
+                        },
+                    )
+                    .expect("recover right")
+                    .expect("right record")
+            });
+            (
+                left.join().expect("left thread"),
+                right.join().expect("right thread"),
+            )
+        });
+
+        assert_eq!(left_record.run_id, run_id);
+        assert_eq!(right_record.run_id, run_id);
+        assert_eq!(left_record.metadata["controller_runtime"]["store"], "left");
+        assert_eq!(
+            right_record.metadata["controller_runtime"]["store"],
+            "right"
+        );
+        assert_eq!(
+            left_lifecycle_store
+                .read_controller_plan(run_id)
+                .expect("left recovered plan")
+                .plan_id,
+            "left-recovery-plan"
+        );
+        assert_eq!(
+            right_lifecycle_store
+                .read_controller_plan(run_id)
+                .expect("right recovered plan")
+                .plan_id,
+            "right-recovery-plan"
+        );
     }
 
     #[test]
