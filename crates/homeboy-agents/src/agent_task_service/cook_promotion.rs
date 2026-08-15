@@ -697,18 +697,36 @@ fn promotion_checkpoint_matches(promotion: &AgentTaskPromotionReport, checkpoint
 
 pub(crate) fn attempt_needs_execution(run_id: &str) -> bool {
     agent_task_lifecycle::status(run_id)
-        .map(|record| {
-            !matches!(
-                record.state,
-                agent_task_lifecycle::AgentTaskRunState::Succeeded
-                    | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-                    | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-                    | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-                    | agent_task_lifecycle::AgentTaskRunState::Failed
-                    | agent_task_lifecycle::AgentTaskRunState::Cancelled
-            )
-        })
+        .map(|record| run_record_needs_execution(&record))
         .unwrap_or(true)
+}
+
+pub(crate) fn attempt_needs_execution_with_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> bool {
+    if lifecycle_store
+        .matches_current_environment()
+        .unwrap_or(false)
+    {
+        return attempt_needs_execution(run_id);
+    }
+    lifecycle_store
+        .read_record(run_id)
+        .map(|record| run_record_needs_execution(&record))
+        .unwrap_or(true)
+}
+
+fn run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    !matches!(
+        record.state,
+        agent_task_lifecycle::AgentTaskRunState::Succeeded
+            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+            | agent_task_lifecycle::AgentTaskRunState::Failed
+            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+    )
 }
 
 pub(crate) fn retryable_provider_discovery_failure(run_id: &str) -> bool {
@@ -723,6 +741,32 @@ pub(crate) fn retryable_provider_discovery_failure(run_id: &str) -> bool {
                         .any(|diagnostic| diagnostic.class == "agent_task.provider_missing")
                 })
         })
+}
+
+pub(crate) fn retryable_provider_discovery_failure_with_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> bool {
+    if lifecycle_store
+        .matches_current_environment()
+        .unwrap_or(false)
+    {
+        return retryable_provider_discovery_failure(run_id);
+    }
+    lifecycle_store
+        .read_record(run_id)
+        .is_ok_and(|record| record.state == agent_task_lifecycle::AgentTaskRunState::Failed)
+        && lifecycle_store
+            .read_aggregate(run_id)
+            .is_ok_and(|aggregate| {
+                !aggregate.outcomes.is_empty()
+                    && aggregate.outcomes.iter().all(|outcome| {
+                        outcome
+                            .diagnostics
+                            .iter()
+                            .any(|diagnostic| diagnostic.class == "agent_task.provider_missing")
+                    })
+            })
 }
 
 pub(crate) fn is_moving_base_finalization_error(error: &Error) -> bool {

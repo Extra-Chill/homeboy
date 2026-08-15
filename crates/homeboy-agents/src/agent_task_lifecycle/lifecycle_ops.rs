@@ -4536,6 +4536,16 @@ pub(crate) fn update_cook_candidate_after_completion(
     aggregate: &AgentTaskAggregate,
     promotion: Option<Value>,
 ) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    update_cook_candidate_after_completion_in_store(&lifecycle_store, record, aggregate, promotion)
+}
+
+pub(crate) fn update_cook_candidate_after_completion_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+    promotion: Option<Value>,
+) -> Result<()> {
     let Some(cook_id) = record.metadata.get("cook_id").and_then(Value::as_str) else {
         return Ok(());
     };
@@ -4547,7 +4557,7 @@ pub(crate) fn update_cook_candidate_after_completion(
     else {
         return Ok(());
     };
-    store::update_cook_index(cook_id, |index| {
+    lifecycle_store.update_cook_index(cook_id, |index| {
         replace_latest_substantive_candidate(index, candidate)
     })?;
     Ok(())
@@ -4786,8 +4796,17 @@ fn empty_acceptance_candidate() -> crate::agent_task_promotion::AgentTaskCandida
 }
 
 pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_promotion_in_store(&lifecycle_store, run_id, promotion)
+}
+
+pub(crate) fn record_promotion_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    promotion: Value,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         if record.metadata.get("latest_promotion") == Some(&promotion) {
             return false;
         }
@@ -4865,10 +4884,15 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
     })?;
     let record = match record {
         Some(record) => record,
-        None => store::read_record(&run_id)?,
+        None => lifecycle_store.read_record(&run_id)?,
     };
-    if let Ok(aggregate) = store::read_aggregate(&run_id) {
-        update_cook_candidate_after_completion(&record, &aggregate, Some(promotion))?;
+    if let Ok(aggregate) = lifecycle_store.read_aggregate(&run_id) {
+        update_cook_candidate_after_completion_in_store(
+            lifecycle_store,
+            &record,
+            &aggregate,
+            Some(promotion),
+        )?;
     }
     Ok(record)
 }

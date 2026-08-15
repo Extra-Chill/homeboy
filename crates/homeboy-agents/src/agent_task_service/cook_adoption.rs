@@ -681,8 +681,10 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             },
             Err(error) => return Err(error),
         };
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
         let dispatch = dispatch_cook_follow_up(
-            &store,
+            (&store, &lifecycle_store),
             &options,
             executor.clone(),
             cook_id,

@@ -10722,37 +10722,66 @@ fn retry_dispatch_operation_key_claim_dispatches_once() {
     // (or a concurrent one) observes the completed claim / held lease and must
     // not send a second handoff. This exercises that exactly-once contract at the
     // claim boundary without the full git-backed cook loop.
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-dispatch-claim";
-        let next_run_id = "run-dispatch-claim-attempt-2";
-        let plan = AgentTaskPlan::new(cook_id, Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some(next_run_id)).unwrap();
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-dispatch-claim";
+    let next_run_id = "run-dispatch-claim-attempt-2";
+    let plan = AgentTaskPlan::new(cook_id, Vec::new());
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, next_run_id, |_| Ok(serde_json::json!({})))
+        .unwrap();
 
-        let operation_key = retry_dispatch_operation_key(next_run_id);
-        let lease = std::time::Duration::from_secs(60);
+    let operation_key = retry_dispatch_operation_key(next_run_id);
+    let lease = std::time::Duration::from_secs(60);
 
-        // First pass acquires the claim → performs the (modeled) dispatch → completes.
-        assert_eq!(
-            agent_task_lifecycle::claim_cook_operation(next_run_id, &operation_key, lease).unwrap(),
-            agent_task_lifecycle::ClaimOutcome::Acquired
-        );
-        agent_task_lifecycle::complete_cook_operation(
+    // First pass acquires the claim → performs the (modeled) dispatch → completes.
+    assert_eq!(
+        lifecycle_store
+            .claim_cook_operation(next_run_id, &operation_key, lease)
+            .unwrap(),
+        agent_task_lifecycle::ClaimOutcome::Acquired
+    );
+    lifecycle_store
+        .complete_cook_operation(
             next_run_id,
             &operation_key,
             serde_json::json!({ "dispatched_run_id": next_run_id }),
         )
         .unwrap();
 
-        // A resumed pass observes AlreadyCompleted and must not re-dispatch.
-        match agent_task_lifecycle::claim_cook_operation(next_run_id, &operation_key, lease)
-            .unwrap()
-        {
-            agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
-                assert_eq!(result["dispatched_run_id"], next_run_id);
-            }
-            other => panic!("expected AlreadyCompleted, got {other:?}"),
+    // A resumed pass observes AlreadyCompleted and must not re-dispatch.
+    match lifecycle_store
+        .claim_cook_operation(next_run_id, &operation_key, lease)
+        .unwrap()
+    {
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
+            assert_eq!(result["dispatched_run_id"], next_run_id);
         }
-    });
+        other => panic!("expected AlreadyCompleted, got {other:?}"),
+    }
+}
+
+#[test]
+fn cook_follow_up_store_boundary_rejects_split_roots_and_unrooted_local_execution() {
+    let first = homeboy_core::test_support::HermeticTestContext::new();
+    let second = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(first.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(first.path_roots());
+    let other_lifecycle_store = AgentTaskLifecycleStore::new(second.path_roots());
+
+    validate_cook_follow_up_stores(&recipe_store, &lifecycle_store, true).unwrap();
+
+    let split_root_error =
+        validate_cook_follow_up_stores(&recipe_store, &other_lifecycle_store, true).unwrap_err();
+    assert!(split_root_error
+        .to_string()
+        .contains("recipe and lifecycle stores must share one data root"));
+
+    let local_execution_error =
+        validate_cook_follow_up_stores(&recipe_store, &lifecycle_store, false).unwrap_err();
+    assert!(local_execution_error
+        .to_string()
+        .contains("requires the full execution boundary"));
 }
 
 #[test]
@@ -10921,54 +10950,71 @@ fn concurrent_retry_dispatch_claims_admit_exactly_one_dispatcher() {
     // held lease (or a completed claim) and do not send a second handoff. This
     // exercises the claim's atomic converge-on-one-owner contract for the
     // retry-dispatch key across real threads.
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-concurrent-dispatch";
-        let next_run_id = "run-concurrent-dispatch-attempt-2";
-        let plan = AgentTaskPlan::new(cook_id, Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some(next_run_id)).unwrap();
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let next_run_id = "same-concurrent-dispatch-attempt-2";
+    for (store, plan_id) in [(&left_store, "left-plan"), (&right_store, "right-plan")] {
+        store
+            .submit_plan_with_runtime_admission(
+                &AgentTaskPlan::new(plan_id, Vec::new()),
+                next_run_id,
+                |_| Ok(serde_json::json!({})),
+            )
+            .unwrap();
+    }
+    let operation_key = retry_dispatch_operation_key(next_run_id);
+    let lease = std::time::Duration::from_secs(300);
+    let left_acquired = Arc::new(AtomicUsize::new(0));
+    let right_acquired = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(4));
+    let mut handles = Vec::new();
 
-        let operation_key = retry_dispatch_operation_key(next_run_id);
-        let lease = std::time::Duration::from_secs(300);
-        let acquired = Arc::new(AtomicUsize::new(0));
-        let barrier = Arc::new(Barrier::new(4));
-
-        let handles: Vec<_> = (0..4)
-            .map(|_| {
-                let key = operation_key.clone();
-                let run = next_run_id.to_string();
-                let acquired = Arc::clone(&acquired);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    if let agent_task_lifecycle::ClaimOutcome::Acquired =
-                        agent_task_lifecycle::claim_cook_operation(&run, &key, lease).unwrap()
-                    {
-                        acquired.fetch_add(1, Ordering::SeqCst);
-                        // The winning dispatcher records completion after its handoff.
-                        agent_task_lifecycle::complete_cook_operation(
-                            &run,
+    for (store, acquired) in [
+        (left_store.clone(), Arc::clone(&left_acquired)),
+        (right_store.clone(), Arc::clone(&right_acquired)),
+    ] {
+        for _ in 0..2 {
+            let store = store.clone();
+            let key = operation_key.clone();
+            let acquired = Arc::clone(&acquired);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                if let agent_task_lifecycle::ClaimOutcome::Acquired = store
+                    .claim_cook_operation(next_run_id, &key, lease)
+                    .unwrap()
+                {
+                    acquired.fetch_add(1, Ordering::SeqCst);
+                    store
+                        .complete_cook_operation(
+                            next_run_id,
                             &key,
-                            serde_json::json!({ "dispatched_run_id": run }),
+                            serde_json::json!({ "dispatched_run_id": next_run_id }),
                         )
                         .unwrap();
-                    }
-                })
-            })
-            .collect();
-        for handle in handles {
-            handle.join().unwrap();
+                }
+            }));
         }
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
 
-        assert_eq!(
-            acquired.load(Ordering::SeqCst),
-            1,
-            "exactly one concurrent pass may dispatch the retry"
-        );
-        let claim = agent_task_lifecycle::operation_claim(next_run_id, &operation_key)
+    assert_eq!(left_acquired.load(Ordering::SeqCst), 1);
+    assert_eq!(right_acquired.load(Ordering::SeqCst), 1);
+    for store in [&left_store, &right_store] {
+        let claim = store
+            .operation_claim(next_run_id, &operation_key)
             .unwrap()
             .expect("dispatch claim recorded");
         assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
-    });
+    }
+    assert_ne!(
+        left_store.run_dir(next_run_id),
+        right_store.run_dir(next_run_id)
+    );
 }
 
 #[test]

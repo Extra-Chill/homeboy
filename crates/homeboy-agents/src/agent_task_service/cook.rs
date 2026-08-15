@@ -43,12 +43,13 @@ use super::cook_pre_execution::{
     with_pre_execution_phase,
 };
 use super::cook_promotion::{
-    attempt_needs_execution, cook_report, finalize_or_load_cook_pr,
+    attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
     finalize_or_load_cook_pr_with_store, is_moving_base_finalization_error,
     moving_base_recovery_for_run_with_store, moving_base_recovery_from_promotion,
     moving_base_recovery_report, next_moving_base_recovery, persisted_promotion_for_attempt,
     promote_or_load_attempt, recover_moving_base_cook_candidate, refreshed_moving_base_recovery,
-    retryable_provider_discovery_failure, CookReportInput, MovingBaseCookRecovery,
+    retryable_provider_discovery_failure, retryable_provider_discovery_failure_with_store,
+    CookReportInput, MovingBaseCookRecovery,
 };
 use super::cook_recipe::CookRecipeStore;
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
@@ -3092,6 +3093,34 @@ fn child_execution_budget(
     }
 }
 
+fn validate_cook_follow_up_stores(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    detached_dispatch: bool,
+) -> Result<()> {
+    if recipe_store.data_root() != lifecycle_store.data_root() {
+        return Err(Error::validation_invalid_argument(
+            "stores",
+            "Cook follow-up recipe and lifecycle stores must share one data root",
+            Some(format!(
+                "recipe={}, lifecycle={}",
+                recipe_store.data_root().display(),
+                lifecycle_store.data_root().display()
+            )),
+            None,
+        ));
+    }
+    if !detached_dispatch && !lifecycle_store.matches_current_environment()? {
+        return Err(Error::validation_invalid_argument(
+            "lifecycle_store",
+            "explicit lifecycle storage for local Cook follow-up execution requires the full execution boundary",
+            Some(lifecycle_store.data_root().display().to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// Append and dispatch one remediation attempt from an authenticated promoted
 /// candidate. Both ordinary Cook feedback and external candidate adoption use
 /// this boundary so their budget, provenance, and baseline authority match.
@@ -3100,7 +3129,7 @@ fn child_execution_budget(
     reason = "Cook follow-up retains explicit durable recipe and dispatch identity fields"
 )]
 pub(crate) fn dispatch_cook_follow_up<E>(
-    store: &CookRecipeStore,
+    stores: (&CookRecipeStore, &AgentTaskLifecycleStore),
     options: &AgentTaskCookServiceOptions,
     executor: E,
     cook_id: &str,
@@ -3119,10 +3148,16 @@ pub(crate) fn dispatch_cook_follow_up<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    let (recipe_store, lifecycle_store) = stores;
+    validate_cook_follow_up_stores(
+        recipe_store,
+        lifecycle_store,
+        options.attempt_dispatcher.is_some(),
+    )?;
     if let Some(reason) = remediation_tool_policy_error(&follow_up_request) {
         return Ok(CookFollowUpDispatch::PolicyFailure { reason });
     }
-    let recipe = store.load_recipe(cook_id)?;
+    let recipe = recipe_store.load_recipe(cook_id)?;
     let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
         recipe_attempt.plan.tasks.len() == 1
             && recipe_attempt.plan.tasks[0].inputs["cook_loop"]["artifact_provenance"]
@@ -3136,7 +3171,10 @@ where
         .filter(|recipe_attempt| recipe_attempt.attempt > attempt)
         .filter(|recipe_attempt| {
             recipe_attempt.plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true
-                && retryable_provider_discovery_failure(&recipe_attempt.run_id)
+                && retryable_provider_discovery_failure_with_store(
+                    lifecycle_store,
+                    &recipe_attempt.run_id,
+                )
         })
         .cloned();
     let persisted_budget_authority = plan
@@ -3180,7 +3218,7 @@ where
                     .as_str()
                     == Some(source_run_id))
     }) {
-        if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recipe_attempt.run_id) {
+        if let Ok(aggregate) = lifecycle_store.read_aggregate(&recipe_attempt.run_id) {
             durable_budget_used.add(execution_budget_usage(&aggregate));
         }
     }
@@ -3204,7 +3242,8 @@ where
         || follow_up_request.inputs["cook_loop"]["review_form_required"] == true)
         .then_some(true)
         .or_else(|| {
-            let durable_provider_executions = agent_task_lifecycle::status(source_run_id)
+            let durable_provider_executions = lifecycle_store
+                .read_record(source_run_id)
                 .ok()
                 .and_then(|record| record.metadata.get("provider_executions").cloned())
                 .filter(|executions| {
@@ -3290,11 +3329,11 @@ where
     let review_form_only =
         follow_up_plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true;
     if let Some(replaced_run_id) = replaced_run_id {
-        store.record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
+        recipe_store.record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
     } else {
-        store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
+        recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
     }
-    if attempt_needs_execution(&next_run_id) {
+    if attempt_needs_execution_with_store(lifecycle_store, &next_run_id) {
         let baseline = materialize_follow_up_baseline(
             promotion,
             source_run_id,
@@ -3307,13 +3346,11 @@ where
         // Refresh the durable execution attestation before this plan can be
         // persisted or handed to a local or detached provider.
         bind_dispatch_workspace_attestations(&mut follow_up_plan)?;
-        agent_task_lifecycle::submit_plan(&follow_up_plan, Some(&next_run_id))?;
-        agent_task_lifecycle::record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
+        lifecycle_store.submit_plan_with_current_runtime(&follow_up_plan, &next_run_id)?;
+        lifecycle_store.record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
         if budget_scope == CookFollowUpBudgetScope::CandidateAdoptionReview {
-            agent_task_lifecycle::checkpoint_candidate_adoption_remediation(
-                source_run_id,
-                &next_run_id,
-            )?;
+            lifecycle_store
+                .checkpoint_candidate_adoption_remediation(source_run_id, &next_run_id)?;
         }
         if let Some(dispatcher) = &options.attempt_dispatcher {
             // A detached dispatcher may return before any executor-side
@@ -3327,7 +3364,7 @@ where
             // this baseline-bound workspace contract, and so the run record the
             // claim is written onto exists.
             let operation_key = retry_dispatch_operation_key(&next_run_id);
-            match agent_task_lifecycle::claim_cook_operation(
+            match lifecycle_store.claim_cook_operation(
                 &next_run_id,
                 &operation_key,
                 RETRY_DISPATCH_CLAIM_LEASE,
@@ -3338,7 +3375,7 @@ where
                         &next_run_id,
                         Some(baseline.capability()),
                     )?;
-                    agent_task_lifecycle::complete_cook_operation(
+                    lifecycle_store.complete_cook_operation(
                         &next_run_id,
                         &operation_key,
                         serde_json::json!({ "dispatched_run_id": next_run_id }),
@@ -3364,8 +3401,8 @@ where
     // The generated ID is random by design. Link the execution only after its
     // materialized plan is durable, so a resumed controller selects this exact
     // run without replacing its baseline-bound workspace contract.
-    if !attempt_needs_execution(&next_run_id) {
-        agent_task_lifecycle::record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
+    if !attempt_needs_execution_with_store(lifecycle_store, &next_run_id) {
+        lifecycle_store.record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
     }
     if review_form_only {
         // A form-only retry deliberately makes no code changes. Carry the
@@ -3377,7 +3414,7 @@ where
             "kind": "review_form_only",
             "source_run_id": source_run_id,
         });
-        agent_task_lifecycle::record_promotion(
+        lifecycle_store.record_promotion(
             &next_run_id,
             serde_json::to_value(carried_promotion)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?,
@@ -5603,8 +5640,9 @@ where
                 .0;
                 let review_form_only =
                     follow_up_request.inputs["cook_loop"]["review_form_required"] == true;
+                let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
                 match dispatch_cook_follow_up(
-                    store,
+                    (store, &lifecycle_store),
                     &options,
                     executor.clone(),
                     &cook_id,
