@@ -48,6 +48,7 @@ const COMPACT_ACTION_LIMIT: usize = 4;
 const COMPACT_ACTION_BYTE_LIMIT: usize = 512;
 const COMPACT_PROMOTION_FILE_LIMIT: usize = 12;
 const COMPACT_PROMOTION_FILE_BYTE_LIMIT: usize = 256;
+const COMPACT_STATUS_BYTE_LIMIT: usize = 16 * 1024;
 const STATUS_WATCH_CHANGE_LIMIT: usize = 12;
 
 /// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
@@ -240,6 +241,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     attach_runner_probe(&mut summary, &runner_probe);
     attach_agent_task_status_actionable(&mut summary, run_id);
     preserve_controller_owner_placement(&mut summary, run_id);
+    let summary = enforce_compact_status_budget(summary);
     let exit_code = subject_exit_code(&summary, args.strict_subject_exit);
     Ok((summary, exit_code))
 }
@@ -3734,7 +3736,7 @@ fn compact_status_summary_with_aggregate(
         "run_id": record.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
         "state": record.get("state").cloned().unwrap_or(Value::Null),
         "child_run_state": record.get("child_run_state").cloned().unwrap_or(Value::Null),
-        "cook": record.get("cook").cloned().unwrap_or(Value::Null),
+        "cook": compact_cook_status(record.get("cook"), run_id),
         "timestamps": compact_fields(record, &["created_at", "updated_at", "started_at", "completed_at"]),
         "work_summary": work_summary,
         "canonical_candidate": canonical_candidate_projection(canonical_candidate),
@@ -3831,7 +3833,7 @@ fn compact_status_summary_with_aggregate(
             ],
         );
     }
-    summary
+    enforce_compact_status_budget(summary)
 }
 
 /// Project completion evidence for machine consumers. The durable aggregate and
@@ -3873,7 +3875,130 @@ pub(crate) fn compact_aggregate_summary(
         summary["full_command"] = json!(format!("homeboy agent-task status {run_id} --full"));
         summary["evidence_command"] = json!(format!("homeboy agent-task evidence {run_id}"));
     }
+    enforce_compact_status_budget(summary)
+}
+
+fn compact_cook_status(cook: Option<&Value>, run_id: &str) -> Value {
+    let Some(cook) = cook.filter(|cook| !cook.is_null()) else {
+        return Value::Null;
+    };
+    let mut summary = compact_fields(
+        cook,
+        &[
+            "cook_id",
+            "phase",
+            "state",
+            "status",
+            "detail",
+            "publication",
+            "terminal_status",
+        ],
+    );
+    if let Some(gates) = cook
+        .get("deterministic_gates")
+        .or_else(|| cook.get("gate_results"))
+        .and_then(Value::as_array)
+    {
+        summary["gates"] = compact_gate_summaries(gates);
+        summary["gates_detail_command"] = json!(format!(
+            "homeboy agent-task status {} --full",
+            quote_arg(run_id)
+        ));
+    }
     summary
+}
+
+fn compact_gate_summaries(gates: &[Value]) -> Value {
+    Value::Array(
+        gates
+            .iter()
+            .take(COMPACT_REF_LIMIT)
+            .map(|gate| compact_fields(gate, &["id", "type", "kind", "status", "state", "private"]))
+            .collect(),
+    )
+}
+
+fn enforce_compact_status_budget(mut value: Value) -> Value {
+    if serialized_len(&value) <= COMPACT_STATUS_BYTE_LIMIT {
+        return value;
+    }
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+    let full_command = object
+        .get("full_command")
+        .and_then(Value::as_str)
+        .unwrap_or("homeboy agent-task status <run-id> --full")
+        .to_string();
+    let mut omitted = Vec::new();
+    // Ordered from supplementary evidence to the broad status tables. Core IDs,
+    // state, and the full-output command always survive this final pass.
+    for section in [
+        "notification_delivery",
+        "transport_recovery",
+        "diagnostic_summary",
+        "failure_reasons",
+        "execution_states",
+        "candidate_adoption",
+        "cook_finalization",
+        "latest_promotion",
+        "moving_base_recovery",
+        "failure_context",
+        "finalization",
+        "selected_candidate",
+        "attempts",
+        "provider",
+        "remaining_phases",
+        "continuation_command",
+        "evidence_command",
+        "risk_flags",
+        "refs",
+        "artifact_refs",
+        "tasks",
+        "queue_visibility",
+        "liveness",
+        "canonical_candidate",
+        "work_summary",
+        "execution_budget",
+        "cook",
+        "timestamps",
+    ] {
+        if let Some(removed) = object.remove(section) {
+            omitted.push(json!({ "section": section, "count": compact_section_count(&removed) }));
+        }
+        if compact_budget_value(object, &full_command, &omitted) <= COMPACT_STATUS_BYTE_LIMIT {
+            break;
+        }
+    }
+    object.insert("full_command".to_string(), Value::String(full_command));
+    if !omitted.is_empty() {
+        object.insert("omitted_sections".to_string(), Value::Array(omitted));
+    }
+    value
+}
+
+fn compact_budget_value(
+    object: &serde_json::Map<String, Value>,
+    full_command: &str,
+    omitted: &[Value],
+) -> usize {
+    let mut projected = object.clone();
+    projected.insert("full_command".to_string(), json!(full_command));
+    if !omitted.is_empty() {
+        projected.insert(
+            "omitted_sections".to_string(),
+            Value::Array(omitted.to_vec()),
+        );
+    }
+    serialized_len(&Value::Object(projected))
+}
+
+fn compact_section_count(value: &Value) -> usize {
+    value.as_array().map_or(1, Vec::len)
+}
+
+fn serialized_len(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
 }
 
 /// The default view for `homeboy agent-task cook`. `--full` is opt-in, so this
@@ -3976,7 +4101,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
             summary[field] = bounded_value(value);
         }
     }
-    summary
+    enforce_compact_status_budget(summary)
 }
 
 fn compact_cook_diagnostic(diagnostic: &Value) -> Value {
@@ -4060,16 +4185,22 @@ fn compact_items(value: Option<&Value>, fields: &[&str]) -> Value {
 
 fn compact_fields(value: &Value, fields: &[&str]) -> Value {
     let mut object = serde_json::Map::new();
+    let mut omitted_scalars = Vec::new();
     for field in fields {
         if let Some(value) = value.get(*field) {
             if value
                 .as_str()
                 .is_some_and(|text| text.len() > COMPACT_TEXT_LIMIT)
             {
+                omitted_scalars
+                    .push(json!({ "field": field, "bytes": value.as_str().map_or(0, str::len) }));
                 continue;
             }
             object.insert((*field).to_string(), bounded_value(value));
         }
+    }
+    if !omitted_scalars.is_empty() {
+        object.insert("omitted_scalars".to_string(), Value::Array(omitted_scalars));
     }
     Value::Object(object)
 }
@@ -4137,6 +4268,17 @@ fn compact_promotion_summary(promotion: &Value, run_id: &str) -> Value {
             adoption,
             &["candidate_ref", "recovery", "ai_model", "ai_model_source"],
         );
+    }
+    if let Some(gates) = promotion
+        .get("deterministic_gates")
+        .or_else(|| promotion.get("gate_results"))
+        .and_then(Value::as_array)
+    {
+        summary["gates"] = compact_gate_summaries(gates);
+        summary["gates_detail_command"] = json!(format!(
+            "homeboy agent-task status {} --full",
+            quote_arg(run_id)
+        ));
     }
     summary["next_action"] = json!(format!(
         "homeboy agent-task status {} --full",
@@ -5817,6 +5959,97 @@ mod tests {
     }
 
     #[test]
+    fn compact_status_redacts_private_gate_commands_and_points_to_authorized_detail() {
+        let secret = "private-gate --token super-secret-token";
+        let record = json!({
+            "run_id": "run-private-gate",
+            "state": "failed",
+            "tasks": [],
+            "cook": {
+                "cook_id": "cook-private-gate",
+                "phase": "promotion",
+                "publication": "blocked",
+                "deterministic_gates": [{
+                    "id": "private-verification",
+                    "kind": "command",
+                    "status": "failed",
+                    "private": true,
+                    "command": secret,
+                    "stdout": "super-secret-token"
+                }]
+            },
+            "metadata": {
+                "latest_promotion": {
+                    "status": "gate_failed",
+                    "deterministic_gates": [{
+                        "id": "private-verification",
+                        "kind": "command",
+                        "status": "failed",
+                        "private": true,
+                        "command": secret,
+                        "stderr": "super-secret-token"
+                    }]
+                }
+            }
+        });
+
+        let summary = compact_status_summary(&record, "run-private-gate");
+        let serialized = serde_json::to_string(&summary).unwrap();
+
+        assert!(!serialized.contains(secret));
+        assert!(!serialized.contains("super-secret-token"));
+        assert_eq!(summary["cook"]["gates"][0]["id"], "private-verification");
+        assert_eq!(summary["cook"]["gates"][0]["kind"], "command");
+        assert_eq!(summary["cook"]["gates"][0]["status"], "failed");
+        assert_eq!(
+            summary["latest_promotion"]["gates_detail_command"],
+            "homeboy agent-task status run-private-gate --full"
+        );
+    }
+
+    #[test]
+    fn compact_status_enforces_final_byte_budget_with_stable_omission_metadata() {
+        let large = "x".repeat(COMPACT_STATUS_BYTE_LIMIT);
+        let record = json!({
+            "run_id": "run-budget",
+            "state": "failed",
+            "tasks": (0..COMPACT_TASK_LIMIT).map(|index| json!({ "task_id": format!("task-{index}"), "state": "failed", "metadata": large })).collect::<Vec<_>>(),
+            "diagnostic_summary": { "evidence": large },
+            "transport_recovery": { "evidence": large },
+            "failure_reasons": [large],
+            "execution_states": { "evidence": large },
+            "notification_delivery": { "transport_result": large },
+            "metadata": {
+                "latest_promotion": {
+                    "status": "applied",
+                    "changed_files": (0..COMPACT_PROMOTION_FILE_LIMIT).map(|index| format!("{large}-{index}")).collect::<Vec<_>>()
+                },
+                "cook_finalization": { "status": "review_ready", "pr_url": large }
+            },
+            "candidate_adoption": { "state": "completed", "result": { "status": "review_ready", "evidence": large } },
+            "cook": { "phase": "terminal", "publication": "blocked", "deterministic_gates": [{ "id": "gate", "kind": "command", "status": "failed", "command": large }] }
+        });
+
+        let summary = compact_status_summary(&record, "run-budget");
+        let omitted = summary["omitted_sections"]
+            .as_array()
+            .expect("omission metadata");
+
+        assert!(serialized_len(&summary) <= COMPACT_STATUS_BYTE_LIMIT);
+        assert_eq!(summary["schema"], "homeboy/agent-task-status-summary/v1");
+        assert_eq!(summary["run_id"], "run-budget");
+        assert_eq!(summary["state"], "failed");
+        assert_eq!(
+            summary["full_command"],
+            "homeboy agent-task status run-budget --full"
+        );
+        assert!(omitted
+            .iter()
+            .any(|item| item["section"] == "diagnostic_summary"));
+        assert!(omitted.iter().all(|item| item["count"].as_u64().is_some()));
+    }
+
+    #[test]
     fn compact_status_surfaces_actionable_notification_delivery_without_destination() {
         let summary = compact_status_summary(
             &json!({
@@ -6766,6 +6999,10 @@ mod tests {
             context.get("recovery_reason").is_none(),
             "oversized prose is omitted atomically instead of splitting Unicode text"
         );
+        assert_eq!(
+            context["omitted_scalars"][0],
+            json!({ "field": "recovery_reason", "bytes": COMPACT_TEXT_LIMIT + 1 })
+        );
 
         assert_eq!(compact_cook_report(report.clone(), true), report);
     }
@@ -6858,6 +7095,47 @@ mod tests {
         assert!(context.get("next_action").is_none());
         assert!(serde_json::to_vec(&compact).unwrap().len() < 2 * 1024);
         assert_eq!(compact_cook_report(report.clone(), true), report);
+    }
+
+    #[test]
+    fn compact_cook_report_enforces_final_byte_budget_after_all_projections() {
+        let large = "x".repeat(COMPACT_STATUS_BYTE_LIMIT);
+        let report = json!({
+            "schema": "homeboy/agent-task-cook/v1",
+            "cook_id": "cook-budget",
+            "latest_run_id": "run-budget",
+            "status": "durable_failure",
+            "stop_reason": large,
+            "terminal_phase": "promotion",
+            "attempts": (0..COMPACT_TASK_LIMIT).map(|index| json!({ "attempt": index, "run_id": format!("run-{index}"), "run_state": "failed", "aggregate_path": large })).collect::<Vec<_>>(),
+            "finalization": { "status": "blocked", "evidence": large },
+            "selected_candidate": { "run_id": "run-budget", "reason": large },
+            "failure_context": {
+                "phase": "promotion",
+                "reason_code": "gate_failed",
+                "recovery_reason": large,
+                "legal_actions": [{ "action": "status", "command": "homeboy agent-task status run-budget --full" }]
+            },
+            "moving_base_recovery": { "blocker": large },
+            "provider": { "evidence": large },
+            "remaining_phases": [large],
+            "continuation_command": large
+        });
+
+        let compact = compact_cook_report(report, false);
+        let omitted = compact["omitted_sections"]
+            .as_array()
+            .expect("omission metadata");
+
+        assert!(serialized_len(&compact) <= COMPACT_STATUS_BYTE_LIMIT);
+        assert_eq!(compact["schema"], "homeboy/agent-task-cook/v1");
+        assert_eq!(compact["cook_id"], "cook-budget");
+        assert_eq!(compact["status"], "durable_failure");
+        assert_eq!(
+            compact["full_command"],
+            "homeboy agent-task status run-budget --full"
+        );
+        assert!(omitted.iter().any(|item| item["section"] == "provider"));
     }
 
     /// The moving-base recovery carries a full promotion report. Compact keeps
