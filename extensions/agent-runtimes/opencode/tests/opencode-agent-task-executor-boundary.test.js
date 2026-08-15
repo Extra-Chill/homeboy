@@ -171,6 +171,20 @@ assert.equal(JSON.stringify({ manifest, packageJson }).includes('WP Codebox'), f
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-opencode-provider-contract-'));
 try {
+	const executorWorkspace = path.join(root, 'executor-workspace');
+	fs.mkdirSync(executorWorkspace, { recursive: true });
+	spawnSync('git', ['init'], { cwd: executorWorkspace, encoding: 'utf8' });
+	spawnSync('git', ['commit', '--allow-empty', '-m', 'initial'], {
+		cwd: executorWorkspace,
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: 'Homeboy Test',
+			GIT_AUTHOR_EMAIL: 'homeboy@example.test',
+			GIT_COMMITTER_NAME: 'Homeboy Test',
+			GIT_COMMITTER_EMAIL: 'homeboy@example.test',
+		},
+	});
 	const runtimesRoot = path.join(root, 'agent-runtimes');
 	const runtimePath = path.join(runtimesRoot, 'opencode');
 	fs.mkdirSync(runtimesRoot, { recursive: true });
@@ -234,6 +248,7 @@ process.exit(0);
 				command_args: [mockCliPath],
 			},
 		},
+		workspace: { root: executorWorkspace },
 		instructions: 'Prove the OpenCode provider boundary without leaking secrets.',
 		artifacts_path: path.join(root, 'default-artifacts'),
 	};
