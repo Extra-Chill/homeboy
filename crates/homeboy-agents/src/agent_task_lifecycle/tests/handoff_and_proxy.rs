@@ -2066,6 +2066,17 @@ fn status_keeps_fresh_planned_runner_submission_live() {
         let run_id = "run-planned-runner-submission";
         submit_plan(&plan, Some(run_id)).expect("submitted");
         mark_running(run_id).expect("running");
+        rewrite_record_for_test(run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .expect("metadata object")
+                .remove("runner_pid");
+        })
+        .expect("controller owner removed");
+        let stale = status(run_id).expect("pre-planning status loaded");
+        assert_eq!(stale.metadata["stale_running"], true);
+
         record_lab_offload_phase(
             run_id,
             "homeboy-lab",
@@ -2076,14 +2087,6 @@ fn status_keeps_fresh_planned_runner_submission_live() {
             Some(&plan),
         )
         .expect("planned runner submission recorded");
-        rewrite_record_for_test(run_id, |record| {
-            record
-                .metadata
-                .as_object_mut()
-                .expect("metadata object")
-                .remove("runner_pid");
-        })
-        .expect("controller owner removed");
 
         let loaded = status(run_id).expect("status loaded");
 
