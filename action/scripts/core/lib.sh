@@ -441,12 +441,16 @@ homeboy_placement_mode() {
 
 homeboy_command_placement_flags() {
   local command="$1"
+  local command_parts=()
 
   homeboy_placement_mode
   if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${HOMEBOY_ACTION_PLACEMENT_MODE}" = "scoped" ]; then
     case "${command}" in
       review\ audit|review\ lint|review\ test|review\ build|review)
-        printf '%s' '--placement local '
+        read -ra command_parts <<< "${command}"
+        if homeboy_help_supports_placement "${command_parts[@]}"; then
+          printf '%s' '--placement local '
+        fi
         ;;
     esac
   fi
