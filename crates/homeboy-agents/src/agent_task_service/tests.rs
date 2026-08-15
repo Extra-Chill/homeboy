@@ -1724,9 +1724,10 @@ fn scoped_reconcile_keeps_exact_attempts_separate_and_expands_cook_aliases_to_th
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
         agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
             // Model the durable parent/attempt link while both projections are
-            // stale, before normal handoff completion terminalizes the parent.
+            // stale after normal handoff completion has redirected the parent.
             record.metadata["detached_cook_handoff"]["attempt_run_id"] =
                 serde_json::json!(&attempt_id);
+            record.metadata["detached_cook_handoff"]["state"] = serde_json::json!("redirected");
         })
         .expect("link stale parent projection");
         for run_id in [cook_id, attempt_id.as_str()] {
