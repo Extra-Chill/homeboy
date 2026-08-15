@@ -189,16 +189,25 @@ pub(super) fn intercept_local_detached_cook(
     // A daemon-owned job is the authority that outlives this launcher. Prove it
     // is reachable before a provider-capable child exists, so unsupported
     // detachment is rejected before dispatch.
-    let controller_client = match homeboy::core::daemon::LocalControllerJobClient::connect() {
-        Ok(client) => client,
-        Err(error) => {
-            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
-                &cook_id,
-                "durable controller ownership could not be established",
-            );
-            return Err(error);
-        }
-    };
+    let controller_client =
+        match homeboy::core::daemon::LocalControllerJobClient::connect_current_build() {
+            Ok(client) => client,
+            Err(error)
+                if controller_job_daemon_build_mismatch(&error) && !cli.detach_after_handoff =>
+            {
+                // An attached caller can retain foreground ownership. This keeps a
+                // newer client useful without letting an older resident daemon
+                // interpret and terminate lifecycle records it does not understand.
+                return Ok(None);
+            }
+            Err(error) => {
+                let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                    &cook_id,
+                    "durable controller ownership could not be established",
+                );
+                return Err(error);
+            }
+        };
     let route = detached_route(cli);
     let launch_token = create_local_cook_launch_token(&session_root)?;
     let mut child = match spawn_detached_cook(&child_args, &log_path, route.as_ref(), &launch_token)
@@ -324,6 +333,10 @@ pub(super) fn intercept_local_detached_cook(
     // already accepted ownership, so losing this client cannot cancel provider work.
     let status = stream_attached_cook_log(&mut child, &log_path)?;
     Ok(Some(status.code().unwrap_or(1)))
+}
+
+fn controller_job_daemon_build_mismatch(error: &Error) -> bool {
+    error.details["classification"] == "controller_job_daemon_build_mismatch"
 }
 
 /// Serialize once, then write that exact acknowledgement wherever the caller
@@ -985,6 +998,23 @@ mod tests {
         let (token, path) = create_local_cook_launch_token(directory.path()).expect("launch token");
         assert!(consume_local_cook_launch_token_at(token.as_ref(), &path));
         assert!(!consume_local_cook_launch_token_at(token.as_ref(), &path));
+    }
+
+    #[test]
+    fn daemon_build_mismatch_is_an_explicit_foreground_fallback_signal() {
+        let mut mismatch = Error::validation_invalid_argument(
+            "daemon_build_identity",
+            "resident daemon differs",
+            None,
+            None,
+        );
+        mismatch.details = serde_json::json!({
+            "classification": "controller_job_daemon_build_mismatch"
+        });
+        assert!(controller_job_daemon_build_mismatch(&mismatch));
+
+        let unrelated = Error::internal_unexpected("daemon unavailable");
+        assert!(!controller_job_daemon_build_mismatch(&unrelated));
     }
 
     #[test]
