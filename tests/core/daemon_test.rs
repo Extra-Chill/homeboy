@@ -1451,6 +1451,30 @@ fn write_daemon_state_for_test(state: &DaemonState) {
 }
 
 #[test]
+fn controller_job_client_rejects_a_live_daemon_from_another_build() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.build_identity.version = "0.0.0-stale".to_string();
+    state.build_identity.display = "homeboy 0.0.0-stale+fixture".to_string();
+    write_daemon_state_for_test(&state);
+
+    let error = match LocalControllerJobClient::connect_current_build() {
+        Ok(_) => panic!("typed controller jobs require the invoking daemon build"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error.details["classification"],
+        "controller_job_daemon_build_mismatch"
+    );
+    assert_eq!(
+        error.details["daemon_build_identity"],
+        "homeboy 0.0.0-stale+fixture"
+    );
+    assert_eq!(error.details["active_jobs"], 0);
+}
+
+#[test]
 fn status_reports_active_job_recovery_evidence_without_mutating_the_store() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");

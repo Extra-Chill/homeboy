@@ -172,6 +172,42 @@ fn controller_job_response(value: &serde_json::Value) -> Option<&serde_json::Val
 }
 
 impl LocalControllerJobClient {
+    /// Connect only when the resident daemon runs this exact Homeboy build.
+    ///
+    /// Controller-job drivers are in-process code, so a reachable older daemon
+    /// can deserialize a request while applying stale ownership semantics. Fail
+    /// before submission instead of handing new lifecycle records to it.
+    pub fn connect_current_build() -> Result<Self> {
+        let status = read_status()?;
+        if status.reachable && !status.fresh {
+            let daemon_identity = status
+                .state
+                .as_ref()
+                .map(|state| state.build_identity.display.clone());
+            let mut error = Error::validation_invalid_argument(
+                "daemon_build_identity",
+                "controller jobs require the resident daemon to match the invoking Homeboy build",
+                daemon_identity.clone(),
+                Some(vec![
+                    "Preserve active daemon jobs, then restart or upgrade the daemon through its lease-bound recovery plan before retrying detached work."
+                        .to_string(),
+                    "Attached callers may continue with foreground ownership when the command supports it."
+                        .to_string(),
+                ]),
+            );
+            error.details = json!({
+                "classification": "controller_job_daemon_build_mismatch",
+                "daemon_build_identity": daemon_identity,
+                "invoking_build_identity": build_identity::current().display,
+                "stale_reason": status.stale_reason,
+                "stale_reason_code": status.freshness.stale_reason_code,
+                "active_jobs": status.freshness.active_jobs,
+            });
+            return Err(error);
+        }
+        Self::connect()
+    }
+
     pub fn connect() -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
         let client = reqwest::blocking::Client::builder()
