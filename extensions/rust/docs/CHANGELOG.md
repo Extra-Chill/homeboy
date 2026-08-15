@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.35.1] - 2026-08-15
+
+### Fixed
+- honor nextest shard thread setting
+
 ## [1.35.0] - 2026-08-12
 
 ### Added
