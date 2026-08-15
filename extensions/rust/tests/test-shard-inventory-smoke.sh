@@ -528,6 +528,7 @@ HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
 HOMEBOY_SKIP_LINT=1 \
 HOMEBOY_RUST_TEST_RUNNER=nextest \
 HOMEBOY_RUST_NEXTEST_SHARD_THREADS=0 \
+HOMEBOY_SETTINGS_JSON='{"rust_nextest_shard_threads":7,"rust_cargo_test_threads":3}' \
 HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
 HOMEBOY_FAKE_NEXTEST_LOG="$WORK_DIR/nextest-threads.log" \
 HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
@@ -546,7 +547,49 @@ if grep -F -- '--test-threads 1' "${WORK_DIR}/nextest-threads.log" >/dev/null; t
   printf 'FAIL: an explicit thread count must replace the serial default\n' >&2
   exit 1
 fi
-printf 'PASS: shard replay honours a configured thread count\n'
+printf 'PASS: shard replay environment override wins over merged settings\n'
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_SETTINGS_JSON='{"rust_nextest_shard_threads":0,"rust_cargo_test_threads":1}' \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_FAKE_NEXTEST_LOG="$WORK_DIR/nextest-setting-threads.log" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/setting-threads-results.json" \
+HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/setting-threads-runner.out"
+grep -F -- '--test-threads num-cpus' "$WORK_DIR/nextest-setting-threads.log" >/dev/null || {
+  printf 'FAIL: merged nextest zero-thread setting must select num-cpus parallelism\n' >&2
+  exit 1
+}
+printf 'PASS: shard replay reads its merged nextest thread setting\n'
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_SETTINGS_JSON='{"rust_cargo_test_threads":3}' \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_FAKE_NEXTEST_LOG="$WORK_DIR/nextest-fallback-threads.log" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/fallback-threads-results.json" \
+HOMEBOY_ANNOTATIONS_DIR="$WORK_DIR/annotations" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/fallback-threads-runner.out"
+grep -F -- '--test-threads 3' "$WORK_DIR/nextest-fallback-threads.log" >/dev/null || {
+  printf 'FAIL: absent nextest setting must preserve the Cargo thread fallback\n' >&2
+  exit 1
+}
+printf 'PASS: shard replay preserves the Cargo thread fallback\n'
 
 # A prebuilt nextest archive makes shard replay execution-only: listing and
 # running must both read the archive instead of recompiling the workspace, and
