@@ -56,8 +56,9 @@ pub(crate) fn run_package(
             .filter(|m| m.actions.iter().any(|a| a.id == "release.package"))
             .collect();
 
-        let declared_artifact_built =
+        let component_build =
             build_declared_component_artifact(component, declared_build_artifact)?;
+        let declared_artifact_built = component_build.is_some();
         if declared_artifact_built {
             collect_declared_build_artifact(
                 state,
@@ -76,6 +77,7 @@ pub(crate) fn run_package(
                     Some(serde_json::json!({
                         "action": "scripts.build",
                         "artifact": declared_build_artifact,
+                        "component_build": component_build,
                         "package_owned_paths": state.package_owned_paths,
                     })),
                     Vec::new(),
@@ -137,6 +139,7 @@ pub(crate) fn run_package(
                 "extension": response["extension"],
                 "action": "release.package",
                 "response": response["response"],
+                "component_build": component_build,
                 "package_owned_paths": state.package_owned_paths,
             })
         } else {
@@ -144,6 +147,7 @@ pub(crate) fn run_package(
                 "action": "release.package",
                 "extensions": responses.iter().map(|response| response["extension"].clone()).collect::<Vec<_>>(),
                 "responses": responses,
+                "component_build": component_build,
                 "package_owned_paths": state.package_owned_paths,
             })
         };
@@ -399,27 +403,118 @@ fn record_existing_cleanup_path(component_path: &Path, path: &str, paths: &mut B
 fn build_declared_component_artifact(
     component: &Component,
     declared_build_artifact: Option<&str>,
-) -> Result<bool> {
+) -> Result<Option<homeboy_extension::build::BuildOutput>> {
     if declared_build_artifact.is_none_or(|path| path.trim().is_empty())
         || !component.has_script(ExtensionCapability::Build)
     {
-        return Ok(false);
+        return Ok(None);
     }
 
-    let (exit_code, build_error) = homeboy_extension::build::build_component(component);
-    if let Some(error) = build_error {
-        return Err(Error::validation_invalid_argument(
-            "scripts.build",
+    let (build, exit_code) = homeboy_extension::build::build_component_with_output(component)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "scripts.build",
+                error.message,
+                Some(component.id.clone()),
+                None,
+            )
+        })?;
+    if !build.success {
+        let error = format_build_failure(&build, &component.local_path, exit_code);
+        return Err(Error::new(
+            homeboy_core::error::ErrorCode::ValidationInvalidArgument,
             format!(
-                "Failed to build declared build_artifact for component '{}' (exit {:?}): {}",
+                "Failed to build declared build_artifact for component '{}' (exit {}): {}",
                 component.id, exit_code, error
             ),
-            Some(component.id.clone()),
-            None,
+            serde_json::json!({
+                "field": "scripts.build",
+                "component_id": component.id,
+                "component_build": build,
+            }),
         ));
     }
 
-    Ok(true)
+    Ok(Some(build))
+}
+
+fn format_build_failure(
+    build: &homeboy_extension::build::BuildOutput,
+    working_dir: &str,
+    exit_code: i32,
+) -> String {
+    let output = if build.output.stderr.trim().is_empty() {
+        &build.output.stdout
+    } else {
+        &build.output.stderr
+    };
+    let tail = output_tail(output, 16 * 1024);
+    format!(
+        "Component build {} after {}ms (exit {}).\n  Command: {}\n  Working directory: {}{}",
+        build.termination.as_deref().unwrap_or("failed"),
+        build.duration_ms,
+        exit_code,
+        build.build_command,
+        working_dir,
+        if tail.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n--- Build output tail ---\n{tail}")
+        },
+    )
+}
+
+fn output_tail(output: &str, max_bytes: usize) -> String {
+    if output.len() <= max_bytes {
+        return output.trim().to_string();
+    }
+    let start = output
+        .char_indices()
+        .find_map(|(index, _)| (index >= output.len().saturating_sub(max_bytes)).then_some(index))
+        .unwrap_or_default();
+    format!("[truncated]\n{}", output[start..].trim())
+}
+
+#[cfg(test)]
+mod build_failure_tests {
+    use super::*;
+    use homeboy_engine_primitives::command::CapturedOutput;
+
+    #[test]
+    fn timed_out_build_error_is_reproducible_and_bounded() {
+        let build = homeboy_extension::build::BuildOutput {
+            command: "build.run".to_string(),
+            component_id: "example".to_string(),
+            build_command: "make release".to_string(),
+            active_env_keys: Vec::new(),
+            output: CapturedOutput::new(String::new(), format!("{}tail", "x".repeat(20_000))),
+            artifact_inputs: Vec::new(),
+            extension_phase_timings: Vec::new(),
+            changed_scope: None,
+            cargo_target: None,
+            success: false,
+            duration_ms: 30_000,
+            termination: Some("timeout".to_string()),
+        };
+
+        let error = format_build_failure(&build, "/work/example", 124);
+
+        assert!(error.contains("timeout after 30000ms"));
+        assert!(error.contains("Command: make release"));
+        assert!(error.contains("Working directory: /work/example"));
+        assert!(error.ends_with("tail"));
+        assert!(error.len() < 17_000);
+    }
+
+    #[test]
+    fn output_tail_is_safe_for_multibyte_output() {
+        let output = format!("{}final diagnostic", "x€".repeat(10_000));
+
+        let tail = output_tail(&output, 16 * 1024);
+
+        assert!(tail.starts_with("[truncated]"));
+        assert!(tail.ends_with("final diagnostic"));
+    }
 }
 
 /// Add a component-owned deploy artifact even when its packaging provider also

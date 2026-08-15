@@ -2,6 +2,7 @@ use crate as extension;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::{exec_context, ExtensionCapability, ExtensionExecutionContext, ExtensionPhaseTiming};
 use homeboy_core::artifact_inputs::{self, ResolvedArtifactInput};
@@ -175,6 +176,9 @@ pub struct BuildOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cargo_target: Option<homeboy_core::CargoTargetEvidence>,
     pub success: bool,
+    pub duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -240,7 +244,7 @@ pub fn run_changed_since(input: &str, changed_since: Option<&str>) -> Result<(Bu
 /// Thin wrapper around `execute_build_component` that adapts the return type
 /// for the deploy pipeline's error handling convention.
 pub fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
-    let result = execute_build_component(component, None);
+    let result = build_component_with_output(component);
 
     match result {
         Ok((output, exit_code)) => {
@@ -264,6 +268,12 @@ pub fn build_component(component: &component::Component) -> (Option<i32>, Option
     }
 }
 
+/// Execute a component-owned build and retain the structured execution evidence
+/// required by callers that publish build results, such as release packaging.
+pub fn build_component_with_output(component: &component::Component) -> Result<(BuildOutput, i32)> {
+    execute_build_component(component, None)
+}
+
 /// Format a build error message with context from stderr/stdout.
 /// Only includes universal POSIX exit code hints - Homeboy is technology-agnostic.
 fn format_build_error(
@@ -281,9 +291,7 @@ fn format_build_error(
         stderr
     };
 
-    // Get last 15 lines for context
-    let tail: Vec<&str> = output_text.lines().rev().take(15).collect();
-    let output_tail: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    let output_tail = bounded_output_tail(output_text);
 
     // Translate universal POSIX exit codes only (no tool-specific hints)
     let hint = match exit_code {
@@ -308,6 +316,29 @@ fn format_build_error(
     }
 
     msg
+}
+
+const BUILD_ERROR_TAIL_BYTES: usize = 16 * 1024;
+
+fn bounded_output_tail(output: &str) -> String {
+    let tail: Vec<&str> = output.lines().rev().take(15).collect();
+    let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    if tail.len() <= BUILD_ERROR_TAIL_BYTES {
+        return tail;
+    }
+    let start = unicode_safe_tail_start(&tail, BUILD_ERROR_TAIL_BYTES);
+    format!(
+        "[output truncated to last {BUILD_ERROR_TAIL_BYTES} bytes]\n{}",
+        &tail[start..]
+    )
+}
+
+fn unicode_safe_tail_start(value: &str, max_bytes: usize) -> usize {
+    let start = value.len().saturating_sub(max_bytes);
+    value
+        .char_indices()
+        .find_map(|(index, _)| (index >= start).then_some(index))
+        .unwrap_or_default()
 }
 
 // === Internal implementation ===
@@ -424,6 +455,7 @@ fn execute_build_component(
     comp: &Component,
     changed_since: Option<&str>,
 ) -> Result<(BuildOutput, i32)> {
+    let started = Instant::now();
     comp.validate_supported_build_config()?;
 
     // Validate required extensions are installed before resolving build commands.
@@ -470,6 +502,8 @@ fn execute_build_component(
                 changed_scope: changed_scope.map(|decision| decision.report),
                 cargo_target: None,
                 success: true,
+                duration_ms: started.elapsed().as_millis(),
+                termination: Some("completed".to_string()),
             },
             0,
         ));
@@ -504,6 +538,8 @@ fn execute_build_component(
                     changed_scope: changed_scope.clone().map(|decision| decision.report),
                     cargo_target: None,
                     success: false,
+                    duration_ms: started.elapsed().as_millis(),
+                    termination: Some("failed".to_string()),
                 },
                 exit_code,
             ));
@@ -530,7 +566,7 @@ fn execute_build_component(
                 capability: extension::ExtensionCapability::Build,
                 source_path: &validated_path,
                 run_dir: &run_dir,
-                passthrough: true,
+                passthrough: false,
                 extra_env: &build_env(changed_since, changed_scope.as_ref()),
                 script_args: &[],
                 timeout: Some(build_timeout),
@@ -544,6 +580,8 @@ fn execute_build_component(
             .command_override(build_cmd.clone())
             .with_run_dir(&run_dir)
             .timeout(Some(build_timeout))
+            .passthrough(false)
+            .stderr_passthrough(true)
             // Legacy env var for backward compat with existing build scripts
             .env("HOMEBOY_PLUGIN_PATH", &comp.local_path);
         for (key, value) in build_env(changed_since, changed_scope.as_ref()) {
@@ -559,6 +597,8 @@ fn execute_build_component(
             .command_override(build_cmd.clone())
             .with_run_dir(&run_dir)
             .timeout(Some(build_timeout))
+            .passthrough(false)
+            .stderr_passthrough(true)
             .env("HOMEBOY_PLUGIN_PATH", &comp.local_path);
         for (key, value) in build_env(changed_since, changed_scope.as_ref()) {
             runner = runner.env(&key, &value);
@@ -586,6 +626,14 @@ fn execute_build_component(
             changed_scope: changed_scope.map(|decision| decision.report),
             cargo_target,
             success,
+            duration_ms: started.elapsed().as_millis(),
+            termination: Some(if runner_output.timed_out {
+                "timeout".to_string()
+            } else if success {
+                "completed".to_string()
+            } else {
+                "failed".to_string()
+            }),
         },
         runner_output.exit_code,
     );
@@ -735,6 +783,10 @@ fn build_env(
     changed_scope: Option<&BuildChangedScopeDecision>,
 ) -> Vec<(String, String)> {
     let mut env = Vec::new();
+    env.push((
+        homeboy_core::server::CHILD_PROGRESS_LABEL_ENV.to_string(),
+        "build".to_string(),
+    ));
     if let Some(changed_since) = changed_since {
         env.push((
             "HOMEBOY_CHANGED_SINCE".to_string(),
@@ -870,6 +922,30 @@ mod tests {
             build_timeout_from(Some("invalid")),
             Duration::from_secs(30 * 60)
         );
+    }
+
+    #[test]
+    fn build_error_tail_is_bounded_and_keeps_the_last_output() {
+        let output = format!(
+            "{}\nfinal diagnostic",
+            "x".repeat(BUILD_ERROR_TAIL_BYTES + 100)
+        );
+
+        let tail = bounded_output_tail(&output);
+
+        assert!(tail.starts_with("[output truncated"));
+        assert!(tail.ends_with("final diagnostic"));
+        assert!(tail.len() <= BUILD_ERROR_TAIL_BYTES + 64);
+    }
+
+    #[test]
+    fn build_error_tail_is_safe_for_multibyte_output() {
+        let output = format!("{}\nfinal diagnostic", "x€".repeat(BUILD_ERROR_TAIL_BYTES));
+
+        let tail = bounded_output_tail(&output);
+
+        assert!(tail.ends_with("final diagnostic"));
+        assert!(tail.is_char_boundary(0));
     }
 
     #[test]
@@ -1019,6 +1095,10 @@ mod tests {
             "HOMEBOY_BUILD_SCOPE_OUTCOME".to_string(),
             "full".to_string()
         )));
+        assert!(env.contains(&(
+            homeboy_core::server::CHILD_PROGRESS_LABEL_ENV.to_string(),
+            "build".to_string()
+        )));
     }
 
     #[test]
@@ -1034,12 +1114,16 @@ mod tests {
             changed_scope: None,
             cargo_target: None,
             success: true,
+            duration_ms: 0,
+            termination: Some("completed".to_string()),
         }));
 
         let value = serde_json::to_value(result).expect("build result serializes");
 
         assert_eq!(value["command"], "build.run");
         assert_eq!(value["component_id"], "example");
+        assert_eq!(value["duration_ms"], 0);
+        assert_eq!(value["termination"], "completed");
         assert!(value.get("Single").is_none());
     }
 }
