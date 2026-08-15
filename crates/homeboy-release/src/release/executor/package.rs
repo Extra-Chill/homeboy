@@ -468,7 +468,11 @@ fn output_tail(output: &str, max_bytes: usize) -> String {
     if output.len() <= max_bytes {
         return output.trim().to_string();
     }
-    format!("[truncated]\n{}", output[output.len() - max_bytes..].trim())
+    let start = output
+        .char_indices()
+        .find_map(|(index, _)| (index >= output.len().saturating_sub(max_bytes)).then_some(index))
+        .unwrap_or_default();
+    format!("[truncated]\n{}", output[start..].trim())
 }
 
 #[cfg(test)]
@@ -500,6 +504,16 @@ mod build_failure_tests {
         assert!(error.contains("Working directory: /work/example"));
         assert!(error.ends_with("tail"));
         assert!(error.len() < 17_000);
+    }
+
+    #[test]
+    fn output_tail_is_safe_for_multibyte_output() {
+        let output = format!("{}final diagnostic", "x€".repeat(10_000));
+
+        let tail = output_tail(&output, 16 * 1024);
+
+        assert!(tail.starts_with("[truncated]"));
+        assert!(tail.ends_with("final diagnostic"));
     }
 }
 

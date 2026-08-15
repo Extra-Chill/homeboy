@@ -770,6 +770,7 @@ fn wait_for_child_or_delegated_failure(
 }
 
 const CHILD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+const CHILD_PROGRESS_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 const CHILD_OUTPUT_TAIL_BYTES: usize = 16 * 1024;
 pub const CHILD_SECRET_ENV_NAMES_ENV: &str = "HOMEBOY_CHILD_SECRET_ENV_NAMES";
 /// Opt in to concise lifecycle messages for a supervised local child.
@@ -804,6 +805,7 @@ struct ChildSupervision {
     record: ChildSupervisionRecord,
     redaction_values: Vec<String>,
     last_heartbeat: Instant,
+    last_progress_report: Instant,
     started: Instant,
     progress_label: Option<String>,
 }
@@ -830,7 +832,7 @@ impl ChildSupervision {
             eprintln!(
                 "[{label}] started command={} cwd={}",
                 redact_child_secret_values(command, &redaction_values),
-                current_dir.unwrap_or(".")
+                redact_child_secret_values(current_dir.unwrap_or("."), &redaction_values)
             );
         }
         let supervision = Self {
@@ -854,6 +856,7 @@ impl ChildSupervision {
             },
             redaction_values,
             last_heartbeat: Instant::now(),
+            last_progress_report: Instant::now(),
             started: Instant::now(),
             progress_label,
         };
@@ -867,11 +870,14 @@ impl ChildSupervision {
         }
         self.record.heartbeat_at = Utc::now().to_rfc3339();
         self.last_heartbeat = Instant::now();
-        if let Some(label) = &self.progress_label {
-            eprintln!(
-                "[{label}] still running elapsed={}s",
-                self.started.elapsed().as_secs()
-            );
+        if progress_report_due(self.last_progress_report, Instant::now()) {
+            if let Some(label) = &self.progress_label {
+                eprintln!(
+                    "[{label}] still running elapsed={}s",
+                    self.started.elapsed().as_secs()
+                );
+                self.last_progress_report = Instant::now();
+            }
         }
         self.persist();
     }
@@ -939,6 +945,10 @@ impl ChildSupervision {
             let _ = std::fs::remove_file(temporary);
         }
     }
+}
+
+fn progress_report_due(last_report: Instant, now: Instant) -> bool {
+    now.duration_since(last_report) >= CHILD_PROGRESS_REPORT_INTERVAL
 }
 
 fn child_secret_values(env: Option<&[(&str, &str)]>) -> Vec<String> {
@@ -1028,6 +1038,31 @@ mod tests {
                 Some(libc::ESRCH)
             );
         }
+    }
+
+    #[test]
+    fn progress_reports_are_rate_limited_separately_from_supervision() {
+        let started = Instant::now();
+
+        assert!(!progress_report_due(
+            started,
+            started + CHILD_PROGRESS_REPORT_INTERVAL - Duration::from_secs(1)
+        ));
+        assert!(progress_report_due(
+            started,
+            started + CHILD_PROGRESS_REPORT_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn progress_cwd_redacts_declared_child_secrets() {
+        let secret = "secret-value";
+        let cwd = format!("/work/{secret}/component");
+
+        assert_eq!(
+            redact_child_secret_values(&cwd, &[secret.to_string()]),
+            "/work/[REDACTED]/component"
+        );
     }
 
     #[test]

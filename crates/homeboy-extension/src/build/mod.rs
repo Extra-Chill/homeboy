@@ -326,11 +326,19 @@ fn bounded_output_tail(output: &str) -> String {
     if tail.len() <= BUILD_ERROR_TAIL_BYTES {
         return tail;
     }
-    let start = tail.len() - BUILD_ERROR_TAIL_BYTES;
+    let start = unicode_safe_tail_start(&tail, BUILD_ERROR_TAIL_BYTES);
     format!(
         "[output truncated to last {BUILD_ERROR_TAIL_BYTES} bytes]\n{}",
         &tail[start..]
     )
+}
+
+fn unicode_safe_tail_start(value: &str, max_bytes: usize) -> usize {
+    let start = value.len().saturating_sub(max_bytes);
+    value
+        .char_indices()
+        .find_map(|(index, _)| (index >= start).then_some(index))
+        .unwrap_or_default()
 }
 
 // === Internal implementation ===
@@ -928,6 +936,16 @@ mod tests {
         assert!(tail.starts_with("[output truncated"));
         assert!(tail.ends_with("final diagnostic"));
         assert!(tail.len() <= BUILD_ERROR_TAIL_BYTES + 64);
+    }
+
+    #[test]
+    fn build_error_tail_is_safe_for_multibyte_output() {
+        let output = format!("{}\nfinal diagnostic", "x€".repeat(BUILD_ERROR_TAIL_BYTES));
+
+        let tail = bounded_output_tail(&output);
+
+        assert!(tail.ends_with("final diagnostic"));
+        assert!(tail.is_char_boundary(0));
     }
 
     #[test]
