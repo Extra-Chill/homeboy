@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
 use homeboy::agents::agent_task_scheduler::{
@@ -80,6 +81,71 @@ type CookAttemptDispatcherFactory = dyn Fn(
 
 const FANOUT_COORDINATOR_HEARTBEAT_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
+const DRY_RUN_PLANNER_TIMEOUT: Duration = Duration::from_secs(10);
+const DRY_RUN_MAX_ISSUES: usize = 128;
+const DRY_RUN_MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
+const DRY_RUN_MAX_GATE_BYTES: usize = 8 * 1024;
+
+/// Dry-run is a static preview, not a smaller execution. Keep its budget
+/// separate from Cook's execution deadline and report only planning phases so
+/// #10019 remains the owner of foreground execution progress.
+struct DryRunPlanner {
+    deadline: Instant,
+    phase: &'static str,
+    replay_command: String,
+}
+
+impl DryRunPlanner {
+    fn new(args: &AgentTaskFanoutCookBatchArgs) -> Self {
+        Self {
+            deadline: Instant::now() + DRY_RUN_PLANNER_TIMEOUT,
+            phase: "initializing",
+            replay_command: dry_run_replay_command(args),
+        }
+    }
+
+    fn advance(&mut self, phase: &'static str, unresolved_dependency: &'static str) -> Result<()> {
+        if Instant::now() >= self.deadline {
+            return Err(Error::new(
+                ErrorCode::ValidationInvalidArgument,
+                "fanout dry-run planner deadline exceeded",
+                serde_json::json!({
+                    "reason": "planner_deadline_exceeded",
+                    "planner_timeout_seconds": DRY_RUN_PLANNER_TIMEOUT.as_secs(),
+                    "phase": self.phase,
+                    "unresolved_dependency": unresolved_dependency,
+                    "replay_command": self.replay_command,
+                }),
+            ));
+        }
+        self.phase = phase;
+        eprintln!(
+            "{{\"event\":\"dry_run_planning_progress\",\"phase\":{}}}",
+            serde_json::to_string(phase).expect("phase serializes"),
+        );
+        Ok(())
+    }
+
+    fn defer(&self, phase: &'static str, unresolved_dependency: &'static str) -> Error {
+        Error::new(
+            ErrorCode::ValidationInvalidArgument,
+            "fanout dry-run accepts static inputs only",
+            serde_json::json!({
+                "reason": "static_input_required",
+                "phase": phase,
+                "unresolved_dependency": unresolved_dependency,
+                "replay_command": self.replay_command,
+            }),
+        )
+    }
+
+    fn failure(&self, mut error: Error, unresolved_dependency: &'static str) -> Error {
+        error.details["phase"] = Value::String(self.phase.to_string());
+        error.details["unresolved_dependency"] = Value::String(unresolved_dependency.to_string());
+        error.details["replay_command"] = Value::String(self.replay_command.clone());
+        error
+    }
+}
 
 struct CoordinatorHeartbeat {
     stop: std::sync::mpsc::Sender<()>,
@@ -1713,6 +1779,9 @@ fn cook_batch_inner(
     mut args: AgentTaskFanoutCookBatchArgs,
     attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
 ) -> CmdResult<Value> {
+    if args.dry_run {
+        return cook_batch_dry_run(args);
+    }
     args.gates.snapshot_file_inputs()?;
     normalize_cook_batch_repo(&mut args)?;
     apply_provider_profile(&mut args);
@@ -1814,8 +1883,6 @@ fn cook_batch_inner(
             )?;
             return Err(error);
         }
-    } else if args.dry_run {
-        preflight_batch_cook_recipe_declarations(&plan)?;
     }
     let run_result = if args.run_plan && can_run {
         let (value, exit_code) = match attempt_dispatcher {
@@ -1867,7 +1934,7 @@ fn cook_batch_inner(
                 },
                 "preflight": {
                     "provider_readiness_command": provider_readiness_command(&args),
-                    "provider_selection": provider_selection_preflight(&args),
+                    "provider_selection": provider_selection_preflight(&args, args.dry_run),
                     "deterministic_gates": effective_batch_cook_gates(&plan)
                 },
                 "worktrees": worktrees,
@@ -1889,6 +1956,161 @@ fn cook_batch_inner(
             }),
         exit_code,
     ))
+}
+
+/// Static dry-run deliberately stops before any repository, provider, workspace,
+/// gate-file, or evidence-file hydration. This makes the planner's wall-clock
+/// bound enforceable without spawning an unkillable helper around a synchronous
+/// dependency.
+fn cook_batch_dry_run(mut args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value> {
+    let mut planner = DryRunPlanner::new(&args);
+    planner.advance("gate_inputs", "declared gate inputs")?;
+    if args.issues.len() > DRY_RUN_MAX_ISSUES {
+        return Err(planner.defer("gate_inputs", "bounded issue list"));
+    }
+    if args
+        .issues
+        .iter()
+        .any(|issue| issue.len() > DRY_RUN_MAX_GATE_BYTES)
+        || args.repo.len() > DRY_RUN_MAX_GATE_BYTES
+        || args
+            .prompt_template
+            .as_deref()
+            .is_some_and(|template| template.len() > DRY_RUN_MAX_INLINE_JSON_BYTES)
+    {
+        return Err(planner.defer("gate_inputs", "bounded static identifier input"));
+    }
+    if args
+        .verification_profiles
+        .as_deref()
+        .is_some_and(|spec| spec.len() > DRY_RUN_MAX_INLINE_JSON_BYTES)
+        || args
+            .gates
+            .verify
+            .iter()
+            .chain(&args.gates.private_verify)
+            .any(|gate| gate.len() > DRY_RUN_MAX_GATE_BYTES)
+    {
+        return Err(planner.defer("gate_inputs", "bounded inline planning input"));
+    }
+    if !static_repeatable_inputs_are_bounded(&args) {
+        return Err(planner.defer("gate_inputs", "bounded repeatable static planning input"));
+    }
+    if !args.gates.verify_file.is_empty()
+        || !args.gates.private_verify_file.is_empty()
+        || !args.provider_evidence_inputs.is_empty()
+    {
+        return Err(planner.defer("gate_inputs", "file-backed gate or provider evidence input"));
+    }
+    if args
+        .verification_profiles
+        .as_deref()
+        .is_some_and(|spec| spec.starts_with('@') || spec.trim() == "-")
+    {
+        return Err(planner.defer("gate_inputs", "file-backed verification profiles"));
+    }
+    planner.advance("repository", "supplied repository identifier")?;
+    normalize_static_cook_batch_repo(&mut args)
+        .map_err(|error| planner.failure(error, "registered primary repository"))?;
+    // Profile/default resolution is part of the effective child identity. It is
+    // local catalog/config projection only; readiness and provider execution
+    // remain deferred to the replayed run.
+    apply_provider_profile(&mut args);
+    resolve_and_validate_effective_backend(&mut args)
+        .map_err(|error| planner.failure(error, "static provider selection"))?;
+    planner.advance(
+        "issues_and_gates",
+        "supplied issue URLs and gate declarations",
+    )?;
+    let plan = build_static_cook_batch_plan(&args)
+        .map_err(|error| planner.failure(error, "supplied issue URLs and gate declarations"))?;
+    planner.advance("gate_contracts", "static deterministic gate declarations")?;
+    let workspace = batch_gate_workspace(&args)
+        .map_err(|error| planner.failure(error, "authoritative registered workspace"))?;
+    validate_batch_cook_gates(&plan, workspace)
+        .map_err(|error| planner.failure(error, "static deterministic gate declarations"))?;
+    planner.advance("worktrees", "static worktree projection")?;
+    let worktrees = static_worktrees_dry_run(&args, &plan);
+    planner.advance("recipe_declarations", "immutable cook declarations")?;
+    let plan_has_private_gates = plan
+        .cooks
+        .iter()
+        .any(|cook| !cook.private_verify.is_empty());
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-cook-batch/v1",
+            "fanout_id": plan.fanout_id,
+            "status": "ready",
+            "dry_run": true,
+            "summary": { "issues": plan.cooks.len(), "worktrees_total": worktrees.rows.len(), "worktrees_blocked": 0 },
+            "preflight": {
+                "provider_readiness_command": provider_readiness_command(&args),
+                "provider_selection": provider_selection_preflight(&args, true),
+                "deterministic_gates": effective_batch_cook_gates(&plan),
+            },
+            "worktrees": worktrees,
+            "plan": public_batch_cook_plan(&plan),
+            "run_result": Value::Null,
+            "commands": cook_batch_commands(&args, plan_has_private_gates, None),
+            "next_actions": cook_batch_next_actions(&args, &plan.fanout_id, "ready", false, false, &static_worktrees_dry_run(&args, &plan), plan_has_private_gates, None),
+        }),
+        0,
+    ))
+}
+
+fn static_repeatable_inputs_are_bounded(args: &AgentTaskFanoutCookBatchArgs) -> bool {
+    let gates = &args.gates;
+    let count = gates.verify.len()
+        + gates.private_verify.len()
+        + gates.input_sources.len()
+        + gates.gate_toolchains.len()
+        + gates.gate_toolchain_specs.len()
+        + gates.gate_package_artifacts.len()
+        + gates.gate_extension_inputs.len()
+        + gates.gate_environment.len()
+        + gates.gate_environment_preserve.len()
+        + args.secret_env.len();
+    if count > DRY_RUN_MAX_ISSUES {
+        return false;
+    }
+    let mut strings = gates
+        .verify
+        .iter()
+        .chain(&gates.private_verify)
+        .chain(&gates.gate_toolchains)
+        .chain(&args.secret_env);
+    if strings.any(|value| value.len() > DRY_RUN_MAX_GATE_BYTES) {
+        return false;
+    }
+    serde_json::to_vec(&(
+        &gates.input_sources,
+        &gates.gate_toolchain_specs,
+        &gates.gate_package_artifacts,
+        &gates.gate_extension_inputs,
+        &gates.gate_environment,
+        &gates.gate_environment_preserve,
+    ))
+    .is_ok_and(|encoded| encoded.len() <= DRY_RUN_MAX_INLINE_JSON_BYTES)
+}
+
+/// Dry-run accepts a registered primary path because it can be normalized from
+/// local component registration without touching Git, providers, or worktrees.
+fn normalize_static_cook_batch_repo(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
+    if !std::path::Path::new(&args.repo).is_absolute() {
+        return Ok(());
+    }
+    match homeboy::core::component::resolve_registered_primary_path(&args.repo)? {
+        homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
+            args.repo = id;
+            Ok(())
+        }
+        homeboy::core::component::RegisteredPrimaryPathResolution::Related(candidates) => {
+            Err(invalid_cook_batch_repo(args, candidates))
+        }
+        homeboy::core::component::RegisteredPrimaryPathResolution::Unknown => {
+            Err(invalid_cook_batch_repo(args, Vec::new()))
+        }
+    }
 }
 
 fn record_batch_preflight_failure(
@@ -2198,18 +2420,7 @@ fn queue_or_reuse_worktrees(
     };
 
     if args.dry_run {
-        if configured_provider_workspace_creation()? {
-            return with_workspace_owner_repair_commands(
-                args,
-                plan,
-                plan_provider_worktrees_dry_run(args, plan)?,
-            );
-        }
-        return with_workspace_owner_repair_commands(
-            args,
-            plan,
-            queue_or_reuse_worktrees_dry_run(args, plan, queue_create)?,
-        );
+        return Ok(static_worktrees_dry_run(args, plan));
     }
 
     let mut reused = Vec::new();
@@ -2255,6 +2466,36 @@ fn queue_or_reuse_worktrees(
             rows,
         },
     )
+}
+
+/// A preview must not contact a worktree provider, inspect existing worktrees,
+/// or resolve Git refs. Those operations can hydrate remote state or block on a
+/// provider. The command is the replayable execution boundary; paths are left
+/// unknown until that boundary materializes the worktree.
+fn static_worktrees_dry_run(
+    args: &AgentTaskFanoutCookBatchArgs,
+    plan: &BatchCookFanoutPlan,
+) -> worktree::WorktreeQueueCreateOutput {
+    worktree::WorktreeQueueCreateOutput {
+        schema: "homeboy/worktree-queue-create/v1",
+        repo: args.repo.clone(),
+        base_ref: args.from.clone(),
+        dry_run: true,
+        rows: plan
+            .cooks
+            .iter()
+            .map(|cook| worktree::WorktreeQueueCreateRow {
+                branch: cook.head.clone().expect("generated cooks have heads"),
+                handle: cook.to_worktree.clone(),
+                status: worktree::WorktreeQueueCreateStatus::WouldCreate,
+                command: worktree_create_command(args, cook.head.as_deref().expect("head exists")),
+                retry_after_seconds: None,
+                active_lock_holder: None,
+                path: None,
+                error: None,
+            })
+            .collect(),
+    }
 }
 
 fn with_workspace_owner_repair_commands(
@@ -2507,9 +2748,17 @@ fn preflight_batch_cook_recipes(
 /// A dry-run validates the immutable recipe declaration, not a future
 /// workspace. Dispatch compilation resolves workspace handles by design, so it
 /// runs only after execution has materialized the declared destination.
-fn preflight_batch_cook_recipe_declarations(plan: &BatchCookFanoutPlan) -> Result<()> {
+fn preflight_batch_cook_recipe_declarations(
+    plan: &BatchCookFanoutPlan,
+    static_planning: bool,
+) -> Result<()> {
     for cook in &plan.cooks {
-        cook.to_cook_invocation(plan)?;
+        // Invocation construction resolves provider disclosure metadata. That
+        // is execution hydration, so static planning limits itself to the
+        // already-validated declaration and leaves provider resolution to run.
+        if !static_planning {
+            cook.to_cook_invocation(plan)?;
+        }
     }
     Ok(())
 }
@@ -3350,6 +3599,35 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
         args.prompt_template.as_deref(),
     )?;
     let profiles = load_verification_profiles(args.verification_profiles.as_deref())?;
+    build_cook_batch_plan_with_profiles(args, profiles)
+}
+
+/// Parse only inline declarations for static dry-run. Unlike the normal loader,
+/// this deliberately cannot open stdin or an `@file` reference.
+fn build_static_cook_batch_plan(
+    args: &AgentTaskFanoutCookBatchArgs,
+) -> Result<BatchCookFanoutPlan> {
+    let profiles = match args.verification_profiles.as_deref() {
+        Some(spec) => serde_json::from_str(spec).map_err(|error| {
+            Error::validation_invalid_argument(
+                "verification-profiles",
+                format!("invalid inline JSON verification profile declaration: {error}"),
+                None,
+                None,
+            )
+        })?,
+        None => VerificationProfiles {
+            profiles: BTreeMap::new(),
+            assignments: Vec::new(),
+        },
+    };
+    build_cook_batch_plan_with_profiles(args, profiles)
+}
+
+fn build_cook_batch_plan_with_profiles(
+    args: &AgentTaskFanoutCookBatchArgs,
+    profiles: VerificationProfiles,
+) -> Result<BatchCookFanoutPlan> {
     let mut seen = HashSet::new();
     let mut cooks = Vec::with_capacity(args.issues.len());
     for issue_url in &args.issues {
@@ -3817,8 +4095,15 @@ fn selected_provider_profile(name: Option<&str>) -> Option<AgentTaskProviderProf
         .cloned()
 }
 
-fn provider_selection_preflight(args: &AgentTaskFanoutCookBatchArgs) -> Value {
-    let warnings = provider_selection_warnings(args);
+fn provider_selection_preflight(
+    args: &AgentTaskFanoutCookBatchArgs,
+    static_planning: bool,
+) -> Value {
+    let warnings = if static_planning && args.provider_profile.is_some() {
+        vec!["provider profile resolution is deferred to the executable run plan".to_string()]
+    } else {
+        provider_selection_warnings(args)
+    };
     serde_json::json!({
         "profile": args.provider_profile,
         "executor": {
@@ -3940,6 +4225,39 @@ fn cook_batch_plan_command(args: &AgentTaskFanoutCookBatchArgs) -> String {
     planned.dry_run = true;
     planned.run_plan = false;
     quote_args(&cook_batch_argv(&planned))
+}
+
+/// Error envelopes must be safe to persist or render. A private gate can only
+/// be replayed from the original local invocation, never by echoing its bytes.
+fn dry_run_replay_command(args: &AgentTaskFanoutCookBatchArgs) -> String {
+    if !args.gates.private_verify.is_empty()
+        || !args.gates.private_verify_file.is_empty()
+        || args
+            .verification_profiles
+            .as_deref()
+            .is_some_and(profile_replay_requires_redaction)
+    {
+        return "[redacted: re-run the original local private Cook-batch invocation]".to_string();
+    }
+    cook_batch_plan_command(args)
+}
+
+fn profile_replay_requires_redaction(spec: &str) -> bool {
+    if spec.starts_with('@') || spec.trim() == "-" {
+        return true;
+    }
+    serde_json::from_str::<Value>(spec)
+        .ok()
+        .and_then(|value| value.get("profiles").cloned())
+        .and_then(|profiles| profiles.as_object().cloned())
+        .is_some_and(|profiles| {
+            profiles.values().any(|profile| {
+                profile
+                    .get("private_verify")
+                    .and_then(Value::as_array)
+                    .is_some_and(|commands| !commands.is_empty())
+            })
+        })
 }
 
 fn has_private_gates(args: &AgentTaskFanoutCookBatchArgs) -> bool {
@@ -6013,6 +6331,7 @@ fi
             let mut args = cook_batch_args();
             args.repo = "fixture".to_string();
             args.gates.verify = vec!["homeboy lint fixture --path .".to_string()];
+            args.dry_run = false;
             let error =
                 cook_batch(args).expect_err("script alias must reject before queuing worktrees");
             assert!(error.message.contains("repository script identity"));
@@ -6517,7 +6836,7 @@ fi
                 "provided"
             );
             assert_eq!(value["worktrees"]["dry_run"], true);
-            assert_eq!(value["worktrees"]["rows"][0]["status"], "created");
+            assert_eq!(value["worktrees"]["rows"][0]["status"], "would_create");
             assert!(value["commands"]["resume_from_plan"]
                 .as_str()
                 .expect("resume command")
@@ -6582,10 +6901,17 @@ fi
 
             assert_eq!(exit_code, 0);
             assert_eq!(value["status"], "ready");
+            assert_eq!(
+                value["worktrees"]["rows"].as_array().expect("rows").len(),
+                2,
+                "the deterministic two-child preview retains every child"
+            );
             for row in value["worktrees"]["rows"].as_array().expect("rows") {
                 assert_eq!(row["status"], "would_create");
-                let path = row["path"].as_str().expect("planned path");
-                assert!(!std::path::Path::new(path).exists());
+                assert!(
+                    row["path"].is_null(),
+                    "static planning does not probe paths"
+                );
             }
             assert!(value["plan"]["cooks"]
                 .as_array()
@@ -6596,7 +6922,152 @@ fi
                 .path()
                 .join(".local/share/homeboy/agent-task-recipes")
                 .exists());
+            assert!(
+                !home
+                    .path()
+                    .join(".local/share/homeboy/agent-task-batches")
+                    .exists(),
+                "dry-run must not create a durable batch"
+            );
         });
+    }
+
+    #[test]
+    fn dry_run_planner_timeout_names_the_unresolved_dependency_and_replay() {
+        let args = cook_batch_args();
+        let mut planner = DryRunPlanner {
+            deadline: Instant::now(),
+            phase: "issues_and_gates",
+            replay_command: cook_batch_plan_command(&args),
+        };
+
+        let error = planner
+            .advance("worktrees", "static worktree projection")
+            .expect_err("expired planner deadline");
+        assert_eq!(error.details["reason"], "planner_deadline_exceeded");
+        assert_eq!(error.details["phase"], "issues_and_gates");
+        assert_eq!(
+            error.details["unresolved_dependency"],
+            "static worktree projection"
+        );
+        assert!(error.details["replay_command"]
+            .as_str()
+            .expect("replay command")
+            .contains("--dry-run"));
+    }
+
+    #[test]
+    fn dry_run_rejects_a_blocking_gate_file_without_opening_it() {
+        with_isolated_home(|home| {
+            let fifo = home.path().join("blocking-gate-input");
+            assert!(Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("create blocking fixture")
+                .success());
+            let mut args = cook_batch_args();
+            args.gates.verify_file.push(fifo.display().to_string());
+
+            let started = Instant::now();
+            let error = cook_batch(args).expect_err("static dry-run rejects file-backed gates");
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "dry-run must return before opening the FIFO: {error}"
+            );
+            assert_eq!(error.details["reason"], "static_input_required");
+            assert_eq!(
+                error.details["unresolved_dependency"],
+                "file-backed gate or provider evidence input"
+            );
+            assert!(error.details["replay_command"]
+                .as_str()
+                .expect("replay command")
+                .contains("--dry-run"));
+            assert!(
+                !home
+                    .path()
+                    .join(".local/share/homeboy/agent-task-recipes")
+                    .exists(),
+                "blocking planning input must not create recipes"
+            );
+        });
+    }
+
+    #[test]
+    fn dry_run_bounds_large_issue_lists_before_plan_construction() {
+        with_isolated_home(|home| {
+            let mut args = cook_batch_args();
+            args.issues = (0..=DRY_RUN_MAX_ISSUES)
+                .map(|number| format!("https://github.com/Extra-Chill/homeboy/issues/{number}"))
+                .collect();
+
+            let started = Instant::now();
+            let error = cook_batch(args).expect_err("oversized static issue list");
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "input cap must bound planning before child construction: {error}"
+            );
+            assert_eq!(error.details["reason"], "static_input_required");
+            assert_eq!(error.details["unresolved_dependency"], "bounded issue list");
+            assert!(!home
+                .path()
+                .join(".local/share/homeboy/agent-task-recipes")
+                .exists());
+        });
+    }
+
+    #[test]
+    fn dry_run_normalizes_registered_primary_and_validates_static_gate_aliases() {
+        with_isolated_home(|home| {
+            let primary = home.path().join("primary");
+            std::fs::create_dir_all(&primary).expect("primary directory");
+            std::fs::write(
+                primary.join("homeboy.json"),
+                r#"{"scripts":{"lint":["check"],"test":["check"]}}"#,
+            )
+            .expect("component manifest");
+            write_component_registration(home.path(), "fixture", &primary);
+
+            for gate in [
+                "homeboy lint fixture --path .",
+                "homeboy test fixture --path .",
+            ] {
+                let mut args = cook_batch_args();
+                args.repo = primary.display().to_string();
+                args.gates.verify = vec![gate.to_string()];
+                let error = cook_batch(args).expect_err("static gate alias is rejected");
+                assert!(
+                    error.message.contains("repository script identity"),
+                    "{error}"
+                );
+                assert!(
+                    error.details["replay_command"]
+                        .as_str()
+                        .expect("public replay command")
+                        .contains("--repo"),
+                    "primary-path input remains replayable"
+                );
+            }
+            assert!(!home
+                .path()
+                .join(".local/share/homeboy/agent-task-recipes")
+                .exists());
+        });
+    }
+
+    #[test]
+    fn public_inline_profile_keeps_an_executable_replay_command() {
+        let mut args = cook_batch_args();
+        args.verification_profiles = Some(
+            r#"{"profiles":{"public":{"verify":["cargo test"]}},"assignments":[]}"#.to_string(),
+        );
+        assert!(dry_run_replay_command(&args).starts_with("homeboy "));
+
+        let sentinel = "PRIVATE_PROFILE_REPLAY_SENTINEL";
+        args.verification_profiles = Some(format!(
+            r#"{{"profiles":{{"private":{{"private_verify":["{sentinel}"]}}}},"assignments":[]}}"#
+        ));
+        assert!(!dry_run_replay_command(&args).contains(sentinel));
     }
 
     #[test]
@@ -6646,7 +7117,7 @@ fi
             let (value, exit_code) = cook_batch(args).expect("mixed dry-run plan");
 
             assert_eq!(exit_code, 0, "{value}");
-            assert_eq!(value["worktrees"]["rows"][0]["status"], "created");
+            assert_eq!(value["worktrees"]["rows"][0]["status"], "would_create");
             assert_eq!(value["worktrees"]["rows"][1]["status"], "would_create");
         });
     }
