@@ -278,10 +278,7 @@ pub fn route_after_parse_with_provenance(
     // Cooks must resolve provider ownership before the launcher can acknowledge
     // or observe them. Auto without a runner is a local provider placement and
     // needs the same daemon-owned supervision as explicit local execution.
-    if inferred_runner_id.is_some()
-        || cli.placement.allows_local_fallback()
-        || cli.placement == homeboy::cli_surface::Placement::Auto
-    {
+    if needs_provider_resolved_cook_interception(cli, inferred_runner_id.as_deref()) {
         let provider_placement = if inferred_runner_id.is_some() {
             "lab"
         } else {
@@ -581,6 +578,16 @@ pub fn route_after_parse_with_provenance(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+fn needs_provider_resolved_cook_interception(cli: &Cli, inferred_runner_id: Option<&str>) -> bool {
+    // Explicit local placement was already intercepted before provider
+    // resolution. Running it through this pass again consumes the supervised
+    // child's one-use launch token twice and recursively detaches the child.
+    cli.placement != homeboy::cli_surface::Placement::Local
+        && (inferred_runner_id.is_some()
+            || cli.placement.allows_local_fallback()
+            || cli.placement == homeboy::cli_surface::Placement::Auto)
 }
 
 /// Return the Lab choice made by resource admission. `Some(None)` is an
