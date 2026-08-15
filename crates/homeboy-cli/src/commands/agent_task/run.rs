@@ -330,9 +330,8 @@ fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
 }
 
 fn redact_preview_replay_argv(argv: impl IntoIterator<Item = String>) -> PreviewReplayArgv {
-    let units = clap_replay_units(argv.into_iter().collect());
+    let (units, mut requires) = clap_replay_units(argv.into_iter().collect());
     let mut replay = Vec::new();
-    let mut requires = Vec::new();
     let mut bytes = 0;
     for unit in units {
         let unit_bytes = unit.iter().map(String::len).sum::<usize>();
@@ -355,34 +354,10 @@ fn redact_preview_replay_argv(argv: impl IntoIterator<Item = String>) -> Preview
     }
 }
 
-fn clap_replay_units(argv: Vec<String>) -> Vec<Vec<String>> {
-    const VALUE_FLAGS: &[&str] = &[
-        "--prompt",
-        "--goal",
-        "--repo",
-        "--task-url",
-        "--to-worktree",
-        "--cwd",
-        "--workspace",
-        "--verify",
-        "--verify-file",
-        "--private-verify",
-        "--private-verify-file",
-        "--gate-env",
-        "--provider-config",
-        "--client-context",
-        "--lab-env-json",
-        "--provider-argv",
-        "--provider-command",
-        "--runner-env",
-        "--secret-env",
-        "--backend",
-        "--selector",
-        "--model",
-        "--base",
-        "--head",
-    ];
+fn clap_replay_units(argv: Vec<String>) -> (Vec<Vec<String>>, Vec<String>) {
+    let value_flags = cook_value_flags();
     let mut units = Vec::new();
+    let mut requires = Vec::new();
     let mut index = 0;
     while index < argv.len() {
         let value = &argv[index];
@@ -391,15 +366,41 @@ fn clap_replay_units(argv: Vec<String>) -> Vec<Vec<String>> {
         } else if let Some((_flag, _)) = value.split_once('=') {
             units.push(vec![value.clone()]);
             index += 1;
-        } else if VALUE_FLAGS.contains(&value.as_str()) && index + 1 < argv.len() {
-            units.push(vec![value.clone(), argv[index + 1].clone()]);
-            index += 2;
+        } else if value_flags.contains(value) {
+            if let Some(next) = argv.get(index + 1).filter(|next| !next.starts_with("--")) {
+                units.push(vec![value.clone(), next.clone()]);
+                index += 2;
+            } else {
+                requires.push(format!("{value} was omitted because its value is absent; provide the original value before replaying"));
+                index += 1;
+            }
         } else {
             units.push(vec![value.clone()]);
             index += 1;
         }
     }
-    units
+    (units, requires)
+}
+
+fn cook_value_flags() -> std::collections::BTreeSet<String> {
+    let command = crate::cli_surface::Cli::command_with_scoped_lab_args();
+    let cook = command
+        .find_subcommand("agent-task")
+        .and_then(|agent_task| agent_task.find_subcommand("cook"))
+        .expect("Cook command exists in generated Clap metadata");
+    let mut flags = std::collections::BTreeSet::new();
+    for arg in cook
+        .get_arguments()
+        .filter(|arg| arg.get_action().takes_values())
+    {
+        if let Some(flag) = arg.get_long() {
+            flags.insert(format!("--{flag}"));
+        }
+        if let Some(aliases) = arg.get_all_aliases() {
+            flags.extend(aliases.into_iter().map(|alias| format!("--{alias}")));
+        }
+    }
+    flags
 }
 
 fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
@@ -410,10 +411,6 @@ fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
         .split('=')
         .next()
         .unwrap_or_default();
-    let value = unit
-        .get(1)
-        .map(String::as_str)
-        .or_else(|| unit[0].split_once('=').map(|(_, value)| value));
     let sensitive = flag == "--private-verify"
         || flag == "--private-verify-file"
         || flag == "--gate-env"
@@ -421,9 +418,12 @@ fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
         || flag == "--lab-env-json"
         || matches!(
             flag,
-            "--provider-config" | "--client-context" | "--provider-command"
-        ) && value.is_some_and(sensitive_payload)
-        || flag == "--provider-argv" && value.is_some_and(sensitive_payload);
+            "--provider-config"
+                | "--provider-command"
+                | "--provider-argv"
+                | "--client-context"
+                | "--secret-env"
+        );
     if !sensitive {
         return (unit, None);
     }
@@ -438,21 +438,6 @@ fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
         vec![format!("{flag}={placeholder}")]
     };
     (replay, Some(format!("{flag} was redacted; replace its parseable placeholder with the original value before replaying")))
-}
-
-fn sensitive_payload(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "api_key",
-        "apikey",
-        "bearer",
-        "authorization",
-    ]
-    .iter()
-    .any(|needle| value.contains(needle))
 }
 
 fn preview_placement_policy() -> Value {
@@ -596,7 +581,7 @@ mod preview_tests {
     }
 
     #[test]
-    fn preview_replay_redacts_sensitive_values_and_preserves_ordinary_provider_argv() {
+    fn preview_replay_redacts_opaque_provider_values_and_arbitrary_credential_names() {
         let replay = redact_preview_replay_argv(std::iter::once("homeboy".to_string()).chain([
             "agent-task".to_string(),
             "cook".to_string(),
@@ -607,7 +592,7 @@ mod preview_tests {
             "--private-verify".to_string(),
             "printf secret-value".to_string(),
             "--provider-argv".to_string(),
-            "ordinary-provider-argument".to_string(),
+            "credential-without-a-secret-name".to_string(),
             "--runner-env=TOKEN=secret-value".to_string(),
         ]));
         assert!(
@@ -618,9 +603,9 @@ mod preview_tests {
         assert_eq!(replay.argv[6], "<redacted:--provider-config>");
         assert_eq!(replay.argv[7], "--private-verify");
         assert_eq!(replay.argv[8], "<redacted:--private-verify>");
-        assert_eq!(replay.argv[10], "ordinary-provider-argument");
+        assert_eq!(replay.argv[10], "<redacted:--provider-argv>");
         assert_eq!(replay.argv[11], "--runner-env=<redacted:--runner-env>");
-        assert_eq!(replay.requires.len(), 4);
+        assert_eq!(replay.requires.len(), 5);
         Cli::try_parse_from(&replay.argv).expect("redacted replay remains parseable");
     }
 
@@ -642,6 +627,42 @@ mod preview_tests {
         for boundary in (3..=replay.argv.len()).step_by(2) {
             Cli::try_parse_from(&replay.argv[..boundary])
                 .unwrap_or_else(|error| panic!("boundary {boundary} is not parseable: {error}"));
+        }
+    }
+
+    #[test]
+    fn every_generated_cook_value_option_is_atomic_and_never_dangles() {
+        for flag in cook_value_flags() {
+            let (_, missing_requires) = clap_replay_units(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                flag.clone(),
+            ]);
+            assert!(
+                missing_requires
+                    .iter()
+                    .any(|requirement| requirement.starts_with(&flag)),
+                "missing value-taking flag {flag} was not withheld atomically"
+            );
+
+            let (units, requires) = clap_replay_units(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                flag.clone(),
+                "placeholder".to_string(),
+            ]);
+            assert!(
+                requires.is_empty(),
+                "complete {flag} unexpectedly needs input"
+            );
+            assert!(
+                units
+                    .iter()
+                    .any(|unit| unit == &[flag.clone(), "placeholder".to_string()]),
+                "value-taking flag {flag} was not retained as one unit"
+            );
         }
     }
 
