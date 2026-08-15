@@ -96,6 +96,65 @@ fn source_upgrade_command_returns_after_same_binary_success() {
 }
 
 #[test]
+fn source_build_command_receives_build_only_contract() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let observed = workspace.path().join("build-only");
+    let command = format!(
+        "printf '%s' \"$HOMEBOY_UPGRADE_BUILD_ONLY\" > {}",
+        quote_path(&observed.display().to_string())
+    );
+
+    run_source_upgrade_command(&command, workspace.path(), Duration::from_secs(1))
+        .expect("source build completes");
+
+    assert_eq!(
+        std::fs::read_to_string(observed).expect("build-only value"),
+        "1"
+    );
+}
+
+#[test]
+fn older_source_completion_is_superseded_unless_forced() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname = \"homeboy\"\nversion = \"1.2.3\"\n",
+    )
+    .expect("candidate manifest");
+    let newer_active = homeboy_core::build_identity::BuildIdentity {
+        display: "homeboy 1.2.4+new".to_string(),
+        version: "1.2.4".to_string(),
+        git_commit: Some("new".to_string()),
+        git_dirty: Some(false),
+    };
+
+    // This models the old build completing after the newer build has already
+    // promoted: re-reading active identity under the lease makes it a no-op.
+    assert!(source_promotion_is_superseded(
+        false,
+        Some(&newer_active),
+        workspace.path()
+    ));
+    let older_active = homeboy_core::build_identity::BuildIdentity {
+        display: "homeboy 1.2.2+old".to_string(),
+        version: "1.2.2".to_string(),
+        git_commit: Some("old".to_string()),
+        git_dirty: Some(false),
+    };
+    // In the reverse completion order, the newer candidate remains eligible.
+    assert!(!source_promotion_is_superseded(
+        false,
+        Some(&older_active),
+        workspace.path()
+    ));
+    assert!(!source_promotion_is_superseded(
+        true,
+        Some(&newer_active),
+        workspace.path()
+    ));
+}
+
+#[test]
 fn cleanup_context_preserves_the_primary_upgrade_error_contract() {
     let primary = upgrade_failure_error(
         InstallMethod::Binary,

@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::constants::{RELEASE_TAG_ENV, VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY};
-use super::helpers::{current_version, version_is_newer};
+use super::helpers::{current_version, source_promotion_decision, version_is_newer};
 use super::planning::resolve_binary_on_path;
 use super::release_catalog::{self, SelectedRelease};
 use super::types::InstallMethod;
@@ -31,6 +31,7 @@ const CLEANUP_ERROR_CONTEXT_LIMIT_CHARS: usize = 1_024;
 /// A custom upgrade command that indirectly spawns `homeboy upgrade` would
 /// otherwise loop indefinitely (#9686).
 const REENTRANCY_GUARD_ENV: &str = "HOMEBOY_UPGRADE_IN_PROGRESS";
+const SOURCE_BUILD_ONLY_ENV: &str = "HOMEBOY_UPGRADE_BUILD_ONLY";
 
 /// RAII guard that removes a temporary file on drop, guaranteeing cleanup
 /// even when the caller returns early via `?`, panics, or is interrupted by a
@@ -65,7 +66,7 @@ pub(crate) struct ActiveBinaryInfo {
     pub build_identity: Option<String>,
 }
 
-type UpgradeExecutionResult = Result<(bool, Option<String>, Option<String>, Option<String>)>;
+type UpgradeExecutionResult = Result<(bool, Option<String>, Option<String>, Option<String>, bool)>;
 
 struct SourceSwapVerification<'a> {
     method: InstallMethod,
@@ -283,7 +284,7 @@ pub(crate) fn execute_upgrade(
     // Reporting a soft `upgraded: false` "completed" here lets operators
     // believe the roll-forward succeeded. Fail loudly with an actionable reason
     // so urgent source fixes are not silently dropped (#5772).
-    Ok((success, new_version, new_build_identity, None))
+    Ok((success, new_version, new_build_identity, None, false))
 }
 
 fn binary_swap_failure(
@@ -323,6 +324,24 @@ fn complete_source_upgrade(
     let replacement_target = replacement_target.ok_or_else(|| {
         Error::internal_unexpected("active binary path unavailable for source upgrade install")
     })?;
+    // Builds may finish in any order. Only promotion is serialized, and the
+    // installed target is re-read while holding that lease before the rename.
+    let promotion_lease = homeboy_core::runtime_promotion::acquire(
+        "controller source promotion",
+        replacement_target.display().to_string(),
+    )?;
+    let active_identity = installed_target_build_identity()?;
+    if source_promotion_is_superseded(force, active_identity.as_ref(), &workspace_root) {
+        let active = active_identity.expect("identity checked above");
+        return Ok((
+            false,
+            Some(active.version),
+            Some(active.display),
+            source_revision,
+            true,
+        ));
+    }
+    promotion_lease.assert_generation()?;
     upgrade_phase("installing source-built binary");
     install_source_built_binary(&built_binary, replacement_target)?;
     upgrade_phase("verifying installed source binary");
@@ -360,7 +379,23 @@ fn complete_source_upgrade(
     }
 
     upgrade_phase("source binary installation verified");
-    Ok((success, new_version, new_build_identity, source_revision))
+    Ok((
+        success,
+        new_version,
+        new_build_identity,
+        source_revision,
+        false,
+    ))
+}
+
+fn source_promotion_is_superseded(
+    force: bool,
+    active: Option<&homeboy_core::build_identity::BuildIdentity>,
+    workspace_root: &Path,
+) -> bool {
+    !force
+        && active
+            .is_some_and(|active| !source_promotion_decision(active, workspace_root).upgrades())
 }
 
 fn upgrade_phase(phase: &str) {
@@ -378,6 +413,7 @@ fn run_source_upgrade_command(
         .args(["-c", command])
         .current_dir(workspace_root)
         .env(REENTRANCY_GUARD_ENV, "1")
+        .env(SOURCE_BUILD_ONLY_ENV, "1")
         .stdin(Stdio::null());
     let guard = ControllerChildGuard::prepare(&mut child_command).map_err(|error| {
         Error::internal_io(error.to_string(), Some("run source upgrade".to_string()))
