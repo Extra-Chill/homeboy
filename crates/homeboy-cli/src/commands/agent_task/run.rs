@@ -384,20 +384,24 @@ fn clap_replay_units(argv: Vec<String>) -> (Vec<Vec<String>>, Vec<String>) {
 
 fn cook_value_flags() -> std::collections::BTreeSet<String> {
     let command = crate::cli_surface::Cli::command_with_scoped_lab_args();
-    let cook = command
-        .find_subcommand("agent-task")
-        .and_then(|agent_task| agent_task.find_subcommand("cook"))
-        .expect("Cook command exists in generated Clap metadata");
     let mut flags = std::collections::BTreeSet::new();
-    for arg in cook
-        .get_arguments()
-        .filter(|arg| arg.get_action().takes_values())
-    {
-        if let Some(flag) = arg.get_long() {
-            flags.insert(format!("--{flag}"));
-        }
-        if let Some(aliases) = arg.get_all_aliases() {
-            flags.extend(aliases.into_iter().map(|alias| format!("--{alias}")));
+    let agent_task = command
+        .find_subcommand("agent-task")
+        .expect("agent-task command exists in generated Clap metadata");
+    let cook = agent_task
+        .find_subcommand("cook")
+        .expect("Cook command exists in generated Clap metadata");
+    for command in [&command, agent_task, cook] {
+        for arg in command
+            .get_arguments()
+            .filter(|arg| arg.get_action().takes_values())
+        {
+            if let Some(flag) = arg.get_long() {
+                flags.insert(format!("--{flag}"));
+            }
+            if let Some(aliases) = arg.get_all_aliases() {
+                flags.extend(aliases.into_iter().map(|alias| format!("--{alias}")));
+            }
         }
     }
     flags
@@ -663,6 +667,118 @@ mod preview_tests {
                     .any(|unit| unit == &[flag.clone(), "placeholder".to_string()]),
                 "value-taking flag {flag} was not retained as one unit"
             );
+        }
+    }
+
+    #[test]
+    fn root_value_options_and_aliases_are_atomic_in_separated_and_equals_forms() {
+        let root_values = [
+            ("--output", "preview.json"),
+            ("--notification-transport", "webhook"),
+            ("--notification-route", "https://example.test/hook"),
+            ("--placement", "auto"),
+            ("--artifact-root", "artifacts"),
+            ("--runner", "runner-1"),
+            ("--runner-env", "TOKEN=value"),
+            ("--runner-secret-env", "TOKEN"),
+            ("--lab-env-json", "{}"),
+            ("--runner-workspace-root", "workspace"),
+        ];
+        let value_flags = cook_value_flags();
+        for (flag, value) in root_values {
+            assert!(value_flags.contains(flag), "missing root value flag {flag}");
+            let (separated, requires) = clap_replay_units(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                flag.to_string(),
+                value.to_string(),
+            ]);
+            assert!(requires.is_empty(), "{flag} separated form needs input");
+            assert!(
+                separated
+                    .iter()
+                    .any(|unit| unit == &[flag.to_string(), value.to_string()]),
+                "{flag} separated form was not atomic"
+            );
+
+            let (equals, requires) = clap_replay_units(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                format!("{flag}={value}"),
+            ]);
+            assert!(requires.is_empty(), "{flag} equals form needs input");
+            assert!(
+                equals
+                    .iter()
+                    .any(|unit| unit == &[format!("{flag}={value}")]),
+                "{flag} equals form was not atomic"
+            );
+        }
+    }
+
+    #[test]
+    fn root_value_units_are_never_split_at_any_replay_budget_boundary() {
+        for flag in [
+            "--output",
+            "--notification-route",
+            "--runner-env",
+            "--lab-env-json",
+        ] {
+            let argv = std::iter::once("homeboy".to_string())
+                .chain(["agent-task".to_string(), "cook".to_string()])
+                .chain(
+                    (0..MAX_PREVIEW_REPLAY_ARGS)
+                        .flat_map(|index| [flag.to_string(), format!("value-{index}")]),
+                )
+                .collect::<Vec<_>>();
+            let replay = redact_preview_replay_argv(argv);
+            assert_eq!(replay.argv.len() % 2, 1, "{flag} was split at the budget");
+            assert!(replay
+                .requires
+                .iter()
+                .any(|item| item.contains("safety budget")));
+        }
+    }
+
+    #[test]
+    fn valid_root_value_forms_parse_before_and_after_cook() {
+        for (flag, value) in [
+            ("--output", "preview.json"),
+            ("--placement", "local"),
+            ("--artifact-root", "artifacts"),
+            ("--runner-env", "TOKEN=value"),
+            ("--runner-secret-env", "TOKEN"),
+            ("--lab-env-json", "{}"),
+            ("--runner-workspace-root", "workspace"),
+        ] {
+            Cli::try_parse_from(["homeboy", flag, value, "agent-task", "cook"])
+                .unwrap_or_else(|error| panic!("separated {flag} must parse: {error}"));
+            let equals = format!("{flag}={value}");
+            Cli::try_parse_from(["homeboy", "agent-task", "cook", &equals])
+                .unwrap_or_else(|error| panic!("equals {flag} must parse: {error}"));
+        }
+        for args in [
+            vec![
+                "homeboy",
+                "--notification-transport",
+                "webhook",
+                "--notification-route",
+                "https://example.test/hook",
+                "agent-task",
+                "cook",
+            ],
+            vec![
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--notification-transport=webhook",
+                "--notification-route=https://example.test/hook",
+            ],
+        ] {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("notification pair must parse: {error}"));
         }
     }
 
