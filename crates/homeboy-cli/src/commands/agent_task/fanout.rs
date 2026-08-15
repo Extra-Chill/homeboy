@@ -7622,7 +7622,7 @@ fi
     }
 
     #[test]
-    fn cook_batch_unknown_provider_profile_warns_without_core_defaults() {
+    fn cook_batch_dry_run_defers_provider_profile_resolution() {
         with_materialized_cook_batch_worktrees(|| {
             let mut args = cook_batch_args();
             args.backend = None;
@@ -7639,7 +7639,7 @@ fi
             assert!(value["preflight"]["provider_selection"]["warnings"][0]
                 .as_str()
                 .expect("warning")
-                .contains("not declared"));
+                .contains("deferred to the executable run plan"));
         });
     }
 

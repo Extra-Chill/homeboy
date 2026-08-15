@@ -104,6 +104,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 
 | Option | Value | Description |
 | --- | --- | --- |
+| `--help-full` | flag | Show the complete Cook option reference |
 | `--prompt` | `<PROMPT>` | Inline prompt, `@<path>` to read a file, `-` to read stdin, or `@prompt:<id>` for a stored prompt |
 | `--cwd` | `<PATH>` | Existing local repo checkout or worktree path to cook in. For Cook, omitting --repo infers its configured component when the Git remote maps unambiguously to one registered component |
 | `--workspace` | `<ID_OR_PATH>` | Homeboy workspace ID or existing local workspace path to cook in. For Cook, omitting --repo infers its configured component when the workspace Git remote maps unambiguously to one registered component |
@@ -126,6 +127,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--allow-command` | `<PATTERN>` | Command pattern the provider agent may run. Supplying any `--allow-command` switches the policy to allow-list mode: every command that does not match one of these patterns is refused |
 | `--command-policy-reason` | `<TEXT>` | Why the command policy exists, returned verbatim to the agent with every refusal. Telling the agent what to do instead (e.g. "this host routes builds to CI; make your edits and push") converts a refused command into correct behaviour rather than a wasted budget |
 | `--candidate-completion` | `<POLICY>` | Completion rule for isolated candidates: wait for all results (default) or promote the first successful candidate |
+| `--preview` | flag | Resolve the Cook plan and validate static inputs without creating a run or provisioning a worktree. Includes a replayable command |
 | `--goal` | `<TEXT>` | One-line statement of what a successful cook must achieve. Recorded as framing metadata for the provider task and used for review. Without --prompt, it supplies the one provider task |
 | `--provider-evidence` | `<JSON>` | Read-only external file projected into `.homeboy/evidence/<id>/` in the Cook workspace. Repeat for each source the provider may read |
 | `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into. The handle is `<repo>@<branch-slug>`, where the slug replaces every character of --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle `repo@fix-1234-x`. Existing destinations are reused. Creating a missing one is not a built-in capability: it requires an enabled worktree provider with a `commands.ensure` argv template, and without one you must create the destination first with `homeboy worktree create`. When omitted, an explicit --cwd is the canonical destination. Otherwise, --repo plus --task-url derives an issue-owned destination through that same configured provider. An explicit --workspace or --cwd Git checkout can infer --repo when its remote maps to exactly one configured component; an explicit --repo must match that checkout. When paired with --cwd, this must name the same existing local or active registered linked task worktree; --cwd remains the Cook workspace authority |
