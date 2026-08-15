@@ -27,9 +27,11 @@ use homeboy_core::{Error, Result};
 use homeboy_engine_primitives::shell::quote_arg;
 
 use super::cook_activity::{CookActivityProbe, CookProviderActivity};
+#[cfg(test)]
+use super::cook_baseline::materialize_follow_up_baseline;
 use super::cook_baseline::{
     compare_gate_failures_to_verified_base, cook_attempt_harvest_context,
-    materialize_follow_up_baseline, materialize_initial_candidate_baseline,
+    materialize_follow_up_baseline_in_root, materialize_initial_candidate_baseline,
     re_materialize_follow_up_baseline, CookFollowUpBaseline, DerivedCookBaselineCapability,
 };
 use super::cook_budget::{
@@ -53,7 +55,9 @@ use super::cook_promotion::{
 };
 use super::cook_recipe::CookRecipeStore;
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
-use super::execution::run_loaded_plan_with_derived_cook_baseline;
+use super::execution::{
+    run_loaded_plan_with_derived_cook_baseline, run_loaded_plan_with_derived_cook_baseline_in_store,
+};
 use super::AgentTaskRunResult;
 
 /// Lease window for a cook promotion operation claim. Long enough that a healthy
@@ -3096,7 +3100,6 @@ fn child_execution_budget(
 fn validate_cook_follow_up_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
-    detached_dispatch: bool,
 ) -> Result<()> {
     if recipe_store.data_root() != lifecycle_store.data_root() {
         return Err(Error::validation_invalid_argument(
@@ -3107,14 +3110,6 @@ fn validate_cook_follow_up_stores(
                 recipe_store.data_root().display(),
                 lifecycle_store.data_root().display()
             )),
-            None,
-        ));
-    }
-    if !detached_dispatch && !lifecycle_store.matches_current_environment()? {
-        return Err(Error::validation_invalid_argument(
-            "lifecycle_store",
-            "explicit lifecycle storage for local Cook follow-up execution requires the full execution boundary",
-            Some(lifecycle_store.data_root().display().to_string()),
             None,
         ));
     }
@@ -3149,11 +3144,7 @@ where
     E: AgentTaskExecutorAdapter + Clone,
 {
     let (recipe_store, lifecycle_store) = stores;
-    validate_cook_follow_up_stores(
-        recipe_store,
-        lifecycle_store,
-        options.attempt_dispatcher.is_some(),
-    )?;
+    validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
     if let Some(reason) = remediation_tool_policy_error(&follow_up_request) {
         return Ok(CookFollowUpDispatch::PolicyFailure { reason });
     }
@@ -3334,8 +3325,9 @@ where
         recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
     }
     if attempt_needs_execution_with_store(lifecycle_store, &next_run_id) {
-        let baseline = materialize_follow_up_baseline(
+        let baseline = materialize_follow_up_baseline_in_root(
             promotion,
+            &lifecycle_store.artifact_root(),
             source_run_id,
             &follow_up_plan.tasks[0].task_id,
         )?;
@@ -3389,7 +3381,8 @@ where
                 | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {}
             }
         } else {
-            run_loaded_plan_with_derived_cook_baseline(
+            run_loaded_plan_with_derived_cook_baseline_in_store(
+                lifecycle_store,
                 follow_up_plan,
                 Some(&next_run_id),
                 executor,

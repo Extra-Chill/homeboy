@@ -84,6 +84,10 @@ impl AgentTaskLifecycleStore {
         self.roots.data().to_path_buf()
     }
 
+    pub(crate) fn artifact_root(&self) -> PathBuf {
+        self.roots.artifacts().to_path_buf()
+    }
+
     pub(crate) fn matches_current_environment(&self) -> Result<bool> {
         Ok(self.roots == paths::PathRoots::from_environment()?)
     }
@@ -177,6 +181,43 @@ impl AgentTaskLifecycleStore {
         error: &Error,
     ) -> Result<AgentTaskRunRecord> {
         super::record_pre_execution_failure_in_store(self, run_id, plan, phase, error)
+    }
+
+    pub(crate) fn mark_running(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::mark_running_in_store(self, run_id)
+    }
+
+    pub(crate) fn reserve_provider_execution(
+        &self,
+        run_id: &str,
+        task: &crate::agent_task::AgentTaskRequest,
+        attempt: u32,
+    ) -> Result<super::ProviderExecutionReservation> {
+        super::lifecycle_ops::reserve_provider_execution_in_store(self, run_id, task, attempt)
+    }
+
+    pub(crate) fn record_provider_execution_terminal(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        state: &str,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_execution_terminal_in_store(
+            self, run_id, task_id, attempt, state,
+        )
+    }
+
+    pub(crate) fn record_provider_execution_cleanup_elapsed(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        elapsed_ms: u64,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_execution_cleanup_elapsed_in_store(
+            self, run_id, task_id, attempt, elapsed_ms,
+        )
     }
 
     pub fn claim_cook_operation(

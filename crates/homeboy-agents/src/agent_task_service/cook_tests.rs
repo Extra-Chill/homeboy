@@ -10762,26 +10762,20 @@ fn retry_dispatch_operation_key_claim_dispatches_once() {
 }
 
 #[test]
-fn cook_follow_up_store_boundary_rejects_split_roots_and_unrooted_local_execution() {
+fn cook_follow_up_store_boundary_accepts_local_execution_and_rejects_split_roots() {
     let first = homeboy_core::test_support::HermeticTestContext::new();
     let second = homeboy_core::test_support::HermeticTestContext::new();
     let recipe_store = CookRecipeStore::new(first.path_roots());
     let lifecycle_store = AgentTaskLifecycleStore::new(first.path_roots());
     let other_lifecycle_store = AgentTaskLifecycleStore::new(second.path_roots());
 
-    validate_cook_follow_up_stores(&recipe_store, &lifecycle_store, true).unwrap();
+    validate_cook_follow_up_stores(&recipe_store, &lifecycle_store).unwrap();
 
     let split_root_error =
-        validate_cook_follow_up_stores(&recipe_store, &other_lifecycle_store, true).unwrap_err();
+        validate_cook_follow_up_stores(&recipe_store, &other_lifecycle_store).unwrap_err();
     assert!(split_root_error
         .to_string()
         .contains("recipe and lifecycle stores must share one data root"));
-
-    let local_execution_error =
-        validate_cook_follow_up_stores(&recipe_store, &lifecycle_store, false).unwrap_err();
-    assert!(local_execution_error
-        .to_string()
-        .contains("requires the full execution boundary"));
 }
 
 #[test]

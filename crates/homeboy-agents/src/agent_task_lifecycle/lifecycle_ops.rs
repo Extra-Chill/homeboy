@@ -1779,6 +1779,14 @@ pub fn prune_controller_runtime_pins(
 }
 
 fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    migrate_record_controller_runtime_in_store(&lifecycle_store, record)
+}
+
+fn migrate_record_controller_runtime_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+) -> Result<()> {
     let Some(runtime) = record
         .metadata
         .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
@@ -1790,7 +1798,7 @@ fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<
         homeboy_core::controller_runtime::migrate_legacy_pin_and_persist(&original, |migrated| {
             record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                 migrated.clone();
-            store::write_record(record)
+            lifecycle_store.write_record(record)
         })?;
     record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
     Ok(())
@@ -1829,15 +1837,23 @@ pub fn recover_controller_runtime(
 }
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    mark_running_in_store(&lifecycle_store, run_id)
+}
+
+pub(crate) fn mark_running_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let mut record = store::read_record(&run_id)?;
-    migrate_record_controller_runtime(&mut record)?;
+    let mut record = lifecycle_store.read_record(&run_id)?;
+    migrate_record_controller_runtime_in_store(lifecycle_store, &mut record)?;
     homeboy_core::controller_runtime::validate_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
     )?;
     let mut error = None;
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         if record.metadata.get("queue_quarantine").is_some() {
             error = Some(Error::validation_invalid_argument(
                 "run_id",
@@ -1901,11 +1917,24 @@ pub fn reserve_provider_execution(
     task: &AgentTaskRequest,
     attempt: u32,
 ) -> Result<ProviderExecutionReservation> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    reserve_provider_execution_in_store(&lifecycle_store, run_id, task, attempt)
+}
+
+pub(crate) fn reserve_provider_execution_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task: &AgentTaskRequest,
+    attempt: u32,
+) -> Result<ProviderExecutionReservation> {
     let run_id = sanitize_run_id(run_id);
-    require_record_workspace_owner(&store::read_record(&run_id)?)?;
+    require_record_workspace_owner_in_store(
+        &lifecycle_store.workspace_claim_store(),
+        &lifecycle_store.read_record(&run_id)?,
+    )?;
     let execution_key = format!("{}:{attempt}", task.task_id);
     let mut reservation = ProviderExecutionReservation::AlreadyReserved;
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         let started_at = now_timestamp();
         let consumed = {
             let metadata = record.ensure_metadata_object();
@@ -2284,10 +2313,21 @@ pub fn record_provider_execution_terminal(
     attempt: u32,
     state: &str,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_terminal_in_store(&lifecycle_store, run_id, task_id, attempt, state)
+}
+
+pub(crate) fn record_provider_execution_terminal_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    state: &str,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let execution_key = format!("{task_id}:{attempt}");
     let mut found = false;
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let cancelled = record.state == AgentTaskRunState::Cancelled;
         let Some(execution) = record
             .ensure_metadata_object()
@@ -2353,10 +2393,27 @@ pub fn record_provider_execution_cleanup_elapsed(
     attempt: u32,
     elapsed_ms: u64,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_cleanup_elapsed_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        elapsed_ms,
+    )
+}
+
+pub(crate) fn record_provider_execution_cleanup_elapsed_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    elapsed_ms: u64,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let execution_key = format!("{task_id}:{attempt}");
     let mut found = false;
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let Some(execution) = record
             .ensure_metadata_object()
             .get_mut("provider_executions")
