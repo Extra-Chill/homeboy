@@ -613,13 +613,37 @@ mod tests {
             std::fs::rename(&original_for_hook, &moved).expect("move original");
             std::fs::rename(&replacement_for_hook, &original_for_hook).expect("replace path");
         }));
-        let mut command = std::process::Command::new("sh");
-        command.args(["-c", "cat marker"]).current_dir(&original);
-        bind_verified_cwd(&mut command, directory.as_raw_fd());
-        test_spawn_hook::invoke();
-        let output = command.output().expect("spawn from verified fd");
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"verified");
+        let plan = PreparedRunnerProcess {
+            runner: Runner {
+                id: "race".to_string(),
+                kind: RunnerKind::Local,
+                server_id: None,
+                workspace_root: Some(original.display().to_string()),
+                settings: server::RunnerSettings::default(),
+                env: HashMap::new(),
+                secret_env: HashMap::new(),
+                resources: HashMap::new(),
+                policy: server::RunnerPolicy::default(),
+            },
+            cwd: original.display().to_string(),
+            command: vec!["sh".to_string(), "-c".to_string(), "cat marker".to_string()],
+            env: HashMap::new(),
+            resource_guard_env: HashMap::new(),
+            secret_env_names: Vec::new(),
+            source_snapshot: SourceSnapshot::default(),
+            require_paths: Vec::new(),
+        };
+        let output = execute_runner_process_until_cancelled_with_progress(
+            &plan,
+            || false,
+            None,
+            false,
+            None,
+            Some(directory.as_raw_fd()),
+        )
+        .expect("execute from verified fd");
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "verified");
     }
 
     #[test]
