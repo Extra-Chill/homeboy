@@ -1457,6 +1457,22 @@ fn pending_detached_cook_handoff_is_discoverable_before_attempt_materialization(
         // The handoff parent is the durable operator handle while no provider
         // attempt exists yet, so both discovery views must expose it.
         assert!(parent.tasks.is_empty());
+        assert_eq!(
+            parent.metadata["detached_cook_handoff"]["admission_state"],
+            "pre_supervisor"
+        );
+        assert!(agent_task_lifecycle::has_pending_detached_cook_handoff(
+            &parent
+        ));
+        let mut legacy_parent = parent.clone();
+        legacy_parent.metadata["detached_cook_handoff"]
+            .as_object_mut()
+            .expect("handoff metadata")
+            .remove("admission_state");
+        assert!(
+            agent_task_lifecycle::has_pending_detached_cook_handoff(&legacy_parent),
+            "records written before admission_state remain protected from recovery"
+        );
         let active = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active discovery");
         assert!(active.runs.iter().any(|run| run.run_id == cook_id));
         let all = discover_runs(AgentTaskDiscoveryFilter::All).expect("all discovery");
@@ -1708,9 +1724,10 @@ fn scoped_reconcile_keeps_exact_attempts_separate_and_expands_cook_aliases_to_th
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
         agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
             // Model the durable parent/attempt link while both projections are
-            // stale, before normal handoff completion terminalizes the parent.
+            // stale after normal handoff completion has redirected the parent.
             record.metadata["detached_cook_handoff"]["attempt_run_id"] =
                 serde_json::json!(&attempt_id);
+            record.metadata["detached_cook_handoff"]["state"] = serde_json::json!("redirected");
         })
         .expect("link stale parent projection");
         for run_id in [cook_id, attempt_id.as_str()] {

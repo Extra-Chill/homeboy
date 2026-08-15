@@ -2,6 +2,8 @@ use super::acceptance_verifier::{
     validate_acceptance_requirement, validate_attestation, with_acceptance_verifier,
 };
 use super::*;
+
+const DETACHED_COOK_ADMISSION_LEASE_SECONDS: i64 = 30;
 use chrono::DateTime;
 use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeSet;
@@ -349,6 +351,10 @@ pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRun
     let mut record = submit_plan(&plan, Some(&cook_id))?;
     record.metadata["detached_cook_handoff"] = json!({
         "state": "pending",
+        "admission_state": "pre_supervisor",
+        "admission_deadline_at": (chrono::Utc::now()
+            + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
+            .to_rfc3339(),
         "cook_id": cook_id,
         "cancellation_fence": { "state": "open" },
     });
@@ -393,17 +399,21 @@ pub fn record_detached_cook_handoff_child(
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
     let record = store::mutate_record(&cook_id, |record| {
-        let state = if record.state == AgentTaskRunState::Cancelled {
-            "cancelled"
-        } else {
-            "pending"
-        };
+        let cancelled = record.state == AgentTaskRunState::Cancelled;
+        let state = if cancelled { "cancelled" } else { "pending" };
+        let cancellation_fence =
+            record.metadata["detached_cook_handoff"]["cancellation_fence"].clone();
         let metadata = record.ensure_metadata_object();
         metadata["detached_cook_handoff"] = json!({
             "state": state,
+        "admission_state": if cancelled { "cancelled" } else { "child_attached" },
+        "child_supervisor_deadline_at": (chrono::Utc::now()
+            + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
+            .to_rfc3339(),
             "cook_id": cook_id,
             "child_pid": pid,
             "child_start_identity": start_identity,
+            "cancellation_fence": cancellation_fence,
         });
         record.updated_at = Some(now_timestamp());
         true
@@ -420,6 +430,7 @@ pub fn record_detached_cook_supervisor(cook_id: &str, job_id: &str) -> Result<()
             return false;
         }
         record.metadata["detached_cook_handoff"]["supervisor_job_id"] = json!(job_id);
+        record.metadata["detached_cook_handoff"]["admission_state"] = json!("supervising");
         record.metadata["detached_cook_handoff"]["reattach_command"] =
             json!(format!("homeboy agent-task status {cook_id} --full"));
         true
@@ -554,6 +565,8 @@ pub fn fail_detached_cook_handoff_parent(
         } else {
             "exited_before_handoff"
         });
+        metadata["detached_cook_handoff"]["admission_state"] =
+            json!(if cancelled { "cancelled" } else { "failed" });
         metadata["detached_cook_handoff"]["reason"] = json!(reason);
         if !record.state.is_terminal() {
             set_run_state(record, AgentTaskRunState::Failed);
@@ -586,6 +599,7 @@ fn complete_detached_cook_handoff_parent_in_store(
             }
             let metadata = record.ensure_metadata_object();
             metadata["detached_cook_handoff"]["state"] = json!("redirected");
+            metadata["detached_cook_handoff"]["admission_state"] = json!("materialized");
             metadata["detached_cook_handoff"]["attempt_run_id"] = json!(attempt_run_id);
             metadata["detached_cook_handoff"]
                 .as_object_mut()
@@ -596,6 +610,91 @@ fn complete_detached_cook_handoff_parent_in_store(
             true
         })?;
     Ok(())
+}
+
+/// A detached Cook parent is admission state, never an executable queued plan.
+///
+/// The original persisted shape only carries `state: pending`; treating that as
+/// the default preserves mixed-version records while newer writers add a more
+/// specific `admission_state` for operator visibility.
+pub fn has_pending_detached_cook_handoff(record: &AgentTaskRunRecord) -> bool {
+    record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id
+        && record.metadata["detached_cook_handoff"]["state"] == "pending"
+}
+
+pub fn detached_cook_admission_is_live(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if !has_pending_detached_cook_handoff(record) {
+        return false;
+    }
+    match record.metadata["detached_cook_handoff"]["admission_state"].as_str() {
+        Some("supervising") => true,
+        Some("child_attached") => detached_cook_child_is_live(record).unwrap_or_else(|| {
+            detached_cook_deadline(record, "child_supervisor_deadline_at")
+                .is_some_and(|deadline| deadline > now)
+        }),
+        Some("pre_supervisor") | None => detached_cook_deadline(record, "admission_deadline_at")
+            .is_some_and(|deadline| deadline > now),
+        _ => false,
+    }
+}
+
+pub fn has_expired_detached_cook_admission(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    has_pending_detached_cook_handoff(record) && !detached_cook_admission_is_live(record, now)
+}
+
+pub fn expire_detached_cook_admission(cook_id: &str) -> Result<bool> {
+    let record = store::read_record(cook_id)?;
+    if !has_expired_detached_cook_admission(&record, chrono::Utc::now()) {
+        return Ok(false);
+    }
+    let terminal = fail_detached_cook_handoff_parent(
+        cook_id,
+        "detached Cook admission lease expired before child or supervisor ownership attached",
+    )?;
+    Ok(terminal.state == AgentTaskRunState::Failed
+        && terminal.metadata["detached_cook_handoff"]["admission_state"] == "failed")
+}
+
+fn detached_cook_child_is_live(record: &AgentTaskRunRecord) -> Option<bool> {
+    let handoff = &record.metadata["detached_cook_handoff"];
+    let pid = handoff["child_pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())?;
+    let identity = serde_json::from_value(handoff["child_start_identity"].clone()).ok()?;
+    match homeboy_core::process::process_identity_state_with_start_identity(
+        pid,
+        None,
+        Some(&identity),
+    ) {
+        homeboy_core::process::ProcessIdentityState::Live => Some(true),
+        homeboy_core::process::ProcessIdentityState::Dead
+        | homeboy_core::process::ProcessIdentityState::IdentityMismatch => Some(false),
+        homeboy_core::process::ProcessIdentityState::Unverifiable => None,
+    }
+}
+
+fn detached_cook_deadline(
+    record: &AgentTaskRunRecord,
+    field: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    record.metadata["detached_cook_handoff"][field]
+        .as_str()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .or_else(|| {
+            chrono::DateTime::parse_from_rfc3339(&record.submitted_at)
+                .ok()
+                .map(|value| {
+                    value.with_timezone(&chrono::Utc)
+                        + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS)
+                })
+        })
 }
 
 /// Build the canonical decision for a run this controller is about to execute

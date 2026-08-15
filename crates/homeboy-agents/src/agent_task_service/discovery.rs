@@ -626,6 +626,12 @@ fn classify_liveness(
     last_update_age_minutes: Option<i64>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskLiveness {
+    // A detached Cook parent has no executable task or owner until its child
+    // and supervisor are durably attached. It is an active admission record,
+    // not stale queued work for the daemon reconciliation tick to cancel.
+    if agent_task_lifecycle::detached_cook_admission_is_live(record, now) {
+        return AgentTaskLiveness::Active;
+    }
     if record.lab_handoff_validation_error().is_some() {
         return AgentTaskLiveness::Unreconciled;
     }
