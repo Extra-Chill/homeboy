@@ -6,16 +6,18 @@ import { createWriteStream } from 'node:fs';
 import { access, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { createTimeoutLineRedactor, recipeRunProjection, readBoundedText, wpCodeboxTimeoutDiagnostics } from '../lib/wp-codebox-timeout-diagnostics.mjs';
+import { configuredWpCodeboxPhpunitTimeoutSeconds } from '../lib/wp-codebox-phpunit-timeout.mjs';
 
 const require = createRequire(import.meta.url);
 const { preflightWpCodeboxCommand } = require('../../../agent-runtimes/wp-codebox/lib/wp-codebox-runtime-selection.js');
 
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
+const phpunitTimeoutSeconds = configuredWpCodeboxPhpunitTimeoutSeconds(process.env, settings);
 const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMPONENT_PATH');
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(scriptDirectory, '../..');
@@ -117,17 +119,17 @@ try {
   if (databaseService?.boundary) {
     executionArgs.push('--approve-external-service-writes', '--policy', JSON.stringify(databaseService.policy));
   }
-  const execution = await runCaptured(executionArgs);
+  const execution = await runCaptured(executionArgs, phpunitTimeoutSeconds);
   const artifactStatus = await handoffArtifacts(runArtifacts, execution);
   if (execution.status !== 0 || !['passed', 'skipped'].includes(artifactStatus)) {
-    process.exitCode = execution.status || 1;
+    process.exitCode = execution.timedOut ? 124 : (execution.status || 1);
   } else {
     process.stdout.write('WP Codebox test run complete.\n');
   }
 } finally {
   await rm(directory, { recursive: true, force: true });
 }
-async function runCaptured(args) {
+async function runCaptured(args, timeoutSeconds) {
   const logsDirectory = path.join(runArtifacts, 'logs');
   const stdoutPath = path.join(logsDirectory, 'recipe-run.stdout.log');
   const stderrPath = path.join(logsDirectory, 'recipe-run.stderr.log');
@@ -136,14 +138,27 @@ async function runCaptured(args) {
 
   return new Promise((resolve, reject) => {
     const [command, ...prefix] = wpCodeboxCommand();
-    const child = spawn(command, [...prefix, ...args], { cwd: componentPath, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, [...prefix, ...args], { cwd: componentPath, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     const stdoutFile = createWriteStream(stdoutPath);
     const stderrFile = createWriteStream(stderrPath);
-    const stdoutRedactor = createLineRedactor(secretValues);
-    const stderrRedactor = createLineRedactor(secretValues);
+    const stdoutRedactor = createTimeoutLineRedactor(secretValues);
+    const stderrRedactor = createTimeoutLineRedactor(secretValues);
     let childError;
+    let timedOut = false;
+    const startedAt = Date.now();
+    let stdoutPreview = Buffer.alloc(0);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killChildGroup(child, 'SIGTERM');
+      // Do not clear or unref this timer when the leader exits: a descendant
+      // can ignore SIGTERM after the CLI has been reaped.
+      setTimeout(() => killChildGroup(child, 'SIGKILL'), 5000);
+    }, timeoutSeconds * 1000);
 
     child.stdout.on('data', (chunk) => {
+      if (stdoutPreview.byteLength < 128 * 1024) {
+        stdoutPreview = Buffer.concat([stdoutPreview, chunk.subarray(0, (128 * 1024) - stdoutPreview.byteLength)]);
+      }
       chunk = stdoutRedactor.write(chunk);
       stdoutFile.write(chunk);
     });
@@ -152,7 +167,8 @@ async function runCaptured(args) {
       stderrFile.write(chunk);
     });
     child.on('error', (error) => { childError = error; });
-    child.on('close', (status) => {
+    child.on('close', (status, signal) => {
+      clearTimeout(timer);
       const stdoutTail = stdoutRedactor.end();
       const stderrTail = stderrRedactor.end();
       stdoutFile.write(stdoutTail);
@@ -167,10 +183,30 @@ async function runCaptured(args) {
           reject(childError);
           return;
         }
-        resolve({ status: status ?? 1, stdoutPath, stderrPath });
+        resolve({
+          status: status ?? 1,
+          stdoutPath,
+          stderrPath,
+          stdoutPreview: stdoutPreview.toString('utf8'),
+          timedOut,
+          elapsedSeconds: Math.ceil((Date.now() - startedAt) / 1000),
+          termination: { result: timedOut ? 'timeout' : 'exited', signal, code: status },
+        });
       }, reject);
     });
   });
+}
+function killChildGroup(child, signal) {
+  if (!child || typeof child.pid !== 'number') {
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch (error) {
+    if (error?.code !== 'ESRCH') {
+      try { child.kill(signal); } catch {}
+    }
+  }
 }
 function configuredSecretValues() {
   const configured = settings.bench_env && typeof settings.bench_env === 'object' ? settings.bench_env : {};
@@ -185,34 +221,6 @@ function redactSecrets(text, secretValues = configuredSecretValues()) {
     text = text.replaceAll(secret, '[REDACTED]');
   }
   return text;
-}
-function createLineRedactor(secretValues) {
-  const decoder = new StringDecoder('utf8');
-  let pending = '';
-  const overlap = Math.max(0, ...secretValues.map((secret) => secret.length - 1));
-  const redact = (text) => redactSecrets(text, secretValues);
-  return {
-    write(chunk) {
-      pending += decoder.write(chunk);
-      const boundary = pending.lastIndexOf('\n') + 1;
-      // JSON recipe responses can be a single line larger than a pipe buffer.
-      // Flush bounded chunks so a crashed PHPUnit run cannot deadlock at 64 KiB.
-      if (boundary === 0) {
-        if (pending.length < 8192) { return ''; }
-        // Keep enough input to redact a secret split across the flush boundary.
-        const buffered = pending.slice(0, Math.max(0, pending.length - overlap));
-        pending = pending.slice(buffered.length);
-        return redact(buffered);
-      }
-      const completeLines = pending.slice(0, boundary);
-      pending = pending.slice(boundary);
-      return redact(completeLines);
-    },
-    end() {
-      pending += decoder.end();
-      return redact(pending);
-    },
-  };
 }
 
 function run(args) {
@@ -656,6 +664,15 @@ async function publishPhpunitArtifacts(artifactDirectory, status) {
     { name: 'recipe-run-steps.json', kind: 'recipe-run-steps', role: 'recipe-run-step-ledger', semantic_key: 'recipe_run_steps', content_type: 'application/json', copy: true },
     { name: 'test-failures.json', kind: 'test-failures', role: 'structured-test-failures', semantic_key: 'test_failures', content_type: 'application/json' },
   ];
+  for (const file of [
+    { name: 'wp-codebox-timeout-diagnostics.json', kind: 'wp-codebox-timeout-diagnostics', role: 'timeout-diagnostics', semantic_key: 'timeout_diagnostics', content_type: 'application/json', copy: true },
+    { name: 'recipe-run.json', kind: 'recipe-run-payload', role: 'raw-recipe-run-payload', semantic_key: 'recipe_run_payload', content_type: 'application/json', copy: true },
+  ]) {
+    try {
+      await access(path.join(artifactDirectory, 'files', file.name));
+      files.push(file);
+    } catch {}
+  }
   await withInvocationArtifactLock(invocationArtifacts, async () => {
     await assertDirectoryTree(invocationArtifacts, ['wp-codebox-phpunit', 'files']);
     await assertDirectoryTree(artifactDirectory, ['files']);
@@ -947,16 +964,39 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
   await copyFile(execution.stdoutPath, path.join(logsDirectory, 'recipe-run.stdout.log'));
   await copyFile(execution.stderrPath, path.join(logsDirectory, 'recipe-run.stderr.log'));
 
-  const stdout = await readFile(execution.stdoutPath, 'utf8');
-  const stderr = await readFile(execution.stderrPath, 'utf8');
+  const stdoutInput = execution.timedOut ? { text: execution.stdoutPreview || (await readBoundedText(execution.stdoutPath)).text, truncated: true } : { text: await readFile(execution.stdoutPath, 'utf8'), truncated: false };
+  const stderrInput = execution.timedOut ? await readBoundedText(execution.stderrPath) : { text: await readFile(execution.stderrPath, 'utf8'), truncated: false };
+  const stdout = stdoutInput.text;
+  const stderr = stderrInput.text;
   let preservedOutput = '';
-  try { preservedOutput = await readFile(phpunitOutputPath, 'utf8'); } catch {}
+  try { preservedOutput = execution.timedOut ? (await readBoundedText(phpunitOutputPath)).text : await readFile(phpunitOutputPath, 'utf8'); } catch {}
   // The recipe-run JSON payload carries the step ledger the raw log concatenation
   // discards. Preserve it as first-class structured evidence so a run that never
   // reaches the PHPUnit step still names the stage that stopped it.
-  const recipeRun = parseRecipeRunPayload(stdout);
+  const recipeRun = execution.timedOut
+    ? { ...recipeRunProjection(stdout), payload: null, phpunitIndexes: [], parse_status: 'bounded_timeout_projection' }
+    : parseRecipeRunPayload(stdout);
   const recipeRunSteps = buildRecipeRunStepsLedger(recipeRun);
   await writeFile(recipeRunStepsPath, `${JSON.stringify(recipeRunSteps, null, 2)}\n`);
+  const timeoutEvidence = execution.timedOut ? wpCodeboxTimeoutDiagnostics({
+    phase: 'wp-codebox-phpunit-recipe-run',
+    elapsedSeconds: execution.elapsedSeconds,
+    budgetSeconds: phpunitTimeoutSeconds,
+    selected: [selectedTestFile, ...changedTestFiles].filter(Boolean),
+    termination: execution.termination,
+    artifacts: [
+      'artifact://files/recipe-run.json',
+      'artifact://files/recipe-run-steps.json',
+      'artifact://files/phpunit-output.log',
+    ],
+    payload: recipeRun,
+    stderr,
+    secretValues: configuredSecretValues(),
+  }) : null;
+  if (timeoutEvidence) {
+    await atomicCopy(execution.stdoutPath, path.join(filesDirectory, 'recipe-run.json'));
+    await writeFile(path.join(filesDirectory, 'wp-codebox-timeout-diagnostics.json'), `${JSON.stringify(timeoutEvidence, null, 2)}\n`);
+  }
   if (managedRuntimeServices.length > 0) {
     await writeFile(managedRuntimeServicesPath, `${JSON.stringify(managedRuntimeServices, null, 2)}\n`);
   }
@@ -964,7 +1004,7 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
   // A failed bootstrap stage means PHPUnit never got to run. Trust that over an
   // optimistic structured sidecar: reporting a pass because the sidecar claims
   // one is exactly how a red run shows up green.
-  const stageLog = await readPhpunitStageLog(artifactDirectory);
+  const stageLog = await readPhpunitStageLog(artifactDirectory, execution.timedOut);
   const stageFailure = (stageLog || '')
     .split('\n')
     .map((line) => line.trim())
@@ -978,7 +1018,9 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
   const preservedOutputReferenced = validResults && Array.isArray(results.rawLogReferences) && results.rawLogReferences.some((reference) => reference?.path === 'files/phpunit-output.log' && reference?.kind === 'phpunit-output');
   const preservedOutputMatches = structuredExecution && preservedOutputReferenced && phpunitSummaryMatches(preservedAggregate, results.summary);
   const referencedOutput = structuredExecution ? await readMatchingPhpunitOutput(artifactDirectory, results) : '';
-  const output = redactSecrets( structuredExecution
+  const output = execution.timedOut
+    ? `${JSON.stringify(timeoutEvidence)}\n`
+    : redactSecrets( structuredExecution
     ? ((preservedOutputMatches && preservedOutput) || referencedOutput || stageLog || structuredPhpunitOutputUnavailable(results, recipeRun))
     : extractPhpunitOutput(stdout, stderr, recipeRun) );
   await writeFile(phpunitOutputPath, output);
@@ -1006,6 +1048,10 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
       { kind: 'test-execution-diagnosis', uri: 'artifact://files/phpunit-execution-diagnosis.json' },
       { kind: 'recipe-run-steps', uri: 'artifact://files/recipe-run-steps.json' },
     ];
+    if (timeoutEvidence) {
+      evidenceReferences.push({ kind: 'wp-codebox-timeout-diagnostics', uri: 'artifact://files/wp-codebox-timeout-diagnostics.json' });
+      evidenceReferences.push({ kind: 'recipe-run-payload', uri: 'artifact://files/recipe-run.json' });
+    }
     if (managedRuntimeServices.length > 0) {
       evidenceReferences.push({ kind: 'managed-runtime-services', uri: 'artifact://files/managed-runtime-services.json' });
     }
@@ -1020,6 +1066,9 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
   process.stdout.write('Full PHPUnit output: artifact://files/phpunit-output.log\n');
   process.stdout.write('PHPUnit execution diagnosis: artifact://files/phpunit-execution-diagnosis.json\n');
   process.stdout.write('Recipe run step ledger: artifact://files/recipe-run-steps.json\n');
+  if (timeoutEvidence) {
+    process.stdout.write(`${JSON.stringify(timeoutEvidence)}\n`);
+  }
   if (stageFailure) {
     process.stdout.write(`BOOTSTRAP FAILURE: ${stageFailure.replace(/^STAGE_(FAIL|FATAL|DIE):/, '')}\n`);
   }
@@ -1187,7 +1236,7 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
     stage_markers: markers.slice(0, 60),
   };
 }
-async function readPhpunitStageLog(artifactDirectory) {
+async function readPhpunitStageLog(artifactDirectory, bounded = false) {
   const stageRoot = path.join(artifactDirectory, 'files', 'phpunit');
   const candidates = [path.join(stageRoot, '.pg-test-result.txt')];
   try {
@@ -1198,7 +1247,7 @@ async function readPhpunitStageLog(artifactDirectory) {
     }
   } catch {}
   for (const candidate of candidates) {
-    try { return await readFile(candidate, 'utf8'); } catch {}
+    try { return bounded ? (await readBoundedText(candidate)).text : await readFile(candidate, 'utf8'); } catch {}
   }
   return null;
 }

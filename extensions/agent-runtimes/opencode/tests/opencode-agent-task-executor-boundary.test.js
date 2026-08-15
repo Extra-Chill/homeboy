@@ -85,14 +85,14 @@ function concretePath(candidate) {
 	}
 }
 
-function resolvedOpenCodeAgent(opencode, cwd, configContent) {
-	const result = spawnSync(opencode, ['debug', 'agent', 'build', '--pure'], {
-		cwd,
-		encoding: 'utf8',
-		env: { ...process.env, OPENCODE_CONFIG_CONTENT: configContent },
-	});
+function installedOpenCodeBinary() {
+	const result = spawnSync('opencode', ['--version'], { encoding: 'utf8' });
+	if (result.error?.code === 'ENOENT') {
+		console.log('Skipping OpenCode file resolver integration: opencode binary is unavailable.');
+		return null;
+	}
 	assert.equal(result.status, 0, result.stderr);
-	return JSON.parse(result.stdout);
+	return result.spawnfile || 'opencode';
 }
 
 (async () => {
@@ -171,6 +171,20 @@ assert.equal(JSON.stringify({ manifest, packageJson }).includes('WP Codebox'), f
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-opencode-provider-contract-'));
 try {
+	const executorWorkspace = path.join(root, 'executor-workspace');
+	fs.mkdirSync(executorWorkspace, { recursive: true });
+	spawnSync('git', ['init'], { cwd: executorWorkspace, encoding: 'utf8' });
+	spawnSync('git', ['commit', '--allow-empty', '-m', 'initial'], {
+		cwd: executorWorkspace,
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: 'Homeboy Test',
+			GIT_AUTHOR_EMAIL: 'homeboy@example.test',
+			GIT_COMMITTER_NAME: 'Homeboy Test',
+			GIT_COMMITTER_EMAIL: 'homeboy@example.test',
+		},
+	});
 	const runtimesRoot = path.join(root, 'agent-runtimes');
 	const runtimePath = path.join(runtimesRoot, 'opencode');
 	fs.mkdirSync(runtimesRoot, { recursive: true });
@@ -200,6 +214,10 @@ assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, 'access-token-mu
 assert.equal(process.env.UNDECLARED_SECRET, undefined);
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
 assert.equal(config.agent.title.disable, true);
+assert.equal(config.permission.external_directory['*'], 'deny');
+assert.equal(config.permission.external_directory[${JSON.stringify(concretePath(executorWorkspace))}], 'allow');
+assert.equal(config.agent.build.permission.external_directory['*'], 'deny');
+assert.equal(config.agent.build.permission.external_directory[${JSON.stringify(concretePath(executorWorkspace))}], 'allow');
 if (instruction === 'Prove two attached runtime tools without leaking secrets.') {
   assert.equal(typeof config.mcp, 'object');
   assert.equal(config.mcp['fixture.mcp'].command[0], process.execPath);
@@ -234,6 +252,7 @@ process.exit(0);
 				command_args: [mockCliPath],
 			},
 		},
+		workspace: { root: executorWorkspace },
 		instructions: 'Prove the OpenCode provider boundary without leaking secrets.',
 		artifacts_path: path.join(root, 'default-artifacts'),
 	};
@@ -283,8 +302,8 @@ process.exit(0);
 	fs.writeFileSync(modelCliPath, `#!/usr/bin/env node
 const assert = require('node:assert/strict');
 assert.equal(process.cwd(), ${JSON.stringify(realModelWorkspace)});
-assert.equal(process.env.PWD, ${JSON.stringify(modelWorkspace)});
-assert.deepEqual(process.argv.slice(2, 7), ['run', '--format', 'json', '--model', 'opencode-go/kimi-k2.7-code']);
+assert.equal(process.env.PWD, ${JSON.stringify(realModelWorkspace)});
+assert.deepEqual(process.argv.slice(2, 9), ['run', '--format', 'json', '--model', 'opencode-go/kimi-k2.7-code', '--dir', ${JSON.stringify(realModelWorkspace)}]);
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
 assert.equal(config.$schema, 'https://opencode.ai/config.json');
 assert.equal(config.model, 'opencode-go/kimi-k2.7-code');
@@ -307,6 +326,7 @@ assert.equal(config.agent.title.disable, true);
 	  edit: { '*': 'allow' },
 	  bash: { '*': 'allow', 'git push *': 'deny' },
 	  external_directory: {
+	    '*': 'deny',
 	    '/unrelated/**': 'deny',
 	    ${JSON.stringify(realModelWorkspace)}: 'allow',
 	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow'
@@ -325,6 +345,7 @@ assert.equal(config.agent.title.disable, true);
 	  edit: { '*': 'allow' },
 	  bash: { '*': 'allow', 'git push *': 'deny' },
 	  external_directory: {
+	    '*': 'deny',
 	    ${JSON.stringify(realModelWorkspace)}: 'allow',
 	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow'
 	  }
@@ -364,12 +385,20 @@ assert.equal(config.agent.title.disable, true);
 
 	const permissionWorkspaces = [
 		{
-			label: 'controller-scratch',
+			label: 'relative-long-attempt-workspace',
 			attemptRoot: path.join(root, 'controller-scratch', 'cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874'),
-			workspace: path.join(root, 'controller-scratch', 'cook-detached-37abbb52-d638495c-b270-46fdc965fc9c-attempt-1-fb890874', 'workspace'),
+			workspace: path.join(root, 'controller-scratch', 'cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874', 'workspace'),
 			workspacePermissionRoot: path.join(root, 'controller-scratch', 'cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874', 'workspace'),
-			workspaceConfig: 'cwd',
+			workspaceConfig: 'relative-cwd',
 			allowAttemptRoot: true,
+			workspaceSiblingAction: 'allow',
+		},
+		{
+			label: 'canonical-permission-root',
+			workspace: path.join(root, 'canonical-permission-root', 'workspace'),
+			workspacePermissionRoot: path.join(root, 'canonical-permission-root'),
+			workspaceConfig: 'cwd',
+			workspaceSiblingAction: 'allow',
 		},
 		{
 			label: 'unrelated-attempt-root',
@@ -426,6 +455,8 @@ assert.equal(config.agent.title.disable, true);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 assert.equal(process.cwd(), ${JSON.stringify(concreteWorkspace)});
+assert.equal(process.argv.at(-3), '--dir');
+assert.equal(process.argv.at(-2), ${JSON.stringify(concreteWorkspace)});
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
 for (const pattern of ${JSON.stringify(workspacePatterns)}) {
   assert.equal(config.permission.external_directory[pattern], 'allow');
@@ -477,6 +508,9 @@ process.exit(0);
 		};
 		if (permissionWorkspace.workspaceConfig === 'cwd') {
 			workspaceRequest.executor.config.cwd = permissionWorkspace.workspace;
+		} else if (permissionWorkspace.workspaceConfig === 'relative-cwd') {
+			workspaceRequest.executor.config.cwd = path.relative(process.cwd(), permissionWorkspace.workspace);
+			assert.equal(path.isAbsolute(workspaceRequest.executor.config.cwd), false);
 		} else {
 			workspaceRequest.workspace_path = permissionWorkspace.workspace;
 		}
@@ -518,7 +552,10 @@ process.exit(0);
 		}
 		assert.equal(externalDirectoryAction(generatedConfig, 'build', concreteWorkspace), 'allow');
 		assert.equal(externalDirectoryAction(generatedConfig, 'build', path.join(concreteWorkspace, 'src', 'index.js')), 'allow');
-		assert.equal(externalDirectoryAction(generatedConfig, 'build', `${concreteWorkspace}-sibling`), 'deny');
+		assert.equal(
+			externalDirectoryAction(generatedConfig, 'build', `${concreteWorkspace}-sibling`),
+			permissionWorkspace.workspaceSiblingAction || 'deny'
+		);
 		assert.equal(externalDirectoryAction(generatedConfig, 'build', path.join(root, 'controller-scratch')), 'deny');
 		assert.equal(
 			readAction(generatedConfig, 'build', concreteWorkspace, path.join(root, 'outside-workspace', 'index.js')),
@@ -544,20 +581,40 @@ process.exit(0);
 				'allow'
 			);
 		}
-		if (permissionWorkspace.label === 'controller-scratch') {
-			const opencode = spawnSync('opencode', ['--version'], { encoding: 'utf8' });
-			if (opencode.status === 0) {
-				const resolvedAgent = resolvedOpenCodeAgent(opencode.spawnfile || 'opencode', concreteWorkspace, JSON.stringify(generatedConfig));
-				const externalDirectoryRules = resolvedAgent.permission.filter((rule) => rule.permission === 'external_directory');
-				// OpenCode asks for this parent-directory glob, not the calling tool's glob.
-				const exactAttemptRequest = path.join(concreteAttemptRoot, '*');
-				assert.equal(externalDirectoryRules.findLast((rule) => rule.pattern === exactAttemptRequest)?.action, 'allow');
-				for (const workspacePattern of workspacePatterns) {
-					assert.equal(externalDirectoryRules.findLast((rule) => rule.pattern === workspacePattern)?.action, 'allow');
-				}
-				assert.equal(externalDirectoryRules.findLast((rule) => rule.pattern === path.join(root, 'controller-scratch', 'unrelated-attempt', '*'))?.action || 'deny', 'deny');
-			}
-		}
+	}
+
+	const resolverWorkspace = concretePath(permissionWorkspaces[0].workspace);
+	const resolverFile = path.join(resolverWorkspace, 'crates', 'opencode-resolver-fixture', 'src', 'lib.rs');
+	const resolverRelativeFile = 'crates/opencode-resolver-fixture/src/lib.rs';
+	const resolverContent = 'pub const OPENCODE_RESOLVER_FIXTURE: &str = "workspace-relative";\n';
+	fs.mkdirSync(path.dirname(resolverFile), { recursive: true });
+	fs.writeFileSync(resolverFile, resolverContent);
+	const opencode = installedOpenCodeBinary();
+	if (opencode) {
+		const search = spawnSync(opencode, ['debug', 'file', 'search', 'opencode-resolver-fixture', '--pure'], {
+			cwd: resolverWorkspace,
+			encoding: 'utf8',
+		});
+		assert.equal(search.status, 0, search.stderr);
+		const searchResults = search.stdout.trim().split(/\r?\n/).filter(Boolean);
+		assert.equal(searchResults.includes(resolverRelativeFile), true, search.stdout);
+		assert.equal(searchResults.some((result) => path.isAbsolute(result) || result === '..' || result.startsWith('../')), false, search.stdout);
+
+		const read = spawnSync(opencode, ['debug', 'file', 'read', resolverRelativeFile, '--pure'], {
+			cwd: resolverWorkspace,
+			encoding: 'utf8',
+		});
+		assert.equal(read.status, 0, read.stderr);
+		const resolvedFile = JSON.parse(read.stdout);
+		assert.equal(Buffer.from(resolvedFile.content, resolvedFile.encoding).toString('utf8'), resolverContent);
+
+		const outsideFile = path.join(path.dirname(resolverWorkspace), 'opencode-resolver-outside.txt');
+		fs.writeFileSync(outsideFile, 'outside workspace');
+		const escapedRead = spawnSync(opencode, ['debug', 'file', 'read', '../opencode-resolver-outside.txt', '--pure'], {
+			cwd: resolverWorkspace,
+			encoding: 'utf8',
+		});
+		assert.notEqual(escapedRead.status, 0, 'OpenCode file resolver escaped the configured workspace root.');
 	}
 
 	const preflightWorkspace = path.join(root, 'controller-scratch', 'cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874', 'workspace');

@@ -416,6 +416,9 @@ function permissionWithExternalDirectoryAllowances(permission, patterns) {
 	return {
 		...rules,
 		external_directory: {
+			// Noninteractive runs cannot answer permission prompts. Deny unmatched
+			// paths explicitly, then let the exact task-owned paths below override it.
+			'*': 'deny',
 			...externalDirectory,
 			// OpenCode resolves matching rules in order, so these task-owned paths
 			// deliberately supersede inherited catch-all rules.
@@ -1169,7 +1172,7 @@ function resolveCommandSpec(config = {}, options = {}) {
 	return { command: configuredCommand.trim(), args: configuredArgs };
 }
 
-function opencodeRunArgs(request = {}, config = {}, commandSpec = {}) {
+function opencodeRunArgs(request = {}, config = {}, commandSpec = {}, cwd = '') {
 	const model = config.model || request.executor?.model || request.model;
 	const format = config.format || 'json';
 	return [
@@ -1180,6 +1183,10 @@ function opencodeRunArgs(request = {}, config = {}, commandSpec = {}) {
 		...(config.agent ? ['--agent', config.agent] : []),
 		...(config.variant ? ['--variant', config.variant] : []),
 		...(config.title ? ['--title', config.title] : []),
+		// OpenCode's location is the authority for relative native tool paths.
+		// Pass the same canonical directory as the child cwd so it cannot fall
+		// back to an inherited location and prefix a workspace path twice.
+		...(isWorkspaceDirectory(cwd) ? ['--dir', cwd] : []),
 		`${request.instructions}${requiredOutputInstructions(request)}`,
 	];
 }
@@ -1193,13 +1200,22 @@ function requiredOutputInstructions(request = {}) {
 }
 
 function resolveOpenCodeCwd(request = {}, config = {}) {
-	return config.cwd
+	const candidate = config.cwd
 		|| config.workspace_root
 		|| config.workspaceRoot
 		|| request.workspace_path
 		|| request.workspace?.path
 		|| request.workspace?.root
 		|| process.cwd();
+	return concretePath(candidate);
+}
+
+function isWorkspaceDirectory(candidate) {
+	try {
+		return isAbsolutePath(candidate) && fs.statSync(candidate).isDirectory();
+	} catch {
+		return false;
+	}
 }
 
 function openCodeWorkspacePermissionPreflight(commandSpec = {}, primaryAgent, cwd, env, allowedTools) {
@@ -1272,7 +1288,7 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 	}
 
 	const cwd = resolveOpenCodeCwd(request, config);
-	const args = opencodeRunArgs(request, config, commandSpec);
+	const args = opencodeRunArgs(request, config, commandSpec, cwd);
 	const spawnExtra = { env: { ...opencodeSpawnEnv(request, options), PWD: cwd } };
 	const toolPermissions = agentTaskPolicyToolPermissions(request.policy, {
 		native: OPENCODE_NATIVE_WORKSPACE_PERMISSIONS,

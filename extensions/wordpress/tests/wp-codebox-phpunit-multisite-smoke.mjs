@@ -20,6 +20,7 @@ const cli = path.join(root, 'wp-codebox');
 await writeFile(cli, `#!/usr/bin/env node
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 const args = process.argv.slice(2);
+if (args.includes('--version')) { process.stdout.write('0.20.0'); process.exit(0); }
 if (args[0] === 'recipe' && args[1] === 'build') {
   const options = JSON.parse(await readFile(args[args.indexOf('--options') + 1], 'utf8'));
   await appendFile(process.env.OBSERVED, JSON.stringify({ options }) + '\\n');

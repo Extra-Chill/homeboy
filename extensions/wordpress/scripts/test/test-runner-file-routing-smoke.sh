@@ -119,6 +119,10 @@ PHP
 cat > "${TMPDIR}/stubs/wp-codebox.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+    printf '0.20.0\n'
+    exit 0
+fi
 echo "WP_CODEBOX_STUB"
 echo "SELECTED=${HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE:-}"
 echo "CORE_MODULE=${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}"
