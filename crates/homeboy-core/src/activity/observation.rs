@@ -23,10 +23,11 @@ pub(super) fn collect(
     collector: &mut ActivityCollector,
     limit: usize,
     filter: &ActivityFilter,
+    exhaustive: bool,
 ) -> Result<()> {
     let store = ObservationStore::open_readonly()?;
     let mut records = store.list_runs(RunListFilter {
-        limit: filter.is_empty().then_some(limit as i64),
+        limit: (!exhaustive && filter.is_empty()).then_some(limit as i64),
         ..Default::default()
     })?;
     let listed_ids = records
@@ -35,7 +36,7 @@ pub(super) fn collect(
         .collect::<BTreeSet<_>>();
     // Recent terminal records are bounded for display, but active work is
     // always included before the canonical report applies its final limit.
-    let active = if filter.is_empty() {
+    let active = if !exhaustive && filter.is_empty() {
         store.list_active_runs_bounded(limit as i64)?
     } else {
         store.list_active_runs()?

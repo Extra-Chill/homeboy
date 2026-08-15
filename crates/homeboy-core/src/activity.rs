@@ -135,7 +135,12 @@ pub fn activity_report_filtered(
     // Match authoritative agent-task identities first. Other sources often
     // carry only durable run/job references; inserting them unfiltered lets the
     // collector join those projections before the canonical selector runs.
-    observation::collect(&mut collector, limit, &ActivityFilter::default())?;
+    observation::collect(
+        &mut collector,
+        limit,
+        &ActivityFilter::default(),
+        !filter.is_empty(),
+    )?;
     daemon_jobs::collect(&mut collector, &ActivityFilter::default())?;
     // Runner federation is last on purpose: every controller-local source is
     // already collected before any remote probe is attempted, so the remote
@@ -883,7 +888,7 @@ mod tests {
                 .expect("finish terminal run");
 
             let mut collector = ActivityCollector::default();
-            observation::collect(&mut collector, 1, &ActivityFilter::default())
+            observation::collect(&mut collector, 1, &ActivityFilter::default(), false)
                 .expect("collect activity");
             let items = collector.items(ActivityScope::All, 10);
 
@@ -918,6 +923,7 @@ mod tests {
                     worktree: Some("/worktree/matching".to_string()),
                     ..Default::default()
                 },
+                true,
             )
             .expect("collect filtered activity");
             let items = collector.items(ActivityScope::All, 10);
