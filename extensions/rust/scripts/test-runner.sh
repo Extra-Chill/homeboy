@@ -90,7 +90,10 @@ rust_cargo_test_threads() {
 # changes until a caller asks. See Extra-Chill/homeboy#11751 W1-9.
 rust_nextest_shard_threads() {
     local value
-    value="${HOMEBOY_RUST_NEXTEST_SHARD_THREADS:-$(rust_cargo_test_threads || true)}"
+    value="${HOMEBOY_RUST_NEXTEST_SHARD_THREADS:-$(homeboy_setting rust_nextest_shard_threads '.rust_nextest_shard_threads' '')}"
+    if [ -z "$value" ]; then
+        value="$(rust_cargo_test_threads || true)"
+    fi
     case "$value" in
         '') printf '1' ;;
         *[!0-9]*) printf '1' ;;
