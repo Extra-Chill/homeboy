@@ -17,6 +17,53 @@ use super::{lab_cli_arguments_are_visible_for_path, LAB_VISIBLE_COMMAND_PATHS};
 use crate::cli_surface::{current_command_surface, Cli, CommandSurfaceEntry};
 use clap::{CommandFactory, FromArgMatches};
 
+fn cook_command(command: clap::Command) -> clap::Command {
+    command
+        .find_subcommand("agent-task")
+        .expect("agent-task command")
+        .find_subcommand("cook")
+        .expect("cook command")
+        .clone()
+}
+
+#[test]
+fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
+    let mut compact = cook_command(Cli::command_with_scoped_lab_args());
+    let compact = compact.render_help().to_string();
+    let mut full = cook_command(Cli::command_with_scoped_lab_args());
+    let full = full.render_long_help().to_string();
+
+    assert!(compact.contains("Quick start:"), "{compact}");
+    assert!(compact.contains("--repo <REPO>"), "{compact}");
+    assert!(compact.contains("--task-url <URL>"), "{compact}");
+    assert!(compact.contains("--preview"), "{compact}");
+    assert!(compact.contains("--help-full"), "{compact}");
+    assert!(!compact.contains("--max-provider-rotations"), "{compact}");
+    assert!(full.contains("--max-provider-rotations"), "{full}");
+    assert!(full.contains("--provider-command"), "{full}");
+    for advanced in [
+        "--placement",
+        "--private-verify",
+        "--gate-env",
+        "--provider-config",
+        "--require-acceptance",
+    ] {
+        assert!(full.contains(advanced), "missing {advanced}:\n{full}");
+    }
+
+    // The routine path stays readable while the complete reference remains
+    // deliberately available through `--help-full`.
+    assert!(
+        compact.len() <= 6_000,
+        "compact Cook help is {} bytes",
+        compact.len()
+    );
+    assert!(
+        full.len() > compact.len() * 2,
+        "full Cook help is not materially larger"
+    );
+}
+
 #[test]
 fn scoped_command_tree_has_valid_argument_relationships() {
     Cli::command_with_scoped_lab_args().debug_assert();

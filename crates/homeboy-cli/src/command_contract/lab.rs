@@ -32,7 +32,57 @@ pub fn scope_lab_cli_arguments(command: Command) -> Command {
             }
         })
     });
-    scope_lab_cli_arguments_at_path(command, &[], &lab_args)
+    scope_cook_help(scope_lab_cli_arguments_at_path(command, &[], &lab_args))
+}
+
+/// Cook has a large control-plane surface, but the routine tracked-task path
+/// only needs a small set of flags. Clap renders `HelpShort` for `--help` and
+/// `HelpLong` for `--help-full`; keep the latter as the complete reference.
+fn scope_cook_help(command: Command) -> Command {
+    const COMMON_COOK_ARGUMENTS: &[&str] = &[
+        "help",
+        "help_full",
+        "preview",
+        "prompt",
+        "goal",
+        "repo",
+        "task_url",
+        "to_worktree",
+        "cwd",
+        "verify",
+        "verify_file",
+        "base",
+        "head",
+        "no_finalize",
+        "draft_pr",
+        "max_attempts",
+    ];
+
+    fn visit(command: Command, path: &[String]) -> Command {
+        let is_cook = path.iter().map(String::as_str).eq(["agent-task", "cook"]);
+        let command = if is_cook {
+            let ids = command
+                .get_arguments()
+                .map(|arg| arg.get_id().to_string())
+                .collect::<Vec<_>>();
+            ids.into_iter().fold(command, |command, id| {
+                if COMMON_COOK_ARGUMENTS.contains(&id.as_str()) {
+                    command
+                } else {
+                    command.mut_arg(id, |arg| arg.hide_short_help(true))
+                }
+            })
+        } else {
+            command
+        };
+        command.mut_subcommands(|subcommand| {
+            let mut child_path = path.to_vec();
+            child_path.push(subcommand.get_name().to_string());
+            visit(subcommand, &child_path)
+        })
+    }
+
+    visit(command, &[])
 }
 
 fn scope_lab_cli_arguments_at_path(

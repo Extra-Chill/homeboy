@@ -160,6 +160,796 @@ pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
 
+/// Resolve the same pre-provisioning Cook inputs used by execution. This path
+/// intentionally never calls `provision_cook_destination` or a durable service.
+pub(crate) fn preview_cook(
+    mut args: AgentTaskCookArgs,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> CmdResult<Value> {
+    args.gates.snapshot_file_inputs()?;
+    // Source policy is a static validation and must apply to preview exactly as
+    // it applies before an execution route can inspect the destination.
+    validate_cook_request_with_provenance(&args, provenance)?;
+    let (args, provision) = resolve_cook_preview_destination(args)?;
+    let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
+        args.to_worktree
+            .as_deref()
+            .map(Path::new)
+            .filter(|path| path.is_dir())
+    });
+    let gate_contract_validation = validate_gate_contracts(
+        args.gates
+            .verify
+            .iter()
+            .chain(&args.gates.private_verify)
+            .cloned(),
+        gate_workspace,
+        &crate::cli_runtime::current_augmented_command_contract(),
+    )?;
+    preflight_cook_provider_credentials(&args)?;
+
+    // Preview binds evidence to the same resolved workspace, but only projects
+    // its read-only paths. Cook alone performs the later secure copy.
+    let mut compile_args = args.clone();
+    compile_args.provider_evidence_inputs.clear();
+    let workspace = provision["path"]
+        .as_str()
+        .expect("preview local workspace")
+        .to_string();
+    let evidence = if !args.provider_evidence_inputs.is_empty() {
+        let mut dispatch = dispatch_args_for_cook(&args);
+        resolve_dispatch_prompt(&mut dispatch)?;
+        validate_provider_evidence_inputs(
+            &args.provider_evidence_inputs,
+            dispatch.prompt.as_deref(),
+        )?;
+        compile_args.dispatch.prompt = dispatch.prompt;
+        let evidence =
+            projected_provider_evidence(&args.provider_evidence_inputs, Some(&workspace))?;
+        rewrite_provider_evidence_prompt(
+            &mut compile_args.dispatch.prompt,
+            &args.provider_evidence_inputs,
+            Some(&workspace),
+        );
+        Some(evidence)
+    } else {
+        None
+    };
+    let mut plan = compile_cook_plan(&compile_args, provision)?;
+    if let Some(evidence) = evidence {
+        for task in &mut plan.tasks {
+            if !task.executor.config.is_object() {
+                task.executor.config = serde_json::json!({});
+            }
+            task.executor.config["evidence_inputs"] = serde_json::to_value(&evidence)
+                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+        }
+    }
+    resolve_cook_execution_budget(&args, &mut plan)?;
+    plan.metadata["gate_contract_validation"] = serde_json::to_value(gate_contract_validation)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+
+    let executor = plan
+        .tasks
+        .first()
+        .map(|task| serde_json::to_value(&task.executor).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
+    let replay = cook_preview_replay_argv(&args);
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "mutates": false,
+            "resolved": {
+                "repository": args.dispatch.repo,
+                "worktree": args.to_worktree,
+                "base": args.base,
+                "head": args.head,
+                "placement": preview_placement_policy(),
+                "provider": executor,
+                "gates": {
+                    "public": args.gates.verify.len(),
+                    "private": args.gates.private_verify.len(),
+                },
+                "retry_budget": plan.metadata["cook_retry_policy"],
+                "publication": {
+                    "finalize": !args.no_finalize,
+                    "draft": args.draft_pr,
+                    "ai_tool": args.ai_tool,
+                },
+            },
+            "replay_argv": replay.argv,
+            "replay_requires": replay.requires,
+        }),
+        0,
+    ))
+}
+
+const MAX_PREVIEW_REPLAY_ARGS: usize = 128;
+const MAX_PREVIEW_REPLAY_BYTES: usize = 16 * 1024;
+
+#[derive(Debug)]
+struct PreviewReplayArgv {
+    argv: Vec<String>,
+    requires: Vec<String>,
+}
+
+fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
+    let process_argv = std::env::args().collect::<Vec<_>>();
+    if process_argv
+        .windows(2)
+        .any(|parts| parts == ["agent-task", "cook"])
+        && process_argv.iter().any(|part| part == "--preview")
+    {
+        return redact_preview_replay_argv(
+            std::iter::once("homeboy".to_string()).chain(
+                process_argv
+                    .into_iter()
+                    .skip(1)
+                    .filter(|part| part != "--preview"),
+            ),
+        );
+    }
+
+    // Unit callers do not have the original process argv. Keep their fallback
+    // useful for embedding while the CLI path above preserves every supplied
+    // advanced flag exactly.
+    let mut argv = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+    ];
+    if let Some(prompt) = &args.dispatch.prompt {
+        argv.extend(["--prompt".to_string(), prompt.clone()]);
+    }
+    if let Some(goal) = &args.goal {
+        argv.extend(["--goal".to_string(), goal.clone()]);
+    }
+    if let Some(repo) = &args.dispatch.repo {
+        argv.extend(["--repo".to_string(), repo.clone()]);
+    }
+    if let Some(task_url) = &args.dispatch.task_url {
+        argv.extend(["--task-url".to_string(), task_url.clone()]);
+    }
+    if let Some(worktree) = &args.to_worktree {
+        argv.extend(["--to-worktree".to_string(), worktree.clone()]);
+    }
+    for gate in &args.gates.verify {
+        argv.extend(["--verify".to_string(), gate.clone()]);
+    }
+    argv.extend(["--base".to_string(), args.base.clone()]);
+    if let Some(head) = &args.head {
+        argv.extend(["--head".to_string(), head.clone()]);
+    }
+    if args.no_finalize {
+        argv.push("--no-finalize".to_string());
+    }
+    if args.draft_pr {
+        argv.push("--draft-pr".to_string());
+    }
+    redact_preview_replay_argv(argv)
+}
+
+fn redact_preview_replay_argv(argv: impl IntoIterator<Item = String>) -> PreviewReplayArgv {
+    let (units, mut requires) = clap_replay_units(argv.into_iter().collect());
+    let mut replay = Vec::new();
+    let mut bytes = 0;
+    for unit in units {
+        let unit_bytes = unit.iter().map(String::len).sum::<usize>();
+        if replay.len() + unit.len() > MAX_PREVIEW_REPLAY_ARGS
+            || bytes + unit_bytes > MAX_PREVIEW_REPLAY_BYTES
+        {
+            requires.push("replay was truncated at the safety budget; re-add omitted complete flag/value units from the original command".to_string());
+            break;
+        }
+        let (unit, requirement) = redact_replay_unit(unit);
+        replay.extend(unit);
+        bytes += unit_bytes;
+        if let Some(requirement) = requirement {
+            requires.push(requirement);
+        }
+    }
+    PreviewReplayArgv {
+        argv: replay,
+        requires,
+    }
+}
+
+fn clap_replay_units(argv: Vec<String>) -> (Vec<Vec<String>>, Vec<String>) {
+    let value_flags = cook_value_flags();
+    let mut units = Vec::new();
+    let mut requires = Vec::new();
+    let mut index = 0;
+    while index < argv.len() {
+        let value = &argv[index];
+        if value == "--preview" {
+            index += 1;
+        } else if let Some((_flag, _)) = value.split_once('=') {
+            units.push(vec![value.clone()]);
+            index += 1;
+        } else if value_flags.contains(value) {
+            if let Some(next) = argv.get(index + 1).filter(|next| !next.starts_with("--")) {
+                units.push(vec![value.clone(), next.clone()]);
+                index += 2;
+            } else {
+                requires.push(format!("{value} was omitted because its value is absent; provide the original value before replaying"));
+                index += 1;
+            }
+        } else {
+            units.push(vec![value.clone()]);
+            index += 1;
+        }
+    }
+    (units, requires)
+}
+
+fn cook_value_flags() -> std::collections::BTreeSet<String> {
+    let command = crate::cli_surface::Cli::command_with_scoped_lab_args();
+    let mut flags = std::collections::BTreeSet::new();
+    let agent_task = command
+        .find_subcommand("agent-task")
+        .expect("agent-task command exists in generated Clap metadata");
+    let cook = agent_task
+        .find_subcommand("cook")
+        .expect("Cook command exists in generated Clap metadata");
+    for command in [&command, agent_task, cook] {
+        for arg in command
+            .get_arguments()
+            .filter(|arg| arg.get_action().takes_values())
+        {
+            if let Some(flag) = arg.get_long() {
+                flags.insert(format!("--{flag}"));
+            }
+            if let Some(aliases) = arg.get_all_aliases() {
+                flags.extend(aliases.into_iter().map(|alias| format!("--{alias}")));
+            }
+        }
+    }
+    flags
+}
+
+fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
+    let flag = unit
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default()
+        .split('=')
+        .next()
+        .unwrap_or_default();
+    let sensitive = flag == "--private-verify"
+        || flag == "--private-verify-file"
+        || flag == "--gate-env"
+        || flag == "--runner-env"
+        || flag == "--lab-env-json"
+        || matches!(
+            flag,
+            "--provider-config"
+                | "--provider-command"
+                | "--provider-argv"
+                | "--client-context"
+                | "--secret-env"
+        );
+    if !sensitive {
+        return (unit, None);
+    }
+    let placeholder = if flag == "--gate-env" {
+        "REDACTED=<redacted:--gate-env>".to_string()
+    } else {
+        format!("<redacted:{flag}>")
+    };
+    let replay = if unit.len() == 2 {
+        vec![flag.to_string(), placeholder]
+    } else {
+        vec![format!("{flag}={placeholder}")]
+    };
+    (replay, Some(format!("{flag} was redacted; replace its parseable placeholder with the original value before replaying")))
+}
+
+fn preview_placement_policy() -> Value {
+    let argv = std::env::args().collect::<Vec<_>>();
+    preview_placement_policy_from_argv(&argv)
+}
+
+fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
+    let placement = argv
+        .iter()
+        .enumerate()
+        .find_map(|(index, value)| {
+            value
+                .strip_prefix("--placement=")
+                .map(str::to_string)
+                .or_else(|| {
+                    (value == "--placement")
+                        .then(|| argv.get(index + 1).cloned())
+                        .flatten()
+                })
+        })
+        .unwrap_or_else(|| "auto".to_string());
+    let runner = argv.iter().enumerate().find_map(|(index, value)| {
+        value
+            .strip_prefix("--runner=")
+            .map(str::to_string)
+            .or_else(|| {
+                (value == "--runner")
+                    .then(|| argv.get(index + 1).cloned())
+                    .flatten()
+            })
+    });
+    serde_json::json!({ "requested": placement, "runner": runner, "route_executed": false })
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::cli_surface::{Cli, Commands};
+    use clap::Parser;
+
+    fn cook(argv: &[&str]) -> AgentTaskCookArgs {
+        let cli = Cli::try_parse_from(argv).expect("parse Cook preview");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+        *cook
+    }
+
+    #[test]
+    fn preview_reports_destination_blockers_without_creating_homeboy_state() {
+        crate::test_support::with_isolated_home(|home| {
+            let before = std::fs::read_dir(home).expect("read isolated home").count();
+            let error = preview_cook(
+                cook(&[
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--preview",
+                    "--prompt",
+                    "implement the issue",
+                    "--backend",
+                    "fixture",
+                    "--no-finalize",
+                ]),
+                None,
+            )
+            .expect_err("missing destination must block preview");
+
+            assert_eq!(
+                error.code,
+                homeboy::core::ErrorCode::ValidationMissingArgument
+            );
+            assert_eq!(
+                error.details["args"],
+                serde_json::json!(["--repo <repo> is required when --to-worktree is omitted"])
+            );
+            assert_eq!(
+                std::fs::read_dir(home).expect("read isolated home").count(),
+                before,
+                "preview must not create Homeboy state"
+            );
+        });
+    }
+
+    #[test]
+    fn preview_replay_argv_is_executable_cook_argv_without_preview() {
+        let args = cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--preview",
+            "--prompt",
+            "implement the issue",
+            "--repo",
+            "homeboy",
+            "--task-url",
+            "https://github.com/Extra-Chill/homeboy/issues/12478",
+            "--verify",
+            "cargo test -p homeboy-cli",
+        ]);
+        let resolved = resolve_cook_destination(args).expect("resolve issue destination");
+        let replay = cook_preview_replay_argv(&resolved);
+        assert!(
+            !replay.argv.iter().any(|part| part == "--preview"),
+            "{replay:?}"
+        );
+        Cli::try_parse_from(&replay.argv).expect("replay argv parses as Cook");
+    }
+
+    #[test]
+    fn preview_applies_argument_provenance_before_destination_resolution() {
+        let mut provenance = crate::cli_surface::CommandArgumentProvenance::default();
+        provenance.set(
+            "no_finalize",
+            crate::cli_surface::ArgumentSource::Configuration,
+        );
+        let error = preview_cook(
+            cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "implement the issue",
+                "--to-worktree",
+                "missing@worktree",
+                "--no-finalize",
+            ]),
+            Some(&provenance),
+        )
+        .expect_err("preview must enforce no-finalize provenance");
+        assert!(
+            error.message.contains("explicitly authorized"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn preview_replay_redacts_opaque_provider_values_and_arbitrary_credential_names() {
+        let replay = redact_preview_replay_argv(std::iter::once("homeboy".to_string()).chain([
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--gate-env".to_string(),
+            "TOKEN=secret-value".to_string(),
+            "--provider-config".to_string(),
+            r#"{"token":"secret-value"}"#.to_string(),
+            "--private-verify".to_string(),
+            "printf secret-value".to_string(),
+            "--provider-argv".to_string(),
+            "credential-without-a-secret-name".to_string(),
+            "--runner-env=TOKEN=secret-value".to_string(),
+        ]));
+        assert!(
+            !replay.argv.join(" ").contains("secret-value"),
+            "{replay:?}"
+        );
+        assert_eq!(replay.argv[4], "REDACTED=<redacted:--gate-env>");
+        assert_eq!(replay.argv[6], "<redacted:--provider-config>");
+        assert_eq!(replay.argv[7], "--private-verify");
+        assert_eq!(replay.argv[8], "<redacted:--private-verify>");
+        assert_eq!(replay.argv[10], "<redacted:--provider-argv>");
+        assert_eq!(replay.argv[11], "--runner-env=<redacted:--runner-env>");
+        assert_eq!(replay.requires.len(), 5);
+        Cli::try_parse_from(&replay.argv).expect("redacted replay remains parseable");
+    }
+
+    #[test]
+    fn preview_replay_truncates_only_at_parseable_clap_unit_boundaries() {
+        let argv = std::iter::once("homeboy".to_string())
+            .chain(["agent-task".to_string(), "cook".to_string()])
+            .chain(
+                (0..MAX_PREVIEW_REPLAY_ARGS)
+                    .flat_map(|index| ["--verify".to_string(), format!("true-{index}")]),
+            )
+            .collect::<Vec<_>>();
+        let replay = redact_preview_replay_argv(argv);
+        assert!(replay.argv.len() < MAX_PREVIEW_REPLAY_ARGS);
+        assert!(replay
+            .requires
+            .iter()
+            .any(|item| item.contains("safety budget")));
+        for boundary in (3..=replay.argv.len()).step_by(2) {
+            Cli::try_parse_from(&replay.argv[..boundary])
+                .unwrap_or_else(|error| panic!("boundary {boundary} is not parseable: {error}"));
+        }
+    }
+
+    #[test]
+    fn every_generated_cook_value_option_is_atomic_and_never_dangles() {
+        for flag in cook_value_flags() {
+            let (_, missing_requires) = clap_replay_units(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                flag.clone(),
+            ]);
+            assert!(
+                missing_requires
+                    .iter()
+                    .any(|requirement| requirement.starts_with(&flag)),
+                "missing value-taking flag {flag} was not withheld atomically"
+            );
+
+            let (units, requires) = clap_replay_units(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                flag.clone(),
+                "placeholder".to_string(),
+            ]);
+            assert!(
+                requires.is_empty(),
+                "complete {flag} unexpectedly needs input"
+            );
+            assert!(
+                units
+                    .iter()
+                    .any(|unit| unit == &[flag.clone(), "placeholder".to_string()]),
+                "value-taking flag {flag} was not retained as one unit"
+            );
+        }
+    }
+
+    #[test]
+    fn root_value_options_and_aliases_are_atomic_in_separated_and_equals_forms() {
+        let root_values = [
+            ("--output", "preview.json"),
+            ("--notification-transport", "webhook"),
+            ("--notification-route", "https://example.test/hook"),
+            ("--placement", "auto"),
+            ("--artifact-root", "artifacts"),
+            ("--runner", "runner-1"),
+            ("--runner-env", "TOKEN=value"),
+            ("--runner-secret-env", "TOKEN"),
+            ("--lab-env-json", "{}"),
+            ("--runner-workspace-root", "workspace"),
+        ];
+        let value_flags = cook_value_flags();
+        for (flag, value) in root_values {
+            assert!(value_flags.contains(flag), "missing root value flag {flag}");
+            let (separated, requires) = clap_replay_units(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                flag.to_string(),
+                value.to_string(),
+            ]);
+            assert!(requires.is_empty(), "{flag} separated form needs input");
+            assert!(
+                separated
+                    .iter()
+                    .any(|unit| unit == &[flag.to_string(), value.to_string()]),
+                "{flag} separated form was not atomic"
+            );
+
+            let (equals, requires) = clap_replay_units(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                format!("{flag}={value}"),
+            ]);
+            assert!(requires.is_empty(), "{flag} equals form needs input");
+            assert!(
+                equals
+                    .iter()
+                    .any(|unit| unit == &[format!("{flag}={value}")]),
+                "{flag} equals form was not atomic"
+            );
+        }
+    }
+
+    #[test]
+    fn root_value_units_are_never_split_at_any_replay_budget_boundary() {
+        for flag in [
+            "--output",
+            "--notification-route",
+            "--runner-env",
+            "--lab-env-json",
+        ] {
+            let argv = std::iter::once("homeboy".to_string())
+                .chain(["agent-task".to_string(), "cook".to_string()])
+                .chain(
+                    (0..MAX_PREVIEW_REPLAY_ARGS)
+                        .flat_map(|index| [flag.to_string(), format!("value-{index}")]),
+                )
+                .collect::<Vec<_>>();
+            let replay = redact_preview_replay_argv(argv);
+            assert_eq!(replay.argv.len() % 2, 1, "{flag} was split at the budget");
+            assert!(replay
+                .requires
+                .iter()
+                .any(|item| item.contains("safety budget")));
+        }
+    }
+
+    #[test]
+    fn valid_root_value_forms_parse_before_and_after_cook() {
+        for (flag, value) in [
+            ("--output", "preview.json"),
+            ("--placement", "local"),
+            ("--artifact-root", "artifacts"),
+            ("--runner-env", "TOKEN=value"),
+            ("--runner-secret-env", "TOKEN"),
+            ("--lab-env-json", "{}"),
+            ("--runner-workspace-root", "workspace"),
+        ] {
+            Cli::try_parse_from(["homeboy", flag, value, "agent-task", "cook"])
+                .unwrap_or_else(|error| panic!("separated {flag} must parse: {error}"));
+            let equals = format!("{flag}={value}");
+            Cli::try_parse_from(["homeboy", "agent-task", "cook", &equals])
+                .unwrap_or_else(|error| panic!("equals {flag} must parse: {error}"));
+        }
+        for args in [
+            vec![
+                "homeboy",
+                "--notification-transport",
+                "webhook",
+                "--notification-route",
+                "https://example.test/hook",
+                "agent-task",
+                "cook",
+            ],
+            vec![
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--notification-transport=webhook",
+                "--notification-route=https://example.test/hook",
+            ],
+        ] {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("notification pair must parse: {error}"));
+        }
+    }
+
+    #[test]
+    fn preview_reports_requested_placement_without_executing_a_route() {
+        let policy = preview_placement_policy_from_argv(&[
+            "homeboy".to_string(),
+            "--placement=lab-or-local".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ]);
+        assert_eq!(policy["requested"], "lab-or-local");
+        assert_eq!(policy["route_executed"], false);
+    }
+
+    #[test]
+    fn read_only_evidence_projection_uses_the_resolved_workspace_path() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source = tempfile::NamedTempFile::new().expect("evidence");
+        std::fs::write(source.path(), "evidence").expect("write evidence");
+        let evidence = vec![AgentTaskProviderEvidenceInput {
+            id: "issue".to_string(),
+            source: source.path().display().to_string(),
+        }];
+        validate_provider_evidence_inputs(&evidence, Some("Read the evidence."))
+            .expect("validate evidence");
+        let projected = projected_provider_evidence(&evidence, workspace.path().to_str())
+            .expect("project read-only evidence path");
+        assert!(projected[0]["path"]
+            .as_str()
+            .expect("projection path")
+            .starts_with(workspace.path().to_str().expect("workspace path")));
+        assert!(projected[0]["read_only"].as_bool().expect("read-only flag"));
+
+        let bounded = redact_preview_replay_argv(
+            (0..MAX_PREVIEW_REPLAY_ARGS + 1).map(|index| format!("arg-{index}")),
+        );
+        assert_eq!(bounded.argv.len(), MAX_PREVIEW_REPLAY_ARGS);
+        assert!(bounded
+            .requires
+            .iter()
+            .any(|item| item.contains("safety budget")));
+    }
+
+    #[test]
+    fn compile_cook_plan_returns_a_typed_evidence_blocker_without_a_workspace() {
+        let args = cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "read the evidence",
+            "--to-worktree",
+            "missing@worktree",
+            "--no-finalize",
+            "--provider-evidence",
+            r#"{"id":"issue","source":"/tmp/issue.md"}"#,
+        ]);
+        let error = compile_cook_plan(&args, serde_json::json!({ "action": "lookup_pending" }))
+            .expect_err("evidence without a workspace must not panic");
+        assert_eq!(
+            error.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+        assert_eq!(error.details["field"], "provider-evidence");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_never_executes_a_configured_worktree_provider() {
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let marker = temp.path().join("provider-ran");
+            let provider = temp.path().join("provider.sh");
+            std::fs::write(
+                &provider,
+                format!("#!/bin/sh\ntouch {}\n", marker.display()),
+            )
+            .expect("write provider");
+            let mut permissions = std::fs::metadata(&provider)
+                .expect("provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+            let mut config = homeboy::core::defaults::load_config();
+            config.worktree_providers.insert(
+                "sentinel".to_string(),
+                homeboy::core::defaults::WorktreeProviderConfig {
+                    enabled: true,
+                    kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                    apply_enabled: true,
+                    lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
+                    lookup_output_limit_bytes: 64 * 1024,
+                    commands: homeboy::core::defaults::WorktreeProviderCommands {
+                        list: Some(vec![provider.display().to_string()]),
+                        ..Default::default()
+                    },
+                    list_result_mapping: None,
+                },
+            );
+            homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+            let error = preview_cook(
+                cook(&[
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--preview",
+                    "--backend",
+                    "fixture",
+                    "--prompt",
+                    "implement the issue",
+                    "--to-worktree",
+                    "sentinel@missing",
+                    "--no-finalize",
+                ]),
+                None,
+            )
+            .expect_err("provider-backed destination must block preview");
+            assert_eq!(
+                error.code,
+                homeboy::core::ErrorCode::ValidationInvalidArgument
+            );
+            assert!(
+                error.message.contains("preview unresolved destination"),
+                "{}",
+                error.message
+            );
+            assert!(!marker.exists(), "preview executed the configured provider");
+        });
+    }
+
+    #[test]
+    fn preview_rejects_an_existing_unsafe_path_without_changing_it() {
+        crate::test_support::with_isolated_home(|_| {
+            let path = tempfile::tempdir().expect("unsafe path");
+            let sentinel = path.path().join("unchanged");
+            std::fs::write(&sentinel, "keep").expect("write sentinel");
+            let error = preview_cook(
+                cook(&[
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--preview",
+                    "--backend",
+                    "fixture",
+                    "--prompt",
+                    "implement the issue",
+                    "--to-worktree",
+                    path.path().to_str().expect("UTF-8 path"),
+                    "--no-finalize",
+                ]),
+                None,
+            )
+            .expect_err("non-worktree path must fail static safety checks");
+            assert_eq!(
+                error.code,
+                homeboy::core::ErrorCode::ValidationInvalidArgument
+            );
+            assert_eq!(
+                std::fs::read_to_string(&sentinel).expect("read sentinel"),
+                "keep"
+            );
+        });
+    }
+}
+
 /// Resume a Cook from its immutable recipe rather than asking the operator to
 /// replay prompt, provider, gate, workspace, or disclosure arguments.
 pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
@@ -1082,6 +1872,96 @@ pub(crate) fn resolve_cook_destination(
         args.head = Some(derived_cook_branch(task_url)?);
     }
     Ok(args)
+}
+
+/// Preview never asks a worktree provider whether a handle exists: even a
+/// provider's nominal "list" command is arbitrary configured code. It only
+/// validates an already-local authority and otherwise returns a typed blocker.
+fn resolve_cook_preview_destination(
+    mut args: AgentTaskCookArgs,
+) -> homeboy::core::Result<(AgentTaskCookArgs, Value)> {
+    normalize_cook_repository_identity(&mut args)?;
+    if args.to_worktree.is_none() {
+        if let Some(cwd) = args.dispatch.cwd.as_deref() {
+            let path = std::fs::canonicalize(cwd).map_err(|error| {
+                homeboy::core::Error::internal_io(error.to_string(), Some(cwd.to_string()))
+            })?;
+            args.to_worktree = Some(path.display().to_string());
+        } else {
+            let repo = args.dispatch.repo.as_deref().ok_or_else(|| {
+                homeboy::core::Error::validation_missing_argument(vec![
+                    "--repo <repo> is required when --to-worktree is omitted".to_string(),
+                ])
+            })?;
+            let task_url = args.dispatch.task_url.as_deref().ok_or_else(|| {
+                homeboy::core::Error::validation_missing_argument(vec![
+                    "--task-url <url> is required when --to-worktree is omitted".to_string(),
+                ])
+            })?;
+            let handle = format!(
+                "{repo}@{}",
+                slugify_cook_branch(&derived_cook_branch(task_url)?)
+            );
+            return Err(preview_destination_blocker(
+                &handle,
+                "the issue-derived destination is not an explicit existing local path; preview will not execute configured worktree-provider commands",
+            ));
+        }
+    }
+    let handle = args.to_worktree.clone().expect("preview destination set");
+    let path = if let Some(cwd) = args.dispatch.cwd.as_deref() {
+        let path = std::fs::canonicalize(cwd).map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(cwd.to_string()))
+        })?;
+        ensure_active_managed_cook_destination(&handle)?;
+        homeboy::core::worktree_providers::validate_task_worktree_root(&path, &handle)?;
+        validate_cook_destination_identity(&args, &path)?;
+        validate_cook_cwd_destination_identity(&path, &handle)?;
+        path
+    } else if Path::new(&handle).is_dir() {
+        let path = std::fs::canonicalize(&handle).map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(handle.clone()))
+        })?;
+        homeboy::core::worktree_providers::validate_task_worktree_root(&path, &handle)?;
+        validate_cook_destination_identity(&args, &path)?;
+        path
+    } else if let Some(record) = homeboy::core::worktree::resolve_workspace_ref_if_present(&handle)?
+    {
+        ensure_active_managed_cook_destination(&handle)?;
+        let path = PathBuf::from(record.path());
+        if !path.is_dir() {
+            return Err(preview_destination_blocker(
+                &handle,
+                "the registered workspace path is missing",
+            ));
+        }
+        homeboy::core::worktree_providers::validate_task_worktree_root(&path, &handle)?;
+        validate_cook_destination_identity(&args, &path)?;
+        path
+    } else {
+        return Err(preview_destination_blocker(
+            &handle,
+            "destination is missing or provider-backed; preview only validates explicit existing local paths",
+        ));
+    };
+    Ok((
+        args,
+        serde_json::json!({
+            "action": "existing",
+            "kind": "preview_local",
+            "handle": handle,
+            "path": path,
+        }),
+    ))
+}
+
+fn preview_destination_blocker(handle: &str, problem: &str) -> homeboy::core::Error {
+    homeboy::core::Error::validation_invalid_argument(
+        "to_worktree",
+        format!("preview unresolved destination `{handle}`: {problem}"),
+        Some(handle.to_string()),
+        Some(vec!["Pass an existing local --cwd or --to-worktree path, or run Cook to let its configured provider resolve the destination.".to_string()]),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -2183,9 +3063,17 @@ pub(crate) fn compile_cook_plan(
         .validate_explicit_models(&plan)?;
     record_cook_goal(&mut plan, args.goal.as_deref());
     if !args.provider_evidence_inputs.is_empty() {
+        let workspace = workspace.as_deref().ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "provider-evidence",
+                "provider evidence cannot be projected until Cook has a resolved workspace path",
+                None,
+                None,
+            )
+        })?;
         let evidence = project_provider_evidence_inputs(
             &args.provider_evidence_inputs,
-            Path::new(workspace.as_deref().expect("bound Cook workspace")),
+            Path::new(workspace),
             None,
         )?;
         for task in &mut plan.tasks {

@@ -898,7 +898,15 @@ mod tests {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(disable_help_flag = true)]
 pub struct AgentTaskCookArgs {
+    /// Show the compact task-first Cook help. Use `--help-full` for every
+    /// advanced transport, provider, gate, and recovery option.
+    #[arg(short = 'h', long, action = clap::ArgAction::HelpShort)]
+    pub help: Option<bool>,
+    /// Show the complete Cook option reference.
+    #[arg(long = "help-full", action = clap::ArgAction::HelpLong)]
+    pub help_full: Option<bool>,
     #[command(flatten)]
     pub dispatch: DispatchArgs,
     /// Completion rule for isolated candidates: wait for all results (default)
@@ -909,6 +917,10 @@ pub struct AgentTaskCookArgs {
     pub attempt_run_id: Option<String>,
     #[arg(long, hide = true)]
     pub attempt_plan: Option<String>,
+    /// Resolve the Cook plan and validate static inputs without creating a run
+    /// or provisioning a worktree. Includes a replayable command.
+    #[arg(long)]
+    pub preview: bool,
     /// One-line statement of what a successful cook must achieve. Recorded as
     /// framing metadata for the provider task and used for review. Without
     /// --prompt, it supplies the one provider task.

@@ -574,6 +574,8 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
         homeboy::core::defaults::save_config(&config).expect("save worktree provider config");
         let (value, exit_code) = run_cook_with_executor(
             AgentTaskCookArgs {
+                help: None,
+                help_full: None,
                 provider_evidence_inputs: Vec::new(),
                 dispatch: DispatchArgs {
                     prompt: None,
@@ -613,6 +615,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 candidate_completion: homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::WaitAll,
                 attempt_run_id: Some("cook-missing-provider-attempt-1-controller".to_string()),
                 attempt_plan: None,
+                preview: false,
                 goal: Some("cook fixture".to_string()),
                 to_worktree: Some(target.display().to_string()),
                 provider_command: None,
@@ -980,6 +983,8 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (value, exit_code) = run_cook_with_executor_and_dispatcher(
             AgentTaskCookArgs {
+                help: None,
+                help_full: None,
                 provider_evidence_inputs: Vec::new(),
                 dispatch: DispatchArgs {
                     prompt: Some("commit a change".to_string()),
@@ -1015,6 +1020,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 candidate_completion: homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::WaitAll,
                 attempt_run_id: None,
                 attempt_plan: None,
+                preview: false,
                 goal: None,
                 to_worktree: Some(target.display().to_string()),
                 provider_command: None,

@@ -76,6 +76,9 @@ pub enum AgentTaskCommand {
     /// client that needs the detached contract should pass
     /// `--detach-after-handoff` rather than rely on the default, and read the
     /// terminal outcome from `agent-task status <run-id>` in either case.
+    #[command(
+        after_help = "Quick start:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'cargo test'\n\nInspect inferred inputs without side effects:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'cargo test' --preview\n\nUse --help-full for the complete advanced option reference."
+    )]
     Cook(Box<AgentTaskCookArgs>),
     /// Continue a detached Cook from its durable Cook ID or provider attempt ID.
     /// The persisted recipe supplies the original prompt, transport, gates,
