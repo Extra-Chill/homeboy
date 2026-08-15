@@ -652,6 +652,16 @@ fn classify_liveness(
         return AgentTaskLiveness::Active;
     }
 
+    if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
+        return AgentTaskLiveness::Unreconciled;
+    }
+    // Pending reverse-broker ownership is runner-host authority. A projected
+    // runner PID cannot be probed on this controller; acceptance or expiry is
+    // the durable boundary for resolving its liveness.
+    if agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now) {
+        return AgentTaskLiveness::Active;
+    }
+
     if record.is_stale_running() {
         return AgentTaskLiveness::Stale;
     }
