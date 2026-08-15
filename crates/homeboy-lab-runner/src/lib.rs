@@ -293,10 +293,10 @@ pub use apply::{
 };
 pub use capabilities::{
     evaluate_lab_runner_capabilities_for_inventory, evaluate_lab_runner_capabilities_for_runner,
-    prepare_lab_runner_capability, runner_capability_inventory, LabRunnerCapabilityContract,
-    LabRunnerGateDecision, LabRunnerGateMode, PreparedLabRunnerCapability,
-    RunnerCapabilityInventory, RunnerCapabilityPreflight, RunnerRequiredTool,
-    RunnerToolCapabilityRequirement, RunnerToolchainReadinessProbe,
+    prepare_lab_runner_capability, runner_capability_inventory, runner_capability_inventory_until,
+    LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
+    PreparedLabRunnerCapability, RunnerCapabilityInventory, RunnerCapabilityPreflight,
+    RunnerRequiredTool, RunnerToolCapabilityRequirement, RunnerToolchainReadinessProbe,
 };
 pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
 pub use command_path::preflight_remote_argv_path_translation;
@@ -875,57 +875,81 @@ pub fn refresh_lab_runner_readiness_for_admission() -> Result<LabRunnerReadiness
     let preferred = defaults::load_config().lab.preferred_runner;
     let mut runner_ids = configured_lab_runner_ids()?;
     runner_ids.sort();
-    let candidates = runner_ids
-        .into_iter()
-        .take(DETACHED_QUEUE_REFRESH_LIMIT)
-        .filter_map(|runner_id| {
-            let runner = load(&runner_id).ok()?;
-            runner_probe_gate::invalidate_runner_probes(&runner_id);
-            let status = status(&runner_id).ok();
-            let Some(status) = status else {
-                // A configured runner whose authoritative status is unavailable
-                // is disconnected, not absent. Preserve that distinction for
-                // the recovery command reported by hot-controller admission.
-                return Some(DefaultLabRunnerCandidate {
-                    id: runner_id,
-                    mode: RunnerTunnelMode::DirectSsh,
-                    connected: false,
-                    capacity: runner.settings.concurrency_limit,
-                    stale_daemon: false,
-                    unverified_daemon: false,
-                    admission_fresh: true,
-                    admission_remediation: None,
-                    active_jobs: 0,
-                    active_jobs_available: false,
-                    capabilities_ready: false,
-                });
-            };
-            let capabilities_ready = runner_capability_inventory(&runner_id)
-                .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
-            let mode = status
-                .session
-                .as_ref()
-                .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
-            Some(DefaultLabRunnerCandidate {
-                id: runner_id,
-                mode,
-                connected: status.connected,
-                capacity: runner.settings.concurrency_limit,
-                stale_daemon: status.admission_blocking_stale_daemon().is_some(),
-                unverified_daemon: status.unverified_daemon().is_some(),
-                admission_fresh: status.daemon_fresh_for_admission(),
-                admission_remediation: status
-                    .admission_action()
-                    .map(|action| action.render_command()),
-                active_jobs: status.active_job_count.max(status.active_jobs.len()),
-                active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
-                capabilities_ready,
-            })
-        })
-        .collect();
-    Ok(lab_runner_readiness_from_candidates(
-        preferred.as_deref(),
-        candidates,
+    let deadline = std::time::Instant::now() + readonly_probe::readonly_probe_timeout();
+    let mut observations = Vec::new();
+    for runner_id in runner_ids.into_iter().take(DETACHED_QUEUE_REFRESH_LIMIT) {
+        observations.push(observe_lab_runner_admission_candidate(&runner_id, deadline));
+    }
+    lab_runner_readiness_from_refresh_observations(preferred.as_deref(), observations)
+}
+
+fn observe_lab_runner_admission_candidate(
+    runner_id: &str,
+    deadline: std::time::Instant,
+) -> Result<DefaultLabRunnerCandidate> {
+    let runner = load(runner_id)?;
+    runner_probe_gate::invalidate_runner_probes(runner_id);
+    let status = runner_admission_snapshot_until(runner_id, deadline)?.status;
+    let capabilities_ready = runner_capability_inventory_until(runner_id, deadline)?
+        .runtime_ids
+        .contains("homeboy");
+    let mode = status
+        .session
+        .as_ref()
+        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
+    Ok(DefaultLabRunnerCandidate {
+        id: runner_id.to_string(),
+        mode,
+        connected: status.connected,
+        capacity: runner.settings.concurrency_limit,
+        stale_daemon: status.admission_blocking_stale_daemon().is_some(),
+        unverified_daemon: status.unverified_daemon().is_some(),
+        admission_fresh: status.daemon_fresh_for_admission(),
+        admission_remediation: status
+            .admission_action()
+            .map(|action| action.render_command()),
+        active_jobs: status.active_job_count.max(status.active_jobs.len()),
+        active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
+        capabilities_ready,
+    })
+}
+
+fn lab_runner_readiness_from_refresh_observations(
+    preferred: Option<&str>,
+    observations: Vec<Result<DefaultLabRunnerCandidate>>,
+) -> Result<LabRunnerReadiness> {
+    let mut candidates = Vec::new();
+    let mut failures = Vec::new();
+    for observation in observations {
+        match observation {
+            Ok(candidate) => candidates.push(candidate),
+            Err(error) => failures.push(serde_json::json!({
+                "code": error.code.as_str(),
+                "message": error.message,
+                "details": error.details,
+            })),
+        }
+    }
+    let readiness = lab_runner_readiness_from_candidates(preferred, candidates);
+    if readiness.state == LabRunnerReadinessState::ConnectedReady || failures.is_empty() {
+        return Ok(readiness);
+    }
+    let timeout = failures.iter().all(|failure| {
+        failure.get("code").and_then(serde_json::Value::as_str)
+            == Some(homeboy_core::error::ErrorCode::RemoteCommandTimeout.as_str())
+    });
+    Err(homeboy_core::error::Error::new(
+        if timeout {
+            homeboy_core::error::ErrorCode::RemoteCommandTimeout
+        } else {
+            homeboy_core::error::ErrorCode::RunnerLabTransportFailure
+        },
+        "No Lab runner completed the bounded admission refresh",
+        serde_json::json!({
+            "runner_failures": failures,
+            "observed_readiness_state": readiness.state.as_str(),
+            "available_runner_ids": readiness.available_runner_ids,
+        }),
     ))
 }
 
@@ -1881,6 +1905,61 @@ mod tests {
         );
         assert_eq!(refreshed.state, LabRunnerReadinessState::ConnectedReady);
         assert_eq!(refreshed.selected_runner_id.as_deref(), Some("lab-a"));
+    }
+
+    #[test]
+    fn admission_refresh_continues_past_a_failed_runner_to_ready_capacity() {
+        let readiness = lab_runner_readiness_from_refresh_observations(
+            None,
+            vec![
+                Err(homeboy_core::error::Error::new(
+                    homeboy_core::error::ErrorCode::RemoteCommandTimeout,
+                    "lab-a timed out",
+                    serde_json::Value::Null,
+                )),
+                Ok(default_lab_candidate(
+                    "lab-b",
+                    RunnerTunnelMode::Reverse,
+                    true,
+                )),
+            ],
+        )
+        .expect("a later ready runner must win admission");
+
+        assert_eq!(readiness.selected_runner_id.as_deref(), Some("lab-b"));
+        assert_eq!(readiness.available_runner_ids, ["lab-b"]);
+    }
+
+    #[test]
+    fn admission_refresh_aggregates_failures_only_when_no_runner_is_ready() {
+        let mut full = default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true);
+        full.capacity = Some(1);
+        full.active_jobs = 1;
+        let error = lab_runner_readiness_from_refresh_observations(
+            None,
+            vec![
+                Err(homeboy_core::error::Error::new(
+                    homeboy_core::error::ErrorCode::RemoteCommandTimeout,
+                    "lab-a timed out",
+                    serde_json::Value::Null,
+                )),
+                Ok(full),
+            ],
+        )
+        .expect_err("aggregate failures only after every runner is unavailable");
+
+        assert_eq!(
+            error.code,
+            homeboy_core::error::ErrorCode::RemoteCommandTimeout
+        );
+        assert_eq!(
+            error.details["runner_failures"][0]["code"],
+            "remote.command_timeout"
+        );
+        assert_eq!(
+            error.details["observed_readiness_state"],
+            "capacity_blocked"
+        );
     }
 
     #[test]

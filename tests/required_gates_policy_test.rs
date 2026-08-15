@@ -211,8 +211,8 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
     assert!(test_gate.contains("      baseline-commands: none"));
     assert!(test_gate
         .contains("      test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}"));
-    assert!(test_gate.contains("      execution-timeout-seconds: '1800'"));
-    assert!(test_gate.contains("      test-timeout-seconds: '1500'"));
+    assert!(test_gate.contains("      execution-timeout-seconds: '2100'"));
+    assert!(test_gate.contains("      test-timeout-seconds: '1800'"));
     assert!(
         !test_gate.contains("baseline-commands: review test"),
         "Test differential gating expands changed PRs to an unbounded full-workspace run"
@@ -660,15 +660,15 @@ fn unknown_mode_is_refused() {
 }
 
 /// The pin validator's parser must be exercisable without network: a workflow
-/// with no SHA-pinned reusable call has nothing to dereference and must not be
-/// treated as a failure. The positive and negative dereferencing paths need the
-/// GitHub API and are exercised by the `Required Gates Declaration` job itself.
+/// with no reusable call has nothing to dereference and must not be treated as a
+/// failure. The positive and negative dereferencing paths need the GitHub API
+/// and are exercised by the `Required Gates Declaration` job itself.
 #[test]
-fn action_pin_validator_is_a_noop_without_sha_pinned_reusable_workflows() {
+fn action_pin_validator_is_a_noop_without_reusable_workflows() {
     let dir = Scratch::new("action-pin-no-pins");
     let workflow = dir.write(
         "ci.yml",
-        "jobs:\n  homeboy:\n    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2\n",
+        "jobs:\n  checkout:\n    steps:\n      - uses: actions/checkout@v6\n",
     );
     let output = Command::new("bash")
         .arg(".github/validate-action-pin.sh")

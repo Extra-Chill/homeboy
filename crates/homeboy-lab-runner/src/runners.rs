@@ -83,7 +83,9 @@ pub use crate::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
     RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput, RuntimeMaterializationStatus,
 };
-pub use crate::{observe_runner_capabilities, runner_capability_inventory};
+pub use crate::{
+    observe_runner_capabilities, runner_capability_inventory, runner_capability_inventory_until,
+};
 
 // Registry CRUD entry points.
 pub use crate::{

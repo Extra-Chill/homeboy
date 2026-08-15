@@ -70,6 +70,15 @@ impl ObservationStore {
         Self::open_initialized_at_with_maintenance(path.into(), false)
     }
 
+    pub fn open_initialized_for_lifecycle_at_roots(
+        path: impl Into<PathBuf>,
+        artifact_root: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let mut store = Self::open_initialized_at_with_maintenance(path.into(), false)?;
+        store.artifact_root = Some(artifact_root.into());
+        Ok(store)
+    }
+
     fn open_initialized_at_with_maintenance(
         path: PathBuf,
         maintain_artifacts: bool,
@@ -89,6 +98,7 @@ impl ObservationStore {
             connection,
             path,
             readonly: false,
+            artifact_root: None,
         };
         if maintain_artifacts {
             // Evidence projections expose opaque handles and failure ranks, so
@@ -116,6 +126,7 @@ impl ObservationStore {
             connection,
             path,
             readonly: false,
+            artifact_root: None,
         })
     }
 
@@ -142,6 +153,7 @@ impl ObservationStore {
                 connection,
                 path,
                 readonly: true,
+                artifact_root: None,
             });
         }
         let connection = schema::open_readonly_connection(&path)?;
@@ -149,7 +161,15 @@ impl ObservationStore {
             connection,
             path,
             readonly: true,
+            artifact_root: None,
         })
+    }
+
+    pub fn artifact_root(&self) -> Result<PathBuf> {
+        self.artifact_root
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(crate::paths::artifact_root)
     }
 
     pub fn status(&self) -> Result<ObservationDbStatus> {
