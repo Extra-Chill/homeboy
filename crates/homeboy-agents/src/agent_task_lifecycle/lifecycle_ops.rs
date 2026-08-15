@@ -2089,8 +2089,27 @@ pub fn record_cook_progress_with_activity(
     detail: Option<&str>,
     activity: Option<Value>,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_progress_with_activity_in_store(
+        &lifecycle_store,
+        run_id,
+        phase,
+        attempt,
+        detail,
+        activity,
+    )
+}
+
+pub fn record_cook_progress_with_activity_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    attempt: u32,
+    detail: Option<&str>,
+    activity: Option<Value>,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let now = now_timestamp();
         {
             let metadata = record.ensure_metadata_object();

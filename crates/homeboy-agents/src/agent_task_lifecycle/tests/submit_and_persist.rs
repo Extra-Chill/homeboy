@@ -198,6 +198,28 @@ fn cook_progress_carries_provider_activity_and_survives_a_failed_probe() {
 }
 
 #[test]
+fn cook_progress_recorder_writes_to_the_injected_store_not_an_ambient_root() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "cook-progress-rooted";
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submit run into injected store");
+    record_cook_progress_with_activity_in_store(
+        &lifecycle_store,
+        run_id,
+        "provider_start",
+        1,
+        Some("rooted progress"),
+        None,
+    )
+    .expect("record progress into injected store");
+    let record = lifecycle_store.read_record(run_id).expect("read run");
+    assert_eq!(record.metadata["cook_progress"]["phase"], "provider_start");
+}
+
+#[test]
 fn a_supervision_stop_survives_an_hour_of_routine_resource_samples() {
     // #7015: the point of the evidence is to answer "why was this stopped?"
     // after the fact. If the decision shared an array with the sample stream, a

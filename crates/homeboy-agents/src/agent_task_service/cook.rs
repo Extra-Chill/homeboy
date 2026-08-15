@@ -5745,7 +5745,6 @@ where
                 .0;
                 let review_form_only =
                     follow_up_request.inputs["cook_loop"]["review_form_required"] == true;
-                let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
                 match dispatch_cook_follow_up(
                     (store, &lifecycle_store),
                     &options,
