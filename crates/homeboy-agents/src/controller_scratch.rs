@@ -797,18 +797,37 @@ fn register_outcome_resources_unlocked(
 /// Marks all resources owned by a terminal run as finalized, including failed
 /// and cancelled exits, so retention starts regardless of task outcome.
 pub fn finalize_run(run_id: &str) -> Result<()> {
-    finalize_run_at_index(index_path()?, run_id)
+    finalize_run_at_index(index_path()?, paths::artifact_root, run_id)
 }
 
 pub(crate) fn finalize_run_at(data_root: &Path, run_id: &str) -> Result<()> {
-    finalize_run_at_index(data_root.join("controller-scratch/resources.json"), run_id)
+    finalize_run_at_index(
+        data_root.join("controller-scratch/resources.json"),
+        paths::artifact_root,
+        run_id,
+    )
 }
 
-fn finalize_run_at_index(index_path: PathBuf, run_id: &str) -> Result<()> {
-    with_index_lock(&index_path, || finalize_run_unlocked(&index_path, run_id))
+#[cfg(test)]
+fn finalize_run_at_roots(index_path: PathBuf, artifact_root: PathBuf, run_id: &str) -> Result<()> {
+    finalize_run_at_index(index_path, || Ok(artifact_root.clone()), run_id)
 }
 
-fn finalize_run_unlocked(index_path: &Path, run_id: &str) -> Result<()> {
+fn finalize_run_at_index(
+    index_path: PathBuf,
+    artifact_root: impl Fn() -> Result<PathBuf>,
+    run_id: &str,
+) -> Result<()> {
+    with_index_lock(&index_path, || {
+        finalize_run_unlocked(&index_path, &artifact_root, run_id)
+    })
+}
+
+fn finalize_run_unlocked(
+    index_path: &Path,
+    artifact_root: &impl Fn() -> Result<PathBuf>,
+    run_id: &str,
+) -> Result<()> {
     let mut index = read_index_at_unlocked(index_path)?;
     let now = chrono::Utc::now().to_rfc3339();
     let mut changed = false;
@@ -829,7 +848,8 @@ fn finalize_run_unlocked(index_path: &Path, run_id: &str) -> Result<()> {
                 ) || resource.lifecycle_state == "interrupted"
                     || stale_dirty_workspace);
             if needs_recovery {
-                let workspace_recovery = recover_authoritative_workspace(resource);
+                let workspace_recovery =
+                    recover_authoritative_workspace(resource, &artifact_root()?);
                 resource.lifecycle_state = "interrupted".to_string();
                 resource.interrupted_at = Some(now.clone());
                 resource.terminal_reason = Some("owning_run_terminalized".to_string());
@@ -850,13 +870,26 @@ fn finalize_run_unlocked(index_path: &Path, run_id: &str) -> Result<()> {
 
 pub fn cleanup(options: ControllerScratchCleanupOptions) -> Result<ControllerScratchCleanupOutput> {
     let index_path = index_path()?;
-    with_index_lock(&index_path, || cleanup_unlocked(options))
+    let observation = ObservationStore::open_initialized()?;
+    cleanup_at_index(&index_path, &observation, options)
+}
+
+fn cleanup_at_index(
+    index_path: &Path,
+    observation: &ObservationStore,
+    options: ControllerScratchCleanupOptions,
+) -> Result<ControllerScratchCleanupOutput> {
+    with_index_lock(index_path, || {
+        cleanup_unlocked(index_path, observation, options)
+    })
 }
 
 fn cleanup_unlocked(
+    index_path: &Path,
+    observation: &ObservationStore,
     options: ControllerScratchCleanupOptions,
 ) -> Result<ControllerScratchCleanupOutput> {
-    let mut index = read_index_unlocked()?;
+    let mut index = read_index_at_unlocked(index_path)?;
     // Only durably registered resources are cleanup candidates. In particular,
     // do not infer ownership by scanning a shared system temporary directory.
     let mut skipped = Vec::new();
@@ -902,8 +935,13 @@ fn cleanup_unlocked(
         }
         let lifecycle_state = resource.lifecycle_state.clone();
         let interrupted_at = resource.interrupted_at.clone();
-        let reason =
-            cleanup_block_reason(resource, &path, now, options.retention_override_seconds)?;
+        let reason = cleanup_block_reason_with_observation(
+            observation,
+            resource,
+            &path,
+            now,
+            options.retention_override_seconds,
+        )?;
         reconciled |= resource.lifecycle_state != lifecycle_state
             || resource.interrupted_at != interrupted_at;
         if let Some(reason) = reason {
@@ -963,10 +1001,6 @@ fn cleanup_unlocked(
             }
         }
     }
-    if reconciled {
-        write_index_unlocked(&index)?;
-    }
-
     let candidate_count = eligible.len();
     let estimated_bytes = eligible.iter().map(|candidate| candidate.size_bytes).sum();
     let remaining: Vec<_> = eligible.iter().skip(options.limit).collect();
@@ -981,7 +1015,22 @@ fn cleanup_unlocked(
         .collect::<Vec<_>>();
     for candidate in &mutation_candidates {
         if options.apply {
-            match remove_candidate(candidate, now, options.retention_override_seconds)? {
+            let removal = remove_candidate_from_index(
+                &mut index,
+                observation,
+                candidate,
+                now,
+                options.retention_override_seconds,
+            );
+            let removal = match removal {
+                Ok(removal) => removal,
+                Err(error) => {
+                    write_index_at_unlocked(index_path, &index)?;
+                    return Err(error);
+                }
+            };
+            reconciled = true;
+            match removal {
                 ScratchRemoval::Removed(bytes) => {
                     applied_count += 1;
                     reclaimed_bytes += bytes;
@@ -1004,6 +1053,9 @@ fn cleanup_unlocked(
                 }
             }
         }
+    }
+    if reconciled {
+        write_index_at_unlocked(index_path, &index)?;
     }
     let (candidates, candidate_detail) = present_detail(
         mutation_candidates,
@@ -1240,21 +1292,6 @@ fn summarize_retention(
         .collect()
 }
 
-fn cleanup_block_reason(
-    resource: &mut ControllerScratchResource,
-    path: &Path,
-    now: chrono::DateTime<chrono::Utc>,
-    retention_override_seconds: Option<i64>,
-) -> Result<Option<String>> {
-    cleanup_block_reason_with_observation(
-        &ObservationStore::open_initialized()?,
-        resource,
-        path,
-        now,
-        retention_override_seconds,
-    )
-}
-
 fn cleanup_block_reason_with_observation(
     observation: &ObservationStore,
     resource: &mut ControllerScratchResource,
@@ -1409,12 +1446,33 @@ enum ScratchRemoval {
 
 const REMOVAL_RACE_REASON: &str = "resource changed or disappeared before deletion";
 
-fn remove_candidate(
+#[cfg(test)]
+fn remove_candidate_at(
+    index_path: &Path,
+    observation: &ObservationStore,
     candidate: &ControllerScratchCandidate,
     now: chrono::DateTime<chrono::Utc>,
     retention_override_seconds: Option<i64>,
 ) -> Result<ScratchRemoval> {
-    let mut index = read_index_unlocked()?;
+    let mut index = read_index_at_unlocked(index_path)?;
+    let removal = remove_candidate_from_index(
+        &mut index,
+        observation,
+        candidate,
+        now,
+        retention_override_seconds,
+    );
+    write_index_at_unlocked(index_path, &index)?;
+    removal
+}
+
+fn remove_candidate_from_index(
+    index: &mut ControllerScratchIndex,
+    observation: &ObservationStore,
+    candidate: &ControllerScratchCandidate,
+    now: chrono::DateTime<chrono::Utc>,
+    retention_override_seconds: Option<i64>,
+) -> Result<ScratchRemoval> {
     let Some(position) = index.resources.iter().position(|resource| {
         resource.lease_id == candidate.lease_id
             && resource.path == candidate.path
@@ -1427,7 +1485,8 @@ fn remove_candidate(
     // candidate that qualified under `--older-than-days` is not spuriously
     // re-blocked here (which would leave it un-deleted forever).
     if !path.exists()
-        || cleanup_block_reason(
+        || cleanup_block_reason_with_observation(
+            observation,
             &mut index.resources[position],
             &path,
             now,
@@ -1435,14 +1494,12 @@ fn remove_candidate(
         )?
         .is_some()
     {
-        write_index_unlocked(&index)?;
         return Ok(ScratchRemoval::Skipped(REMOVAL_RACE_REASON.to_string()));
     }
     let bytes = path_size(&path)?;
     // Git first. A registered worktree deleted behind Git leaves a live
     // registration in a shared repository that nothing reaps (#10568).
     if let Some(reason) = unregister_scratch_git_worktrees(&path) {
-        write_index_unlocked(&index)?;
         return Ok(ScratchRemoval::Skipped(reason));
     }
     // `git worktree remove` already deleted the worktree; the enclosing lease
@@ -1460,7 +1517,6 @@ fn remove_candidate(
     // leaving the record behind would keep re-reporting a stranded registration
     // that has already converged.
     index.resources[position].git_worktree = None;
-    write_index_unlocked(&index)?;
     Ok(ScratchRemoval::Removed(bytes))
 }
 
@@ -1658,8 +1714,11 @@ fn recovery_evidence_is_current(resource: &ControllerScratchResource) -> bool {
     }
 }
 
-fn recover_authoritative_workspace(resource: &ControllerScratchResource) -> serde_json::Value {
-    recover_authoritative_workspace_inner(resource).unwrap_or_else(|error| {
+fn recover_authoritative_workspace(
+    resource: &ControllerScratchResource,
+    artifact_root: &Path,
+) -> serde_json::Value {
+    recover_authoritative_workspace_inner(resource, artifact_root).unwrap_or_else(|error| {
         serde_json::json!({
             "state": "recovery_failed",
             "message": error.message,
@@ -1669,6 +1728,7 @@ fn recover_authoritative_workspace(resource: &ControllerScratchResource) -> serd
 
 fn recover_authoritative_workspace_inner(
     resource: &ControllerScratchResource,
+    artifact_root: &Path,
 ) -> Result<serde_json::Value> {
     if resource.ephemeral {
         return Ok(serde_json::json!({ "state": "explicitly_ephemeral" }));
@@ -1718,7 +1778,7 @@ fn recover_authoritative_workspace_inner(
         ],
         "git diff HEAD",
     )?;
-    let recovery_root = paths::artifact_root()?
+    let recovery_root = artifact_root
         .join("controller-scratch-recovery")
         .join(paths::sanitize_path_segment(&resource.run_id))
         .join(paths::sanitize_path_segment(&resource.lease_id));
@@ -1938,12 +1998,6 @@ impl Drop for ControllerScratchIndexLock {
     }
 }
 
-#[cfg(test)]
-fn read_index() -> Result<ControllerScratchIndex> {
-    let index_path = index_path()?;
-    with_index_lock(&index_path, read_index_unlocked)
-}
-
 fn read_index_unlocked() -> Result<ControllerScratchIndex> {
     read_index_at_unlocked(&index_path()?)
 }
@@ -2098,16 +2152,6 @@ fn preserve_index_bytes(path: &Path, classification: &str) -> Result<PathBuf> {
     Ok(preserved_path)
 }
 
-#[cfg(test)]
-fn write_index(index: &ControllerScratchIndex) -> Result<()> {
-    let index_path = index_path()?;
-    with_index_lock(&index_path, || write_index_unlocked(index))
-}
-
-fn write_index_unlocked(index: &ControllerScratchIndex) -> Result<()> {
-    write_index_at_unlocked(&index_path()?, index)
-}
-
 fn write_index_at_unlocked(path: &Path, index: &ControllerScratchIndex) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -2152,6 +2196,11 @@ mod tests {
             .expect("scratch index")
     }
 
+    fn write_index_at(data_root: &Path, index: &ControllerScratchIndex) {
+        write_index_at_unlocked(&data_root.join("controller-scratch/resources.json"), index)
+            .expect("write scratch index");
+    }
+
     fn observation_store() -> (tempfile::TempDir, ObservationStore) {
         let root = tempfile::tempdir().expect("observation root");
         let store = ObservationStore::open_initialized_at(root.path().join("homeboy.sqlite"))
@@ -2173,6 +2222,19 @@ mod tests {
             retention_override_seconds,
         )
         .expect("cleanup eligibility")
+    }
+
+    fn cleanup_at(
+        data_root: &Path,
+        observation: &ObservationStore,
+        options: ControllerScratchCleanupOptions,
+    ) -> ControllerScratchCleanupOutput {
+        cleanup_at_index(
+            &data_root.join("controller-scratch/resources.json"),
+            observation,
+            options,
+        )
+        .expect("cleanup")
     }
 
     fn resource(path: &Path, root: &Path) -> ControllerScratchResource {
@@ -2237,75 +2299,79 @@ mod tests {
 
     #[test]
     fn terminal_or_missing_run_with_dead_active_lease_becomes_orphaned_and_waits_retention() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            fs::create_dir(&scratch).expect("scratch");
-            write_index(&ControllerScratchIndex {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![resource(&scratch, root.path())],
-            })
-            .expect("index");
+            },
+        );
 
-            let output = cleanup(ControllerScratchCleanupOptions {
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
                 full: false,
                 retention_override_seconds: None,
-            })
-            .expect("reconcile");
-            assert_eq!(output.candidate_count, 0);
-            assert_eq!(
-                output
-                    .skipped
-                    .iter()
-                    .find(|skipped| skipped.path == scratch.display().to_string())
-                    .expect("scratch skip")
-                    .reason,
-                "terminal or missing run has a dead active lease owner; orphaned retention has started"
-            );
-            let resource = read_index()
-                .expect("index")
-                .resources
-                .into_iter()
-                .next()
-                .expect("resource");
-            assert_eq!(resource.lifecycle_state, "orphaned");
-            assert_eq!(
-                resource.terminal_reason.as_deref(),
-                Some("terminal_run_or_missing_lease_owner")
-            );
-            assert_eq!(
-                resource.interrupted_at.as_deref(),
-                resource.finalized_at.as_deref()
-            );
-            let interrupted_at = resource.finalized_at.as_deref().expect("finalized");
-            let interrupted_at = chrono::DateTime::parse_from_rfc3339(interrupted_at)
-                .expect("timestamp")
-                .with_timezone(&chrono::Utc);
-            assert!(!retention_expired(
-                resource.finalized_at.as_deref(),
-                INTERRUPTED_RETENTION,
-                &scratch,
-                interrupted_at
-            ));
-            assert!(retention_expired(
-                resource.finalized_at.as_deref(),
-                INTERRUPTED_RETENTION,
-                &scratch,
-                interrupted_at + chrono::Duration::days(1)
-            ));
-            assert_eq!(output.retention_reasons.len(), 1);
-            assert_eq!(
-                output.retention_reasons[0].reason,
-                "terminal or missing run has a dead active lease owner; orphaned retention has started"
-            );
-            assert_eq!(output.retention_reasons[0].resource_count, 1);
-            assert_eq!(
-                output.retention_reasons[0].owners[0].run_id,
-                "missing-terminal-run"
-            );
-        });
+            },
+        );
+        assert_eq!(output.candidate_count, 0);
+        assert_eq!(
+            output
+                .skipped
+                .iter()
+                .find(|skipped| skipped.path == scratch.display().to_string())
+                .expect("scratch skip")
+                .reason,
+            "terminal or missing run has a dead active lease owner; orphaned retention has started"
+        );
+        let resource = read_index_at(data_root.path())
+            .resources
+            .into_iter()
+            .next()
+            .expect("resource");
+        assert_eq!(resource.lifecycle_state, "orphaned");
+        assert_eq!(
+            resource.terminal_reason.as_deref(),
+            Some("terminal_run_or_missing_lease_owner")
+        );
+        assert_eq!(
+            resource.interrupted_at.as_deref(),
+            resource.finalized_at.as_deref()
+        );
+        let interrupted_at = resource.finalized_at.as_deref().expect("finalized");
+        let interrupted_at = chrono::DateTime::parse_from_rfc3339(interrupted_at)
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+        assert!(!retention_expired(
+            resource.finalized_at.as_deref(),
+            INTERRUPTED_RETENTION,
+            &scratch,
+            interrupted_at
+        ));
+        assert!(retention_expired(
+            resource.finalized_at.as_deref(),
+            INTERRUPTED_RETENTION,
+            &scratch,
+            interrupted_at + chrono::Duration::days(1)
+        ));
+        assert_eq!(output.retention_reasons.len(), 1);
+        assert_eq!(
+            output.retention_reasons[0].reason,
+            "terminal or missing run has a dead active lease owner; orphaned retention has started"
+        );
+        assert_eq!(output.retention_reasons[0].resource_count, 1);
+        assert_eq!(
+            output.retention_reasons[0].owners[0].run_id,
+            "missing-terminal-run"
+        );
     }
 
     #[test]
@@ -2356,39 +2422,50 @@ mod tests {
 
     #[test]
     fn interrupted_ephemeral_git_checkout_is_reclaimable() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let allocation = allocate_attempt("run-candidate", "promotion", "candidate", 1)
-                .expect("allocate candidate checkout");
-            mark_attempt_ephemeral(&allocation).expect("mark ephemeral");
-            let output = Command::new("git")
-                .args(["init"])
-                .current_dir(&allocation.path)
-                .output()
-                .expect("initialize candidate checkout");
-            assert!(output.status.success());
-            fs::write(allocation.path.join("candidate.txt"), "candidate\n")
-                .expect("write candidate state");
-            abandon_attempt_for_test(&allocation).expect("simulate interrupted owner");
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let allocation = allocate_at(
+            data_root.path(),
+            "run-candidate",
+            "promotion",
+            "candidate",
+            1,
+        );
+        mark_attempt_ephemeral(&allocation).expect("mark ephemeral");
+        let output = Command::new("git")
+            .args(["init"])
+            .current_dir(&allocation.path)
+            .output()
+            .expect("initialize candidate checkout");
+        assert!(output.status.success());
+        fs::write(allocation.path.join("candidate.txt"), "candidate\n")
+            .expect("write candidate state");
+        abandon_attempt_for_test(&allocation).expect("simulate interrupted owner");
 
-            let first = cleanup(ControllerScratchCleanupOptions {
+        let first = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
                 full: false,
                 retention_override_seconds: Some(0),
-            })
-            .expect("reconcile interrupted checkout");
-            assert_eq!(first.candidate_count, 0);
+            },
+        );
+        assert_eq!(first.candidate_count, 0);
 
-            let second = cleanup(ControllerScratchCleanupOptions {
+        let second = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 1,
                 full: false,
                 retention_override_seconds: Some(0),
-            })
-            .expect("reap interrupted checkout");
-            assert_eq!(second.applied_count, 1);
-            assert!(!allocation.path.exists());
-        });
+            },
+        );
+        assert_eq!(second.applied_count, 1);
+        assert!(!allocation.path.exists());
     }
 
     #[test]
@@ -2528,24 +2605,27 @@ mod tests {
 
     #[test]
     fn cleanup_ignores_unregistered_system_temp_paths() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let path =
-                std::env::temp_dir().join(format!("homeboy-unregistered-{}", uuid::Uuid::new_v4()));
-            fs::create_dir(&path).expect("unregistered scratch");
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let path =
+            std::env::temp_dir().join(format!("homeboy-unregistered-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path).expect("unregistered scratch");
 
-            let output = cleanup(ControllerScratchCleanupOptions {
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
                 full: false,
                 retention_override_seconds: None,
-            })
-            .expect("cleanup inventory");
+            },
+        );
 
-            assert!(output.candidates.is_empty());
-            assert!(output.skipped.is_empty());
-            assert!(path.exists());
-            fs::remove_dir(&path).expect("remove unregistered scratch");
-        });
+        assert!(output.candidates.is_empty());
+        assert!(output.skipped.is_empty());
+        assert!(path.exists());
+        fs::remove_dir(&path).expect("remove unregistered scratch");
     }
 
     #[test]
@@ -2650,101 +2730,120 @@ mod tests {
 
     #[test]
     fn finalized_workspace_changes_are_recovered_before_nested_fixtures_converge() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let allocation =
-                allocate_attempt("recovery-run", "scheduler-plan", "task", 1).expect("allocate");
-            let workspace = allocation.path.join("workspace");
-            fs::create_dir(&workspace).expect("workspace");
-            run_git(&workspace, &["init", "-b", "main"]);
-            fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
-            run_git(&workspace, &["add", "."]);
-            run_git(
-                &workspace,
-                &[
-                    "-c",
-                    "user.name=Homeboy",
-                    "-c",
-                    "user.email=homeboy@example.test",
-                    "commit",
-                    "-m",
-                    "base",
-                ],
-            );
-            fs::write(workspace.join("tracked.txt"), "candidate\n").expect("candidate change");
-            let generated = allocation.path.join("generated-fixture");
-            fs::create_dir(&generated).expect("generated fixture");
-            run_git(&generated, &["init", "-b", "main"]);
-            fs::write(generated.join("untracked.txt"), "fixture").expect("dirty fixture");
-            abandon_attempt_for_test(&allocation).expect("dead owner");
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let allocation = allocate_at(
+            data_root.path(),
+            "recovery-run",
+            "scheduler-plan",
+            "task",
+            1,
+        );
+        let workspace = allocation.path.join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        run_git(&workspace, &["init", "-b", "main"]);
+        fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+        run_git(&workspace, &["add", "."]);
+        run_git(
+            &workspace,
+            &[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "base",
+            ],
+        );
+        fs::write(workspace.join("tracked.txt"), "candidate\n").expect("candidate change");
+        let generated = allocation.path.join("generated-fixture");
+        fs::create_dir(&generated).expect("generated fixture");
+        run_git(&generated, &["init", "-b", "main"]);
+        fs::write(generated.join("untracked.txt"), "fixture").expect("dirty fixture");
+        abandon_attempt_for_test(&allocation).expect("dead owner");
 
-            finalize_run("recovery-run").expect("recover and finalize");
-            let resource = read_index()
-                .expect("index")
-                .resources
-                .into_iter()
-                .find(|resource| resource.lease_id == allocation.lease_id)
-                .expect("resource");
-            let recovery =
-                &resource.terminal_evidence.as_ref().expect("evidence")["workspace_recovery"];
-            assert_eq!(recovery["state"], "recovered");
-            assert!(Path::new(recovery["bundle"]["path"].as_str().expect("bundle path")).is_file());
-            assert!(Path::new(recovery["patch"]["path"].as_str().expect("patch path")).is_file());
+        finalize_run_at_roots(
+            data_root.path().join("controller-scratch/resources.json"),
+            data_root.path().join("artifacts"),
+            "recovery-run",
+        )
+        .expect("recover and finalize");
+        let resource = read_index_at(data_root.path())
+            .resources
+            .into_iter()
+            .find(|resource| resource.lease_id == allocation.lease_id)
+            .expect("resource");
+        let recovery =
+            &resource.terminal_evidence.as_ref().expect("evidence")["workspace_recovery"];
+        assert_eq!(recovery["state"], "recovered");
+        assert!(Path::new(recovery["bundle"]["path"].as_str().expect("bundle path")).is_file());
+        assert!(Path::new(recovery["patch"]["path"].as_str().expect("patch path")).is_file());
 
-            let output = cleanup(ControllerScratchCleanupOptions {
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
                 full: false,
                 retention_override_seconds: Some(0),
-            })
-            .expect("cleanup preview");
-            assert_eq!(output.candidate_count, 1);
-            assert_eq!(
-                output.candidates[0].path,
-                allocation.path.display().to_string()
-            );
-        });
+            },
+        );
+        assert_eq!(output.candidate_count, 1);
+        assert_eq!(
+            output.candidates[0].path,
+            allocation.path.display().to_string()
+        );
     }
 
     #[test]
     fn workspace_changed_after_recovery_remains_retained() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let allocation =
-                allocate_attempt("changed-run", "scheduler-plan", "task", 1).expect("allocate");
-            let workspace = allocation.path.join("workspace");
-            fs::create_dir(&workspace).expect("workspace");
-            run_git(&workspace, &["init", "-b", "main"]);
-            fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
-            run_git(&workspace, &["add", "."]);
-            run_git(
-                &workspace,
-                &[
-                    "-c",
-                    "user.name=Homeboy",
-                    "-c",
-                    "user.email=homeboy@example.test",
-                    "commit",
-                    "-m",
-                    "base",
-                ],
-            );
-            fs::write(workspace.join("tracked.txt"), "first\n").expect("first change");
-            abandon_attempt_for_test(&allocation).expect("dead owner");
-            finalize_run("changed-run").expect("recover and finalize");
-            fs::write(workspace.join("tracked.txt"), "second\n").expect("later change");
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let allocation = allocate_at(data_root.path(), "changed-run", "scheduler-plan", "task", 1);
+        let workspace = allocation.path.join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        run_git(&workspace, &["init", "-b", "main"]);
+        fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+        run_git(&workspace, &["add", "."]);
+        run_git(
+            &workspace,
+            &[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "base",
+            ],
+        );
+        fs::write(workspace.join("tracked.txt"), "first\n").expect("first change");
+        abandon_attempt_for_test(&allocation).expect("dead owner");
+        finalize_run_at_roots(
+            data_root.path().join("controller-scratch/resources.json"),
+            data_root.path().join("artifacts"),
+            "changed-run",
+        )
+        .expect("recover and finalize");
+        fs::write(workspace.join("tracked.txt"), "second\n").expect("later change");
 
-            let output = cleanup(ControllerScratchCleanupOptions {
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
                 full: false,
                 retention_override_seconds: Some(0),
-            })
-            .expect("cleanup preview");
-            assert_eq!(output.candidate_count, 0);
-            assert_eq!(
-                output.skipped[0].reason,
-                "git checkout has dirty or unpushed state"
-            );
-        });
+            },
+        );
+        assert_eq!(output.candidate_count, 0);
+        assert_eq!(
+            output.skipped[0].reason,
+            "git checkout has dirty or unpushed state"
+        );
     }
 
     #[test]
@@ -2776,7 +2875,8 @@ mod tests {
             .into_iter()
             .find(|resource| resource.lease_id == allocation.lease_id)
             .expect("resource");
-        let recovery = recover_authoritative_workspace_inner(&resource).expect("recover");
+        let recovery =
+            recover_authoritative_workspace_inner(&resource, data_root.path()).expect("recover");
 
         assert_eq!(recovery["state"], "untracked_changes_retained");
     }
@@ -2784,6 +2884,7 @@ mod tests {
     #[test]
     fn submodule_workspaces_remain_retained() {
         let root = tempfile::tempdir().expect("root");
+        let artifact_root = tempfile::tempdir().expect("artifact root");
         let submodule = root.path().join("submodule");
         fs::create_dir(&submodule).expect("submodule source");
         run_git(&submodule, &["init", "-b", "main"]);
@@ -2818,45 +2919,51 @@ mod tests {
         let mut resource = resource(&scratch, root.path());
         resource.plan_id.clear();
 
-        let recovery = recover_authoritative_workspace_inner(&resource).expect("inspect workspace");
+        let recovery = recover_authoritative_workspace_inner(&resource, artifact_root.path())
+            .expect("inspect workspace");
 
         assert_eq!(recovery["state"], "submodules_retained");
     }
 
     #[test]
     fn unknown_legacy_checkout_layout_fails_closed_with_recovery_command() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            fs::create_dir(&scratch).expect("scratch");
-            let mut legacy = resource(&scratch, root.path());
-            legacy.plan_id.clear();
-            legacy.lifecycle_state = "interrupted".to_string();
-            legacy.run_id = "legacy-run".to_string();
-            write_index(&ControllerScratchIndex {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        let mut legacy = resource(&scratch, root.path());
+        legacy.plan_id.clear();
+        legacy.lifecycle_state = "interrupted".to_string();
+        legacy.run_id = "legacy-run".to_string();
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![legacy],
-            })
-            .expect("legacy resource");
+            },
+        );
 
-            let output = cleanup(ControllerScratchCleanupOptions {
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
                 full: false,
                 retention_override_seconds: Some(0),
-            })
-            .expect("cleanup preview");
+            },
+        );
 
-            assert_eq!(output.candidate_count, 0);
-            assert_eq!(
-                output.skipped[0].reason,
-                "resource has no explicit authoritative Git checkout"
-            );
-            assert_eq!(
-                output.skipped[0].recovery_command.as_deref(),
-                Some("homeboy agent-task cancel legacy-run")
-            );
-        });
+        assert_eq!(output.candidate_count, 0);
+        assert_eq!(
+            output.skipped[0].reason,
+            "resource has no explicit authoritative Git checkout"
+        );
+        assert_eq!(
+            output.skipped[0].recovery_command.as_deref(),
+            Some("homeboy agent-task cancel legacy-run")
+        );
     }
 
     #[test]
@@ -2900,125 +3007,141 @@ mod tests {
 
     #[test]
     fn skipped_rows_have_bounded_default_detail_and_lossless_full_detail() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            // Large retained inventories keep exact aggregates while the default
-            // response stays inside the shared item and byte presentation budget.
-            let root = tempfile::tempdir().expect("root");
-            let total = 125;
-            let mut resources = Vec::with_capacity(total);
-            for index in 0..total {
-                let scratch = root.path().join(format!("scratch-{index}"));
-                fs::create_dir(&scratch).expect("scratch");
-                let mut resource = resource(&scratch, root.path());
-                resource.run_id = format!("run-{index}");
-                resource.lease_id = format!("lease-{index}");
-                resource.lifecycle_state = "released".to_string();
-                // Within the retention window, so every resource is skipped.
-                resource.retention = "P7D".to_string();
-                resources.push(resource);
-            }
-            write_index(&ControllerScratchIndex {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        // Large retained inventories keep exact aggregates while the default
+        // response stays inside the shared item and byte presentation budget.
+        let root = tempfile::tempdir().expect("root");
+        let total = 125;
+        let mut resources = Vec::with_capacity(total);
+        for index in 0..total {
+            let scratch = root.path().join(format!("scratch-{index}"));
+            fs::create_dir(&scratch).expect("scratch");
+            let mut resource = resource(&scratch, root.path());
+            resource.run_id = format!("run-{index}");
+            resource.lease_id = format!("lease-{index}");
+            resource.lifecycle_state = "released".to_string();
+            // Within the retention window, so every resource is skipped.
+            resource.retention = "P7D".to_string();
+            resources.push(resource);
+        }
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources,
-            })
-            .expect("resource index");
+            },
+        );
 
-            let output = cleanup(ControllerScratchCleanupOptions {
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
                 full: false,
                 retention_override_seconds: None,
-            })
-            .expect("cleanup");
+            },
+        );
 
-            assert_eq!(output.candidate_count, 0);
-            // True total is preserved even though rendered rows are bounded.
-            assert_eq!(output.skipped_count, total);
-            assert!(output.skipped.len() <= OutputBudget::COLLECTION.max_items);
-            assert!(output.skipped_detail.returned_bytes <= OutputBudget::COLLECTION.max_bytes);
-            assert_eq!(output.skipped_detail.total_items, total);
-            assert_eq!(
-                output.skipped_detail.omitted_items,
-                total - output.skipped.len()
-            );
-            assert!(output.skipped_detail.truncated);
-            assert!(!output.skipped_detail.total_bytes_known);
-            // The aggregate summary still accounts for every retained resource.
-            let summarized: usize = output
-                .retention_reasons
-                .iter()
-                .map(|reason| reason.resource_count)
-                .sum();
-            assert_eq!(summarized, total);
+        assert_eq!(output.candidate_count, 0);
+        // True total is preserved even though rendered rows are bounded.
+        assert_eq!(output.skipped_count, total);
+        assert!(output.skipped.len() <= OutputBudget::COLLECTION.max_items);
+        assert!(output.skipped_detail.returned_bytes <= OutputBudget::COLLECTION.max_bytes);
+        assert_eq!(output.skipped_detail.total_items, total);
+        assert_eq!(
+            output.skipped_detail.omitted_items,
+            total - output.skipped.len()
+        );
+        assert!(output.skipped_detail.truncated);
+        assert!(!output.skipped_detail.total_bytes_known);
+        // The aggregate summary still accounts for every retained resource.
+        let summarized: usize = output
+            .retention_reasons
+            .iter()
+            .map(|reason| reason.resource_count)
+            .sum();
+        assert_eq!(summarized, total);
 
-            let full = cleanup(ControllerScratchCleanupOptions {
+        let full = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
                 full: true,
                 retention_override_seconds: None,
-            })
-            .expect("full cleanup");
-            assert_eq!(full.skipped.len(), total);
-            assert!(!full.skipped_detail.truncated);
-        });
+            },
+        );
+        assert_eq!(full.skipped.len(), total);
+        assert!(!full.skipped_detail.truncated);
     }
 
     #[test]
     fn thousands_of_candidates_keep_default_output_bounded_and_apply_exactly_the_limit() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let total = 1_000;
-            let mut resources = Vec::with_capacity(total);
-            for index in 0..total {
-                let scratch = root.path().join(format!("scratch-{index}"));
-                fs::create_dir(&scratch).expect("scratch");
-                fs::write(scratch.join("payload"), "x").expect("payload");
-                let mut resource = resource(&scratch, root.path());
-                resource.run_id = format!("run-{index}");
-                resource.lease_id = format!("lease-{index}");
-                resource.lifecycle_state = "released".to_string();
-                resource.ephemeral = true;
-                resources.push(resource);
-            }
-            write_index(&ControllerScratchIndex {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let total = 1_000;
+        let mut resources = Vec::with_capacity(total);
+        for index in 0..total {
+            let scratch = root.path().join(format!("scratch-{index}"));
+            fs::create_dir(&scratch).expect("scratch");
+            fs::write(scratch.join("payload"), "x").expect("payload");
+            let mut resource = resource(&scratch, root.path());
+            resource.run_id = format!("run-{index}");
+            resource.lease_id = format!("lease-{index}");
+            resource.lifecycle_state = "released".to_string();
+            resource.ephemeral = true;
+            resources.push(resource);
+        }
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources,
-            })
-            .expect("resource index");
+            },
+        );
 
-            let preview = cleanup(ControllerScratchCleanupOptions {
+        let preview = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: total,
                 full: false,
                 retention_override_seconds: None,
-            })
-            .expect("preview");
-            assert_eq!(preview.candidate_count, total);
-            assert_eq!(preview.candidates.len(), OutputBudget::COLLECTION.max_items);
-            assert!(preview.candidate_detail.returned_bytes <= OutputBudget::COLLECTION.max_bytes);
-            assert_eq!(preview.candidate_detail.total_items, total);
-            assert_eq!(
-                preview.candidate_detail.omitted_items,
-                total - preview.candidates.len()
-            );
-            assert!(preview.candidate_detail.truncated);
-            assert_eq!(preview.remaining_candidate_count, 0);
+            },
+        );
+        assert_eq!(preview.candidate_count, total);
+        assert_eq!(preview.candidates.len(), OutputBudget::COLLECTION.max_items);
+        assert!(preview.candidate_detail.returned_bytes <= OutputBudget::COLLECTION.max_bytes);
+        assert_eq!(preview.candidate_detail.total_items, total);
+        assert_eq!(
+            preview.candidate_detail.omitted_items,
+            total - preview.candidates.len()
+        );
+        assert!(preview.candidate_detail.truncated);
+        assert_eq!(preview.remaining_candidate_count, 0);
 
-            let applied = cleanup(ControllerScratchCleanupOptions {
+        let applied = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: true,
                 limit: total,
                 full: false,
                 retention_override_seconds: None,
-            })
-            .expect("apply");
-            assert_eq!(applied.candidate_count, total);
-            assert_eq!(applied.applied_count, total);
-            assert_eq!(applied.reclaimed_bytes, preview.estimated_bytes);
-            assert_eq!(applied.candidate_detail.total_items, total);
-            assert_eq!(applied.candidates.len(), OutputBudget::COLLECTION.max_items);
-            assert!(!root.path().join("scratch-0").exists());
-            assert!(!root.path().join(format!("scratch-{}", total - 1)).exists());
-        });
+            },
+        );
+        assert_eq!(applied.candidate_count, total);
+        assert_eq!(applied.applied_count, total);
+        assert_eq!(applied.reclaimed_bytes, preview.estimated_bytes);
+        assert_eq!(applied.candidate_detail.total_items, total);
+        assert_eq!(applied.candidates.len(), OutputBudget::COLLECTION.max_items);
+        assert!(!root.path().join("scratch-0").exists());
+        assert!(!root.path().join(format!("scratch-{}", total - 1)).exists());
     }
 
     #[test]
@@ -3058,53 +3181,61 @@ mod tests {
 
     #[test]
     fn override_unlocked_bytes_are_reported_separately_from_default_policy() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            // A released, clean resource still inside its default P7D window:
-            // eligible only because of the override. Its bytes must be reported
-            // as override-unlocked, not default-policy-eligible.
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            fs::create_dir(&scratch).expect("scratch");
-            fs::write(scratch.join("generated.txt"), "some generated bytes").expect("content");
-            let mut resource = resource(&scratch, root.path());
-            resource.lifecycle_state = "released".to_string();
-            resource.retention = "P7D".to_string();
-            write_index(&ControllerScratchIndex {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        // A released, clean resource still inside its default P7D window:
+        // eligible only because of the override. Its bytes must be reported
+        // as override-unlocked, not default-policy-eligible.
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        fs::write(scratch.join("generated.txt"), "some generated bytes").expect("content");
+        let mut resource = resource(&scratch, root.path());
+        resource.lifecycle_state = "released".to_string();
+        resource.retention = "P7D".to_string();
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![resource],
-            })
-            .expect("resource index");
+            },
+        );
 
-            // Default policy: retained, nothing eligible, no override-unlocked bytes.
-            let default_run = cleanup(ControllerScratchCleanupOptions {
+        // Default policy: retained, nothing eligible, no override-unlocked bytes.
+        let default_run = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 10,
                 full: false,
                 retention_override_seconds: None,
-            })
-            .expect("default cleanup");
-            assert_eq!(default_run.candidate_count, 0);
-            assert_eq!(default_run.estimated_bytes, 0);
-            assert_eq!(default_run.default_policy_eligible_bytes, 0);
-            assert_eq!(default_run.override_unlocked_bytes, 0);
+            },
+        );
+        assert_eq!(default_run.candidate_count, 0);
+        assert_eq!(default_run.estimated_bytes, 0);
+        assert_eq!(default_run.default_policy_eligible_bytes, 0);
+        assert_eq!(default_run.override_unlocked_bytes, 0);
 
-            // Pressure override: now eligible, and every eligible byte is
-            // attributed to the override (default policy would reclaim none).
-            let override_run = cleanup(ControllerScratchCleanupOptions {
+        // Pressure override: now eligible, and every eligible byte is
+        // attributed to the override (default policy would reclaim none).
+        let override_run = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 10,
                 full: false,
                 retention_override_seconds: Some(0),
-            })
-            .expect("override cleanup");
-            assert_eq!(override_run.candidate_count, 1);
-            assert!(override_run.estimated_bytes > 0);
-            assert_eq!(override_run.default_policy_eligible_bytes, 0);
-            assert_eq!(
-                override_run.override_unlocked_bytes,
-                override_run.estimated_bytes
-            );
-        });
+            },
+        );
+        assert_eq!(override_run.candidate_count, 1);
+        assert!(override_run.estimated_bytes > 0);
+        assert_eq!(override_run.default_policy_eligible_bytes, 0);
+        assert_eq!(
+            override_run.override_unlocked_bytes,
+            override_run.estimated_bytes
+        );
     }
 
     #[test]
@@ -3127,182 +3258,208 @@ mod tests {
 
     #[test]
     fn terminal_reconstructable_resource_is_inventoried_and_removed_with_byte_accounting() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            let remote = root.path().join("remote.git");
-            run_git(
-                root.path(),
-                &["init", "--bare", remote.to_str().expect("remote path")],
-            );
-            fs::create_dir(&scratch).expect("scratch");
-            fs::write(scratch.join("generated.txt"), "generated bytes").expect("content");
-            run_git(&scratch, &["init", "-b", "main"]);
-            run_git(&scratch, &["config", "user.email", "homeboy@example.test"]);
-            run_git(&scratch, &["config", "user.name", "Homeboy Test"]);
-            run_git(&scratch, &["add", "."]);
-            run_git(&scratch, &["commit", "-m", "initial"]);
-            run_git(
-                &scratch,
-                &[
-                    "remote",
-                    "add",
-                    "origin",
-                    remote.to_str().expect("remote path"),
-                ],
-            );
-            run_git(&scratch, &["push", "-u", "origin", "main"]);
-            let mut resource = resource(&scratch, root.path());
-            resource.lifecycle_state = "released".to_string();
-            // Older provider registrations had no lease. Recovery must still
-            // reconcile that owned resource after the normal safety gates.
-            resource.lease_id.clear();
-            write_index(&ControllerScratchIndex {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        let remote = root.path().join("remote.git");
+        run_git(
+            root.path(),
+            &["init", "--bare", remote.to_str().expect("remote path")],
+        );
+        fs::create_dir(&scratch).expect("scratch");
+        fs::write(scratch.join("generated.txt"), "generated bytes").expect("content");
+        run_git(&scratch, &["init", "-b", "main"]);
+        run_git(&scratch, &["config", "user.email", "homeboy@example.test"]);
+        run_git(&scratch, &["config", "user.name", "Homeboy Test"]);
+        run_git(&scratch, &["add", "."]);
+        run_git(&scratch, &["commit", "-m", "initial"]);
+        run_git(
+            &scratch,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path"),
+            ],
+        );
+        run_git(&scratch, &["push", "-u", "origin", "main"]);
+        let mut resource = resource(&scratch, root.path());
+        resource.lifecycle_state = "released".to_string();
+        // Older provider registrations had no lease. Recovery must still
+        // reconcile that owned resource after the normal safety gates.
+        resource.lease_id.clear();
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![resource],
-            })
-            .expect("resource index");
+            },
+        );
 
-            let inventory = cleanup(ControllerScratchCleanupOptions {
+        let inventory = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
                 full: false,
                 retention_override_seconds: None,
-            })
-            .expect("inventory");
-            assert_eq!(inventory.candidate_count, 1);
-            assert!(inventory.estimated_bytes > 0);
-            assert_eq!(inventory.reclaimed_bytes, 0);
-            assert_eq!(inventory.candidates[0].owner_pid, u32::MAX);
-            assert_eq!(inventory.candidates[0].lifecycle_state, "released");
-            assert!(inventory.candidates[0].reason.is_empty());
+            },
+        );
+        assert_eq!(inventory.candidate_count, 1);
+        assert!(inventory.estimated_bytes > 0);
+        assert_eq!(inventory.reclaimed_bytes, 0);
+        assert_eq!(inventory.candidates[0].owner_pid, u32::MAX);
+        assert_eq!(inventory.candidates[0].lifecycle_state, "released");
+        assert!(inventory.candidates[0].reason.is_empty());
 
-            let applied = cleanup(ControllerScratchCleanupOptions {
+        let applied = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 1,
                 full: false,
                 retention_override_seconds: None,
-            })
-            .expect("apply");
-            assert_eq!(applied.applied_count, 1);
-            assert_eq!(applied.reclaimed_bytes, inventory.estimated_bytes);
-            assert!(!scratch.exists());
-            let retained = read_index()
-                .expect("index")
-                .resources
-                .into_iter()
-                .find(|resource| resource.path == scratch.display().to_string())
-                .expect("retained lifecycle evidence");
-            assert_eq!(retained.lifecycle_state, "released");
-            assert_eq!(retained.path, scratch.display().to_string());
+            },
+        );
+        assert_eq!(applied.applied_count, 1);
+        assert_eq!(applied.reclaimed_bytes, inventory.estimated_bytes);
+        assert!(!scratch.exists());
+        let retained = read_index_at(data_root.path())
+            .resources
+            .into_iter()
+            .find(|resource| resource.path == scratch.display().to_string())
+            .expect("retained lifecycle evidence");
+        assert_eq!(retained.lifecycle_state, "released");
+        assert_eq!(retained.path, scratch.display().to_string());
 
-            let repeated = cleanup(ControllerScratchCleanupOptions {
+        let repeated = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 1,
                 full: false,
                 retention_override_seconds: None,
-            })
-            .expect("repeated apply");
-            assert_eq!(repeated.applied_count, 0);
-            assert_eq!(repeated.candidate_count, 0);
-        });
+            },
+        );
+        assert_eq!(repeated.applied_count, 0);
+        assert_eq!(repeated.candidate_count, 0);
     }
 
     #[test]
     fn apply_revalidates_a_resource_that_becomes_live() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            fs::create_dir(&scratch).expect("scratch");
-            let mut stored = resource(&scratch, root.path());
-            stored.lifecycle_state = "released".to_string();
-            write_index(&ControllerScratchIndex {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        let mut stored = resource(&scratch, root.path());
+        stored.lifecycle_state = "released".to_string();
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![stored],
-            })
-            .expect("index");
+            },
+        );
 
-            let candidate = ControllerScratchCandidate {
-                path: scratch.display().to_string(),
-                run_id: "missing-terminal-run".to_string(),
-                task_id: "task-1".to_string(),
-                size_bytes: 0,
-                owner_pid: u32::MAX,
-                lease_id: "test-lease".to_string(),
-                reason: String::new(),
-                lifecycle_state: "released".to_string(),
-                source_ref: None,
-            };
-            let index = read_index().expect("index");
-            let resource = &mut index.resources.into_iter().next().expect("resource");
-            resource.owner_pid = std::process::id();
-            write_index(&ControllerScratchIndex {
+        let candidate = ControllerScratchCandidate {
+            path: scratch.display().to_string(),
+            run_id: "missing-terminal-run".to_string(),
+            task_id: "task-1".to_string(),
+            size_bytes: 0,
+            owner_pid: u32::MAX,
+            lease_id: "test-lease".to_string(),
+            reason: String::new(),
+            lifecycle_state: "released".to_string(),
+            source_ref: None,
+        };
+        let index = read_index_at(data_root.path());
+        let resource = &mut index.resources.into_iter().next().expect("resource");
+        resource.owner_pid = std::process::id();
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![resource.clone()],
-            })
-            .expect("live index");
+            },
+        );
 
-            assert!(matches!(
-                remove_candidate(&candidate, chrono::Utc::now(), None).expect("remove"),
-                ScratchRemoval::Skipped(reason) if reason == REMOVAL_RACE_REASON
-            ));
-            assert!(scratch.exists());
-        });
+        assert!(matches!(
+            remove_candidate_at(
+                &data_root.path().join("controller-scratch/resources.json"),
+                &observation,
+                &candidate,
+                chrono::Utc::now(),
+                None,
+            )
+            .expect("remove"),
+            ScratchRemoval::Skipped(reason) if reason == REMOVAL_RACE_REASON
+        ));
+        assert!(scratch.exists());
     }
 
     #[test]
     fn bounded_cleanup_reports_continuation() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let remote = root.path().join("remote.git");
-            run_git(
-                root.path(),
-                &["init", "--bare", remote.to_str().expect("remote")],
-            );
-            let first = clean_checkout(root.path(), &remote, "first");
-            let second = root.path().join("second");
-            run_git(
-                root.path(),
-                &[
-                    "clone",
-                    "-b",
-                    "main",
-                    remote.to_str().expect("remote"),
-                    second.to_str().expect("second"),
-                ],
-            );
-            let mut first_resource = resource(&first, root.path());
-            first_resource.lifecycle_state = "released".to_string();
-            let mut second_resource = resource(&second, root.path());
-            second_resource.lease_id = "second-lease".to_string();
-            second_resource.lifecycle_state = "released".to_string();
-            write_index(&ControllerScratchIndex {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let remote = root.path().join("remote.git");
+        run_git(
+            root.path(),
+            &["init", "--bare", remote.to_str().expect("remote")],
+        );
+        let first = clean_checkout(root.path(), &remote, "first");
+        let second = root.path().join("second");
+        run_git(
+            root.path(),
+            &[
+                "clone",
+                "-b",
+                "main",
+                remote.to_str().expect("remote"),
+                second.to_str().expect("second"),
+            ],
+        );
+        let mut first_resource = resource(&first, root.path());
+        first_resource.lifecycle_state = "released".to_string();
+        let mut second_resource = resource(&second, root.path());
+        second_resource.lease_id = "second-lease".to_string();
+        second_resource.lifecycle_state = "released".to_string();
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![first_resource, second_resource],
-            })
-            .expect("index");
+            },
+        );
 
-            let output = cleanup(ControllerScratchCleanupOptions {
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
                 full: false,
                 retention_override_seconds: None,
-            })
-            .expect("preview");
-            assert_eq!(output.candidate_count, 2);
-            assert_eq!(output.candidates.len(), 1);
-            assert_eq!(output.remaining_candidate_count, 1);
-            assert!(output.remaining_candidate_bytes > 0);
-            assert!(output.has_more);
-            assert_eq!(
-                output.next_command.as_deref(),
-                Some("homeboy cleanup --include controller-scratch --limit 1")
-            );
-            assert_eq!(
-                output.drain_command,
-                "homeboy cleanup --include controller-scratch --limit 10 --apply"
-            );
-        });
+            },
+        );
+        assert_eq!(output.candidate_count, 2);
+        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.remaining_candidate_count, 1);
+        assert!(output.remaining_candidate_bytes > 0);
+        assert!(output.has_more);
+        assert_eq!(
+            output.next_command.as_deref(),
+            Some("homeboy cleanup --include controller-scratch --limit 1")
+        );
+        assert_eq!(
+            output.drain_command,
+            "homeboy cleanup --include controller-scratch --limit 10 --apply"
+        );
     }
 
     #[test]
@@ -3524,96 +3681,108 @@ mod tests {
     /// `.git/worktrees/<id>` entry after every reclaimed attempt.
     #[test]
     fn cleanup_unregisters_a_linked_attempt_worktree_instead_of_stranding_it() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let lease = root.path().join("lease");
-            let (source, worktree) = attempt_worktree(root.path(), &lease);
-            let registration = linked_worktree_registration(&worktree)
-                .expect("linked worktree registration")
-                .registration;
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let lease = root.path().join("lease");
+        let (source, worktree) = attempt_worktree(root.path(), &lease);
+        let registration = linked_worktree_registration(&worktree)
+            .expect("linked worktree registration")
+            .registration;
 
-            let mut stored = resource(&lease, root.path());
-            stored.lifecycle_state = "released".to_string();
-            stored.git_worktree = linked_worktree_registration(&worktree);
-            write_index(&ControllerScratchIndex {
+        let mut stored = resource(&lease, root.path());
+        stored.lifecycle_state = "released".to_string();
+        stored.git_worktree = linked_worktree_registration(&worktree);
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![stored],
-            })
-            .expect("index");
+            },
+        );
 
-            let preview = cleanup(ControllerScratchCleanupOptions {
+        let preview = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 10,
                 full: true,
                 retention_override_seconds: None,
-            })
-            .expect("preview");
-            assert_eq!(preview.candidate_count, 1, "{:?}", preview.skipped);
-            assert_eq!(preview.registered_worktree_count, 1);
+            },
+        );
+        assert_eq!(preview.candidate_count, 1, "{:?}", preview.skipped);
+        assert_eq!(preview.registered_worktree_count, 1);
 
-            let applied = cleanup(ControllerScratchCleanupOptions {
+        let applied = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 10,
                 full: true,
                 retention_override_seconds: None,
-            })
-            .expect("apply");
-            assert_eq!(applied.applied_count, 1, "{:?}", applied.skipped);
-            assert!(!lease.exists());
-            assert!(
-                !Path::new(&registration).exists(),
-                "the Git registration must not outlive the worktree"
-            );
-            let listed = Command::new("git")
-                .args(["worktree", "list", "--porcelain"])
-                .current_dir(&source)
-                .output()
-                .expect("git worktree list");
-            assert!(
-                !String::from_utf8_lossy(&listed.stdout)
-                    .contains(worktree.to_str().expect("worktree")),
-                "the source repository must no longer list the attempt worktree"
-            );
-        });
+            },
+        );
+        assert_eq!(applied.applied_count, 1, "{:?}", applied.skipped);
+        assert!(!lease.exists());
+        assert!(
+            !Path::new(&registration).exists(),
+            "the Git registration must not outlive the worktree"
+        );
+        let listed = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&source)
+            .output()
+            .expect("git worktree list");
+        assert!(
+            !String::from_utf8_lossy(&listed.stdout).contains(worktree.to_str().expect("worktree")),
+            "the source repository must no longer list the attempt worktree"
+        );
     }
 
     /// Unpushed, unmerged work is sacred: it is reported, never reclaimed.
     #[test]
     fn an_attempt_worktree_holding_the_only_copy_of_a_commit_is_reported_not_removed() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let lease = root.path().join("lease");
-            let (_source, worktree) = attempt_worktree(root.path(), &lease);
-            fs::write(worktree.join("candidate.txt"), "candidate\n").expect("candidate");
-            run_git(&worktree, &["add", "."]);
-            run_git(&worktree, &["commit", "-m", "unique candidate"]);
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let lease = root.path().join("lease");
+        let (_source, worktree) = attempt_worktree(root.path(), &lease);
+        fs::write(worktree.join("candidate.txt"), "candidate\n").expect("candidate");
+        run_git(&worktree, &["add", "."]);
+        run_git(&worktree, &["commit", "-m", "unique candidate"]);
 
-            let mut stored = resource(&lease, root.path());
-            stored.lifecycle_state = "released".to_string();
-            stored.git_worktree = linked_worktree_registration(&worktree);
-            write_index(&ControllerScratchIndex {
+        let mut stored = resource(&lease, root.path());
+        stored.lifecycle_state = "released".to_string();
+        stored.git_worktree = linked_worktree_registration(&worktree);
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![stored],
-            })
-            .expect("index");
+            },
+        );
 
-            let applied = cleanup(ControllerScratchCleanupOptions {
+        let applied = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 10,
                 full: true,
                 // Even the most aggressive retention override must not reach it.
                 retention_override_seconds: Some(0),
-            })
-            .expect("apply");
+            },
+        );
 
-            assert_eq!(applied.applied_count, 0);
-            assert_eq!(applied.candidate_count, 0);
-            assert_eq!(
-                applied.skipped[0].reason,
-                "git checkout has dirty or unpushed state"
-            );
-            assert!(worktree.join("candidate.txt").exists());
-        });
+        assert_eq!(applied.applied_count, 0);
+        assert_eq!(applied.candidate_count, 0);
+        assert_eq!(
+            applied.skipped[0].reason,
+            "git checkout has dirty or unpushed state"
+        );
+        assert!(worktree.join("candidate.txt").exists());
     }
 
     /// A registration whose worktree directory is already gone is pruned by
