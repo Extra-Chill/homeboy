@@ -468,6 +468,7 @@ pub fn sync_workspace(
                     ResourceCleanupPolicy::DeleteOnSuccess,
                 )
             });
+            let prepared_workspace_lease = metadata.workspace_lease.clone();
             let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
                 &runner,
                 metadata,
@@ -502,7 +503,7 @@ pub fn sync_workspace(
                     resource_lifecycle,
                     sync_mode: RunnerWorkspaceSyncMode::Git,
                     snapshot_identity: git.head,
-                    prepared_workspace_lease: None,
+                    prepared_workspace_lease,
                     counts: ByteFileCounts::default(),
                     excludes,
                     includes,

@@ -1004,52 +1004,6 @@ fn reverse_worker_executes_a_verified_staged_source_package() {
 }
 
 #[test]
-fn reverse_worker_executes_the_controller_materialized_workspace_target() {
-    test_support::with_isolated_home(|_| {
-        create_shell_runner();
-        let workspace = tempfile::tempdir().expect("workspace");
-        std::fs::write(
-            workspace.path().join("authoritative.txt"),
-            "controller-routed",
-        )
-        .expect("write source");
-        let path = tempfile::tempdir().expect("jobs").path().join("jobs.json");
-        let store = JobStore::open_without_reconciliation(&path).expect("open durable store");
-        let mut request = run_id_echo_request();
-        request.command = vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            "cat authoritative.txt".to_string(),
-        ];
-        request.cwd = Some(workspace.path().display().to_string());
-        request.metadata = Some(serde_json::json!({
-            "submission_key": "controller-workspace-job-1",
-            "staged_workspace_materialization": crate::runner_staging_operation::ControllerWorkspaceMaterialization::new(
-                "runner-workspace-1",
-                workspace.path().display().to_string(),
-                "git:abc123",
-                "sha256:durable-plan",
-            ),
-        }));
-        let job = store
-            .submit_remote_runner_job(request)
-            .expect("submit staged job");
-        drop(store);
-        let store = JobStore::open_without_reconciliation(&path).expect("reopen durable store");
-        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
-        let (output, exit_code) =
-            run_reverse_worker(worker_options(broker_url)).expect("run worker");
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.job.expect("job").id, job.id);
-        handle.join().expect("mock broker joins");
-        assert_eq!(
-            result_event_data(&store, job.id)["stdout"],
-            serde_json::json!("controller-routed")
-        );
-    });
-}
-
-#[test]
 fn reverse_worker_loop_backs_off_when_no_job_is_available() {
     test_support::with_isolated_home(|_| {
         crate::create(

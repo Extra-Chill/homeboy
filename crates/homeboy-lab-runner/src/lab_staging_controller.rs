@@ -1126,52 +1126,67 @@ fn submit_deferred_runner_staging(
         )
     })?;
     let digest = format!("sha256:{}", content_hash::sha256_hex(&sealed_payload));
-    let (source_artifact, workspace) =
-        match SourceArtifactTransfer::from_directory(format!("source-{run_id}"), &source_path) {
-            Ok(artifact) => (Some(artifact), None),
-            Err(artifact_error) => {
-                // Large clean Git worktrees are staged through the existing
-                // controller-routed bundle authority. Non-Git sources retain the
-                // bounded sealed-artifact contract and surface their original
-                // containment/filtering failure.
-                let git_status = std::process::Command::new("git")
-                    .args(["status", "--porcelain=v1"])
-                    .current_dir(&source_path)
-                    .output()
-                    .ok()
-                    .filter(|output| output.status.success());
-                let Some(git_status) = git_status else {
-                    return Err(artifact_error);
-                };
-                if !git_status.stdout.is_empty() {
-                    return Err(artifact_error);
-                }
-                let stage =
-                    crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage(
-                        request,
-                        crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(
-                            &recipe.command,
-                        ),
-                        crate::lab_plan::base_lab_plan(None),
-                        runner_id,
-                        &source_path,
-                        &["homeboy".to_string()],
-                        request.job_overrides.workspace_root.as_deref(),
-                        Some(run_id.to_string()),
-                        &recipe.normalized_args,
-                        Some(run_id),
-                    )?;
-                (
+    let (source_artifact, workspace) = match SourceArtifactTransfer::from_directory(
+        format!("source-{run_id}"),
+        &source_path,
+    ) {
+        Ok(artifact) => (Some(artifact), None),
+        Err(artifact_error) => {
+            if !source_artifact_exceeds_transfer_bounds(&artifact_error) {
+                return Err(artifact_error);
+            }
+            // Large clean Git worktrees are staged through the existing
+            // controller-routed bundle authority. Non-Git sources retain the
+            // bounded sealed-artifact contract and surface their original
+            // containment/filtering failure.
+            let git_status = std::process::Command::new("git")
+                .args(["status", "--porcelain=v1"])
+                .current_dir(&source_path)
+                .output()
+                .ok()
+                .filter(|output| output.status.success());
+            let Some(git_status) = git_status else {
+                return Err(artifact_error);
+            };
+            if !git_status.stdout.is_empty() {
+                return Err(artifact_error);
+            }
+            let stage = crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage(
+                request,
+                crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(
+                    &recipe.command,
+                ),
+                crate::lab_plan::base_lab_plan(None),
+                runner_id,
+                &source_path,
+                &["homeboy".to_string()],
+                request.job_overrides.workspace_root.as_deref(),
+                Some(run_id.to_string()),
+                &recipe.normalized_args,
+                Some(run_id),
+            )?;
+            (
                     None,
                     Some(ControllerWorkspaceMaterialization::new(
                         stage.remote_cwd.clone(),
                         stage.remote_cwd,
                         stage.synced.snapshot_identity,
+                        stage.synced.prepared_workspace_lease.ok_or_else(|| {
+                            Error::internal_unexpected(
+                                "controller-materialized Git workspace did not report its runner lease",
+                            )
+                        })?,
+                        stage.synced.current_workspace.source_commit.ok_or_else(|| {
+                            Error::internal_unexpected(
+                                "controller-materialized Git workspace did not report its source commit",
+                            )
+                        })?,
+                        run_id,
                         canonical_digest(plan)?,
                     )),
                 )
-            }
-        };
+        }
+    };
     let handoff = DirectLabHandoffEnvelope::new(
         homeboy_product_identity::build_identity().display,
         recipe,
@@ -1221,6 +1236,35 @@ fn submit_deferred_runner_staging(
         },
     )?;
     Ok(deferred_receipt)
+}
+
+fn source_artifact_exceeds_transfer_bounds(error: &Error) -> bool {
+    let Some(source_package) = error.details.get("source_package") else {
+        return false;
+    };
+    if source_package.get("schema").and_then(Value::as_str)
+        != Some("homeboy/source-package-limit-diagnostic/v1")
+    {
+        return false;
+    }
+    let measured_entries = source_package
+        .pointer("/measured/file_count")
+        .and_then(Value::as_u64);
+    let measured_bytes = source_package
+        .pointer("/measured/bytes")
+        .and_then(Value::as_u64);
+    let entry_limit = source_package
+        .pointer("/limits/entry_limit")
+        .and_then(Value::as_u64);
+    let byte_limit = source_package
+        .pointer("/limits/byte_limit")
+        .and_then(Value::as_u64);
+    let file_byte_limit = source_package
+        .pointer("/limits/file_byte_limit")
+        .and_then(Value::as_u64);
+    matches!((measured_entries, entry_limit), (Some(measured), Some(limit)) if measured > limit)
+        || matches!((measured_bytes, byte_limit), (Some(measured), Some(limit)) if measured > limit)
+        || matches!((measured_bytes, file_byte_limit), (Some(measured), Some(limit)) if measured > limit)
 }
 
 /// A response can be lost after the daemon accepted the request. Create uses
@@ -4482,17 +4526,16 @@ mod tests {
             request.durable_agent_task_plan = Some(&plan);
             request.job_overrides.workspace_root =
                 Some(home.path().join("runner-workspaces").display().to_string());
-            let pre_provider = || {
-                Err(Error::internal_unexpected(
-                    "fixture typed pre-provider daemon admission failure",
-                ))
-            };
             let receipt = submit_detached_staging_with_daemon_ensure(
                 run_id,
                 "lab",
                 crate::RunnerTunnelMode::Reverse,
                 &request,
-                pre_provider,
+                || {
+                    Err(Error::internal_unexpected(
+                        "fixture typed pre-provider daemon admission failure",
+                    ))
+                },
             )
             .expect("admit durable fallback staging");
             let DetachedStagingSubmission::Deferred(receipt) = receipt else {
@@ -4586,7 +4629,87 @@ mod tests {
                     .expect("replay projection"),
                 0
             );
+
+            // A second accepted workspace is replaced after staging but before
+            // its reverse worker consumes the execution receipt. The worker
+            // must reject the changed Git baseline rather than execute it.
+            let tampered_run_id = "authenticated-reverse-staging-tampered-run";
+            submit_recipe_run(tampered_run_id);
+            let tampered_receipt = submit_detached_staging_with_daemon_ensure(
+                tampered_run_id,
+                "lab",
+                crate::RunnerTunnelMode::Reverse,
+                &request,
+                || {
+                    Err(Error::internal_unexpected(
+                        "fixture typed pre-provider daemon admission failure",
+                    ))
+                },
+            )
+            .expect("admit tamper fixture");
+            let DetachedStagingSubmission::Deferred(_) = tampered_receipt else {
+                panic!("typed pre-provider failure must select deferred staging");
+            };
+            let staging_store = homeboy_core::paths::runner_session_file("lab")
+                .expect("session path")
+                .with_file_name("lab-staging/store.json");
+            let staged: Value = serde_json::from_slice(
+                &std::fs::read(staging_store).expect("read runner staging store"),
+            )
+            .expect("parse runner staging store");
+            let remote_cwd = staged
+                .pointer(&format!(
+                    "/stages/{tampered_run_id}/envelope/materialization/workspace/remote_cwd"
+                ))
+                .and_then(Value::as_str)
+                .expect("tampered workspace path");
+            std::fs::write(
+                std::path::Path::new(remote_cwd).join("input.txt"),
+                "replacement",
+            )
+            .expect("replace staged workspace content");
+            let error = crate::run_reverse_worker(crate::ReverseRunnerWorkerOptions {
+                runner_id: "lab".to_string(),
+                broker_url: broker.url().to_string(),
+                broker_token: Some(broker.token().to_string()),
+                project_id: None,
+                lease_ms: 30_000,
+                concurrency_limit: Some(1),
+                loop_mode: false,
+                idle_backoff_ms: 1,
+                max_idle_backoff_ms: 10,
+                broker_failure_backoff_ms: 1,
+                broker_retry_limit: 1,
+            })
+            .expect_err("tampered workspace must be rejected before execution");
+            assert_eq!(
+                error.code,
+                homeboy_core::ErrorCode::ValidationInvalidArgument
+            );
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_tracked_symlink_is_not_eligible_for_scalable_source_fallback() {
+        let source = tempfile::tempdir().expect("source");
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .current_dir(source.path())
+            .status()
+            .expect("init")
+            .success());
+        std::os::unix::fs::symlink("/etc/passwd", source.path().join("escape"))
+            .expect("create escape link");
+        assert!(std::process::Command::new("git")
+            .args(["add", "escape"])
+            .current_dir(source.path())
+            .status()
+            .expect("track link")
+            .success());
+        let error = SourceArtifactTransfer::from_directory("unsafe-link", source.path())
+            .expect_err("unsafe link remains terminal");
+        assert!(!source_artifact_exceeds_transfer_bounds(&error));
     }
 
     fn envelope() -> LabStagingDispatchEnvelope {

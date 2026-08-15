@@ -225,6 +225,48 @@ pub fn extract_staged_source_artifact(
     Ok(root)
 }
 
+/// Re-resolve the workspace authority from runner-owned staging state before a
+/// claimed job executes. Queue metadata is a projection, not the authority.
+pub fn verify_staged_workspace_materialization(
+    store_path: impl AsRef<Path>,
+    workspace: &crate::runner_staging_operation::ControllerWorkspaceMaterialization,
+) -> Result<()> {
+    workspace.validate()?;
+    let state: StagingStoreState =
+        serde_json::from_slice(&fs::read(store_path.as_ref()).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(store_path.as_ref().display().to_string()),
+            )
+        })?)
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("parse {}", store_path.as_ref().display())),
+            )
+        })?;
+    let stage = state.stages.get(&workspace.run_id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "staged_workspace_materialization",
+            "runner staging store has no durable workspace authority for this run",
+            Some(workspace.run_id.clone()),
+            None,
+        )
+    })?;
+    stage.envelope.validate()?;
+    if stage.envelope.handoff.run_id != workspace.run_id
+        || stage.envelope.materialization.workspace.as_ref() != Some(workspace)
+    {
+        return Err(Error::validation_invalid_argument(
+            "staged_workspace_materialization",
+            "queued workspace materialization does not match runner-owned staging authority",
+            Some(workspace.run_id.clone()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 fn extraction_conflict(path: &Path) -> Error {
     Error::validation_invalid_argument(
         "source_package",

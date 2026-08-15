@@ -729,7 +729,10 @@ mod source_directory {
 
     use homeboy_core::{Error, Result};
 
-    use super::MAX_SOURCE_PACKAGE_FILE_BYTES;
+    use super::{
+        MAX_SOURCE_ARTIFACT_BYTES, MAX_SOURCE_PACKAGE_ENTRIES, MAX_SOURCE_PACKAGE_FILE_BYTES,
+        SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA,
+    };
 
     #[cfg(any(
         target_os = "macos",
@@ -911,13 +914,32 @@ mod source_directory {
         let metadata = file.metadata().map_err(|error| {
             Error::internal_io(error.to_string(), Some(name.to_string_lossy().into_owned()))
         })?;
-        if !metadata.is_file() || metadata.len() > MAX_SOURCE_PACKAGE_FILE_BYTES {
+        if !metadata.is_file() {
             return Err(Error::validation_invalid_argument(
                 "source_path",
-                "source package file must remain a bounded regular file when opened",
+                "source package file must remain a regular file when opened",
                 Some(name.to_string_lossy().into_owned()),
                 None,
             ));
+        }
+        if metadata.len() > MAX_SOURCE_PACKAGE_FILE_BYTES {
+            let mut error = Error::validation_invalid_argument(
+                "source_path",
+                "source package file exceeds the configured size bound",
+                Some(name.to_string_lossy().into_owned()),
+                None,
+            );
+            error.details["source_package"] = serde_json::json!({
+                "schema": SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA,
+                "measured": { "file_count": 1, "bytes": metadata.len(), "largest_entries": [] },
+                "limits": {
+                    "entry_limit": MAX_SOURCE_PACKAGE_ENTRIES,
+                    "byte_limit": MAX_SOURCE_ARTIFACT_BYTES,
+                    "file_byte_limit": MAX_SOURCE_PACKAGE_FILE_BYTES,
+                    "exclusion_limit": super::MAX_SOURCE_PACKAGE_EXCLUSIONS,
+                },
+            });
+            return Err(error);
         }
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
         file.take(MAX_SOURCE_PACKAGE_FILE_BYTES + 1)
@@ -1592,6 +1614,9 @@ pub struct ControllerWorkspaceMaterialization {
     pub workspace_id: String,
     pub remote_cwd: String,
     pub source_snapshot_id: String,
+    pub workspace_lease: String,
+    pub source_commit: String,
+    pub run_id: String,
     pub durable_plan_digest: String,
 }
 
@@ -1603,6 +1628,9 @@ impl ControllerWorkspaceMaterialization {
         workspace_id: impl Into<String>,
         remote_cwd: impl Into<String>,
         source_snapshot_id: impl Into<String>,
+        workspace_lease: impl Into<String>,
+        source_commit: impl Into<String>,
+        run_id: impl Into<String>,
         durable_plan_digest: impl Into<String>,
     ) -> Self {
         Self {
@@ -1610,6 +1638,9 @@ impl ControllerWorkspaceMaterialization {
             workspace_id: workspace_id.into(),
             remote_cwd: remote_cwd.into(),
             source_snapshot_id: source_snapshot_id.into(),
+            workspace_lease: workspace_lease.into(),
+            source_commit: source_commit.into(),
+            run_id: run_id.into(),
             durable_plan_digest: durable_plan_digest.into(),
         }
     }
@@ -1619,6 +1650,13 @@ impl ControllerWorkspaceMaterialization {
             || self.workspace_id.trim().is_empty()
             || self.remote_cwd.trim().is_empty()
             || self.source_snapshot_id.trim().is_empty()
+            || self.workspace_lease.trim().is_empty()
+            || self.source_commit.len() != 40
+            || !self
+                .source_commit
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.run_id.trim().is_empty()
             || !self.durable_plan_digest.starts_with("sha256:")
         {
             return Err(Error::validation_invalid_argument(
@@ -2059,6 +2097,9 @@ pub(crate) mod tests_support {
             "runner-workspace-1",
             "/runner/workspaces/run-1",
             "git:abc123",
+            "workspace:lease-1",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "run-1",
             durable_plan_digest,
         ));
         let receipt = submit_remote_runner_staging(&mut transport(), &envelope)
