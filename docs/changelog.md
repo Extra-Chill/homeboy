@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.4] - 2026-08-15
+
+### Changed
+- let the Cook spine take its lifecycle store
+- fail a run that skipped its required gates
+- wire Cook progress to the rooted recorder
+- root the Cook progress recorder
+
+### Fixed
+- make cancel report honestly and bound its wait
+- stop reporting a cook with no PR as succeeded
+- warn when an attached local cook owns its provider tree
+- sweep every declared backend when no --backend is given
+- name and echo the provider timeout budget
+
 ## [0.350.3] - 2026-08-15
 
 ### Changed
