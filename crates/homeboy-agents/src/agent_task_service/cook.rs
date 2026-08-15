@@ -44,8 +44,6 @@ use super::cook_pre_execution::{
     record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
     with_pre_execution_phase,
 };
-#[cfg(test)]
-use super::cook_promotion::promote_or_load_attempt;
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
     finalize_or_load_cook_pr_with_stores, is_moving_base_finalization_error,
@@ -734,6 +732,7 @@ pub(crate) trait CookSideEffectService {
     /// promotion when this attempt was interrupted after promoting.
     fn promote(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport>;
@@ -790,10 +789,11 @@ where
 {
     fn promote(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport> {
-        promote_with_operation_claim(options, run_id)
+        promote_with_operation_claim_in_store(lifecycle_store, options, run_id)
     }
 
     fn recover_moving_base(
@@ -860,10 +860,11 @@ where
 {
     fn promote(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport> {
-        promote_or_load_attempt(options, run_id)
+        promote_or_load_attempt_in_store(lifecycle_store, options, run_id)
     }
 
     fn recover_moving_base(
@@ -3648,9 +3649,16 @@ where
     E: AgentTaskExecutorAdapter + Clone,
 {
     let store = CookRecipeStore::from_current_data_root()?;
-    let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
-        finalize_or_load_cook_pr(options, run_id, promotion)
-    });
+    let side_effects =
+        DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
+            finalize_or_load_cook_pr_with_stores(
+                &store,
+                lifecycle_store,
+                options,
+                run_id,
+                promotion,
+            )
+        });
     run_cook_with_boundaries_observed_policy_with_store(
         &store,
         options,
@@ -3672,10 +3680,24 @@ pub fn run_cook_with_durable_observer<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
-        finalize_or_load_cook_pr(options, run_id, promotion)
-    });
-    run_cook_with_boundaries_observed(options, executor, side_effects, Some(observer))
+    let store = CookRecipeStore::from_current_data_root()?;
+    let side_effects =
+        DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
+            finalize_or_load_cook_pr_with_stores(
+                &store,
+                lifecycle_store,
+                options,
+                run_id,
+                promotion,
+            )
+        });
+    run_cook_with_boundaries_observed_with_store(
+        &store,
+        options,
+        executor,
+        side_effects,
+        Some(observer),
+    )
 }
 
 pub(crate) fn run_cook_with_finalizer<E, F>(
@@ -5260,7 +5282,7 @@ where
             attempt,
             None,
         )?;
-        let mut promotion = match side_effects.promote(&options, &run_id) {
+        let mut promotion = match side_effects.promote(&lifecycle_store, &options, &run_id) {
             Ok(report) => report,
             Err(error) => {
                 attempts.push(AgentTaskCookAttemptReport {

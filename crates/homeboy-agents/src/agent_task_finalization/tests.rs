@@ -51,6 +51,31 @@ struct MockBackend {
     last_body: String,
     publication_binding: Option<AgentTaskPublicationBinding>,
     publication_binding_calls: u8,
+    candidate_validation_calls: u8,
+    rooted_candidate_validation_calls: u8,
+}
+
+impl MockBackend {
+    fn validate_candidate_value(&self, options: &AgentTaskPrFinalizationOptions) -> Result<()> {
+        let Some(expected) = self.candidate.as_ref() else {
+            return Ok(());
+        };
+        let actual = crate::agent_task_promotion::candidate_fingerprint(&options.path)?;
+        if actual != *expected {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                "candidate changed after promotion; rerun promotion gates before finalization",
+                None,
+                None,
+            ));
+        }
+        let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint: _ } =
+            actual
+        else {
+            unreachable!("test candidate is Git")
+        };
+        Ok(())
+    }
 }
 
 impl AgentTaskPrFinalizationBackend for MockBackend {
@@ -97,24 +122,16 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         self.hydrate_gate_proof(run_id)
     }
     fn validate_candidate(&mut self, options: &AgentTaskPrFinalizationOptions) -> Result<()> {
-        let Some(expected) = self.candidate.as_ref() else {
-            return Ok(());
-        };
-        let actual = crate::agent_task_promotion::candidate_fingerprint(&options.path)?;
-        if actual != *expected {
-            return Err(Error::validation_invalid_argument(
-                "path",
-                "candidate changed after promotion; rerun promotion gates before finalization",
-                None,
-                None,
-            ));
-        }
-        let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint: _ } =
-            actual
-        else {
-            unreachable!("test candidate is Git")
-        };
-        Ok(())
+        self.candidate_validation_calls += 1;
+        self.validate_candidate_value(options)
+    }
+    fn validate_candidate_in_store(
+        &mut self,
+        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        options: &AgentTaskPrFinalizationOptions,
+    ) -> Result<()> {
+        self.rooted_candidate_validation_calls += 1;
+        self.validate_candidate_value(options)
     }
     fn current_branch(&mut self, _path: &str) -> Result<String> {
         Ok(if self.branch.is_empty() {
@@ -1062,6 +1079,39 @@ fn requires_a_real_durable_run_unless_manual_mode_is_selected() {
 }
 
 #[test]
+fn rooted_finalization_dispatches_candidate_validation_through_the_explicit_store() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "cook-3678";
+    lifecycle_store
+        .submit_plan_with_runtime_admission(
+            &AgentTaskPlan::new("rooted-finalization", Vec::new()),
+            run_id,
+            |_| Ok(json!({})),
+        )
+        .unwrap();
+
+    let mut gate_proof = successful_gate_proof();
+    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(successful_lifecycle("openai/gpt-5.6-terra")),
+        gate_proof: Some(gate_proof),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+
+    finalize_pr_with_backend_in_store(finalization_options, &mut backend, &lifecycle_store)
+        .expect("rooted finalization");
+
+    assert_eq!(backend.rooted_candidate_validation_calls, 1);
+    assert_eq!(backend.candidate_validation_calls, 0);
+}
+
+#[test]
 fn manual_finalization_cannot_bypass_acceptance_for_an_existing_run_id() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "manual-acceptance-bypass";
@@ -1917,7 +1967,7 @@ fn production_validator_normalizes_changed_file_order_and_duplicates() {
         promotion.source.run_id = Some(run_id.to_string());
         promotion.target.path = Some(repo.path().display().to_string());
         promotion.changed_files = vec!["a".to_string(), "b".to_string()];
-        promotion.provenance = json!({ "candidate": candidate });
+        promotion.provenance = json!({ "candidate": candidate.clone() });
         crate::agent_task_lifecycle::record_promotion(
             run_id,
             serde_json::to_value(promotion).unwrap(),
@@ -1932,6 +1982,51 @@ fn production_validator_normalizes_changed_file_order_and_duplicates() {
         options.changed_files = vec!["a".to_string()];
         assert!(validate_real_candidate_fingerprint(&options).is_err());
     });
+}
+
+#[test]
+fn production_validator_uses_explicit_store_for_colliding_run_ids() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(right_context.path_roots());
+    let repo = real_git_repo();
+    std::fs::write(repo.path().join("a"), "a").unwrap();
+    let candidate =
+        crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap()).unwrap();
+    let run_id = "same-production-validator-run";
+    let plan = crate::agent_task_scheduler::AgentTaskPlan::new("validator", Vec::new());
+
+    for (store, changed_files) in [
+        (&left_store, vec!["a".to_string()]),
+        (&right_store, vec!["wrong".to_string()]),
+    ] {
+        store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+            .unwrap();
+        let mut promotion = successful_gate_proof().promotion;
+        promotion.source.run_id = Some(run_id.to_string());
+        promotion.target.path = Some(repo.path().display().to_string());
+        promotion.changed_files = changed_files;
+        promotion.provenance = json!({ "candidate": candidate });
+        store
+            .record_promotion(run_id, serde_json::to_value(promotion).unwrap())
+            .unwrap();
+    }
+
+    let mut options = real_git_finalization_options(repo.path(), vec!["a".to_string()]);
+    options.run_id = run_id.to_string();
+    let mut backend = RealAgentTaskPrFinalizationBackend;
+    backend
+        .validate_candidate_in_store(&left_store, &options)
+        .expect("left candidate validation");
+    let error = backend
+        .validate_candidate_in_store(&right_store, &options)
+        .expect_err("right promotion must not alias left");
+
+    assert!(error.message.contains("persisted promotion report"));
 }
 
 #[test]

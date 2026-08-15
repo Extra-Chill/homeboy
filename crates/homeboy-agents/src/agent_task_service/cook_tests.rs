@@ -1015,6 +1015,7 @@ struct CanonicalSelectionSideEffects {
 impl CookSideEffectService for CanonicalSelectionSideEffects {
     fn promote(
         &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport> {
@@ -9831,6 +9832,13 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         }
         self.hydrate_gate_proof(run_id)
     }
+    fn validate_candidate_in_store(
+        &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
+        options: &crate::agent_task_finalization::AgentTaskPrFinalizationOptions,
+    ) -> Result<()> {
+        self.validate_candidate(options)
+    }
     fn current_branch(&mut self, _path: &str) -> Result<String> {
         Ok("fix/8058".to_string())
     }
@@ -10822,7 +10830,7 @@ fn promotion_claim_and_replay_isolate_identical_ids_across_lifecycle_stores() {
     let options = promotion_claim_options(cook_id, run_id);
     let operation_key = promotion_operation_key(run_id);
 
-    for store in [&left_store, &right_store] {
+    for (store, artifact_id) in [(&left_store, "left-patch"), (&right_store, "right-patch")] {
         store
             .submit_plan_with_runtime_admission(
                 &AgentTaskPlan::new(cook_id, Vec::new()),
@@ -10830,12 +10838,18 @@ fn promotion_claim_and_replay_isolate_identical_ids_across_lifecycle_stores() {
                 |_| Ok(serde_json::json!({})),
             )
             .unwrap();
+        let mut rooted_promotion = promotion(run_id);
+        rooted_promotion.patch_artifact.id = artifact_id.to_string();
         store
-            .record_promotion(run_id, serde_json::to_value(promotion(run_id)).unwrap())
+            .record_promotion(run_id, serde_json::to_value(rooted_promotion).unwrap())
             .unwrap();
 
-        let first = promote_with_operation_claim_in_store(store, &options, run_id).unwrap();
-        let replayed = promote_with_operation_claim_in_store(store, &options, run_id).unwrap();
+        let mut side_effects = DefaultCookSideEffects::new(|_, _, _, _| {
+            unreachable!("promotion isolation does not finalize")
+        });
+        let first = side_effects.promote(store, &options, run_id).unwrap();
+        let replayed = side_effects.promote(store, &options, run_id).unwrap();
+        assert_eq!(first.patch_artifact.id, artifact_id);
         assert_eq!(replayed.patch_artifact.id, first.patch_artifact.id);
         assert_eq!(
             store
@@ -11087,7 +11101,9 @@ fn duplicate_controller_passes_revalidate_one_promoted_candidate() {
                     Ok(serde_json::json!({"status": "review_ready", "run_id": rid}))
                 },
             );
-            let promotion = side_effects.promote(&options, run_id).unwrap();
+            let promotion = side_effects
+                .promote(&lifecycle_store, &options, run_id)
+                .unwrap();
             let finalization = side_effects
                 .finalize(&lifecycle_store, &options, run_id, &promotion)
                 .unwrap();
