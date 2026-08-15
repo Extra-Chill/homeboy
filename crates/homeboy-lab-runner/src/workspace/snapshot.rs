@@ -41,6 +41,67 @@ fn is_reserved_runner_workspace_path(relative: &str) -> bool {
     RESERVED_RUNNER_WORKSPACE_PATHS.contains(&relative)
 }
 
+/// The runner owns this container and may remove it with its metadata while a
+/// snapshot traversal still holds a directory entry for it. Its disappearance
+/// is therefore a cache miss, unlike a source path disappearing mid-read.
+fn is_runner_metadata_directory(logical: &Path) -> bool {
+    logical == Path::new(".homeboy")
+}
+
+#[cfg(test)]
+mod test_snapshot_directory_discovery_hook {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    type Hook = (PathBuf, Box<dyn FnOnce() + Send>);
+
+    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+
+    pub(crate) struct Guard;
+
+    pub(crate) fn install(path: PathBuf, action: impl FnOnce() + Send + 'static) -> Guard {
+        let mut hook = HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("snapshot discovery hook lock");
+        assert!(
+            hook.is_none(),
+            "snapshot discovery hook is already installed"
+        );
+        *hook = Some((path, Box::new(action)));
+        Guard
+    }
+
+    pub(crate) fn run(path: &Path) {
+        let action = HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("snapshot discovery hook lock")
+            .take_if(|(expected, _)| expected == path)
+            .map(|(_, action)| action);
+        if let Some(action) = action {
+            action();
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            *HOOK
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .expect("snapshot discovery hook lock") = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_after_snapshot_directory_discovery_hook(
+    path: std::path::PathBuf,
+    action: impl FnOnce() + Send + 'static,
+) -> test_snapshot_directory_discovery_hook::Guard {
+    test_snapshot_directory_discovery_hook::install(path, action)
+}
+
 // The workspace-content *identity spec* (permission-policy names, the default
 // policy, the policy -> algorithm-marker mapping, and the content manifest
 // types) lives in the leaf `homeboy-source-snapshot-contract` crate so the
@@ -269,17 +330,28 @@ impl ContentHashTraversal<'_> {
         logical: &Path,
         ancestors: &mut Vec<std::path::PathBuf>,
     ) -> Result<()> {
-        let mut children = fs::read_dir(path)
-            .map_err(|err| {
-                Error::internal_io(err.to_string(), Some("read sync directory".to_string()))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|err| {
-                Error::internal_io(
+        let mut children = match fs::read_dir(path) {
+            Ok(children) => children,
+            Err(err)
+                if is_runner_metadata_directory(logical)
+                    && err.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(err) => {
+                return Err(Error::internal_io(
                     err.to_string(),
-                    Some("read sync directory entry".to_string()),
-                )
-            })?;
+                    Some("read sync directory".to_string()),
+                ));
+            }
+        }
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("read sync directory entry".to_string()),
+            )
+        })?;
         children.sort_by_key(|entry| entry.path());
         for entry in children {
             let entry_path = entry.path();
@@ -297,9 +369,23 @@ impl ContentHashTraversal<'_> {
             {
                 continue;
             }
-            let link_metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
-                Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
-            })?;
+            #[cfg(test)]
+            test_snapshot_directory_discovery_hook::run(&entry_path);
+            let link_metadata = match fs::symlink_metadata(&entry_path) {
+                Ok(metadata) => metadata,
+                Err(err)
+                    if is_runner_metadata_directory
+                        && err.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    continue;
+                }
+                Err(err) => {
+                    return Err(Error::internal_io(
+                        err.to_string(),
+                        Some("read sync file metadata".to_string()),
+                    ));
+                }
+            };
             // A symlink whose target resolves is dereferenced so its target content
             // stays provenance-bound (target drift changes the hash). A symlink whose
             // target is intentionally unavailable on the controller (e.g. a tracked
@@ -337,13 +423,32 @@ impl ContentHashTraversal<'_> {
             } else {
                 entry_path.clone()
             };
-            let metadata = fs::metadata(&resolved).map_err(|err| {
-                Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
-            })?;
+            let metadata = match fs::metadata(&resolved) {
+                Ok(metadata) => metadata,
+                Err(err)
+                    if is_runner_metadata_directory
+                        && err.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    continue;
+                }
+                Err(err) => {
+                    return Err(Error::internal_io(
+                        err.to_string(),
+                        Some("read sync file metadata".to_string()),
+                    ));
+                }
+            };
             if metadata.is_dir() {
-                let canonical = resolved
-                    .canonicalize()
-                    .map_err(|err| Error::internal_io(err.to_string(), None))?;
+                let canonical = match resolved.canonicalize() {
+                    Ok(canonical) => canonical,
+                    Err(err)
+                        if is_runner_metadata_directory
+                            && err.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        continue;
+                    }
+                    Err(err) => return Err(Error::internal_io(err.to_string(), None)),
+                };
                 if ancestors.contains(&canonical) {
                     return Err(Error::validation_invalid_argument(
                         "workspace",
@@ -491,17 +596,28 @@ fn collect_content_hash_entries_v1(
     ancestors: &mut Vec<std::path::PathBuf>,
     entries: &mut Vec<(String, &'static str, u32, Vec<u8>)>,
 ) -> Result<()> {
-    let mut children = fs::read_dir(path)
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read sync directory".to_string()))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|err| {
-            Error::internal_io(
+    let mut children = match fs::read_dir(path) {
+        Ok(children) => children,
+        Err(err)
+            if is_runner_metadata_directory(logical)
+                && err.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(Error::internal_io(
                 err.to_string(),
-                Some("read sync directory entry".to_string()),
-            )
-        })?;
+                Some("read sync directory".to_string()),
+            ));
+        }
+    }
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("read sync directory entry".to_string()),
+        )
+    })?;
     children.sort_by_key(|entry| entry.path());
     for entry in children {
         let entry_path = entry.path();
@@ -514,9 +630,22 @@ fn collect_content_hash_entries_v1(
         {
             continue;
         }
-        let link_metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
-        })?;
+        #[cfg(test)]
+        test_snapshot_directory_discovery_hook::run(&entry_path);
+        let link_metadata = match fs::symlink_metadata(&entry_path) {
+            Ok(metadata) => metadata,
+            Err(err)
+                if is_runner_metadata_directory && err.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(err) => {
+                return Err(Error::internal_io(
+                    err.to_string(),
+                    Some("read sync file metadata".to_string()),
+                ));
+            }
+        };
         // Resolvable symlinks are dereferenced (target content stays bound); a
         // tracked symlink with an unavailable target binds its target text
         // instead of failing the hash. See the v2 collector for rationale. (#8374)
@@ -538,13 +667,31 @@ fn collect_content_hash_entries_v1(
         } else {
             entry_path.clone()
         };
-        let metadata = fs::metadata(&resolved).map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
-        })?;
+        let metadata = match fs::metadata(&resolved) {
+            Ok(metadata) => metadata,
+            Err(err)
+                if is_runner_metadata_directory && err.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(err) => {
+                return Err(Error::internal_io(
+                    err.to_string(),
+                    Some("read sync file metadata".to_string()),
+                ));
+            }
+        };
         if metadata.is_dir() {
-            let canonical = resolved
-                .canonicalize()
-                .map_err(|err| Error::internal_io(err.to_string(), None))?;
+            let canonical = match resolved.canonicalize() {
+                Ok(canonical) => canonical,
+                Err(err)
+                    if is_runner_metadata_directory
+                        && err.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    continue;
+                }
+                Err(err) => return Err(Error::internal_io(err.to_string(), None)),
+            };
             if ancestors.contains(&canonical) {
                 return Err(Error::validation_invalid_argument(
                     "workspace",

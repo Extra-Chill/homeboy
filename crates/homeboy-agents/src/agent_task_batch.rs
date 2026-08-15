@@ -14,7 +14,8 @@ use crate::agent_task_dependency_graph::{
 };
 use crate::agent_task_lifecycle::{self, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
-use homeboy_core::{paths, Error, Result};
+use crate::agent_task_service;
+use homeboy_core::{paths, Error, ErrorCode, Result};
 
 mod types;
 
@@ -283,9 +284,11 @@ fn claim_fanout_run_batch_in_store(
         let metadata = batch.metadata.as_object_mut().expect("metadata object");
         metadata.remove("terminal_failure");
         let claim_id = Uuid::new_v4().to_string();
+        let admission_deadline_at = (Utc::now() + chrono::Duration::seconds(COORDINATOR_LEASE_SECONDS))
+            .to_rfc3339();
         metadata.insert(
             "coordinator".to_string(),
-            json!({ "claim_id": claim_id, "stage": "admitting", "heartbeat_at": now_timestamp(), "lease_seconds": COORDINATOR_LEASE_SECONDS }),
+            json!({ "claim_id": claim_id, "stage": "admitting", "heartbeat_at": now_timestamp(), "admission_deadline_at": admission_deadline_at, "lease_seconds": COORDINATOR_LEASE_SECONDS }),
         );
         batch.state = AgentTaskBatchState::Admitting;
         batch.updated_at = Some(now_timestamp());
@@ -320,6 +323,13 @@ fn heartbeat_fanout_run_batch_in_store(
                 )
             })?;
         coordinator.insert("heartbeat_at".to_string(), json!(now_timestamp()));
+        // An admitting coordinator can spend longer than one lease preparing
+        // gates, worktrees, and recipes. A live heartbeat renews that admission
+        // lease; a dead coordinator still expires when heartbeats stop.
+        coordinator.insert(
+            "admission_deadline_at".to_string(),
+            json!((Utc::now() + chrono::Duration::seconds(COORDINATOR_LEASE_SECONDS)).to_rfc3339()),
+        );
         batch.updated_at = Some(now_timestamp());
         Ok(())
     })
@@ -427,7 +437,118 @@ fn record_fanout_run_batch_failed_admissions_in_store<'a>(
 }
 
 pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
-    AgentTaskBatchStore::from_current_data_root()?.status(batch_id)
+    let store = AgentTaskBatchStore::from_current_data_root()?;
+    let _ = store.expire_stalled_fanout_admission(batch_id)?;
+    store.status(batch_id)
+}
+
+/// Expire a live coordinator only when its durable record proves it never
+/// advanced beyond pre-child admission. Detached supervision uses this to stop
+/// the stranded process as soon as the durable terminal blocker is written.
+pub fn expire_stalled_fanout_admission(batch_id: &str) -> Result<bool> {
+    AgentTaskBatchStore::from_current_data_root()?.expire_stalled_fanout_admission(batch_id)
+}
+
+/// Turn an accepted coordinator that never leaves admission into durable,
+/// actionable state. The admission deadline is independent of the heartbeat:
+/// a live process that is stuck before it can create a child must not renew its
+/// way into an indefinite `admitting` state.
+fn expire_stalled_fanout_admission_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+) -> Result<bool> {
+    store.with_batch_lock(batch_id, || {
+        let mut batch = store.read_batch(batch_id)?;
+        let coordinator = &batch.metadata["coordinator"];
+        let heartbeat_stale = coordinator["heartbeat_at"]
+            .as_str()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|heartbeat| {
+                Utc::now() - heartbeat.with_timezone(&Utc)
+                    > chrono::Duration::seconds(COORDINATOR_LEASE_SECONDS)
+            });
+        let child_started = batch.child_runs.iter().any(|child| {
+            child.state != AgentTaskRunState::Queued
+                || batch.metadata["child_finalizations"]
+                    .get(&child.run_id)
+                    .is_some()
+                || agent_task_lifecycle::run_record_exists(&child.run_id).unwrap_or(true)
+        });
+        let expired = batch.state == AgentTaskBatchState::Admitting
+            && coordinator["stage"].as_str() == Some("admitting")
+            && heartbeat_stale
+            && !child_started
+            && coordinator["admission_deadline_at"]
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .is_some_and(|deadline| Utc::now() >= deadline.with_timezone(&Utc));
+        if !expired {
+            return Ok(false);
+        }
+        let stage = coordinator["stage"]
+            .as_str()
+            .unwrap_or("admitting")
+            .to_string();
+        let command = stalled_admission_recovery_command(&batch)?;
+        if !batch.metadata.is_object() {
+            batch.metadata = Value::Object(serde_json::Map::new());
+        }
+        batch.metadata.as_object_mut().expect("metadata object").insert(
+            "terminal_failure".to_string(),
+            json!({
+                "stage": stage,
+                "failure": {
+                    "code": "coordinator_admission_timeout",
+                    "message": format!("fanout coordinator did not advance beyond '{stage}' before its admission deadline"),
+                    "next_action": command,
+                }
+            }),
+        );
+        for child in &mut batch.child_runs {
+            child.state = AgentTaskRunState::Failed;
+        }
+        batch.state = AgentTaskBatchState::Failed;
+        batch.updated_at = Some(now_timestamp());
+        store.write_batch(&batch)?;
+        Ok(true)
+    })
+}
+
+fn stalled_admission_recovery_command(batch: &AgentTaskBatchRecord) -> Result<String> {
+    stalled_admission_recovery_command_with(batch, |child| {
+        agent_task_service::recipe_exists(&child.task_id)
+    })
+}
+
+fn stalled_admission_recovery_command_with(
+    batch: &AgentTaskBatchRecord,
+    mut recipe_exists: impl FnMut(&AgentTaskBatchChildRun) -> Result<bool>,
+) -> Result<String> {
+    let recipes_exist = batch
+        .child_runs
+        .iter()
+        .map(&mut recipe_exists)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .all(|exists| exists);
+    if recipes_exist {
+        return Ok(format!(
+            "homeboy agent-task fanout resume {}",
+            batch.batch_id
+        ));
+    }
+    batch.metadata["replan_command"]
+        .as_str()
+        .filter(|command| !command.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "replan_command",
+                "stalled fanout admission has no persisted child recipes or replan command",
+                Some(batch.batch_id.clone()),
+                None,
+            )
+        })
 }
 
 fn status_in_store<S, P>(
@@ -444,17 +565,27 @@ where
     if batch.metadata["terminal_failure"].is_object() {
         batch.state = AgentTaskBatchState::Failed;
         let commands = commands(&batch.batch_id);
+        let admission_blocker = batch.metadata["terminal_failure"].clone();
+        let mut next_actions = vec![commands.status.clone(), commands.artifacts.clone()];
+        if let Some(command) = admission_blocker
+            .pointer("/failure/next_action")
+            .and_then(Value::as_str)
+        {
+            next_actions.insert(0, command.to_string());
+        }
         return Ok(AgentTaskBatchStatusReport {
             schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
             status: "failed".to_string(),
+            observation_fresh: true,
             totals: totals_for_children(&batch.child_runs),
             batch,
             unavailable_child_runs: Vec::new(),
+            admission_blocker: Some(admission_blocker),
             projection_pending_child_runs: Vec::new(),
             resumable_child_runs: Vec::new(),
             resumable: false,
             dependency_graph: None,
-            next_actions: vec![commands.status.clone(), commands.artifacts.clone()],
+            next_actions,
             commands,
         });
     }
@@ -462,6 +593,7 @@ where
     let mut projection_pending_child_runs = Vec::new();
     let mut resumable_child_runs = Vec::new();
     let mut timed_out_child_runs = HashSet::new();
+    let mut observation_fresh = true;
     for child in &mut batch.child_runs {
         if terminal_preflight_or_admission_failure(&batch.metadata, &child.run_id) {
             continue;
@@ -492,6 +624,9 @@ where
                 }
             }
             Err(error) => {
+                if error.code == ErrorCode::ObservationStoreBusy {
+                    observation_fresh = false;
+                }
                 if !child.state.is_terminal() {
                     unavailable_child_runs.push(child_issue(
                         child,
@@ -544,12 +679,14 @@ where
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
         status: state.outcome_status().to_string(),
+        observation_fresh,
         dependency_graph,
         next_actions,
         commands,
         batch,
         totals,
         unavailable_child_runs,
+        admission_blocker: None,
         projection_pending_child_runs,
         resumable_child_runs,
         resumable,
@@ -566,7 +703,7 @@ pub fn fanout_dependency_graph_with_finalization_statuses(
     refresh_dependency_graph_with_finalization_statuses(
         &mut batch,
         Some(statuses),
-        &mut agent_task_lifecycle::status,
+        &mut agent_task_lifecycle::persisted_status,
     )
 }
 
@@ -628,19 +765,25 @@ where
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     let mut states = BTreeMap::new();
     for child in &batch.child_runs {
-        let finalization_status = finalization_statuses
-            .and_then(|statuses| statuses.get(&child.task_id).cloned())
-            .or_else(|| {
-                child_status(&child.run_id)
-                    .ok()
-                    .and_then(|record| record.metadata.get("cook_finalization").cloned())
-                    .and_then(|value| {
-                        value
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-            });
+        let finalization_status = if let Some(status) =
+            finalization_statuses.and_then(|statuses| statuses.get(&child.task_id).cloned())
+        {
+            Some(status)
+        } else {
+            match child_status(&child.run_id) {
+                Ok(record) => record
+                    .metadata
+                    .get("cook_finalization")
+                    .and_then(|value| value.get("status"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                // A status projection has already retained the batch's last
+                // durable child state; a transient read lock must not turn a
+                // graph refresh into a user-visible status failure.
+                Err(error) if error.code == ErrorCode::ObservationStoreBusy => None,
+                Err(error) => return Err(error),
+            }
+        };
         let has_finalization = finalization_status.is_some();
         let mut state = match child.state {
             AgentTaskRunState::Failed => AgentTaskDependencyState::Failed,
@@ -1098,9 +1241,13 @@ impl AgentTaskBatchStore {
     fn status(&self, batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
         self.status_with(
             batch_id,
-            agent_task_lifecycle::status,
-            agent_task_lifecycle::terminal_artifact_projection_readiness,
+            agent_task_lifecycle::persisted_status,
+            agent_task_lifecycle::terminal_artifact_projection_readiness_bounded,
         )
+    }
+
+    fn expire_stalled_fanout_admission(&self, batch_id: &str) -> Result<bool> {
+        expire_stalled_fanout_admission_in_store(self, batch_id)
     }
 
     fn status_with<S, P>(
@@ -1367,6 +1514,7 @@ mod tests {
         AgentTaskExecutionContext, AgentTaskExecutorAdapter,
     };
     use std::collections::HashMap;
+    use std::sync::{Arc, Barrier};
 
     fn batch_store() -> (tempfile::TempDir, AgentTaskBatchStore) {
         let temp = tempfile::tempdir().expect("temporary batch data root");
@@ -1602,6 +1750,42 @@ mod tests {
             .next_actions
             .iter()
             .any(|action| action.contains("partial results only")));
+    }
+
+    #[test]
+    fn terminal_child_busy_observation_keeps_terminal_state_but_marks_staleness() {
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
+        let plan = AgentTaskPlan::new("fanout/terminal-busy", vec![request("a")]);
+        submit_batch(&batch_store, &lifecycle_store, &plan, "batch/terminal-busy");
+        rewrite_record(&lifecycle_store, "batch_terminal-busy-a", |record| {
+            record.state = AgentTaskRunState::Succeeded;
+        });
+        let mut batch = batch_store
+            .read_batch("batch/terminal-busy")
+            .expect("durable batch");
+        batch.child_runs[0].state = AgentTaskRunState::Succeeded;
+        batch_store
+            .write_batch(&batch)
+            .expect("persist terminal batch state");
+
+        let report = batch_store
+            .status_with(
+                "batch/terminal-busy",
+                |_| {
+                    Err(Error::observation_store_busy(
+                        "test.sqlite",
+                        "read terminal child",
+                        750,
+                    ))
+                },
+                |_| Ok(None),
+            )
+            .expect("fanout status falls back to terminal durable state");
+
+        assert_eq!(report.batch.state, AgentTaskBatchState::Succeeded);
+        assert_eq!(report.totals.succeeded, 1);
+        assert!(!report.observation_fresh);
+        assert!(report.unavailable_child_runs.is_empty());
     }
 
     #[test]
@@ -1952,6 +2136,68 @@ mod tests {
     }
 
     #[test]
+    fn fanout_status_retains_durable_state_while_observation_writers_contend() {
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
+        let plan = AgentTaskPlan::new(
+            "fanout/contended-status",
+            vec![request("a"), request("b"), request("c")],
+        );
+        let batch = submit_batch(
+            &batch_store,
+            &lifecycle_store,
+            &plan,
+            "batch/contended-status",
+        );
+        let database = lifecycle_store.observation_db_path();
+        let barrier = Arc::new(Barrier::new(batch.child_runs.len() + 1));
+        let writers = batch
+            .child_runs
+            .iter()
+            .enumerate()
+            .map(|(writer, child)| {
+                let barrier = Arc::clone(&barrier);
+                let database = database.clone();
+                let run_id = child.run_id.clone();
+                std::thread::spawn(move || {
+                    let store =
+                        homeboy_core::observation::ObservationStore::open_initialized_at(database)
+                            .expect("open contending writer");
+                    let metadata = store
+                        .get_run(&run_id)
+                        .expect("read writer record")
+                        .expect("writer record exists")
+                        .metadata_json;
+                    barrier.wait();
+                    for sequence in 0..50 {
+                        let mut metadata = metadata.clone();
+                        metadata["contention"] = json!({ "writer": writer, "sequence": sequence });
+                        store
+                            .update_run_metadata(&run_id, metadata)
+                            .expect("bounded observation writer completes");
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        for _ in 0..100 {
+            let report = batch_store
+                .status_with(
+                    "batch/contended-status",
+                    |run_id| lifecycle_store.read_record_bounded(run_id),
+                    |_| Ok(None),
+                )
+                .expect("fanout status remains available during writes");
+            assert_eq!(report.batch.state, AgentTaskBatchState::Queued);
+            assert_eq!(report.totals.queued, 3);
+            assert!(report.observation_fresh);
+        }
+        for writer in writers {
+            writer.join().expect("contending writer joined");
+        }
+    }
+
+    #[test]
     fn merged_dependent_terminalizes_after_its_invalidated_review_is_recompleted() {
         let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
         let plan = AgentTaskPlan::new("fanout/merged-dependent", vec![request("a")]);
@@ -2236,6 +2482,207 @@ mod tests {
                 .expect("reclaimed batch")
                 .state,
             AgentTaskBatchState::Admitting
+        );
+    }
+
+    #[test]
+    fn expired_admission_is_a_durable_terminal_blocker_with_a_recovery_command() {
+        let (_temp, store) = batch_store();
+        let children = vec![FanoutRunBatchChild {
+            task_id: "stuck".to_string(),
+            run_id: "stuck-run".to_string(),
+        }];
+        store
+            .persist_fanout_run_batch("stuck-wave", "stuck-wave", &children, json!({}))
+            .expect("persist");
+        store
+            .claim_fanout_run_batch("stuck-wave")
+            .expect("claim")
+            .expect("claim id");
+        store
+            .mutate_batch("stuck-wave", |batch| {
+                batch.metadata["coordinator"]["admission_deadline_at"] =
+                    json!("2000-01-01T00:00:00Z");
+                batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
+                batch.metadata["replan_command"] =
+                    json!("homeboy agent-task fanout run-plan --input @plan.json");
+                Ok(())
+            })
+            .expect("expire admission");
+
+        assert!(store
+            .expire_stalled_fanout_admission("stuck-wave")
+            .expect("terminalize stalled admission"));
+        let status = store.status("stuck-wave").expect("read failed batch");
+
+        assert_eq!(status.batch.state, AgentTaskBatchState::Failed);
+        assert_eq!(status.batch.child_runs[0].state, AgentTaskRunState::Failed);
+        assert_eq!(
+            status.batch.metadata["terminal_failure"]["failure"]["code"],
+            "coordinator_admission_timeout"
+        );
+        assert_eq!(
+            status.batch.metadata["terminal_failure"]["failure"]["next_action"],
+            "homeboy agent-task fanout run-plan --input @plan.json"
+        );
+    }
+
+    #[test]
+    fn stalled_admission_recovery_resumes_only_when_every_recipe_exists() {
+        let batch = AgentTaskBatchRecord {
+            schema: AGENT_TASK_BATCH_SCHEMA.to_string(),
+            batch_id: "recipe-wave".to_string(),
+            plan_id: "recipe-wave".to_string(),
+            state: AgentTaskBatchState::Admitting,
+            submitted_at: now_timestamp(),
+            updated_at: None,
+            task_count: 2,
+            child_runs: vec![
+                AgentTaskBatchChildRun {
+                    task_id: "a".to_string(),
+                    run_id: "a-run".to_string(),
+                    state: AgentTaskRunState::Queued,
+                },
+                AgentTaskBatchChildRun {
+                    task_id: "b".to_string(),
+                    run_id: "b-run".to_string(),
+                    state: AgentTaskRunState::Queued,
+                },
+            ],
+            metadata: json!({
+                "replan_command": "homeboy agent-task fanout run-plan --input @plan.json"
+            }),
+        };
+
+        assert_eq!(
+            stalled_admission_recovery_command_with(&batch, |_| Ok(false))
+                .expect("pre-recipe recovery command"),
+            "homeboy agent-task fanout run-plan --input @plan.json"
+        );
+        assert_eq!(
+            stalled_admission_recovery_command_with(&batch, |_| Ok(true))
+                .expect("recipe-backed recovery command"),
+            "homeboy agent-task fanout resume recipe-wave"
+        );
+    }
+
+    #[test]
+    fn a_heartbeat_renews_slow_preflight_admission_without_false_expiry() {
+        let (_temp, store) = batch_store();
+        let children = vec![FanoutRunBatchChild {
+            task_id: "slow-preflight".to_string(),
+            run_id: "slow-preflight-run".to_string(),
+        }];
+        store
+            .persist_fanout_run_batch("slow-preflight", "slow-preflight", &children, json!({}))
+            .expect("persist");
+        let claim_id = store
+            .claim_fanout_run_batch("slow-preflight")
+            .expect("claim")
+            .expect("claim id");
+        store
+            .mutate_batch("slow-preflight", |batch| {
+                batch.metadata["coordinator"]["admission_deadline_at"] =
+                    json!("2000-01-01T00:00:00Z");
+                batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
+                Ok(())
+            })
+            .expect("age initial admission lease");
+
+        store
+            .heartbeat_fanout_run_batch("slow-preflight", &claim_id)
+            .expect("healthy preflight heartbeat");
+
+        assert!(!store
+            .expire_stalled_fanout_admission("slow-preflight")
+            .expect("live preflight is retained"));
+        assert_ne!(
+            store.read_batch("slow-preflight").expect("batch").metadata["coordinator"]
+                ["admission_deadline_at"],
+            json!("2000-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn expired_admission_with_a_fresh_heartbeat_or_started_child_is_not_terminated() {
+        let (_temp, store) = batch_store();
+        let children = vec![FanoutRunBatchChild {
+            task_id: "live".to_string(),
+            run_id: "live-run".to_string(),
+        }];
+        for (batch_id, started) in [("live-wave", false), ("started-wave", true)] {
+            store
+                .persist_fanout_run_batch(batch_id, batch_id, &children, json!({}))
+                .expect("persist");
+            store
+                .claim_fanout_run_batch(batch_id)
+                .expect("claim")
+                .expect("claim id");
+            store
+                .mutate_batch(batch_id, |batch| {
+                    batch.metadata["coordinator"]["admission_deadline_at"] =
+                        json!("2000-01-01T00:00:00Z");
+                    if started {
+                        batch.metadata["coordinator"]["heartbeat_at"] =
+                            json!("2000-01-01T00:00:00Z");
+                        batch.child_runs[0].state = AgentTaskRunState::Running;
+                    }
+                    Ok(())
+                })
+                .expect("set durable progress");
+
+            assert!(
+                !store
+                    .expire_stalled_fanout_admission(batch_id)
+                    .expect("observe active admission"),
+                "{batch_id} must retain its active coordinator"
+            );
+            assert_eq!(
+                store.read_batch(batch_id).expect("batch").state,
+                AgentTaskBatchState::Admitting
+            );
+        }
+    }
+
+    #[test]
+    fn status_projects_the_exact_returned_admission_blocker() {
+        let (_temp, store) = batch_store();
+        let children = vec![FanoutRunBatchChild {
+            task_id: "source".to_string(),
+            run_id: "source-run".to_string(),
+        }];
+        store
+            .persist_fanout_run_batch("source-wave", "source-wave", &children, json!({}))
+            .expect("persist");
+        let claim_id = store
+            .claim_fanout_run_batch("source-wave")
+            .expect("claim")
+            .expect("claim id");
+        store
+            .record_fanout_run_batch_failure(
+                "source-wave",
+                &claim_id,
+                "source_staging",
+                json!({
+                    "code": "source_package_too_large",
+                    "message": "source package exceeds configured entry or total size bounds",
+                    "next_action": "homeboy agent-task fanout resume source-wave",
+                }),
+            )
+            .expect("record source blocker");
+
+        let status = store.status("source-wave").expect("project blocker");
+        assert_eq!(
+            status.admission_blocker.as_ref().unwrap()["stage"],
+            "source_staging"
+        );
+        assert_eq!(
+            status.admission_blocker.as_ref().unwrap()["failure"]["code"],
+            "source_package_too_large"
+        );
+        assert_eq!(
+            status.next_actions[0],
+            "homeboy agent-task fanout resume source-wave"
         );
     }
 

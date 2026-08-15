@@ -73,8 +73,16 @@ pub struct AgentTaskBatchStatusReport {
     pub schema: &'static str,
     /// Additive top-level projection of `batch.state` for command envelopes.
     pub status: String,
+    /// Whether every child lifecycle observation was available for this status
+    /// projection. `batch` remains the durable orchestration state when false.
+    pub observation_fresh: bool,
     pub batch: AgentTaskBatchRecord,
     pub totals: AgentTaskBatchTotals,
+    /// The controller-side blocker that prevented any child admission. This
+    /// projects the typed failure persisted before a child lifecycle record
+    /// exists, rather than making callers inspect batch metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_blocker: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unavailable_child_runs: Vec<AgentTaskBatchChildIssue>,
     /// Terminal children whose runner patch remains unavailable to the

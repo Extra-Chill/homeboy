@@ -12,9 +12,11 @@ use homeboy_core::{Error, Result};
 
 use crate::lab_staging_controller::LabStagingRecipe;
 
-pub const DIRECT_LAB_HANDOFF_SCHEMA: &str = "homeboy/direct-lab-handoff/v1";
+pub const DIRECT_LAB_HANDOFF_SCHEMA_V1: &str = "homeboy/direct-lab-handoff/v1";
+pub const DIRECT_LAB_HANDOFF_SCHEMA: &str = "homeboy/direct-lab-handoff/v2";
 pub const DIRECT_LAB_HANDOFF_RECEIPT_SCHEMA: &str = "homeboy/direct-lab-handoff-receipt/v1";
-pub const DIRECT_LAB_HANDOFF_CAPABILITY: &str = "direct-lab-handoff/v1";
+pub const DIRECT_LAB_HANDOFF_CAPABILITY_V1: &str = "direct-lab-handoff/v1";
+pub const DIRECT_LAB_HANDOFF_CAPABILITY: &str = "direct-lab-handoff/v2";
 
 /// Complete runner admission input. It has no controller-local attachment or
 /// filesystem references, so the runner can persist it before acknowledging.
@@ -48,8 +50,10 @@ impl DirectLabHandoffEnvelope {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.schema != DIRECT_LAB_HANDOFF_SCHEMA
-            || self.run_id.trim().is_empty()
+        if !matches!(
+            self.schema.as_str(),
+            DIRECT_LAB_HANDOFF_SCHEMA_V1 | DIRECT_LAB_HANDOFF_SCHEMA
+        ) || self.run_id.trim().is_empty()
             || self.runner_id.trim().is_empty()
             || self.idempotency_key != self.run_id
             || self.controller_identity.trim().is_empty()
@@ -59,7 +63,7 @@ impl DirectLabHandoffEnvelope {
         {
             return Err(Error::validation_invalid_argument(
                 "direct_lab_handoff",
-                "direct Lab handoff requires its v1 schema, bound identities, run-scoped idempotency key, controller identity, recipe, and durable plan",
+                "direct Lab handoff requires its v2 schema, bound identities, run-scoped idempotency key, controller identity, recipe, and durable plan",
                 Some(self.run_id.clone()),
                 None,
             ));
@@ -146,11 +150,16 @@ pub fn submit_direct_lab_handoff(
     envelope: &DirectLabHandoffEnvelope,
 ) -> Result<DirectLabHandoffReceipt> {
     envelope.validate()?;
-    if !receiver.supports_capability(DIRECT_LAB_HANDOFF_CAPABILITY) {
+    let capability = if envelope.schema == DIRECT_LAB_HANDOFF_SCHEMA_V1 {
+        DIRECT_LAB_HANDOFF_CAPABILITY_V1
+    } else {
+        DIRECT_LAB_HANDOFF_CAPABILITY
+    };
+    if !receiver.supports_capability(capability) {
         return Err(Error::validation_invalid_argument(
             "runner_capabilities",
             format!(
-                "runner `{}` does not support {DIRECT_LAB_HANDOFF_CAPABILITY}",
+                "runner `{}` does not support {capability}",
                 envelope.runner_id
             ),
             Some(envelope.runner_id.clone()),

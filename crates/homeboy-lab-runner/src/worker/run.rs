@@ -5,6 +5,14 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::{
+    fs::File,
+    io::Read,
+    os::fd::{AsRawFd, FromRawFd},
+    os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    process::Command,
+};
 
 use reqwest::blocking::Client;
 use serde_json::json;
@@ -363,7 +371,7 @@ fn run_once_output(
     let _command_assets =
         materialize_command_assets(&claim.job.id.to_string(), &mut execution_envelope)?;
     let _private_at_files = verify_private_at_files(&mut execution_envelope)?;
-    materialize_staged_source_artifact(
+    let _staged_workspace = materialize_staged_source_artifact(
         &options.runner_id,
         &claim.job.id.to_string(),
         &mut execution_envelope,
@@ -419,6 +427,11 @@ fn run_once_output(
             claim.job.id.to_string(),
         )?,
         || {
+            verify_staged_workspace_before_execution(
+                &options.runner_id,
+                &execution_envelope,
+                _staged_workspace.as_ref(),
+            )?;
             let recovered =
                 resolve_runner_execution_context(&options.runner_id, execution_context.id())?;
             consume_execution(
@@ -439,6 +452,8 @@ fn run_once_output(
             // must not be used to recompute the pre-consumption receipt.
             Ok(())
         },
+        #[cfg(unix)]
+        _staged_workspace.as_ref().map(StagedWorkspaceDirectory::fd),
         || {
             if cancel_seen || last_cancel_poll.elapsed() < BROKER_CANCEL_POLL_INTERVAL {
                 return cancel_seen;
@@ -1005,9 +1020,41 @@ fn materialize_staged_source_artifact(
     runner_id: &str,
     job_id: &str,
     envelope: &mut RunnerExecutionEnvelope,
-) -> Result<()> {
-    let Some(source) = envelope.metadata.get("staged_source_artifact") else {
-        return Ok(());
+) -> Result<Option<StagedWorkspaceDirectory>> {
+    if let Some(workspace) = envelope
+        .metadata
+        .get("staged_workspace_materialization")
+        .filter(|workspace| !workspace.is_null())
+    {
+        let workspace: crate::runner_staging_operation::ControllerWorkspaceMaterialization =
+            serde_json::from_value(workspace.clone()).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "staged_workspace_materialization",
+                    format!("invalid staged workspace materialization: {error}"),
+                    None,
+                    None,
+                )
+            })?;
+        let dispatch = envelope.dispatch.as_mut().ok_or_else(|| {
+            Error::internal_unexpected("staged runner job has no execution dispatch")
+        })?;
+        if dispatch.cwd.as_deref() != Some(workspace.remote_cwd.as_str()) {
+            return Err(Error::validation_invalid_argument(
+                "staged_workspace_materialization",
+                "staged runner workspace does not match the claimed execution target",
+                Some(workspace.workspace_id),
+                None,
+            ));
+        }
+        let directory = verify_controller_workspace(runner_id, &workspace, None)?;
+        return Ok(Some(directory));
+    }
+    let Some(source) = envelope
+        .metadata
+        .get("staged_source_artifact")
+        .filter(|source| !source.is_null())
+    else {
+        return Ok(None);
     };
     let source = serde_json::from_value(source.clone()).map_err(|error| {
         Error::validation_invalid_argument(
@@ -1032,7 +1079,212 @@ fn materialize_staged_source_artifact(
         .as_mut()
         .ok_or_else(|| Error::internal_unexpected("staged runner job has no execution dispatch"))?;
     dispatch.cwd = Some(workspace.display().to_string());
+    Ok(None)
+}
+
+struct StagedWorkspaceDirectory {
+    #[cfg(unix)]
+    directory: File,
+}
+
+impl StagedWorkspaceDirectory {
+    #[cfg(unix)]
+    fn fd(&self) -> std::os::fd::RawFd {
+        self.directory.as_raw_fd()
+    }
+}
+
+fn verify_staged_workspace_before_execution(
+    runner_id: &str,
+    envelope: &RunnerExecutionEnvelope,
+    authority: Option<&StagedWorkspaceDirectory>,
+) -> Result<()> {
+    let Some(raw) = envelope
+        .metadata
+        .get("staged_workspace_materialization")
+        .filter(|workspace| !workspace.is_null())
+    else {
+        return Ok(());
+    };
+    let workspace = serde_json::from_value(raw.clone()).map_err(|error| {
+        Error::validation_invalid_argument(
+            "staged_workspace_materialization",
+            format!("invalid staged workspace materialization: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let authority = authority.ok_or_else(|| {
+        Error::internal_unexpected("staged workspace authority was not retained until execution")
+    })?;
+    verify_controller_workspace(runner_id, &workspace, Some(authority))?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn verify_controller_workspace(
+    runner_id: &str,
+    workspace: &crate::runner_staging_operation::ControllerWorkspaceMaterialization,
+    retained: Option<&StagedWorkspaceDirectory>,
+) -> Result<StagedWorkspaceDirectory> {
+    use std::fs::OpenOptions;
+
+    workspace.validate()?;
+    let session_path = homeboy_core::paths::runner_session_file(runner_id)?;
+    let store_path = session_path.with_file_name(format!("{runner_id}-staging/store.json"));
+    crate::runner_staging_store::verify_staged_workspace_materialization(store_path, workspace)?;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY);
+    let opened = options.open(&workspace.remote_cwd).map_err(|error| {
+        Error::validation_invalid_argument(
+            "staged_workspace_materialization",
+            format!("open runner-owned workspace without following links: {error}"),
+            Some(workspace.remote_cwd.clone()),
+            None,
+        )
+    })?;
+    let directory = retained
+        .map(|authority| &authority.directory)
+        .unwrap_or(&opened);
+    let metadata = read_workspace_metadata_nofollow(&directory)?;
+    let actual_path = metadata
+        .get("remote_path")
+        .and_then(serde_json::Value::as_str);
+    let snapshot = metadata
+        .get("snapshot_identity")
+        .and_then(serde_json::Value::as_str);
+    let lease = metadata
+        .get("workspace_lease")
+        .and_then(serde_json::Value::as_str);
+    let commit = metadata
+        .get("source_commit")
+        .and_then(serde_json::Value::as_str);
+    let run_id = metadata.get("run_id").and_then(serde_json::Value::as_str);
+    if actual_path != Some(workspace.remote_cwd.as_str())
+        || snapshot != Some(workspace.source_snapshot_id.as_str())
+        || lease != Some(workspace.workspace_lease.as_str())
+        || commit != Some(workspace.source_commit.as_str())
+        || run_id != Some(workspace.run_id.as_str())
+    {
+        return Err(Error::validation_invalid_argument(
+            "staged_workspace_materialization",
+            "runner workspace metadata no longer matches the staged source identity, lease, and run ownership",
+            Some(workspace.run_id.clone()),
+            None,
+        ));
+    }
+    let fd = directory.as_raw_fd();
+    let mut command = Command::new("git");
+    command.args(["status", "--porcelain=v1"]);
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(fd) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    let output = command.output().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("verify staged Git workspace".to_string()),
+        )
+    })?;
+    if !output.status.success() || !output.stdout.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "staged_workspace_materialization",
+            "runner workspace Git baseline is missing or dirty after staging",
+            Some(workspace.run_id.clone()),
+            None,
+        ));
+    }
+    let fd = directory.as_raw_fd();
+    let mut command = Command::new("git");
+    command.args(["rev-parse", "HEAD"]);
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(fd) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    let output = command.output().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read staged Git baseline".to_string()),
+        )
+    })?;
+    if !output.status.success()
+        || String::from_utf8_lossy(&output.stdout).trim() != workspace.source_commit
+    {
+        return Err(Error::validation_invalid_argument(
+            "staged_workspace_materialization",
+            "runner workspace Git baseline does not match the staged source commit",
+            Some(workspace.run_id.clone()),
+            None,
+        ));
+    }
+    Ok(StagedWorkspaceDirectory { directory: opened })
+}
+
+#[cfg(not(unix))]
+fn verify_controller_workspace(
+    _runner_id: &str,
+    _workspace: &crate::runner_staging_operation::ControllerWorkspaceMaterialization,
+    _retained: Option<&StagedWorkspaceDirectory>,
+) -> Result<StagedWorkspaceDirectory> {
+    Err(Error::validation_invalid_argument(
+        "staged_workspace_materialization",
+        "controller-materialized workspaces require Unix no-follow verification",
+        None,
+        None,
+    ))
+}
+
+#[cfg(unix)]
+fn read_workspace_metadata_nofollow(directory: &File) -> Result<serde_json::Value> {
+    use std::ffi::CString;
+
+    fn open_at(directory: &File, name: &str, flags: i32) -> Result<File> {
+        let name = CString::new(name).expect("literal has no NUL");
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                flags | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(Error::validation_invalid_argument(
+                "staged_workspace_materialization",
+                std::io::Error::last_os_error().to_string(),
+                None,
+                None,
+            ));
+        }
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    let homeboy = open_at(directory, ".homeboy", libc::O_RDONLY | libc::O_DIRECTORY)?;
+    let mut metadata = open_at(&homeboy, "runner-workspace.json", libc::O_RDONLY)?;
+    let mut bytes = Vec::new();
+    metadata.read_to_end(&mut bytes).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read runner workspace metadata".to_string()),
+        )
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse runner workspace metadata".to_string()),
+        )
+    })
 }
 
 /// Materialize broker-owned command files in the worker's durable data root and

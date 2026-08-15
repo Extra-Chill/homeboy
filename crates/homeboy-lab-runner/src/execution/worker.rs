@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::fd::RawFd;
 
 use homeboy_core::error::Result;
 
@@ -20,6 +22,7 @@ pub(crate) fn exec_worker_local_until_cancelled_with_progress(
     runner_id: &str,
     options: RunnerExecOptions,
     before_provider: impl FnOnce() -> Result<()>,
+    #[cfg(unix)] verified_cwd_fd: Option<RawFd>,
     is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<super::super::RunnerCommandProgressSink>,
 ) -> Result<(RunnerExecOutput, i32)> {
@@ -31,6 +34,8 @@ pub(crate) fn exec_worker_local_until_cancelled_with_progress(
             progress_sink,
             true,
             None,
+            #[cfg(unix)]
+            verified_cwd_fd,
         )
     })
 }

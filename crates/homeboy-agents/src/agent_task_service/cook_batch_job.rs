@@ -549,6 +549,16 @@ impl CookBatchJobDriver {
                 handle.progress(job.progress_projection())?;
             }
 
+            // A pre-child admission timeout is the one safe point to stop the
+            // coordinator directly: the batch store just proved every child is
+            // still unstarted and terminalized the wave with its recovery
+            // command. Later phases retain the ordinary child-safe cancellation
+            // path above.
+            if agent_task_batch::expire_stalled_fanout_admission(&job.request.batch_id)? {
+                let _ = homeboy_core::process::terminate_process_tree(job.request.child_pid);
+                return job.observe_terminal();
+            }
+
             if !coordinator_is_live(&job.request) {
                 return job.observe_terminal();
             }

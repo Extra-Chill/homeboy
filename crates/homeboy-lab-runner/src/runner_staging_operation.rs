@@ -7,6 +7,7 @@
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
@@ -15,13 +16,19 @@ use std::path::{Component, Path};
 #[cfg(unix)]
 use std::process::Command;
 
+use homeboy_core::engine::canonical_json::canonical_json_bytes;
 use homeboy_core::{Error, Result};
+use homeboy_engine_primitives::content_hash;
 
 use crate::direct_lab_handoff::{DirectLabHandoffEnvelope, DirectLabHandoffReceipt};
 
-pub const REMOTE_RUNNER_STAGING_SCHEMA: &str = "homeboy/remote-runner-staging/v1";
+pub const REMOTE_RUNNER_STAGING_SCHEMA_V1: &str = "homeboy/remote-runner-staging/v1";
+pub const REMOTE_RUNNER_STAGING_SCHEMA: &str = "homeboy/remote-runner-staging/v2";
 pub const REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA: &str = "homeboy/remote-runner-staging-receipt/v1";
-pub const REMOTE_RUNNER_STAGING_CAPABILITY: &str = "remote-runner-staging/v1";
+pub const REMOTE_RUNNER_STAGING_CAPABILITY_V1: &str = "remote-runner-staging/v1";
+pub const REMOTE_RUNNER_STAGING_CAPABILITY: &str = "remote-runner-staging/v2";
+pub const REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY: &str =
+    "remote-runner-source-materialization/v2";
 pub const REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY: &str = "remote-runner-source-artifact/v1";
 pub const REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY: &str =
     "remote-runner-source-artifact/v2";
@@ -32,7 +39,10 @@ pub const MAX_SOURCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_ENTRIES: usize = 1024;
 pub const MAX_SOURCE_PACKAGE_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_EXCLUSIONS: usize = 1024;
+/// Legacy result schema accepted for persisted source-package checks.
 pub const SOURCE_PACKAGE_CHECK_SCHEMA: &str = "homeboy/source-package-check/v1";
+pub const SOURCE_PACKAGE_CHECK_SCHEMA_V2: &str = "homeboy/source-package-check/v2";
+const SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA: &str = "homeboy/source-package-limit-diagnostic/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +68,9 @@ pub struct SourcePackageFailure {
 pub struct SourcePackageCheckVerdict {
     pub schema: String,
     pub valid: bool,
+    /// Present for v2 results. V1 records did not declare aggregate limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<SourcePackageLimits>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted: Option<SourcePackageAccepted>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +92,26 @@ pub struct SourcePackageAccepted {
 #[serde(deny_unknown_fields)]
 pub struct SourcePackagePartial {
     pub file_count: usize,
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub largest_entries: Vec<SourcePackageContributor>,
+}
+
+/// The fixed safety bounds applied by sealed source-artifact staging.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageLimits {
+    pub entry_limit: usize,
+    pub byte_limit: u64,
+    pub file_byte_limit: u64,
+    pub exclusion_limit: usize,
+}
+
+/// A bounded, deterministic sample of entries consuming the package budget.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageContributor {
+    pub path: String,
     pub bytes: u64,
 }
 
@@ -112,8 +145,9 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
                 .sum();
             return SourcePackageScan {
                 verdict: SourcePackageCheckVerdict {
-                    schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
+                    schema: SOURCE_PACKAGE_CHECK_SCHEMA_V2.to_string(),
                     valid: true,
+                    limits: Some(source_package_limits()),
                     accepted: Some(SourcePackageAccepted {
                         package_format: transfer.package.format,
                         file_count,
@@ -130,13 +164,17 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
         Err(error) => {
             return SourcePackageScan {
                 verdict: SourcePackageCheckVerdict {
-                    schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
+                    schema: SOURCE_PACKAGE_CHECK_SCHEMA_V2.to_string(),
                     valid: false,
+                    limits: Some(source_package_limits()),
                     accepted: None,
-                    partial: Some(SourcePackagePartial {
-                        file_count: 0,
-                        bytes: 0,
-                    }),
+                    partial: source_package_partial_from_error(&error).or(Some(
+                        SourcePackagePartial {
+                            file_count: 0,
+                            bytes: 0,
+                            largest_entries: Vec::new(),
+                        },
+                    )),
                     excluded: Vec::new(),
                     blocked: vec![SourcePackageFailure {
                         kind: "source_package".to_string(),
@@ -404,11 +442,15 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
         });
         SourcePackageScan {
             verdict: SourcePackageCheckVerdict {
-                schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
+                schema: SOURCE_PACKAGE_CHECK_SCHEMA_V2.to_string(),
                 valid: failures.is_empty(),
+                limits: Some(source_package_limits()),
                 accepted,
-                partial: (!failures.is_empty())
-                    .then_some(SourcePackagePartial { file_count, bytes }),
+                partial: (!failures.is_empty()).then_some(SourcePackagePartial {
+                    file_count,
+                    bytes,
+                    largest_entries: source_package_contributors(&payloads),
+                }),
                 excluded: exclusions,
                 blocked: failures,
             },
@@ -464,6 +506,100 @@ impl SourcePackagePayload {
             Self::Symlink { target } => target.len() as u64,
         }
     }
+}
+
+fn source_package_limits() -> SourcePackageLimits {
+    SourcePackageLimits {
+        entry_limit: MAX_SOURCE_PACKAGE_ENTRIES,
+        byte_limit: MAX_SOURCE_ARTIFACT_BYTES,
+        file_byte_limit: MAX_SOURCE_PACKAGE_FILE_BYTES,
+        exclusion_limit: MAX_SOURCE_PACKAGE_EXCLUSIONS,
+    }
+}
+
+fn source_package_contributors(
+    payloads: &BTreeMap<String, SourcePackagePayload>,
+) -> Vec<SourcePackageContributor> {
+    let mut entries = payloads
+        .iter()
+        .map(|(path, payload)| SourcePackageContributor {
+            path: path.clone(),
+            bytes: payload.size_bytes(),
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    entries.truncate(5);
+    entries
+}
+
+fn source_package_partial(
+    payloads: &BTreeMap<String, SourcePackagePayload>,
+) -> SourcePackagePartial {
+    SourcePackagePartial {
+        file_count: payloads.len(),
+        bytes: payloads
+            .values()
+            .map(SourcePackagePayload::size_bytes)
+            .sum(),
+        largest_entries: source_package_contributors(payloads),
+    }
+}
+
+fn source_package_partial_from_error(error: &Error) -> Option<SourcePackagePartial> {
+    serde_json::from_value(
+        error
+            .details
+            .get("source_package")?
+            .get("measured")?
+            .clone(),
+    )
+    .ok()
+}
+
+fn source_package_limit_error(
+    root: &Path,
+    payloads: &BTreeMap<String, SourcePackagePayload>,
+) -> Error {
+    let measured = source_package_partial(payloads);
+    let limits = source_package_limits();
+    let check_command = format!(
+        "homeboy source package check --path {}",
+        homeboy_core::engine::shell::quote_arg(&root.display().to_string())
+    );
+    let retry = "Retry the original Lab command after reducing the source package or selecting a Git-capable Lab route.";
+    let mut error = Error::validation_invalid_argument(
+        "source_path",
+        format!(
+            "source package exceeds configured bounds: measured {} entries / {} bytes; limits {} entries / {} bytes",
+            measured.file_count, measured.bytes, limits.entry_limit, limits.byte_limit,
+        ),
+        Some(root.display().to_string()),
+        Some(vec![
+            format!("Inspect the exact package budget and excluded paths: {check_command}"),
+            "Remove generated or vendored files from the source worktree before retrying; `.git` and untracked symlinks are excluded automatically.".to_string(),
+            retry.to_string(),
+        ]),
+    );
+    error.details["source_package"] = json!({
+        "schema": SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA,
+        "measured": measured,
+        "limits": limits,
+        "excluded_path_policy": {
+            "excluded": [".git", "untracked_symlink"],
+            "tracked_symlinks": "included only when their relative target remains inside the source root"
+        },
+        "continuation": {
+            "preflight_command": check_command,
+            "retry": retry,
+            "scalable_transport": "Git workspace materialization is selected automatically for eligible clean repository worktrees."
+        }
+    });
+    error
 }
 
 fn source_package_format(payloads: &BTreeMap<String, SourcePackagePayload>) -> &'static str {
@@ -595,7 +731,10 @@ mod source_directory {
 
     use homeboy_core::{Error, Result};
 
-    use super::MAX_SOURCE_PACKAGE_FILE_BYTES;
+    use super::{
+        MAX_SOURCE_ARTIFACT_BYTES, MAX_SOURCE_PACKAGE_ENTRIES, MAX_SOURCE_PACKAGE_FILE_BYTES,
+        SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA,
+    };
 
     #[cfg(any(
         target_os = "macos",
@@ -777,13 +916,32 @@ mod source_directory {
         let metadata = file.metadata().map_err(|error| {
             Error::internal_io(error.to_string(), Some(name.to_string_lossy().into_owned()))
         })?;
-        if !metadata.is_file() || metadata.len() > MAX_SOURCE_PACKAGE_FILE_BYTES {
+        if !metadata.is_file() {
             return Err(Error::validation_invalid_argument(
                 "source_path",
-                "source package file must remain a bounded regular file when opened",
+                "source package file must remain a regular file when opened",
                 Some(name.to_string_lossy().into_owned()),
                 None,
             ));
+        }
+        if metadata.len() > MAX_SOURCE_PACKAGE_FILE_BYTES {
+            let mut error = Error::validation_invalid_argument(
+                "source_path",
+                "source package file exceeds the configured size bound",
+                Some(name.to_string_lossy().into_owned()),
+                None,
+            );
+            error.details["source_package"] = serde_json::json!({
+                "schema": SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA,
+                "measured": { "file_count": 1, "bytes": metadata.len(), "largest_entries": [] },
+                "limits": {
+                    "entry_limit": MAX_SOURCE_PACKAGE_ENTRIES,
+                    "byte_limit": MAX_SOURCE_ARTIFACT_BYTES,
+                    "file_byte_limit": MAX_SOURCE_PACKAGE_FILE_BYTES,
+                    "exclusion_limit": super::MAX_SOURCE_PACKAGE_EXCLUSIONS,
+                },
+            });
+            return Err(error);
         }
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
         file.take(MAX_SOURCE_PACKAGE_FILE_BYTES + 1)
@@ -909,6 +1067,7 @@ impl SourceArtifactTransfer {
             }
             #[cfg(unix)]
             fn collect(
+                root: &Path,
                 directory: &std::fs::File,
                 relative_directory: &str,
                 tracked_links: &BTreeSet<String>,
@@ -974,11 +1133,20 @@ impl SourceArtifactTransfer {
                                     target: verdict.target,
                                 },
                             );
+                            if entries.len() > MAX_SOURCE_PACKAGE_ENTRIES
+                                || entries
+                                    .values()
+                                    .map(SourcePackagePayload::size_bytes)
+                                    .sum::<u64>()
+                                    > MAX_SOURCE_ARTIFACT_BYTES
+                            {
+                                return Err(source_package_limit_error(root, entries));
+                            }
                             continue;
                         }
                         libc::S_IFDIR => {
                             let child = source_directory::open_directory_at(directory, &name)?;
-                            collect(&child, &relative, tracked_links, entries, exclusions)?;
+                            collect(root, &child, &relative, tracked_links, entries, exclusions)?;
                         }
                         libc::S_IFREG => {
                             let bytes = source_directory::read_regular_file_at(directory, &name)?;
@@ -1013,12 +1181,7 @@ impl SourceArtifactTransfer {
                             .sum::<u64>()
                             > MAX_SOURCE_ARTIFACT_BYTES
                     {
-                        return Err(Error::validation_invalid_argument(
-                            "source_path",
-                            "source package exceeds configured entry or total size bounds",
-                            None,
-                            None,
-                        ));
+                        return Err(source_package_limit_error(root, entries));
                     }
                 }
                 Ok(())
@@ -1045,6 +1208,7 @@ impl SourceArtifactTransfer {
             let mut exclusions = Vec::new();
             #[cfg(unix)]
             collect(
+                root,
                 &root_directory,
                 "",
                 &tracked_links,
@@ -1137,6 +1301,23 @@ impl SourceArtifactTransfer {
                     entries,
                 },
             };
+            // The HTTP envelope carries Base64, not raw package bytes. Keep the
+            // inline transport bound truthful and route its overflow through
+            // the same typed scalable-materialization decision.
+            if transfer.content_base64.len() as u64 > MAX_SOURCE_ARTIFACT_BYTES {
+                let mut error = Error::validation_invalid_argument(
+                    "source_path",
+                    "source package exceeds the encoded inline transfer bound",
+                    Some(root.display().to_string()),
+                    None,
+                );
+                error.details["source_package"] = json!({
+                    "schema": SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA,
+                    "measured": { "file_count": transfer.package.entries.len(), "bytes": transfer.content_base64.len(), "largest_entries": [] },
+                    "limits": { "entry_limit": MAX_SOURCE_PACKAGE_ENTRIES, "byte_limit": MAX_SOURCE_ARTIFACT_BYTES, "file_byte_limit": MAX_SOURCE_PACKAGE_FILE_BYTES, "exclusion_limit": MAX_SOURCE_PACKAGE_EXCLUSIONS }
+                });
+                return Err(error);
+            }
             transfer.decode_verified()?;
             Ok((transfer, exclusions))
         }
@@ -1438,6 +1619,74 @@ pub struct RunnerMaterializationAuthority {
     pub source: SealedSourceAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_artifact: Option<SourceArtifactTransfer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<ControllerWorkspaceMaterialization>,
+}
+
+/// A controller-routed workspace has already crossed the controller-to-runner
+/// boundary. It identifies the runner-owned execution target without exporting
+/// controller paths or reopening the runner's private Git-origin access.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControllerWorkspaceMaterialization {
+    pub schema: String,
+    pub workspace_id: String,
+    pub remote_cwd: String,
+    pub source_snapshot_id: String,
+    pub workspace_lease: String,
+    pub source_commit: String,
+    pub run_id: String,
+    pub durable_plan_digest: String,
+}
+
+pub const CONTROLLER_WORKSPACE_MATERIALIZATION_SCHEMA: &str =
+    "homeboy/controller-workspace-materialization/v1";
+
+impl ControllerWorkspaceMaterialization {
+    pub fn new(
+        workspace_id: impl Into<String>,
+        remote_cwd: impl Into<String>,
+        source_snapshot_id: impl Into<String>,
+        workspace_lease: impl Into<String>,
+        source_commit: impl Into<String>,
+        run_id: impl Into<String>,
+        durable_plan_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: CONTROLLER_WORKSPACE_MATERIALIZATION_SCHEMA.to_string(),
+            workspace_id: workspace_id.into(),
+            remote_cwd: remote_cwd.into(),
+            source_snapshot_id: source_snapshot_id.into(),
+            workspace_lease: workspace_lease.into(),
+            source_commit: source_commit.into(),
+            run_id: run_id.into(),
+            durable_plan_digest: durable_plan_digest.into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != CONTROLLER_WORKSPACE_MATERIALIZATION_SCHEMA
+            || self.workspace_id.trim().is_empty()
+            || self.remote_cwd.trim().is_empty()
+            || self.source_snapshot_id.trim().is_empty()
+            || self.workspace_lease.trim().is_empty()
+            || self.source_commit.len() != 40
+            || !self
+                .source_commit
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.run_id.trim().is_empty()
+            || !self.durable_plan_digest.starts_with("sha256:")
+        {
+            return Err(Error::validation_invalid_argument(
+                "controller_workspace_materialization",
+                "remote staging requires a v1 runner workspace target, source identity, and durable-plan digest",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl RunnerMaterializationAuthority {
@@ -1455,18 +1704,16 @@ impl RunnerMaterializationAuthority {
             ));
         }
         self.source.validate()?;
-        self.source_artifact
-            .as_ref()
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "source_artifact",
-                    "remote staging requires a transferable source artifact before admission",
-                    Some(self.authority_id.clone()),
-                    None,
-                )
-            })?
-            .decode_verified()
-            .map(|_| ())
+        match (&self.source_artifact, &self.workspace) {
+            (Some(artifact), None) => artifact.decode_verified().map(|_| ()),
+            (None, Some(workspace)) => workspace.validate(),
+            _ => Err(Error::validation_invalid_argument(
+                "source_materialization",
+                "remote staging requires exactly one bounded source artifact or controller-materialized workspace",
+                Some(self.authority_id.clone()),
+                None,
+            )),
+        }
     }
 }
 
@@ -1489,7 +1736,11 @@ impl RemoteRunnerStagingEnvelope {
         let mut handoff = handoff.clone();
         handoff.recipe.source_path = None;
         let envelope = Self {
-            schema: REMOTE_RUNNER_STAGING_SCHEMA.to_string(),
+            schema: if handoff.schema == crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1 {
+                REMOTE_RUNNER_STAGING_SCHEMA_V1.to_string()
+            } else {
+                REMOTE_RUNNER_STAGING_SCHEMA.to_string()
+            },
             handoff,
             materialization,
         };
@@ -1498,9 +1749,15 @@ impl RemoteRunnerStagingEnvelope {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.schema != REMOTE_RUNNER_STAGING_SCHEMA
-            || self.handoff.recipe.source_path.is_some()
-            || self.handoff.schema != crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA
+        if !matches!(
+            self.schema.as_str(),
+            REMOTE_RUNNER_STAGING_SCHEMA_V1 | REMOTE_RUNNER_STAGING_SCHEMA
+        ) || self.handoff.recipe.source_path.is_some()
+            || !matches!(
+                self.handoff.schema.as_str(),
+                crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1
+                    | crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA
+            )
             || self.handoff.run_id.trim().is_empty()
             || self.handoff.runner_id.trim().is_empty()
             || self.handoff.idempotency_key != self.handoff.run_id
@@ -1511,13 +1768,44 @@ impl RemoteRunnerStagingEnvelope {
         {
             return Err(Error::validation_invalid_argument(
                 "remote_runner_staging",
-                "remote staging requires its v1 schema, bound handoff identities, and no controller-local source path",
+                "remote staging requires its v2 schema, bound handoff identities, and no controller-local source path",
                 Some(self.handoff.run_id.clone()),
                 None,
             ));
         }
         self.handoff.recipe.validate_for_runner_staging()?;
-        self.materialization.validate()
+        self.materialization.validate()?;
+        if self.schema == REMOTE_RUNNER_STAGING_SCHEMA_V1
+            && (self.handoff.schema != crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1
+                || self.materialization.source_artifact.is_none()
+                || self.materialization.workspace.is_some())
+        {
+            return Err(Error::validation_invalid_argument(
+                "remote_runner_staging",
+                "v1 staging accepts bounded source artifacts only",
+                Some(self.handoff.run_id.clone()),
+                None,
+            ));
+        }
+        if let Some(workspace) = &self.materialization.workspace {
+            let plan = canonical_json_bytes(&self.handoff.durable_plan).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("canonicalize staged durable plan".to_string()),
+                )
+            })?;
+            if workspace.durable_plan_digest
+                != format!("sha256:{}", content_hash::sha256_hex(&plan))
+            {
+                return Err(Error::validation_invalid_argument(
+                    "controller_workspace_materialization.durable_plan_digest",
+                    "controller-materialized workspace is not bound to this durable plan",
+                    Some(self.handoff.run_id.clone()),
+                    None,
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1556,18 +1844,21 @@ impl RemoteRunnerStagingReceipt {
                 None,
             ));
         }
-        self.artifacts
-            .source_artifact
-            .as_ref()
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "remote_runner_staging_receipt.source_artifact",
-                    "remote staging receipt is missing its immutable source artifact",
+        match (
+            &self.artifacts.source_artifact,
+            &envelope.materialization.workspace,
+        ) {
+            (Some(artifact), None) => artifact.validate()?,
+            (None, Some(_)) => {}
+            _ => {
+                return Err(Error::validation_invalid_argument(
+                    "remote_runner_staging_receipt.source_materialization",
+                    "remote staging receipt does not match its accepted source materialization",
                     Some(envelope.handoff.run_id.clone()),
                     None,
-                )
-            })?
-            .validate()?;
+                ));
+            }
+        }
         self.handoff.validate_for(&envelope.handoff)
     }
 }
@@ -1601,15 +1892,32 @@ pub fn submit_remote_runner_staging(
             None,
         ));
     }
-    if !transport.supports_capability(REMOTE_RUNNER_STAGING_CAPABILITY) {
+    let staging_capability = if envelope.schema == REMOTE_RUNNER_STAGING_SCHEMA_V1 {
+        REMOTE_RUNNER_STAGING_CAPABILITY_V1
+    } else {
+        REMOTE_RUNNER_STAGING_CAPABILITY
+    };
+    if !transport.supports_capability(staging_capability) {
         return Err(Error::runner_capability_missing(
             &envelope.handoff.runner_id,
             "sealed runner staging",
-            vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()],
+            vec![staging_capability.to_string()],
             Vec::new(),
         ));
     }
-    if !transport.supports_capability(REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY) {
+    if envelope.materialization.workspace.is_some()
+        && !transport.supports_capability(REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY)
+    {
+        return Err(Error::runner_capability_missing(
+            &envelope.handoff.runner_id,
+            "versioned runner source materialization",
+            vec![REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string()],
+            Vec::new(),
+        ));
+    }
+    if envelope.materialization.source_artifact.is_some()
+        && !transport.supports_capability(REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY)
+    {
         return Err(Error::runner_capability_missing(
             &envelope.handoff.runner_id,
             "sealed runner source artifact transfer",
@@ -1660,7 +1968,13 @@ pub(crate) mod tests_support {
             self.connected
         }
         fn supports_capability(&self, capability: &str) -> bool {
-            (self.compatible && capability == REMOTE_RUNNER_STAGING_CAPABILITY)
+            (self.compatible
+                && matches!(
+                    capability,
+                    REMOTE_RUNNER_STAGING_CAPABILITY | REMOTE_RUNNER_STAGING_CAPABILITY_V1
+                ))
+                || (self.compatible
+                    && capability == REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY)
                 || (self.source_artifact_compatible
                     && capability == REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY)
                 || (self.symlink_artifact_compatible
@@ -1767,6 +2081,7 @@ pub(crate) mod tests_support {
                     "source-package-1",
                     b"source package",
                 )),
+                workspace: None,
             },
         )
         .expect("sealed envelope")
@@ -1818,6 +2133,50 @@ pub(crate) mod tests_support {
         assert!(submit_remote_runner_staging(&mut disconnected, &envelope).is_err());
         assert_eq!(disconnected.calls, 0);
         assert_eq!(disconnected.provider_budget, 0);
+    }
+
+    #[test]
+    fn controller_materialized_workspace_is_accepted_without_source_bytes() {
+        let mut envelope = envelope();
+        let durable_plan_digest = format!(
+            "sha256:{}",
+            content_hash::sha256_hex(
+                &canonical_json_bytes(&envelope.handoff.durable_plan).expect("canonical plan"),
+            )
+        );
+        envelope.materialization.source_artifact = None;
+        envelope.materialization.workspace = Some(ControllerWorkspaceMaterialization::new(
+            "runner-workspace-1",
+            "/runner/workspaces/run-1",
+            "git:abc123",
+            "workspace:lease-1",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "run-1",
+            durable_plan_digest,
+        ));
+        let receipt = submit_remote_runner_staging(&mut transport(), &envelope)
+            .expect("accept controller-materialized source");
+        assert!(receipt.artifacts.source_artifact.is_none());
+        assert_eq!(
+            envelope
+                .materialization
+                .workspace
+                .as_ref()
+                .expect("workspace")
+                .remote_cwd,
+            "/runner/workspaces/run-1"
+        );
+    }
+
+    #[test]
+    fn bounded_artifact_v1_interoperates_with_a_new_runner() {
+        let mut envelope = envelope();
+        envelope.handoff.schema =
+            crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1.to_string();
+        envelope.schema = REMOTE_RUNNER_STAGING_SCHEMA_V1.to_string();
+        let receipt = submit_remote_runner_staging(&mut transport(), &envelope)
+            .expect("new runner accepts old bounded staging");
+        assert!(receipt.artifacts.source_artifact.is_some());
     }
 
     #[test]
@@ -2196,9 +2555,135 @@ pub(crate) mod tests_support {
         assert_eq!(
             verdict.partial,
             Some(SourcePackagePartial {
-                file_count: 0,
+                file_count: MAX_SOURCE_PACKAGE_ENTRIES + 1,
                 bytes: 0,
+                largest_entries: vec![
+                    SourcePackageContributor {
+                        path: "a/0000".to_string(),
+                        bytes: 0,
+                    },
+                    SourcePackageContributor {
+                        path: "a/0001".to_string(),
+                        bytes: 0,
+                    },
+                    SourcePackageContributor {
+                        path: "a/0002".to_string(),
+                        bytes: 0,
+                    },
+                    SourcePackageContributor {
+                        path: "a/0003".to_string(),
+                        bytes: 0,
+                    },
+                    SourcePackageContributor {
+                        path: "a/0004".to_string(),
+                        bytes: 0,
+                    },
+                ],
             })
+        );
+    }
+
+    #[test]
+    fn source_package_entry_limit_reports_measured_values_limits_and_continuation() {
+        let source = tempfile::tempdir().expect("source");
+        for index in 0..=MAX_SOURCE_PACKAGE_ENTRIES {
+            std::fs::write(source.path().join(format!("{index:04}")), b"x").expect("file");
+        }
+
+        let error = SourceArtifactTransfer::from_directory("source-1", source.path())
+            .expect_err("entry limit");
+        assert!(error.message.contains("1025 entries / 1025 bytes"));
+        assert_eq!(
+            error.details["source_package"]["measured"]["file_count"],
+            MAX_SOURCE_PACKAGE_ENTRIES + 1
+        );
+        assert_eq!(
+            error.details["source_package"]["limits"]["entry_limit"],
+            MAX_SOURCE_PACKAGE_ENTRIES
+        );
+        assert!(
+            error.details["source_package"]["continuation"]["preflight_command"]
+                .as_str()
+                .expect("preflight command")
+                .contains("homeboy source package check --path")
+        );
+        let verdict = scan_source_package(source.path()).verdict;
+        assert_eq!(
+            verdict.limits.expect("v2 limits").entry_limit,
+            MAX_SOURCE_PACKAGE_ENTRIES
+        );
+        assert_eq!(
+            verdict.partial.expect("partial measurement").file_count,
+            MAX_SOURCE_PACKAGE_ENTRIES + 1
+        );
+    }
+
+    #[test]
+    fn source_package_byte_limit_reports_measured_values_limits_and_contributors() {
+        let source = tempfile::tempdir().expect("source");
+        for index in 0..4 {
+            std::fs::write(
+                source.path().join(format!("{index:04}")),
+                vec![b'x'; MAX_SOURCE_PACKAGE_FILE_BYTES as usize],
+            )
+            .expect("file");
+        }
+        std::fs::write(source.path().join("0004"), b"x").expect("overflow file");
+
+        let error = SourceArtifactTransfer::from_directory("source-1", source.path())
+            .expect_err("byte limit");
+        assert_eq!(
+            error.details["source_package"]["measured"]["bytes"],
+            MAX_SOURCE_ARTIFACT_BYTES + 1
+        );
+        assert_eq!(
+            error.details["source_package"]["limits"]["byte_limit"],
+            MAX_SOURCE_ARTIFACT_BYTES
+        );
+        assert_eq!(
+            error.details["source_package"]["measured"]["largest_entries"]
+                .as_array()
+                .expect("contributors")[0]["path"],
+            "0000"
+        );
+    }
+
+    #[test]
+    fn source_package_check_v1_round_trips_without_v2_limits() {
+        let legacy = json!({
+            "schema": SOURCE_PACKAGE_CHECK_SCHEMA,
+            "valid": false,
+            "partial": {"file_count": 3, "bytes": 12},
+            "excluded": [],
+            "blocked": []
+        });
+
+        let verdict: SourcePackageCheckVerdict =
+            serde_json::from_value(legacy).expect("deserialize v1 check");
+        assert_eq!(verdict.schema, SOURCE_PACKAGE_CHECK_SCHEMA);
+        assert!(verdict.limits.is_none());
+        let serialized = serde_json::to_value(&verdict).expect("serialize v1 check");
+        assert!(serialized.get("limits").is_none());
+        assert_eq!(
+            serialized["partial"]["largest_entries"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn source_package_check_v2_round_trips_with_limits() {
+        let verdict = scan_source_package(tempfile::tempdir().expect("source").path()).verdict;
+        assert_eq!(verdict.schema, SOURCE_PACKAGE_CHECK_SCHEMA_V2);
+        assert_eq!(
+            verdict.limits.as_ref().expect("v2 limits").byte_limit,
+            MAX_SOURCE_ARTIFACT_BYTES
+        );
+        assert_eq!(
+            serde_json::from_value::<SourcePackageCheckVerdict>(
+                serde_json::to_value(&verdict).expect("serialize v2 check")
+            )
+            .expect("deserialize v2 check"),
+            verdict
         );
     }
 }

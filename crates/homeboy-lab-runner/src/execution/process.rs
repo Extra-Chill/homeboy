@@ -511,12 +511,19 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     progress_sink: Option<RunnerCommandProgressSink>,
     require_child_identity_acknowledgement: bool,
     child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
+    #[cfg(unix)] verified_cwd_fd: Option<std::os::fd::RawFd>,
 ) -> Result<ProcessOutput> {
     let temp_owner = runner_temp_owner(&plan.env)?;
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
+    #[cfg(unix)]
+    if let Some(fd) = verified_cwd_fd {
+        bind_verified_cwd(&mut command, fd);
+    }
     apply_runner_process_env(&mut command, plan, &temp_owner)?;
 
+    #[cfg(test)]
+    test_spawn_hook::invoke();
     command_output_until_cancelled_with_progress(
         &mut command,
         is_cancelled,
@@ -530,6 +537,42 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     )
 }
 
+#[cfg(unix)]
+fn bind_verified_cwd(command: &mut std::process::Command, fd: std::os::fd::RawFd) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(fd) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+pub(super) mod test_spawn_hook {
+    use std::sync::{Mutex, OnceLock};
+    type Hook = Box<dyn FnOnce() + Send>;
+    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+    pub(super) struct Guard;
+    pub(super) fn install(hook: Hook) -> Guard {
+        *HOOK.get_or_init(|| Mutex::new(None)).lock().expect("hook") = Some(hook);
+        Guard
+    }
+    pub(super) fn invoke() {
+        if let Some(hook) = HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("hook")
+            .take()
+        {
+            hook();
+        }
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::items_after_test_module,
@@ -539,12 +582,69 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    #[cfg(unix)]
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
     use std::sync::{Arc, Barrier};
 
     const GUTENBERG_LAB_OFFLOAD_BYTES: usize = 142_952;
     const GUTENBERG_SOURCE_SNAPSHOT_BYTES: usize = 44_680;
     const GUTENBERG_EXECUTION_BUNDLE_BYTES: usize = 8_552;
     const SAFE_CHILD_PROVENANCE_ENV_BYTES: usize = 16 * 1024;
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_directory_fd_survives_a_spawn_boundary_path_replacement() {
+        let root = tempfile::tempdir().expect("root");
+        let original = root.path().join("workspace");
+        let replacement = root.path().join("replacement");
+        std::fs::create_dir(&original).expect("original");
+        std::fs::create_dir(&replacement).expect("replacement");
+        std::fs::write(original.join("marker"), "verified").expect("original marker");
+        std::fs::write(replacement.join("marker"), "replacement").expect("replacement marker");
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY);
+        let directory = options.open(&original).expect("open verified directory");
+        let moved = root.path().join("moved-original");
+        let original_for_hook = original.clone();
+        let replacement_for_hook = replacement.clone();
+        let _hook = test_spawn_hook::install(Box::new(move || {
+            std::fs::rename(&original_for_hook, &moved).expect("move original");
+            std::fs::rename(&replacement_for_hook, &original_for_hook).expect("replace path");
+        }));
+        let plan = PreparedRunnerProcess {
+            runner: Runner {
+                id: "race".to_string(),
+                kind: RunnerKind::Local,
+                server_id: None,
+                workspace_root: Some(original.display().to_string()),
+                settings: server::RunnerSettings::default(),
+                env: HashMap::new(),
+                secret_env: HashMap::new(),
+                resources: HashMap::new(),
+                policy: server::RunnerPolicy::default(),
+            },
+            cwd: original.display().to_string(),
+            command: vec!["sh".to_string(), "-c".to_string(), "cat marker".to_string()],
+            env: HashMap::new(),
+            resource_guard_env: HashMap::new(),
+            secret_env_names: Vec::new(),
+            source_snapshot: SourceSnapshot::default(),
+            require_paths: Vec::new(),
+        };
+        let output = execute_runner_process_until_cancelled_with_progress(
+            &plan,
+            || false,
+            None,
+            false,
+            None,
+            Some(directory.as_raw_fd()),
+        )
+        .expect("execute from verified fd");
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "verified");
+    }
 
     #[test]
     fn controller_proxy_projection_is_explicit_and_replaces_only_the_requested_name() {

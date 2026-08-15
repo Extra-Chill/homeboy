@@ -88,7 +88,10 @@ struct CoordinatorHeartbeat {
 }
 
 impl CoordinatorHeartbeat {
-    fn start(batch_id: String, claim_id: String) -> Self {
+    fn start(batch_id: String, claim_id: String) -> Result<Self> {
+        // Claim admission before preflight, then renew it synchronously before
+        // any potentially slow gate, workspace, recipe, or provider work.
+        batch::heartbeat_fanout_run_batch(&batch_id, &claim_id)?;
         let (stop, receiver) = std::sync::mpsc::channel();
         let stale_error = std::sync::Arc::new(std::sync::Mutex::new(None));
         let worker_error = std::sync::Arc::clone(&stale_error);
@@ -100,14 +103,26 @@ impl CoordinatorHeartbeat {
                         *worker_error.lock().expect("heartbeat error lock") = Some(error.message);
                         break;
                     }
+                    if let Ok(record) = batch::read_batch_record(&batch_id) {
+                        eprintln!(
+                            "{{\"event\":\"coordinator_heartbeat\",\"phase\":{},\"children_total\":{},\"next_action\":{}}}",
+                            serde_json::to_string(&record.metadata["coordinator"]["stage"])
+                                .expect("coordinator stage serializes"),
+                            record.child_runs.len(),
+                            serde_json::to_string(&format!(
+                                "homeboy agent-task fanout status {batch_id}"
+                            ))
+                            .expect("status command serializes"),
+                        );
+                    }
                 }
             }
         });
-        Self {
+        Ok(Self {
             stop,
             worker: Some(worker),
             stale_error,
-        }
+        })
     }
 
     fn finish(mut self) -> Result<()> {
@@ -258,8 +273,17 @@ fn reconcile_fanout_pr_states(batch_id: &str, mutate: bool) -> Result<BTreeMap<S
     let mut resolutions = Vec::new();
     let mut statuses = BTreeMap::new();
     for child in batch.child_runs {
-        let Ok(record) = agent_task_lifecycle::status(&child.run_id) else {
-            continue;
+        let record = if mutate {
+            agent_task_lifecycle::status(&child.run_id)?
+        } else {
+            match agent_task_lifecycle::persisted_status(&child.run_id) {
+                Ok(record) => record,
+                // The batch report retains the last durable child state and
+                // marks observation freshness separately below. A transient
+                // projection lock must not make status itself unavailable.
+                Err(error) if error.code == ErrorCode::ObservationStoreBusy => continue,
+                Err(error) => return Err(error),
+            }
         };
         let Some(mut finalization) = record.metadata.get("cook_finalization").cloned() else {
             continue;
@@ -562,7 +586,7 @@ fn reconcile_portfolio(
     let observations = batch_record
         .child_runs
         .iter()
-        .map(|child| portfolio_observation(&child.task_id, &child.run_id))
+        .map(|child| portfolio_observation(&child.task_id, &child.run_id, false))
         .collect::<Result<Vec<_>>>()?;
     let dependencies = durable_graph_dependencies(batch_record)?;
     let status = portfolio.reconcile(observations, &dependencies);
@@ -675,7 +699,7 @@ impl supervisor::FanoutPortfolioAdapter for CookFanoutPortfolioAdapter {
         &mut self,
         child: &supervisor::AgentTaskFanoutPortfolioChild,
     ) -> Result<supervisor::AgentTaskFanoutPortfolioObservation> {
-        portfolio_observation(&child.child_id, &child.run_id)
+        portfolio_observation(&child.child_id, &child.run_id, true)
     }
 
     fn continue_provider(
@@ -857,9 +881,15 @@ fn resume_fanout_child(
 fn portfolio_observation(
     child_id: &str,
     run_id: &str,
+    reconcile: bool,
 ) -> Result<homeboy::agents::agent_tasks::fanout_supervisor::AgentTaskFanoutPortfolioObservation> {
     use homeboy::agents::agent_tasks::fanout_supervisor as supervisor;
-    let record = agent_task_lifecycle::status(run_id).ok();
+    let record = if reconcile {
+        agent_task_lifecycle::status(run_id)
+    } else {
+        agent_task_lifecycle::persisted_status(run_id)
+    }
+    .ok();
     let provider = match record.as_ref().map(|record| record.state) {
         Some(agent_task_lifecycle::AgentTaskRunState::Running) => {
             supervisor::AgentTaskFanoutProviderState::Running
@@ -1189,6 +1219,7 @@ fn persist_fanout_run_batch_record(plan: &BatchCookFanoutPlan) -> Result<()> {
         serde_json::json!({
             "source": "fanout-run-plan",
             "durable_child_runs": true,
+            "replan_command": secure_batch_plan_execution(&plan.fanout_id),
             "dependency_graph": plan.dependency_graph_metadata()?,
         }),
     )?;
@@ -1198,6 +1229,10 @@ fn persist_fanout_run_batch_record(plan: &BatchCookFanoutPlan) -> Result<()> {
 fn claim_fanout_run_batch_coordinator(plan: &BatchCookFanoutPlan) -> Result<String> {
     persist_fanout_run_batch_record(plan)?;
     if let Some(claim_id) = batch::claim_fanout_run_batch(&plan.fanout_id)? {
+        eprintln!(
+            "{{\"event\":\"coordinator_admission_claimed\",\"phase\":\"admitting\",\"children_total\":{},\"next_action\":\"homeboy agent-task fanout status {}\"}}",
+            plan.cooks.len(), plan.fanout_id,
+        );
         return Ok(claim_id);
     }
     Err(Error::validation_invalid_argument(
@@ -1209,12 +1244,24 @@ fn claim_fanout_run_batch_coordinator(plan: &BatchCookFanoutPlan) -> Result<Stri
 }
 
 fn record_batch_failure(plan: &BatchCookFanoutPlan, claim_id: &str, stage: &str, error: &Error) {
-    let _ = batch::record_fanout_run_batch_failure(
+    let recorded = batch::record_fanout_run_batch_failure(
         &plan.fanout_id,
         claim_id,
         stage,
         serde_json::json!({ "message": error.message, "details": error.details }),
     );
+    if recorded.is_ok() {
+        eprintln!(
+            "{{\"event\":\"coordinator_failed\",\"phase\":{},\"children_total\":{},\"next_action\":{}}}",
+            serde_json::to_string(stage).expect("stage serializes"),
+            plan.cooks.len(),
+            serde_json::to_string(&format!(
+                "homeboy agent-task fanout resume {}",
+                plan.fanout_id
+            ))
+            .expect("resume command serializes"),
+        );
+    }
 }
 
 fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
@@ -1236,6 +1283,7 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
         None => claim_fanout_run_batch_coordinator(&plan)?,
     };
     let outcome = (|| {
+        let heartbeat = CoordinatorHeartbeat::start(plan.fanout_id.clone(), claim_id.clone())?;
         persist_batch_cook_recipes(&plan, |options| {
             record_gate_contract_validation(options, &gate_contract_validation);
             options.attempt_dispatcher = Some(attempt_dispatcher(options));
@@ -1249,7 +1297,6 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
         // Resolved once, here, and bound for the whole batch: every worker thread
         // re-binds this same absolute instant, so the budget covers the batch
         // rather than restarting per child.
-        let heartbeat = CoordinatorHeartbeat::start(plan.fanout_id.clone(), claim_id.clone());
         let result = with_current_cook_deadline(plan.cook_deadline(), || {
             batch::heartbeat_fanout_run_batch(&plan.fanout_id, &claim_id)?;
             agent_task_service::run_cook_batch_with_control(
@@ -1308,6 +1355,7 @@ where
         None => claim_fanout_run_batch_coordinator(&plan)?,
     };
     let outcome = (|| {
+        let heartbeat = CoordinatorHeartbeat::start(plan.fanout_id.clone(), claim_id.clone())?;
         persist_batch_cook_recipes(&plan, |options| {
             record_gate_contract_validation(options, &gate_contract_validation);
         })?;
@@ -1318,7 +1366,6 @@ where
         let concurrency = batch_concurrency(&plan, &cooks);
         // See the sibling runner: the budget is resolved once and bound for the
         // whole batch so it does not restart per child.
-        let heartbeat = CoordinatorHeartbeat::start(plan.fanout_id.clone(), claim_id.clone());
         let result = with_current_cook_deadline(plan.cook_deadline(), || {
             batch::heartbeat_fanout_run_batch(&plan.fanout_id, &claim_id)?;
             agent_task_service::run_cook_batch_with_control(
@@ -7026,6 +7073,81 @@ fi
                 "{state:?}"
             );
         }
+    }
+
+    #[test]
+    fn public_fanout_status_returns_stale_durable_state_during_observation_contention() {
+        with_isolated_home(|_| {
+            let batch_id = "contended-public-status";
+            let run_id = "contended-public-status-child";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(run_id)
+                .expect("persist child lifecycle record");
+            batch::persist_fanout_run_batch(
+                batch_id,
+                batch_id,
+                &[batch::FanoutRunBatchChild {
+                    task_id: run_id.to_string(),
+                    run_id: run_id.to_string(),
+                }],
+                json!({ "replan_command": "homeboy agent-task fanout run-plan --input @plan.json" }),
+            )
+            .expect("persist fanout batch");
+
+            let database =
+                homeboy::core::observation::store::database_path().expect("observation path");
+            let connection =
+                rusqlite::Connection::open(database).expect("open contention connection");
+            connection
+                // WAL permits concurrent readers. Use rollback-journal locking so
+                // the public command must exercise the bounded busy fallback.
+                .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE")
+                .expect("hold observation write lock");
+
+            let (value, exit_code) = batch_status(AgentTaskFanoutBatchStatusArgs {
+                batch_id: batch_id.to_string(),
+            })
+            .expect("public status keeps the durable batch readable");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["batch"]["observation_fresh"], false);
+            assert_eq!(value["batch"]["batch"]["state"], "queued");
+        });
+    }
+
+    #[test]
+    fn coordinator_heartbeat_starts_before_slow_preflight() {
+        with_isolated_home(|_| {
+            let batch_id = "heartbeat-before-preflight";
+            batch::persist_fanout_run_batch(
+                batch_id,
+                batch_id,
+                &[batch::FanoutRunBatchChild {
+                    task_id: "child".to_string(),
+                    run_id: "child-run".to_string(),
+                }],
+                json!({ "replan_command": "homeboy agent-task fanout run-plan --input @plan.json" }),
+            )
+            .expect("persist batch");
+            let claim_id = batch::claim_fanout_run_batch(batch_id)
+                .expect("claim")
+                .expect("claim id");
+            let before = batch::read_batch_record(batch_id).expect("batch").metadata["coordinator"]
+                ["admission_deadline_at"]
+                .clone();
+
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            CoordinatorHeartbeat::start(batch_id.to_string(), claim_id)
+                .expect("start heartbeat before preflight")
+                .finish()
+                .expect("finish heartbeat");
+
+            assert_ne!(
+                batch::read_batch_record(batch_id)
+                    .expect("renewed batch")
+                    .metadata["coordinator"]["admission_deadline_at"],
+                before
+            );
+        });
     }
 
     #[test]
