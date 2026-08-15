@@ -82,7 +82,7 @@ install_wp_codebox() {
     # as its target is gone.
     prune_stale_wp_codebox_wrapper() {
         local wrapper="$1"
-        local target
+        local target=""
         local line
 
         [ -f "${wrapper}" ] || return 0
