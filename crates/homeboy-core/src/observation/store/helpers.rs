@@ -243,7 +243,17 @@ pub(crate) fn collect_rows<T>(
     Ok(records)
 }
 
+#[cfg(test)]
 pub(crate) fn persisted_artifact_path(
+    run_id: &str,
+    artifact_id: &str,
+    source: &Path,
+) -> Result<PathBuf> {
+    persisted_artifact_path_at(&crate::paths::artifact_root()?, run_id, artifact_id, source)
+}
+
+pub(crate) fn persisted_artifact_path_at(
+    artifact_root: &Path,
     run_id: &str,
     artifact_id: &str,
     source: &Path,
@@ -256,7 +266,7 @@ pub(crate) fn persisted_artifact_path(
         .filter(|name| !name.is_empty())
         .map(|name| format!("{artifact_id}-{name}"))
         .unwrap_or_else(|| artifact_id.to_string());
-    Ok(paths::artifact_root()?.join(run_id).join(file_name))
+    Ok(artifact_root.join(run_id).join(file_name))
 }
 
 fn validate_artifact_path_component(field: &str, value: &str) -> Result<()> {

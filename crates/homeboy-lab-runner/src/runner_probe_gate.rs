@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::{Error, ErrorCode, Result};
 
 /// How long a successful probe answer stays reusable without reconnecting.
 pub const DEFAULT_PROBE_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -277,8 +277,14 @@ impl Drop for ProbePermit {
     }
 }
 
-/// Block until this runner has a free connection slot, then take it.
-fn acquire_permit(runner_id: &str, probe: &str, limit: usize) -> ProbePermit {
+/// Block until this runner has a free connection slot, then take it. The caller
+/// owns the deadline so a saturated probe gate cannot outlive admission.
+fn acquire_permit_until(
+    runner_id: &str,
+    probe: &str,
+    limit: usize,
+    deadline: Instant,
+) -> Result<ProbePermit> {
     let budget = budget_for(runner_id);
     let mut throttled = false;
     let peak;
@@ -286,10 +292,18 @@ fn acquire_permit(runner_id: &str, probe: &str, limit: usize) -> ProbePermit {
         let mut inner = lock(&budget.inner);
         while inner.active >= limit {
             throttled = true;
-            inner = budget
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| probe_permit_timeout_error(runner_id, probe, limit))?;
+            let (guard, timeout) = budget
                 .released
-                .wait(inner)
+                .wait_timeout(inner, remaining)
                 .unwrap_or_else(PoisonError::into_inner);
+            inner = guard;
+            if timeout.timed_out() && inner.active >= limit {
+                return Err(probe_permit_timeout_error(runner_id, probe, limit));
+            }
         }
         inner.active += 1;
         inner.peak = inner.peak.max(inner.active);
@@ -308,7 +322,20 @@ fn acquire_permit(runner_id: &str, probe: &str, limit: usize) -> ProbePermit {
             metrics.throttled += 1;
         }
     });
-    ProbePermit { budget }
+    Ok(ProbePermit { budget })
+}
+
+fn probe_permit_timeout_error(runner_id: &str, probe: &str, limit: usize) -> Error {
+    Error::new(
+        ErrorCode::RemoteCommandTimeout,
+        "Runner probe admission deadline expired while waiting for capacity",
+        serde_json::json!({
+            "runner_id": runner_id,
+            "probe": probe,
+            "concurrency_limit": limit,
+            "stage": "probe_permit",
+        }),
+    )
 }
 
 /// Clears the in-flight marker even if the probe panics, so a panicking probe
@@ -356,6 +383,28 @@ where
     T: Clone + Send + Sync + 'static,
     F: FnOnce() -> Result<T>,
 {
+    deduplicated_probe_until(
+        runner_id,
+        probe,
+        fingerprint,
+        Instant::now() + probe_wait(),
+        run,
+    )
+}
+
+/// Deadline-aware form of [`deduplicated_probe`]. The shared deadline covers
+/// cache coalescing, permit acquisition, and the caller's bounded transport.
+pub fn deduplicated_probe_until<T, F>(
+    runner_id: &str,
+    probe: &str,
+    fingerprint: &str,
+    deadline: Instant,
+    run: F,
+) -> Result<T>
+where
+    T: Clone + Send + Sync + 'static,
+    F: FnOnce() -> Result<T>,
+{
     let ttl = probe_cache_ttl();
     let wait = probe_wait();
     let limit = probe_concurrency();
@@ -389,11 +438,18 @@ where
             break;
         }
         waited = true;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| probe_permit_timeout_error(runner_id, probe, limit))?;
         let (guard, timeout) = slot
             .ready
-            .wait_timeout(inner, wait)
+            .wait_timeout(inner, wait.min(remaining))
             .unwrap_or_else(PoisonError::into_inner);
         inner = guard;
+        if timeout.timed_out() && Instant::now() >= deadline {
+            return Err(probe_permit_timeout_error(runner_id, probe, limit));
+        }
         if timeout.timed_out() {
             // Fail open. The owner is slower than the wait budget; opening one
             // extra connection beats blocking the caller indefinitely.
@@ -411,7 +467,7 @@ where
     let _in_flight = InFlightGuard {
         slot: Arc::clone(&slot),
     };
-    let permit = acquire_permit(runner_id, probe, limit);
+    let permit = acquire_permit_until(runner_id, probe, limit, deadline)?;
     record(runner_id, probe, |metrics| metrics.dispatched += 1);
     let outcome = run();
     drop(permit);
@@ -515,6 +571,38 @@ mod tests {
         let metrics = metrics_for("lab", "cached");
         assert_eq!(metrics.dispatched, 1);
         assert_eq!(metrics.cache_hits, 4);
+    }
+
+    #[test]
+    fn deadline_aware_probe_times_out_while_waiting_for_a_saturated_permit() {
+        let _serialized = serialized();
+        let limit = probe_concurrency();
+        let permits = (0..limit)
+            .map(|_| {
+                acquire_permit_until(
+                    "lab",
+                    "saturated",
+                    limit,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .expect("saturating permit")
+            })
+            .collect::<Vec<_>>();
+
+        let started = Instant::now();
+        let error = deduplicated_probe_until(
+            "lab",
+            "saturated",
+            "second-question",
+            Instant::now() + Duration::from_millis(25),
+            || Ok("unreachable".to_string()),
+        )
+        .expect_err("saturated permit must respect the admission deadline");
+
+        assert_eq!(error.code, ErrorCode::RemoteCommandTimeout);
+        assert_eq!(error.details["stage"], "probe_permit");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(permits);
     }
 
     #[test]

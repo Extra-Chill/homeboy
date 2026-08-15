@@ -9,8 +9,9 @@ use super::super::apply::{
 };
 use super::super::promote::{
     normalize_promotion_patch, promote, promote_with_provider,
-    promote_with_provider_and_checkpoint, resume_promoted_patch, select_patch_artifact,
-    validate_artifact_content,
+    promote_with_provider_and_checkpoint,
+    promote_with_provider_and_checkpoint_in_observation_store, resume_promoted_patch,
+    retain_committed_changes_artifact, select_patch_artifact, validate_artifact_content,
 };
 use super::super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
@@ -273,6 +274,154 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
         assert_eq!(result.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(provider.apply_calls.len(), 1);
     });
+}
+
+#[test]
+fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(left_context.path_roots())
+            .open_observation_initialized()
+            .expect("left observation store");
+    let right_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(right_context.path_roots())
+            .open_observation_initialized()
+            .expect("right observation store");
+    let run_id = "same-projected-run";
+    let task_id = "same-projected-task";
+    let artifact_id = "same-projected-patch";
+    let mut source: Value = serde_json::from_str(&recovered_runner_aggregate(
+        task_id,
+        artifact_id,
+        &sha256_hex(VALID_PATCH),
+        VALID_PATCH.len(),
+    ))
+    .expect("aggregate JSON");
+    source["status"] = Value::String("partial_recoverable".to_string());
+    source["outcomes"][0]["status"] = Value::String("candidate_recoverable".to_string());
+    source["outcomes"][0]["artifacts"][0]["metadata"] = serde_json::json!({
+        "executor_artifact_finalized": true,
+        "run_id": run_id,
+        "task_id": task_id,
+        "producer_attempt": 1,
+        "base_ref": "base-sha",
+        "provider_backend": "test",
+        "repository_identity": "repo",
+        "workspace_identity": "workspace",
+        "gate_feedback_baseline": {
+            "source_run_id": run_id,
+            "source_task_id": task_id,
+            "patch_artifact": {
+                "id": artifact_id,
+                "kind": "patch",
+                "sha256": sha256_hex(VALID_PATCH),
+            }
+        }
+    });
+    source["outcomes"][0]["artifacts"][0]
+        .as_object_mut()
+        .expect("patch artifact")
+        .remove("path");
+    record_controller_projection_in_store(
+        &right_store,
+        run_id,
+        task_id,
+        artifact_id,
+        "wrong patch bytes",
+    );
+    let projected = record_controller_projection_in_store(
+        &left_store,
+        run_id,
+        task_id,
+        artifact_id,
+        VALID_PATCH,
+    );
+    let temp = tempfile::tempdir().expect("promotion tempdir");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+
+    let result = promote_with_provider_and_checkpoint_in_observation_store(
+        AgentTaskPromotionOptions {
+            source: source.to_string(),
+            source_run_id: Some(run_id.to_string()),
+            source_path: None,
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "homeboy@rooted-projection".to_string(),
+            task_id: Some(task_id.to_string()),
+            artifact_id: Some(artifact_id.to_string()),
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+        &mut |_| Ok(()),
+        &left_store,
+    )
+    .expect("explicit projection is promoted");
+
+    assert_eq!(result.patch_artifact.path, projected.display().to_string());
+    assert_eq!(provider.apply_calls.len(), 1);
+}
+
+#[test]
+fn committed_changes_retention_uses_the_explicit_observation_store() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(left_context.path_roots())
+            .open_observation_initialized()
+            .expect("left observation store");
+    let right_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(right_context.path_roots())
+            .open_observation_initialized()
+            .expect("right observation store");
+    let run_id = "same-committed-retention-run";
+    left_store
+        .upsert_imported_run(&homeboy_core::observation::RunRecord {
+            id: run_id.to_string(),
+            kind: "agent-task".to_string(),
+            component_id: None,
+            started_at: "2026-08-15T00:00:00Z".to_string(),
+            finished_at: Some("2026-08-15T00:00:01Z".to_string()),
+            status: "pass".to_string(),
+            command: Some("homeboy agent-task".to_string()),
+            cwd: None,
+            homeboy_version: Some("test".to_string()),
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::json!({}),
+        })
+        .expect("record explicit run");
+    let aggregate: AgentTaskAggregate = serde_json::from_str(&recovered_runner_aggregate(
+        "committed-task",
+        "patch",
+        &sha256_hex(VALID_PATCH),
+        VALID_PATCH.len(),
+    ))
+    .expect("aggregate");
+    let mut options = promotion_options("homeboy@committed-retention");
+    options.source_run_id = Some(run_id.to_string());
+
+    let retained = retain_committed_changes_artifact(
+        &options,
+        &aggregate.outcomes[0],
+        VALID_PATCH,
+        &sha256_hex(VALID_PATCH),
+        Some(&left_store),
+    )
+    .expect("retain committed changes")
+    .expect("retained path");
+
+    assert!(retained.starts_with(left_context.root()));
+    assert_eq!(left_store.list_artifacts(run_id).unwrap().len(), 1);
+    assert!(right_store.list_artifacts(run_id).unwrap().is_empty());
 }
 
 #[test]

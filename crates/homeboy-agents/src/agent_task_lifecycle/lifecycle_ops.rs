@@ -1779,6 +1779,14 @@ pub fn prune_controller_runtime_pins(
 }
 
 fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    migrate_record_controller_runtime_in_store(&lifecycle_store, record)
+}
+
+fn migrate_record_controller_runtime_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+) -> Result<()> {
     let Some(runtime) = record
         .metadata
         .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
@@ -1790,7 +1798,7 @@ fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<
         homeboy_core::controller_runtime::migrate_legacy_pin_and_persist(&original, |migrated| {
             record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                 migrated.clone();
-            store::write_record(record)
+            lifecycle_store.write_record(record)
         })?;
     record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
     Ok(())
@@ -1829,15 +1837,23 @@ pub fn recover_controller_runtime(
 }
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    mark_running_in_store(&lifecycle_store, run_id)
+}
+
+pub(crate) fn mark_running_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let mut record = store::read_record(&run_id)?;
-    migrate_record_controller_runtime(&mut record)?;
+    let mut record = lifecycle_store.read_record(&run_id)?;
+    migrate_record_controller_runtime_in_store(lifecycle_store, &mut record)?;
     homeboy_core::controller_runtime::validate_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
     )?;
     let mut error = None;
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         if record.metadata.get("queue_quarantine").is_some() {
             error = Some(Error::validation_invalid_argument(
                 "run_id",
@@ -1901,11 +1917,24 @@ pub fn reserve_provider_execution(
     task: &AgentTaskRequest,
     attempt: u32,
 ) -> Result<ProviderExecutionReservation> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    reserve_provider_execution_in_store(&lifecycle_store, run_id, task, attempt)
+}
+
+pub(crate) fn reserve_provider_execution_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task: &AgentTaskRequest,
+    attempt: u32,
+) -> Result<ProviderExecutionReservation> {
     let run_id = sanitize_run_id(run_id);
-    require_record_workspace_owner(&store::read_record(&run_id)?)?;
+    require_record_workspace_owner_in_store(
+        &lifecycle_store.workspace_claim_store(),
+        &lifecycle_store.read_record(&run_id)?,
+    )?;
     let execution_key = format!("{}:{attempt}", task.task_id);
     let mut reservation = ProviderExecutionReservation::AlreadyReserved;
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         let started_at = now_timestamp();
         let consumed = {
             let metadata = record.ensure_metadata_object();
@@ -2284,10 +2313,21 @@ pub fn record_provider_execution_terminal(
     attempt: u32,
     state: &str,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_terminal_in_store(&lifecycle_store, run_id, task_id, attempt, state)
+}
+
+pub(crate) fn record_provider_execution_terminal_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    state: &str,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let execution_key = format!("{task_id}:{attempt}");
     let mut found = false;
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let cancelled = record.state == AgentTaskRunState::Cancelled;
         let Some(execution) = record
             .ensure_metadata_object()
@@ -2353,10 +2393,27 @@ pub fn record_provider_execution_cleanup_elapsed(
     attempt: u32,
     elapsed_ms: u64,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_cleanup_elapsed_in_store(
+        &lifecycle_store,
+        run_id,
+        task_id,
+        attempt,
+        elapsed_ms,
+    )
+}
+
+pub(crate) fn record_provider_execution_cleanup_elapsed_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    elapsed_ms: u64,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let execution_key = format!("{task_id}:{attempt}");
     let mut found = false;
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let Some(execution) = record
             .ensure_metadata_object()
             .get_mut("provider_executions")
@@ -4409,7 +4466,15 @@ const COOK_CANDIDATE_SELECTION_WINDOW: usize = 64;
 /// attempt has candidate bytes, retain the legacy latest attempt for old runs.
 pub fn select_cook_candidate(cook_id: &str) -> Result<AgentTaskCookCandidateSelection> {
     let index = cook_index(cook_id)?;
-    select_cook_candidate_from_index(cook_id, index)
+    select_cook_candidate_from_index(cook_id, index, None)
+}
+
+pub(crate) fn select_cook_candidate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<AgentTaskCookCandidateSelection> {
+    let index = lifecycle_store.read_cook_index(&sanitize_run_id(cook_id))?;
+    select_cook_candidate_from_index(cook_id, index, Some(lifecycle_store))
 }
 
 pub fn select_cook_candidate_from_attempts(
@@ -4429,15 +4494,17 @@ pub fn select_cook_candidate_from_attempts(
             latest_substantive_candidate: None,
             attempts,
         },
+        None,
     )
 }
 
 fn select_cook_candidate_from_index(
     cook_id: &str,
     index: AgentTaskCookIndex,
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
 ) -> Result<AgentTaskCookCandidateSelection> {
     if let Some(candidate) = index.latest_substantive_candidate.as_ref() {
-        if substantive_candidate(&candidate.run_id).as_ref()
+        if substantive_candidate_in_store(&candidate.run_id, lifecycle_store).as_ref()
             == Some(&(candidate.task_id.clone(), candidate.artifact_id.clone()))
         {
             return Ok(AgentTaskCookCandidateSelection {
@@ -4467,7 +4534,9 @@ fn select_cook_candidate_from_index(
     let mut skipped_newer_run_ids = Vec::new();
     let mut skipped_newer_attempts = Vec::new();
     for attempt in attempts.iter().take(COOK_CANDIDATE_SELECTION_WINDOW) {
-        if let Some((task_id, artifact_id)) = substantive_candidate(&attempt.run_id) {
+        if let Some((task_id, artifact_id)) =
+            substantive_candidate_in_store(&attempt.run_id, lifecycle_store)
+        {
             return Ok(AgentTaskCookCandidateSelection {
                 schema: "homeboy/agent-task-cook-candidate-selection/v1".to_string(),
                 cook_id: index.cook_id,
@@ -4536,6 +4605,16 @@ pub(crate) fn update_cook_candidate_after_completion(
     aggregate: &AgentTaskAggregate,
     promotion: Option<Value>,
 ) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    update_cook_candidate_after_completion_in_store(&lifecycle_store, record, aggregate, promotion)
+}
+
+pub(crate) fn update_cook_candidate_after_completion_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+    promotion: Option<Value>,
+) -> Result<()> {
     let Some(cook_id) = record.metadata.get("cook_id").and_then(Value::as_str) else {
         return Ok(());
     };
@@ -4547,7 +4626,7 @@ pub(crate) fn update_cook_candidate_after_completion(
     else {
         return Ok(());
     };
-    store::update_cook_index(cook_id, |index| {
+    lifecycle_store.update_cook_index(cook_id, |index| {
         replace_latest_substantive_candidate(index, candidate)
     })?;
     Ok(())
@@ -4616,14 +4695,28 @@ fn substantive_candidate_from_aggregate(
 }
 
 fn substantive_candidate(run_id: &str) -> Option<(String, String)> {
+    substantive_candidate_in_store(run_id, None)
+}
+
+fn substantive_candidate_in_store(
+    run_id: &str,
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
+) -> Option<(String, String)> {
     // Candidate recovery is a bounded scan. Avoid the aggregate reader's
     // reconciliation path when this controller record never projected one.
-    let record = exact_record(run_id).ok()?;
+    let record = match lifecycle_store {
+        Some(store) => store.read_record(run_id).ok()?,
+        None => exact_record(run_id).ok()?,
+    };
     let aggregate_path = record.aggregate_path?;
     if !std::path::Path::new(&aggregate_path).exists() {
         return None;
     }
-    let Ok(aggregate) = store::read_aggregate(run_id) else {
+    let aggregate = match lifecycle_store {
+        Some(store) => store.read_aggregate(run_id),
+        None => store::read_aggregate(run_id),
+    };
+    let Ok(aggregate) = aggregate else {
         return None;
     };
     substantive_candidate_in_aggregate(run_id, &aggregate)
@@ -4786,8 +4879,17 @@ fn empty_acceptance_candidate() -> crate::agent_task_promotion::AgentTaskCandida
 }
 
 pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_promotion_in_store(&lifecycle_store, run_id, promotion)
+}
+
+pub(crate) fn record_promotion_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    promotion: Value,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         if record.metadata.get("latest_promotion") == Some(&promotion) {
             return false;
         }
@@ -4865,10 +4967,15 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
     })?;
     let record = match record {
         Some(record) => record,
-        None => store::read_record(&run_id)?,
+        None => lifecycle_store.read_record(&run_id)?,
     };
-    if let Ok(aggregate) = store::read_aggregate(&run_id) {
-        update_cook_candidate_after_completion(&record, &aggregate, Some(promotion))?;
+    if let Ok(aggregate) = lifecycle_store.read_aggregate(&run_id) {
+        update_cook_candidate_after_completion_in_store(
+            lifecycle_store,
+            &record,
+            &aggregate,
+            Some(promotion),
+        )?;
     }
     Ok(record)
 }
@@ -5061,8 +5168,17 @@ pub fn record_acceptance_verdict_with_feedback(
 /// Persist the controller publication result separately from promotion so a
 /// resumed cook can prove finalization already completed before it publishes.
 pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_finalization_in_store(&lifecycle_store, run_id, finalization)
+}
+
+pub(crate) fn record_cook_finalization_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    finalization: Value,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         if record.metadata.get("cook_finalization") == Some(&finalization) {
             return false;
         }
@@ -5074,7 +5190,7 @@ pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<Age
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }
 
@@ -5171,8 +5287,17 @@ pub fn record_cook_moving_base_recovery(
     run_id: &str,
     recovery: Value,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_moving_base_recovery_in_store(&lifecycle_store, run_id, recovery)
+}
+
+pub(crate) fn record_cook_moving_base_recovery_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    recovery: Value,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         if record.metadata.get("cook_moving_base_recovery") == Some(&recovery) {
             return false;
         }
@@ -5184,13 +5309,21 @@ pub fn record_cook_moving_base_recovery(
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }
 
 pub fn clear_cook_moving_base_recovery(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    clear_cook_moving_base_recovery_in_store(&lifecycle_store, run_id)
+}
+
+pub(crate) fn clear_cook_moving_base_recovery_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let Some(metadata) = record.metadata.as_object_mut() else {
             return false;
         };
@@ -5202,6 +5335,6 @@ pub fn clear_cook_moving_base_recovery(run_id: &str) -> Result<AgentTaskRunRecor
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }
