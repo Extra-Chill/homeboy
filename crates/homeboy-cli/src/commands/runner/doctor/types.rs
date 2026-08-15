@@ -41,6 +41,9 @@ pub struct RunnerDoctorOutput {
     /// The same retained-job ownership projection used by status and reconcile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission_summary: Option<homeboy::runner::runners::RunnerAdmissionSummary>,
+    /// Provider-specific Lab readiness, separate from runner substrate checks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_readiness: Option<RunnerDoctorProviderReadiness>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub repairs: Vec<RunnerRepair>,
 }
@@ -51,6 +54,12 @@ pub struct RunnerDoctorDiagnostics {
     pub completed_checks: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub timed_out_probes: Vec<RunnerDoctorTimedOutProbe>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerDoctorProviderReadiness {
+    pub ready_for: Vec<String>,
+    pub blocked_for: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

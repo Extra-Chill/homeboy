@@ -384,6 +384,7 @@ pub fn report(
         diagnostics,
         daemon_recovery: persisted_status.and_then(|status| status.daemon_freshness.clone()),
         admission_summary: admission_snapshot.map(|snapshot| snapshot.summary),
+        provider_readiness: None,
         repairs: Vec::new(),
     }
 }
@@ -412,7 +413,7 @@ pub(super) fn unreachable_report(
         runner: runner_summary("ssh", Some(runner), Some(server)), status: RunnerDoctorStatus::Error,
         capabilities: RunnerCapabilities::default(), resources: RunnerResources::default(),
         checks: vec![checks::error("ssh.execution", format!("SSH runner {} is not reachable", runner_id), Some("Run `homeboy server status <server-id>` and verify host, user, port, identity_file, and network access".to_string()), common::detail_map(&[("stderr", output.stderr.trim()), ("stdout", output.stdout.trim())]))],
-        secret_env_migration: None, diagnostics: Some(types::RunnerDoctorDiagnostics { status: "partial", completed_checks: 1, timed_out_probes: Vec::new() }), daemon_recovery: None, admission_summary: None, repairs: Vec::new(),
+        secret_env_migration: None, diagnostics: Some(types::RunnerDoctorDiagnostics { status: "partial", completed_checks: 1, timed_out_probes: Vec::new() }), daemon_recovery: None, admission_summary: None, provider_readiness: None, repairs: Vec::new(),
     }
 }
 
@@ -477,6 +478,7 @@ pub(super) fn disconnected_report(
         diagnostics: None,
         daemon_recovery,
         admission_summary,
+        provider_readiness: None,
         repairs: Vec::new(),
     }
 }

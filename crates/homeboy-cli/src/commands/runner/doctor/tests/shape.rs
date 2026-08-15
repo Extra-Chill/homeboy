@@ -66,6 +66,49 @@ fn overall_status_promotes_errors_over_warnings() {
 }
 
 #[test]
+fn lab_offload_readiness_keeps_a_healthy_eligible_provider_ready() {
+    let checks = vec![
+        provider_check("selected.provider", RunnerDoctorStatus::Ok),
+        provider_check("optional.provider", RunnerDoctorStatus::Error),
+    ];
+    let eligible = vec![
+        "selected.provider".to_string(),
+        "optional.provider".to_string(),
+    ];
+
+    let (status, readiness) = checks::lab_offload_status(&checks, &eligible);
+
+    assert_eq!(status, RunnerDoctorStatus::Ok);
+    assert_eq!(readiness.ready_for, vec!["selected.provider"]);
+    assert_eq!(readiness.blocked_for, vec!["optional.provider"]);
+}
+
+#[test]
+fn lab_offload_readiness_blocks_a_failed_selected_provider() {
+    let checks = vec![
+        provider_check("selected.provider", RunnerDoctorStatus::Error),
+        provider_check("optional.provider", RunnerDoctorStatus::Ok),
+    ];
+    let eligible = vec!["selected.provider".to_string()];
+
+    let (status, readiness) = checks::lab_offload_status(&checks, &eligible);
+
+    assert_eq!(status, RunnerDoctorStatus::Error);
+    assert!(readiness.ready_for.is_empty());
+    assert_eq!(readiness.blocked_for, vec!["selected.provider"]);
+}
+
+fn provider_check(provider_id: &str, status: RunnerDoctorStatus) -> types::RunnerCheck {
+    types::RunnerCheck {
+        id: format!("provider.{provider_id}"),
+        status,
+        message: "provider readiness".to_string(),
+        remediation: None,
+        details: BTreeMap::from([("provider_id".to_string(), provider_id.to_string())]),
+    }
+}
+
+#[test]
 fn operational_exit_code_matches_the_doctor_readiness_verdict() {
     for (scenario, status, expected_exit_code) in [
         ("healthy", RunnerDoctorStatus::Ok, 0),
