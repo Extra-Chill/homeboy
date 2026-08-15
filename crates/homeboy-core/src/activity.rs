@@ -125,27 +125,34 @@ pub fn activity_report_filtered(
     command: &'static str,
 ) -> Result<ActivityReport> {
     let mut collector = ActivityCollector::default();
-    observation::collect(&mut collector, limit)?;
     // Items and record health come from one pass over the durable agent-task
     // records. Reading them separately walked the corpus twice (#10308).
     let (agent_task_items, agent_task_record_health) =
-        agent_task_provider::agent_task_activity(limit)?;
+        agent_task_provider::agent_task_activity_filtered(limit, filter)?;
     for item in agent_task_items {
         collector.insert(item);
     }
-    daemon_jobs::collect(&mut collector)?;
+    // Match authoritative agent-task identities first. Other sources often
+    // carry only durable run/job references; inserting them unfiltered lets the
+    // collector join those projections before the canonical selector runs.
+    observation::collect(&mut collector, limit, &ActivityFilter::default())?;
+    daemon_jobs::collect(&mut collector, &ActivityFilter::default())?;
     // Runner federation is last on purpose: every controller-local source is
     // already collected before any remote probe is attempted, so the remote
     // bound can only ever add to a complete local answer — it can never delay
     // or lose one.
-    let federation = runner_sessions::collect(&mut collector, options.federate_runners);
+    let federation = runner_sessions::collect(
+        &mut collector,
+        options.federate_runners,
+        &ActivityFilter::default(),
+    );
     let collection_limit = if scope == ActivityScope::ActiveRecent {
         limit.saturating_add(DEFAULT_STALE_PROJECTION_WINDOW)
     } else {
         limit
     };
     let mut report = report_from_items(
-        collector.items(ActivityScope::All, collection_limit),
+        collector.items_filtered(ActivityScope::All, collection_limit, filter),
         scope,
         limit,
         command,
@@ -330,6 +337,8 @@ fn report_from_items(
     filter: &ActivityFilter,
 ) -> ActivityReport {
     reclassify_stale_running(&mut items);
+    // Sources apply this before their own caps. Retaining it here protects
+    // provider implementations that cannot express the selector natively.
     items.retain(|item| filter.matches(item));
     let counts = counts_for_items(&items);
     items.sort_by_key(|item| std::cmp::Reverse(activity_sort_key(item)));
@@ -593,9 +602,15 @@ mod tests {
             task_url: Some("https://example.test/issues/12146".to_string()),
             repository: Some("Extra-Chill/homeboy".to_string()),
             worktree: Some("homeboy@fix-12146".to_string()),
+            identities: vec![ActivityTaskIdentity {
+                task_url: Some("https://example.test/issues/12146".to_string()),
+                repository: Some("Extra-Chill/homeboy".to_string()),
+                worktree: Some("homeboy@fix-12146".to_string()),
+            }],
         };
         let mut wrong_repository = matching.clone();
         wrong_repository.context.repository = Some("Extra-Chill/other".to_string());
+        wrong_repository.context.identities[0].repository = Some("Extra-Chill/other".to_string());
         let filter = ActivityFilter {
             task_url: Some("https://example.test/issues/12146".to_string()),
             repository: Some("Extra-Chill/homeboy".to_string()),
@@ -613,6 +628,36 @@ mod tests {
         assert_eq!(report.command, "runs.list_active");
         assert_eq!(report.counts.total, 1);
         assert_eq!(report.items[0].id, "accepted-task");
+    }
+
+    #[test]
+    fn activity_filter_does_not_join_separate_tasks_into_a_false_and_match() {
+        let mut item = item("multi-task", ActivityState::Queued);
+        item.context.identities = vec![
+            ActivityTaskIdentity {
+                task_url: Some("https://example.test/issues/one".to_string()),
+                repository: Some("Extra-Chill/one".to_string()),
+                worktree: Some("one@task".to_string()),
+            },
+            ActivityTaskIdentity {
+                task_url: Some("https://example.test/issues/two".to_string()),
+                repository: Some("Extra-Chill/two".to_string()),
+                worktree: Some("two@task".to_string()),
+            },
+        ];
+
+        assert!(ActivityFilter {
+            task_url: Some("https://example.test/issues/two".to_string()),
+            repository: Some("Extra-Chill/two".to_string()),
+            worktree: Some("two@task".to_string()),
+        }
+        .matches(&item));
+        assert!(!ActivityFilter {
+            task_url: Some("https://example.test/issues/one".to_string()),
+            repository: Some("Extra-Chill/two".to_string()),
+            worktree: None,
+        }
+        .matches(&item));
     }
 
     #[test]
@@ -811,7 +856,8 @@ mod tests {
             store.start(job.id).expect("start job");
 
             let mut collector = ActivityCollector::default();
-            daemon_jobs::collect(&mut collector).expect("collect activity");
+            daemon_jobs::collect(&mut collector, &ActivityFilter::default())
+                .expect("collect activity");
 
             let reopened = api_jobs::JobStore::open_without_reconciliation(&path)
                 .expect("reopen durable store");
@@ -837,10 +883,47 @@ mod tests {
                 .expect("finish terminal run");
 
             let mut collector = ActivityCollector::default();
-            observation::collect(&mut collector, 1).expect("collect activity");
+            observation::collect(&mut collector, 1, &ActivityFilter::default())
+                .expect("collect activity");
             let items = collector.items(ActivityScope::All, 10);
 
             assert!(items.iter().any(|item| item.id == active.id));
+        });
+    }
+
+    #[test]
+    fn observation_identity_filter_runs_before_the_source_limit() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let matching = store
+                .start_run(
+                    NewRunRecord::builder("matching")
+                        .cwd_path(std::path::Path::new("/worktree/matching"))
+                        .build(),
+                )
+                .expect("matching run");
+            store
+                .start_run(
+                    NewRunRecord::builder("newer-non-matching")
+                        .cwd_path(std::path::Path::new("/worktree/other"))
+                        .build(),
+                )
+                .expect("non-matching run");
+
+            let mut collector = ActivityCollector::default();
+            observation::collect(
+                &mut collector,
+                1,
+                &ActivityFilter {
+                    worktree: Some("/worktree/matching".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("collect filtered activity");
+            let items = collector.items(ActivityScope::All, 10);
+
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].id, matching.id);
         });
     }
 

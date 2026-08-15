@@ -242,9 +242,15 @@ fn task_identity(task: &crate::agent_task::AgentTaskRequest) -> ActivityTaskIden
                 .or_else(|| task.source_refs.first())
                 .map(|source| source.uri.clone())
         }),
-        repository: task.workspace.slug.clone(),
+        repository: repository_from_task_url(task.workspace.task_url.as_deref()),
         worktree: task.workspace.root.clone(),
     }
+}
+
+fn repository_from_task_url(task_url: Option<&str>) -> Option<String> {
+    let path = task_url?.split("github.com/").nth(1)?;
+    let mut segments = path.split('/');
+    Some(format!("{}/{}", segments.next()?, segments.next()?))
 }
 
 fn actions_for_agent_task(

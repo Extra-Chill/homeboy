@@ -28,12 +28,18 @@ impl ActivityCollector {
             .or_insert(item);
     }
 
-    pub(crate) fn items(self, scope: ActivityScope, limit: usize) -> Vec<ActivityItem> {
+    pub(crate) fn items_filtered(
+        self,
+        scope: ActivityScope,
+        limit: usize,
+        filter: &super::ActivityFilter,
+    ) -> Vec<ActivityItem> {
         let mut items = self.items.into_values().collect::<Vec<_>>();
         for item in &mut items {
             finalize_item(item);
         }
         items.sort_by_key(|item| std::cmp::Reverse(item_sort_key(item)));
+        items.retain(|item| filter.matches(item));
         if scope == ActivityScope::ActiveRecent {
             items.retain(|item| is_active(item.state) || item.finished_at.is_some());
         }
