@@ -100,6 +100,24 @@ pub fn allocate_attempt(
     )
 }
 
+pub(crate) fn allocate_attempt_at(
+    data_root: &Path,
+    run_id: &str,
+    plan_id: &str,
+    task_id: &str,
+    attempt: u32,
+) -> Result<ControllerScratchAllocation> {
+    let store = data_root.join("controller-scratch");
+    allocate_attempt_at_roots(
+        run_id,
+        plan_id,
+        task_id,
+        attempt,
+        store.join("attempts"),
+        store.join("resources.json"),
+    )
+}
+
 #[cfg(test)]
 pub fn allocate_test_attempt(
     run_id: &str,

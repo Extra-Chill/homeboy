@@ -207,11 +207,12 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
     // its key before cancellation so the original job is cancelled rather than
     // left running on the runner. Preparing intents have no replay request and
     // deliberately do not reach this lookup.
-    if record.state == AgentTaskRunState::Queued
-        && super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted(
-            &record.run_id,
-        )?
-    {
+    if matches!(
+        record.state,
+        AgentTaskRunState::Queued | AgentTaskRunState::Running
+    ) && super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted(
+        &record.run_id,
+    )? {
         record = store::read_record(&record.run_id)?;
     }
     if record.state == AgentTaskRunState::Cancelled {

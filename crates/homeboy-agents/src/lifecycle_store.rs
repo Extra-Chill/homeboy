@@ -84,6 +84,14 @@ impl AgentTaskLifecycleStore {
         self.roots.data().to_path_buf()
     }
 
+    pub(crate) fn artifact_root(&self) -> PathBuf {
+        self.roots.artifacts().to_path_buf()
+    }
+
+    pub(crate) fn matches_current_environment(&self) -> Result<bool> {
+        Ok(self.roots == paths::PathRoots::from_environment()?)
+    }
+
     pub(crate) fn workspace_claim_store(
         &self,
     ) -> homeboy_core::workspace_claim::WorkspaceClaimStore {
@@ -129,8 +137,31 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub(crate) fn submit_plan_with_current_runtime(
+        &self,
+        plan: &AgentTaskPlan,
+        run_id: &str,
+    ) -> Result<AgentTaskRunRecord> {
+        self.submit_plan_with_runtime_admission_status(
+            plan,
+            run_id,
+            super::lifecycle_ops::execution_runner_id(),
+            &|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok(),
+            |run_id| {
+                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+                    run_id,
+                    || Ok(self.read_record(run_id)?.state.is_terminal()),
+                )
+                .map(|admission| admission.runtime)
+            },
+        )
+    }
+
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
-        ObservationStore::open_initialized_for_lifecycle_at(self.observation_db_path())
+        ObservationStore::open_initialized_for_lifecycle_at_roots(
+            self.observation_db_path(),
+            self.artifact_root(),
+        )
     }
 
     pub fn open_observation_readonly(&self) -> Result<ObservationStore> {
@@ -153,6 +184,43 @@ impl AgentTaskLifecycleStore {
         error: &Error,
     ) -> Result<AgentTaskRunRecord> {
         super::record_pre_execution_failure_in_store(self, run_id, plan, phase, error)
+    }
+
+    pub(crate) fn mark_running(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::mark_running_in_store(self, run_id)
+    }
+
+    pub(crate) fn reserve_provider_execution(
+        &self,
+        run_id: &str,
+        task: &crate::agent_task::AgentTaskRequest,
+        attempt: u32,
+    ) -> Result<super::ProviderExecutionReservation> {
+        super::lifecycle_ops::reserve_provider_execution_in_store(self, run_id, task, attempt)
+    }
+
+    pub(crate) fn record_provider_execution_terminal(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        state: &str,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_execution_terminal_in_store(
+            self, run_id, task_id, attempt, state,
+        )
+    }
+
+    pub(crate) fn record_provider_execution_cleanup_elapsed(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        elapsed_ms: u64,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_execution_cleanup_elapsed_in_store(
+            self, run_id, task_id, attempt, elapsed_ms,
+        )
     }
 
     pub fn claim_cook_operation(
@@ -178,12 +246,75 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub fn fail_cook_operation(
+        &self,
+        run_id: &str,
+        operation_key: &str,
+        result: Value,
+    ) -> Result<()> {
+        super::operation_claims::fail_cook_operation_in_store(self, run_id, operation_key, result)
+    }
+
+    pub(crate) fn aggregate_source_exact(&self, run_id: &str) -> Result<(String, PathBuf)> {
+        let record = self.read_record(run_id)?;
+        record.aggregate_path.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!(
+                    "agent-task run '{}' has no aggregate artifact yet",
+                    record.run_id
+                ),
+                Some(record.run_id.clone()),
+                None,
+            )
+        })?;
+        let aggregate = self.read_aggregate(&record.run_id)?;
+        let raw = serde_json::to_string_pretty(&aggregate).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("serialize agent-task aggregate {}", record.run_id)),
+            )
+        })?;
+        Ok((raw, self.aggregate_path(&record.run_id)))
+    }
+
     pub fn operation_claim(
         &self,
         run_id: &str,
         operation_key: &str,
     ) -> Result<Option<super::OperationClaim>> {
         super::operation_claims::operation_claim_in_store(self, run_id, operation_key)
+    }
+
+    pub fn checkpoint_candidate_adoption_remediation(
+        &self,
+        run_id: &str,
+        remediation_run_id: &str,
+    ) -> Result<()> {
+        super::lifecycle_candidate_adoption::checkpoint_candidate_adoption_remediation_in_store(
+            self,
+            run_id,
+            remediation_run_id,
+        )
+    }
+
+    pub fn record_promotion(&self, run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_promotion_in_store(self, run_id, promotion)
+    }
+
+    pub(crate) fn record_cook_moving_base_recovery(
+        &self,
+        run_id: &str,
+        recovery: Value,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_cook_moving_base_recovery_in_store(self, run_id, recovery)
+    }
+
+    pub(crate) fn clear_cook_moving_base_recovery(
+        &self,
+        run_id: &str,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::clear_cook_moving_base_recovery_in_store(self, run_id)
     }
 
     pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {
@@ -246,6 +377,29 @@ impl AgentTaskLifecycleStore {
 
     pub fn read_cook_index(&self, cook_id: &str) -> Result<AgentTaskCookIndex> {
         read_cook_index_in_store(self, cook_id)
+    }
+
+    pub(crate) fn select_cook_candidate(
+        &self,
+        cook_id: &str,
+    ) -> Result<super::AgentTaskCookCandidateSelection> {
+        super::lifecycle_ops::select_cook_candidate_in_store(self, cook_id)
+    }
+
+    pub(crate) fn update_cook_index(
+        &self,
+        cook_id: &str,
+        mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,
+    ) -> Result<Option<AgentTaskCookIndex>> {
+        let path = self.cook_index_path(cook_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let mut index = read_json(&path)?;
+        if mutate(&mut index) {
+            write_json(&path, &index)?;
+        }
+        Ok(Some(index))
     }
 
     pub fn cook_index_exists(&self, cook_id: &str) -> bool {
@@ -1002,17 +1156,7 @@ pub(super) fn update_cook_index(
     cook_id: &str,
     mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,
 ) -> Result<Option<AgentTaskCookIndex>> {
-    let path = cook_index_path(&sanitize_run_id(cook_id))?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let mut index = read_json(&path)?;
-    if mutate(&mut index) {
-        // `write_json` is atomic; this makes the pointer update one durable
-        // index transaction without nesting the configuration lock it owns.
-        write_json(&path, &index)?;
-    }
-    Ok(Some(index))
+    default_store()?.update_cook_index(cook_id, mutate)
 }
 
 pub(super) fn record_exists(run_id: &str) -> Result<bool> {

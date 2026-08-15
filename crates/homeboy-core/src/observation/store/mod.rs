@@ -21,7 +21,7 @@ use super::records::{
     NewTriageItemRecord, RunCursor, RunListFilter, RunPage, RunRecord, RunStatus, TraceRunRecord,
     TraceSpanRecord, TriageItemRecord, TriagePullRequestSignals,
 };
-use crate::{paths, Error, Result};
+use crate::{Error, Result};
 pub use artifacts::directory_tree_sha256;
 pub use artifacts::{
     ArtifactListFilter, ArtifactListPage, ArtifactPublication, ArtifactPublicationType,
@@ -62,6 +62,7 @@ pub struct ObservationStore {
     connection: Connection,
     path: PathBuf,
     readonly: bool,
+    artifact_root: Option<PathBuf>,
 }
 
 pub fn database_path() -> Result<PathBuf> {

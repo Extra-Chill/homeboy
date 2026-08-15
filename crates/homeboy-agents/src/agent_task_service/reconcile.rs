@@ -505,6 +505,48 @@ mod tests {
     }
 
     #[test]
+    fn the_daemon_tick_preserves_a_fresh_planned_runner_submission() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-tick-planned-runner";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+            agent_task_lifecycle::mark_running(run_id).expect("running");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_pid");
+            })
+            .expect("controller owner removed");
+            let stale = agent_task_lifecycle::status(run_id).expect("pre-planning status");
+            assert_eq!(stale.metadata["stale_running"], true);
+            agent_task_lifecycle::record_lab_offload_phase(
+                run_id,
+                "homeboy-lab",
+                "materializing",
+                None,
+                None,
+                None,
+                Some(&plan),
+            )
+            .expect("planned runner submission recorded");
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("tick pass");
+
+            assert_eq!(report["reconciled"], 0, "{report}");
+            let refreshed = agent_task_lifecycle::status(run_id).expect("refreshed");
+            assert_eq!(
+                refreshed.state,
+                agent_task_lifecycle::AgentTaskRunState::Running
+            );
+            assert!(refreshed.metadata.get("stale_running").is_none());
+        });
+    }
+
+    #[test]
     fn a_reconciled_run_reports_the_state_it_was_left_in() {
         // The `reconciled` branch used to hardcode `Running` — reporting the
         // state of a run it had just cancelled, which made the whole report

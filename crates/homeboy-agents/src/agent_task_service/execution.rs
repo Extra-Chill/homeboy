@@ -81,6 +81,48 @@ where
 }
 
 pub(crate) fn run_loaded_plan_with_derived_cook_baseline<E>(
+    plan: AgentTaskPlan,
+    record_run_id: Option<&str>,
+    executor: E,
+    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    run_loaded_plan_with_derived_cook_baseline_in_optional_store(
+        None,
+        plan,
+        record_run_id,
+        executor,
+        derived_cook_baseline,
+        supplied_harvest_context,
+    )
+}
+
+pub(crate) fn run_loaded_plan_with_derived_cook_baseline_in_store<E>(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    plan: AgentTaskPlan,
+    record_run_id: Option<&str>,
+    executor: E,
+    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    run_loaded_plan_with_derived_cook_baseline_in_optional_store(
+        Some(lifecycle_store),
+        plan,
+        record_run_id,
+        executor,
+        derived_cook_baseline,
+        supplied_harvest_context,
+    )
+}
+
+fn run_loaded_plan_with_derived_cook_baseline_in_optional_store<E>(
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     mut plan: AgentTaskPlan,
     record_run_id: Option<&str>,
     executor: E,
@@ -95,42 +137,85 @@ where
         // the same materialized workspace contract. In particular, Cook's
         // derived baseline capability must bind the persisted task workspace.
         if let Err(error) = prepare_plan_for_execution(&mut plan, Some(run_id)) {
-            agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
-            agent_task_lifecycle::record_pre_execution_failure(
-                run_id,
-                &plan,
-                "prepare_plan_for_execution",
-                &error,
-            )?;
+            match lifecycle_store {
+                Some(store) => {
+                    store.submit_plan_with_current_runtime(&plan, run_id)?;
+                    store.record_pre_execution_failure(
+                        run_id,
+                        &plan,
+                        "prepare_plan_for_execution",
+                        &error,
+                    )?;
+                }
+                None => {
+                    agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+                    agent_task_lifecycle::record_pre_execution_failure(
+                        run_id,
+                        &plan,
+                        "prepare_plan_for_execution",
+                        &error,
+                    )?;
+                }
+            }
             return Err(error);
         }
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        match lifecycle_store {
+            Some(store) => {
+                store.submit_plan_with_current_runtime(&plan, run_id)?;
+            }
+            None => {
+                agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+            }
+        }
         let harvest_context = match supplied_harvest_context.clone().map(Ok).unwrap_or_else(
             crate::agent_task_scheduler::HarvestExecutionContext::from_current_process,
         ) {
             Ok(context) => context,
             Err(error) => {
-                agent_task_lifecycle::record_pre_execution_failure(
-                    run_id,
-                    &plan,
-                    "validate_harvest_transport",
-                    &error,
-                )?;
+                match lifecycle_store {
+                    Some(store) => store.record_pre_execution_failure(
+                        run_id,
+                        &plan,
+                        "validate_harvest_transport",
+                        &error,
+                    )?,
+                    None => agent_task_lifecycle::record_pre_execution_failure(
+                        run_id,
+                        &plan,
+                        "validate_harvest_transport",
+                        &error,
+                    )?,
+                };
                 return Err(error);
             }
         };
         if harvest_context.snapshot_signaled() {
             bind_runner_snapshot_workspace_attestations(&mut plan)?;
         }
-        agent_task_lifecycle::mark_running(run_id)?;
+        match lifecycle_store {
+            Some(store) => {
+                store.mark_running(run_id)?;
+            }
+            None => {
+                agent_task_lifecycle::mark_running(run_id)?;
+            }
+        }
         let aggregate = run_plan_with_scheduler(
+            lifecycle_store,
             plan.clone(),
             record_run_id,
             executor,
             derived_cook_baseline,
             harvest_context,
         )?;
-        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
+        match lifecycle_store {
+            Some(store) => {
+                store.record_run_aggregate(run_id, &plan, &aggregate)?;
+            }
+            None => {
+                agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
+            }
+        }
         return Ok(AgentTaskRunResult {
             exit_code: aggregate_exit_code(&aggregate),
             value: crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
@@ -145,6 +230,7 @@ where
         bind_runner_snapshot_workspace_attestations(&mut plan)?;
     }
     let aggregate = run_plan_with_scheduler(
+        lifecycle_store,
         plan.clone(),
         record_run_id,
         executor,
@@ -1151,8 +1237,14 @@ fn run_prepared_claimed<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    let aggregate =
-        run_plan_with_scheduler(plan.clone(), Some(&run_id), executor, None, harvest_context)?;
+    let aggregate = run_plan_with_scheduler(
+        None,
+        plan.clone(),
+        Some(&run_id),
+        executor,
+        None,
+        harvest_context,
+    )?;
     agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
@@ -1231,6 +1323,7 @@ fn preflight_queued_plan_provider_eligibility(plan: &AgentTaskPlan) -> Result<()
 }
 
 fn run_plan_with_scheduler<E>(
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     plan: AgentTaskPlan,
     run_id: Option<&str>,
     executor: E,
@@ -1242,6 +1335,10 @@ where
 {
     let scheduler =
         AgentTaskScheduler::new_controller(executor).with_harvest_context(harvest_context);
+    let scheduler = match lifecycle_store {
+        Some(store) => scheduler.with_lifecycle_store(store.clone()),
+        None => scheduler,
+    };
     match run_id {
         Some(run_id) => Ok(scheduler
             .with_run_id(run_id.to_string())
@@ -1411,11 +1508,111 @@ fn materialization_string(materialization: &Value, key: &str) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::Path;
+    use std::process::Command;
 
     use super::*;
-    use crate::agent_task_scheduler::{
-        AgentTaskManagedService, AgentTaskManagedServiceLifecycle, AgentTaskPlan,
+    use crate::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
+        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AgentTaskWorkspaceMode,
+        AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
+    use crate::agent_task_scheduler::{
+        AgentTaskExecutionContext, AgentTaskManagedService, AgentTaskManagedServiceLifecycle,
+        AgentTaskPlan, HarvestExecutionContext,
+    };
+
+    #[derive(Clone)]
+    struct SuccessfulExecutor;
+
+    impl AgentTaskExecutorAdapter for SuccessfulExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            if let Some(root) = request.workspace.root.as_deref() {
+                std::fs::write(
+                    Path::new(root).join("rooted-change.txt"),
+                    format!("change from {}\n", request.task_id),
+                )
+                .expect("write provider change");
+            }
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("succeeded".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: serde_json::json!({}),
+            }
+        }
+    }
+
+    fn one_task_plan(plan_id: &str, workspace: &Path) -> AgentTaskPlan {
+        AgentTaskPlan::new(
+            plan_id,
+            vec![AgentTaskRequest {
+                schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: "same-task".to_string(),
+                group_key: None,
+                parent_plan_id: Some(plan_id.to_string()),
+                executor: AgentTaskExecutor {
+                    backend: "test".to_string(),
+                    selector: None,
+                    runtime_selection: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: Value::Null,
+                },
+                instructions: "execute the rooted task".to_string(),
+                inputs: Value::Null,
+                source_refs: Vec::new(),
+                workspace: AgentTaskWorkspace {
+                    mode: AgentTaskWorkspaceMode::Existing,
+                    root: Some(workspace.display().to_string()),
+                    ..Default::default()
+                },
+                component_contracts: Vec::new(),
+                policy: AgentTaskPolicy::default(),
+                limits: AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
+                runtime_tools: Vec::new(),
+                metadata: Value::Null,
+            }],
+        )
+    }
+
+    fn initialize_workspace(path: &Path) {
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("run git fixture command");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "agent@example.test"]);
+        git(&["config", "user.name", "Agent"]);
+        std::fs::write(path.join("base.txt"), "base\n").expect("write base fixture");
+        git(&["add", "base.txt"]);
+        git(&["commit", "-m", "base"]);
+    }
 
     fn invalid_service() -> AgentTaskManagedService {
         AgentTaskManagedService {
@@ -1459,5 +1656,69 @@ mod tests {
             homeboy_core::ErrorCode::ValidationInvalidArgument
         );
         assert!(error.message.contains("cleanup_deadline_ms"));
+    }
+
+    #[test]
+    fn local_execution_isolates_identical_run_ids_in_explicit_lifecycle_stores() {
+        let first = homeboy_core::test_support::HermeticTestContext::new();
+        let second = homeboy_core::test_support::HermeticTestContext::new();
+        let first_store = agent_task_lifecycle::AgentTaskLifecycleStore::new(first.path_roots());
+        let second_store = agent_task_lifecycle::AgentTaskLifecycleStore::new(second.path_roots());
+        let first_workspace = tempfile::tempdir().expect("first workspace");
+        let second_workspace = tempfile::tempdir().expect("second workspace");
+        initialize_workspace(first_workspace.path());
+        initialize_workspace(second_workspace.path());
+        let run_id = "same-local-follow-up-run";
+
+        for (store, plan_id, workspace) in [
+            (
+                &first_store,
+                "first-local-follow-up",
+                first_workspace.path(),
+            ),
+            (
+                &second_store,
+                "second-local-follow-up",
+                second_workspace.path(),
+            ),
+        ] {
+            let result = run_loaded_plan_with_derived_cook_baseline_in_store(
+                store,
+                one_task_plan(plan_id, workspace),
+                Some(run_id),
+                SuccessfulExecutor,
+                None,
+                Some(HarvestExecutionContext::default()),
+            )
+            .expect("execute through the explicit lifecycle store");
+            assert_eq!(result.exit_code, 0);
+
+            let record = store.read_record(run_id).expect("rooted terminal record");
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Succeeded
+            );
+            assert_eq!(
+                record.metadata["provider_executions"][0]["state"],
+                "succeeded"
+            );
+            assert!(
+                record.metadata["provider_executions"][0]["post_provider_cleanup_finished_at"]
+                    .is_string()
+            );
+            let aggregate = store.read_aggregate(run_id).expect("rooted aggregate");
+            let patch_path = aggregate.outcomes[0].artifacts[0]
+                .path
+                .as_deref()
+                .map(Path::new)
+                .expect("harvested patch path");
+            assert!(patch_path.starts_with(store.artifact_root()));
+            assert!(patch_path.exists());
+            let scratch_index = store.data_root().join("controller-scratch/resources.json");
+            let scratch = std::fs::read_to_string(scratch_index).expect("rooted scratch index");
+            assert!(scratch.contains(run_id));
+        }
+
+        assert_ne!(first_store.run_dir(run_id), second_store.run_dir(run_id));
     }
 }

@@ -71,7 +71,39 @@ pub fn promote_with_checkpoint(
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
     let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
-    let mut report = promote_with_provider_and_checkpoint(options, &mut provider, &mut checkpoint)?;
+    let mut report = promote_with_provider_and_checkpoint_internal(
+        options,
+        &mut provider,
+        &mut checkpoint,
+        None,
+    )?;
+    if let Some(provenance) = provider.provenance() {
+        report.provenance["worktree_provider"] = provenance.clone();
+    }
+    if let Some(runner_id) = crate::agent_task_lifecycle::execution_runner_id() {
+        report.provenance["lab_offload"] = json!({
+            "runner_id": runner_id,
+            "source_aggregate": report.source.path,
+            "source_artifact": report.patch_artifact.path,
+            "target_worktree": report.to_worktree,
+            "target_workspace": report.target.path,
+        });
+    }
+    Ok(report)
+}
+
+pub(crate) fn promote_with_checkpoint_in_observation_store(
+    options: AgentTaskPromotionOptions,
+    observation_store: &homeboy_core::observation::ObservationStore,
+    mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
+) -> Result<AgentTaskPromotionReport> {
+    let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
+    let mut report = promote_with_provider_and_checkpoint_internal(
+        options,
+        &mut provider,
+        &mut checkpoint,
+        Some(observation_store),
+    )?;
     if let Some(provenance) = provider.provenance() {
         report.provenance["worktree_provider"] = provenance.clone();
     }
@@ -95,6 +127,24 @@ pub fn resume_promoted_patch(
     target_path: &Path,
     previous: &Value,
 ) -> Result<AgentTaskPromotionReport> {
+    resume_promoted_patch_internal(options, target_path, previous, None)
+}
+
+pub(crate) fn resume_promoted_patch_in_observation_store(
+    options: AgentTaskPromotionOptions,
+    target_path: &Path,
+    previous: &Value,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<AgentTaskPromotionReport> {
+    resume_promoted_patch_internal(options, target_path, previous, Some(observation_store))
+}
+
+fn resume_promoted_patch_internal(
+    options: AgentTaskPromotionOptions,
+    target_path: &Path,
+    previous: &Value,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+) -> Result<AgentTaskPromotionReport> {
     validate_resume_provenance(&options, target_path, previous)?;
     let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
         Error::validation_invalid_json(
@@ -110,6 +160,7 @@ pub fn resume_promoted_patch(
         &outcome.task_id,
         options.source_run_id.as_deref(),
         options.source_path.as_deref(),
+        observation_store,
     )?;
     let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
         Error::internal_io(
@@ -467,6 +518,30 @@ pub(super) fn promote_with_provider_and_checkpoint(
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
+    promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, None)
+}
+
+#[cfg(test)]
+pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
+    options: AgentTaskPromotionOptions,
+    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<AgentTaskPromotionReport> {
+    promote_with_provider_and_checkpoint_internal(
+        options,
+        provider,
+        checkpoint,
+        Some(observation_store),
+    )
+}
+
+fn promote_with_provider_and_checkpoint_internal(
+    options: AgentTaskPromotionOptions,
+    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+) -> Result<AgentTaskPromotionReport> {
     validate_workspace_handle(&options.to_worktree)?;
     let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
         Error::validation_invalid_json(
@@ -517,6 +592,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             &options,
             provider,
             checkpoint,
+            observation_store,
             &source_kind,
             &outcome,
             None,
@@ -540,6 +616,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             &options,
             provider,
             checkpoint,
+            observation_store,
             &source_kind,
             &outcome,
             None,
@@ -548,7 +625,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
     }
 
     let artifact = match if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable {
-        select_recoverable_patch_artifact(&outcome, &options)
+        select_recoverable_patch_artifact(&outcome, &options, observation_store)
     } else {
         select_patch_artifact(&outcome, options.artifact_id.as_deref())
     } {
@@ -559,6 +636,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
                     &options,
                     provider,
                     checkpoint,
+                    observation_store,
                     &source_kind,
                     &outcome,
                     None,
@@ -579,11 +657,10 @@ pub(super) fn promote_with_provider_and_checkpoint(
             None,
         ));
     }
-    let gate_feedback_baseline = bind_gate_feedback_baseline(gate_feedback_baseline_for_artifact(
-        &source_for_provenance,
-        &outcome,
-        &artifact,
-    )?)?;
+    let gate_feedback_baseline = bind_gate_feedback_baseline_internal(
+        gate_feedback_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?,
+        observation_store,
+    )?;
     let promotion_chain_baseline =
         promotion_chain_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?;
     let destination_baseline = promotion_chain_baseline
@@ -595,6 +672,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
         &outcome.task_id,
         options.source_run_id.as_deref(),
         options.source_path.as_deref(),
+        observation_store,
     )?;
     let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
         Error::internal_io(
@@ -609,6 +687,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
                 &options,
                 provider,
                 checkpoint,
+                observation_store,
                 &source_kind,
                 &outcome,
                 Some(&artifact),
@@ -979,6 +1058,13 @@ fn gate_feedback_baseline_for_artifact(
 /// identity before a follow-up can reuse a dirty destination. Older baselines
 /// without source identity retain their existing strict path/hash contract.
 pub(crate) fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Option<Value>> {
+    bind_gate_feedback_baseline_internal(baseline, None)
+}
+
+fn bind_gate_feedback_baseline_internal(
+    baseline: Option<Value>,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+) -> Result<Option<Value>> {
     let Some(mut baseline) = baseline else {
         return Ok(None);
     };
@@ -1042,14 +1128,28 @@ pub(crate) fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Opt
                 None,
             )
         })?;
-    let (record_id, _) = crate::agent_task_lifecycle::verified_controller_artifact_projection(
-        &run_id,
-        &task_id,
-        &artifact_id,
-        &kind,
-        &sha256,
-        None,
-    )?
+    let projection = match observation_store {
+        Some(store) => {
+            crate::agent_task_lifecycle::verified_controller_artifact_projection_in_store(
+                store,
+                &run_id,
+                &task_id,
+                &artifact_id,
+                &kind,
+                &sha256,
+                None,
+            )?
+        }
+        None => crate::agent_task_lifecycle::verified_controller_artifact_projection(
+            &run_id,
+            &task_id,
+            &artifact_id,
+            &kind,
+            &sha256,
+            None,
+        )?,
+    };
+    let (record_id, _) = projection
     .ok_or_else(|| Error::validation_invalid_argument(
         "gate_feedback_candidate_baseline",
         format!(
@@ -1245,6 +1345,7 @@ fn promote_committed_changes(
     options: &AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
     source_kind: &str,
     outcome: &AgentTaskOutcome,
     artifact: Option<&AgentTaskArtifact>,
@@ -1271,9 +1372,14 @@ fn promote_committed_changes(
             None,
         ));
     }
-    let retained_patch_path =
-        retain_committed_changes_artifact(options, outcome, &patch, &committed_patch.sha256)?
-            .unwrap_or_else(|| committed_patch.patch_path.clone());
+    let retained_patch_path = retain_committed_changes_artifact(
+        options,
+        outcome,
+        &patch,
+        &committed_patch.sha256,
+        observation_store,
+    )?
+    .unwrap_or_else(|| committed_patch.patch_path.clone());
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
     // Keep committed-change promotion on the same atomic base-validation
     // boundary as artifact promotion: no apply or checkpoint may precede a
@@ -1293,10 +1399,11 @@ fn promote_committed_changes(
             .map(str::trim)
             .is_none_or(str::is_empty);
     let provider_patch = write_normalized_patch(&normalized_patch.content)?;
-    let gate_feedback_baseline = bind_gate_feedback_baseline(
+    let gate_feedback_baseline = bind_gate_feedback_baseline_internal(
         artifact
             .and_then(|artifact| artifact.metadata.get("gate_feedback_baseline"))
             .cloned(),
+        observation_store,
     )?;
     let mut command_evidence = Vec::new();
     let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
@@ -1433,16 +1540,24 @@ fn promote_committed_changes(
 
 /// Retain the controller-generated committed delta before its producer path can
 /// be cleaned up. Only an existing controller run may own this projection.
-fn retain_committed_changes_artifact(
+pub(super) fn retain_committed_changes_artifact(
     options: &AgentTaskPromotionOptions,
     outcome: &AgentTaskOutcome,
     patch: &str,
     sha256: &str,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<Option<PathBuf>> {
     let Some(run_id) = options.source_run_id.as_deref() else {
         return Ok(None);
     };
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let ambient_store;
+    let store = match observation_store {
+        Some(store) => store,
+        None => {
+            ambient_store = homeboy_core::observation::ObservationStore::open_initialized()?;
+            &ambient_store
+        }
+    };
     if store.get_run(run_id)?.is_none() {
         return Ok(None);
     }
@@ -2367,8 +2482,10 @@ pub(crate) fn select_patch_artifact(
 fn select_recoverable_patch_artifact(
     outcome: &AgentTaskOutcome,
     options: &AgentTaskPromotionOptions,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<AgentTaskArtifact> {
-    let canonical = canonical_recoverable_patch_artifacts(outcome, options)?;
+    let canonical =
+        canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)?;
     match canonical.artifacts.len() {
         1 => Ok(canonical.artifacts.into_iter().next().expect("one canonical patch")),
         0 => Err(Error::new(
@@ -2409,6 +2526,22 @@ pub fn canonical_recoverable_patch_artifacts(
     outcome: &AgentTaskOutcome,
     options: &AgentTaskPromotionOptions,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
+    canonical_recoverable_patch_artifacts_internal(outcome, options, None)
+}
+
+pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<CanonicalRecoverablePatchArtifacts> {
+    canonical_recoverable_patch_artifacts_internal(outcome, options, Some(observation_store))
+}
+
+fn canonical_recoverable_patch_artifacts_internal(
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
+) -> Result<CanonicalRecoverablePatchArtifacts> {
     let mut candidates = outcome
         .artifacts
         .iter()
@@ -2435,6 +2568,7 @@ pub fn canonical_recoverable_patch_artifacts(
             &outcome.task_id,
             options.source_run_id.as_deref(),
             options.source_path.as_deref(),
+            observation_store,
         ) {
             Ok(path) => path,
             Err(error) => {
@@ -2522,13 +2656,20 @@ fn resolve_artifact_path(
     task_id: &str,
     source_run_id: Option<&str>,
     source_path: Option<&Path>,
+    observation_store: Option<&homeboy_core::observation::ObservationStore>,
 ) -> Result<PathBuf> {
     if let Some(run_id) = source_run_id {
-        if let Some(projected) =
-            crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
+        let projected = match observation_store {
+            Some(store) => {
+                crate::agent_task_lifecycle::verified_controller_artifact_projection_path_in_store(
+                    store, run_id, task_id, artifact,
+                )?
+            }
+            None => crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
                 run_id, task_id, artifact,
-            )?
-        {
+            )?,
+        };
+        if let Some(projected) = projected {
             return Ok(projected);
         }
     }
