@@ -23,7 +23,8 @@ use crate::runner_staging_operation::{
     RemoteRunnerStagingEnvelope, RemoteRunnerStagingReceipt, RemoteRunnerStagingTransport,
     RunnerSourceArtifact, RunnerStagingArtifacts, SourcePackageEntryKind,
     REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY, REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY,
-    REMOTE_RUNNER_STAGING_CAPABILITY, REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA,
+    REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY, REMOTE_RUNNER_STAGING_CAPABILITY,
+    REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA,
 };
 use crate::{broker_submit_token_for_runner, RunnerSession, RunnerTunnelMode};
 
@@ -269,7 +270,8 @@ struct StoredStage {
 #[serde(deny_unknown_fields)]
 struct StagingIntent {
     envelope: RemoteRunnerStagingEnvelope,
-    source_artifact: RunnerSourceArtifact,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_artifact: Option<RunnerSourceArtifact>,
     state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runner_job_id: Option<String>,
@@ -367,13 +369,16 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 None,
             ));
         }
-        let transfer = envelope
+        let source_artifact = envelope
             .materialization
             .source_artifact
             .as_ref()
-            .expect("envelope validation requires source artifact");
-        let bytes = transfer.decode_verified()?;
-        let source_artifact = transfer.descriptor();
+            .map(|transfer| {
+                transfer
+                    .decode_verified()
+                    .map(|bytes| (transfer.descriptor(), bytes))
+            })
+            .transpose()?;
         let _lock = self.admission_lock()?;
         let mut state = self.load()?;
         let key = &envelope.handoff.idempotency_key;
@@ -386,7 +391,9 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                     None,
                 ));
             }
-            self.verify_source_artifact(&source_artifact)?;
+            if let Some((artifact, _)) = &source_artifact {
+                self.verify_source_artifact(artifact)?;
+            }
             return Ok(existing.receipt.clone());
         }
 
@@ -395,7 +402,9 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             .entry(key.clone())
             .or_insert_with(|| StagingIntent {
                 envelope: envelope.clone(),
-                source_artifact: source_artifact.clone(),
+                source_artifact: source_artifact
+                    .as_ref()
+                    .map(|(artifact, _)| artifact.clone()),
                 state: "intent_created".to_string(),
                 runner_job_id: None,
             });
@@ -403,7 +412,9 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
 
         // The lock covers materialization and receipt publication. Concurrent
         // requests therefore observe one durable admission, not two writes.
-        self.persist_source_artifact(&source_artifact, &bytes)?;
+        if let Some((artifact, bytes)) = &source_artifact {
+            self.persist_source_artifact(artifact, bytes)?;
+        }
         // Source bytes are now durable before any queue entry can become claimable.
         state.intents.get_mut(key).expect("intent").state = "source_ready".to_string();
         self.persist(&state)?;
@@ -427,7 +438,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
             handoff: DirectLabHandoffReceipt::accepted(&envelope.handoff, runner_job_id),
             artifacts: RunnerStagingArtifacts {
-                source_artifact: Some(source_artifact),
+                source_artifact: source_artifact.map(|(artifact, _)| artifact),
                 ..artifacts
             },
         };
@@ -676,7 +687,9 @@ impl<M: RunnerStagingMaterializer> RemoteRunnerStagingTransport for RunnerStagin
         self.compatible
             && (matches!(
                 capability,
-                REMOTE_RUNNER_STAGING_CAPABILITY | REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY
+                REMOTE_RUNNER_STAGING_CAPABILITY
+                    | REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY
+                    | REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY
             ) || (cfg!(unix) && capability == REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY))
     }
     fn stage_durable(
@@ -908,6 +921,7 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
     fn capabilities(&self, _runner_id: &str) -> Result<Vec<String>> {
         let mut capabilities = vec![
             REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
+            REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
             REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
         ];
         if cfg!(unix) {
@@ -957,8 +971,8 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
             .materialization
             .source_artifact
             .as_ref()
-            .expect("validated source artifact")
-            .descriptor();
+            .map(crate::runner_staging_operation::SourceArtifactTransfer::descriptor);
+        let workspace = request.envelope.materialization.workspace.clone();
         let receipt = transport
             .store
             .stage_durable_with_submit(&request.envelope, |envelope| {
@@ -968,7 +982,9 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
                         project_id: None,
                         operation: "runner_staged_execution".to_string(),
                         command: envelope.handoff.recipe.normalized_args.clone(),
-                        cwd: None,
+                        cwd: workspace
+                            .as_ref()
+                            .map(|workspace| workspace.remote_cwd.clone()),
                         env: std::collections::HashMap::new(),
                         secret_env_names: Vec::new(),
                         secret_env_plan: Default::default(),
@@ -985,6 +1001,7 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
                         metadata: Some(serde_json::json!({
                             "submission_key": envelope.handoff.idempotency_key,
                             "staged_source_artifact": source_artifact,
+                            "staged_workspace_materialization": workspace,
                         })),
                     },
                 )?;
@@ -1316,6 +1333,7 @@ mod tests {
             session: direct_session,
             capabilities: vec![
                 REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
+                REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
                 REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
             ],
         };
@@ -1330,6 +1348,7 @@ mod tests {
             session: reverse_session,
             capabilities: vec![
                 REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
+                REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
                 REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
             ],
         };

@@ -26,8 +26,8 @@ use homeboy_core::{Error, Result};
 
 use crate::direct_lab_handoff::DirectLabHandoffEnvelope;
 use crate::runner_staging_operation::{
-    RemoteRunnerStagingEnvelope, RunnerMaterializationAuthority, SealedSourceAuthority,
-    SourceArtifactTransfer,
+    ControllerWorkspaceMaterialization, RemoteRunnerStagingEnvelope,
+    RunnerMaterializationAuthority, SealedSourceAuthority, SourceArtifactTransfer,
 };
 use crate::{LabOffloadCommand, LabOffloadRequest};
 
@@ -1126,8 +1126,52 @@ fn submit_deferred_runner_staging(
         )
     })?;
     let digest = format!("sha256:{}", content_hash::sha256_hex(&sealed_payload));
-    let source_artifact =
-        SourceArtifactTransfer::from_directory(format!("source-{run_id}"), &source_path)?;
+    let (source_artifact, workspace) =
+        match SourceArtifactTransfer::from_directory(format!("source-{run_id}"), &source_path) {
+            Ok(artifact) => (Some(artifact), None),
+            Err(artifact_error) => {
+                // Large clean Git worktrees are staged through the existing
+                // controller-routed bundle authority. Non-Git sources retain the
+                // bounded sealed-artifact contract and surface their original
+                // containment/filtering failure.
+                let git_status = std::process::Command::new("git")
+                    .args(["status", "--porcelain=v1"])
+                    .current_dir(&source_path)
+                    .output()
+                    .ok()
+                    .filter(|output| output.status.success());
+                let Some(git_status) = git_status else {
+                    return Err(artifact_error);
+                };
+                if !git_status.stdout.is_empty() {
+                    return Err(artifact_error);
+                }
+                let stage =
+                    crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage(
+                        request,
+                        crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(
+                            &recipe.command,
+                        ),
+                        crate::lab_plan::base_lab_plan(None),
+                        runner_id,
+                        &source_path,
+                        &["homeboy".to_string()],
+                        request.job_overrides.workspace_root.as_deref(),
+                        Some(run_id.to_string()),
+                        &recipe.normalized_args,
+                        Some(run_id),
+                    )?;
+                (
+                    None,
+                    Some(ControllerWorkspaceMaterialization::new(
+                        stage.remote_cwd.clone(),
+                        stage.remote_cwd,
+                        stage.synced.snapshot_identity,
+                        canonical_digest(plan)?,
+                    )),
+                )
+            }
+        };
     let handoff = DirectLabHandoffEnvelope::new(
         homeboy_product_identity::build_identity().display,
         recipe,
@@ -1146,7 +1190,8 @@ fn submit_deferred_runner_staging(
                     ))
                 })?,
             ),
-            source_artifact: Some(source_artifact),
+            source_artifact,
+            workspace,
         },
     )?;
     let mut transport =
@@ -4375,12 +4420,50 @@ mod tests {
 
             let source = home.path().join("source");
             std::fs::create_dir_all(&source).expect("create source");
-            std::fs::write(source.join("input.txt"), "staged-source\n").expect("write source");
+            // Exceed the sealed artifact bound with a clean Git worktree. The
+            // deferred controller must stage this through its Git authority,
+            // never ask the reverse worker to reach the private origin.
+            std::fs::write(
+                source.join("input.txt"),
+                [b"staged-source\n".as_slice(), &vec![b'x'; 4 * 1024 * 1024]].concat(),
+            )
+            .expect("write source");
+            for args in [
+                vec!["init"],
+                vec!["config", "user.email", "fixture@example.test"],
+                vec!["config", "user.name", "Fixture"],
+                vec!["add", "input.txt"],
+                vec!["commit", "-m", "fixture"],
+            ] {
+                assert!(std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("run git")
+                    .success());
+            }
+            let origin = home.path().join("origin.git");
+            assert!(std::process::Command::new("git")
+                .args(["init", "--bare", origin.to_str().expect("origin path")])
+                .status()
+                .expect("create origin")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    origin.to_str().expect("origin path")
+                ])
+                .current_dir(&source)
+                .status()
+                .expect("set origin")
+                .success());
             let output = home.path().join("worker-output.txt");
             let args = vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                format!("cat input.txt | tee {}", output.display()),
+                format!("grep -o staged-source input.txt | tee {}", output.display()),
             ];
             let plan = homeboy_agents::agent_task_scheduler::AgentTaskPlan::new(
                 "authenticated-reverse-staging",
@@ -4397,6 +4480,8 @@ mod tests {
                 );
             request.source_path = Some(&source);
             request.durable_agent_task_plan = Some(&plan);
+            request.job_overrides.workspace_root =
+                Some(home.path().join("runner-workspaces").display().to_string());
             let pre_provider = || {
                 Err(Error::internal_unexpected(
                     "fixture typed pre-provider daemon admission failure",
@@ -4452,6 +4537,27 @@ mod tests {
                 .get(uuid::Uuid::parse_str(&job_id).expect("job id"))
                 .expect("broker job");
             assert_eq!(job.status, JobStatus::Succeeded);
+            let staging_store = homeboy_core::paths::runner_session_file("lab")
+                .expect("session path")
+                .with_file_name("lab-staging/store.json");
+            let staged: Value = serde_json::from_slice(
+                &std::fs::read(staging_store).expect("read runner staging store"),
+            )
+            .expect("parse runner staging store");
+            let workspace = staged
+                .pointer(&format!(
+                    "/stages/{run_id}/envelope/materialization/workspace"
+                ))
+                .expect("controller-routed workspace materialization");
+            assert!(workspace.get("source_snapshot_id").is_some());
+            assert!(
+                staged
+                    .pointer(&format!(
+                        "/stages/{run_id}/envelope/materialization/source_artifact"
+                    ))
+                    .is_none(),
+                "over-bound Git source must not cross the bounded artifact channel"
+            );
             let results = broker.store.events(job.id).expect("terminal evidence");
             assert_eq!(
                 results

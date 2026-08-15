@@ -16,13 +16,17 @@ use std::path::{Component, Path};
 #[cfg(unix)]
 use std::process::Command;
 
+use homeboy_core::engine::canonical_json::canonical_json_bytes;
 use homeboy_core::{Error, Result};
+use homeboy_engine_primitives::content_hash;
 
 use crate::direct_lab_handoff::{DirectLabHandoffEnvelope, DirectLabHandoffReceipt};
 
-pub const REMOTE_RUNNER_STAGING_SCHEMA: &str = "homeboy/remote-runner-staging/v1";
+pub const REMOTE_RUNNER_STAGING_SCHEMA: &str = "homeboy/remote-runner-staging/v2";
 pub const REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA: &str = "homeboy/remote-runner-staging-receipt/v1";
-pub const REMOTE_RUNNER_STAGING_CAPABILITY: &str = "remote-runner-staging/v1";
+pub const REMOTE_RUNNER_STAGING_CAPABILITY: &str = "remote-runner-staging/v2";
+pub const REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY: &str =
+    "remote-runner-source-materialization/v2";
 pub const REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY: &str = "remote-runner-source-artifact/v1";
 pub const REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY: &str =
     "remote-runner-source-artifact/v2";
@@ -1574,6 +1578,58 @@ pub struct RunnerMaterializationAuthority {
     pub source: SealedSourceAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_artifact: Option<SourceArtifactTransfer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<ControllerWorkspaceMaterialization>,
+}
+
+/// A controller-routed workspace has already crossed the controller-to-runner
+/// boundary. It identifies the runner-owned execution target without exporting
+/// controller paths or reopening the runner's private Git-origin access.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControllerWorkspaceMaterialization {
+    pub schema: String,
+    pub workspace_id: String,
+    pub remote_cwd: String,
+    pub source_snapshot_id: String,
+    pub durable_plan_digest: String,
+}
+
+pub const CONTROLLER_WORKSPACE_MATERIALIZATION_SCHEMA: &str =
+    "homeboy/controller-workspace-materialization/v1";
+
+impl ControllerWorkspaceMaterialization {
+    pub fn new(
+        workspace_id: impl Into<String>,
+        remote_cwd: impl Into<String>,
+        source_snapshot_id: impl Into<String>,
+        durable_plan_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: CONTROLLER_WORKSPACE_MATERIALIZATION_SCHEMA.to_string(),
+            workspace_id: workspace_id.into(),
+            remote_cwd: remote_cwd.into(),
+            source_snapshot_id: source_snapshot_id.into(),
+            durable_plan_digest: durable_plan_digest.into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != CONTROLLER_WORKSPACE_MATERIALIZATION_SCHEMA
+            || self.workspace_id.trim().is_empty()
+            || self.remote_cwd.trim().is_empty()
+            || self.source_snapshot_id.trim().is_empty()
+            || !self.durable_plan_digest.starts_with("sha256:")
+        {
+            return Err(Error::validation_invalid_argument(
+                "controller_workspace_materialization",
+                "remote staging requires a v1 runner workspace target, source identity, and durable-plan digest",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl RunnerMaterializationAuthority {
@@ -1591,18 +1647,16 @@ impl RunnerMaterializationAuthority {
             ));
         }
         self.source.validate()?;
-        self.source_artifact
-            .as_ref()
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "source_artifact",
-                    "remote staging requires a transferable source artifact before admission",
-                    Some(self.authority_id.clone()),
-                    None,
-                )
-            })?
-            .decode_verified()
-            .map(|_| ())
+        match (&self.source_artifact, &self.workspace) {
+            (Some(artifact), None) => artifact.decode_verified().map(|_| ()),
+            (None, Some(workspace)) => workspace.validate(),
+            _ => Err(Error::validation_invalid_argument(
+                "source_materialization",
+                "remote staging requires exactly one bounded source artifact or controller-materialized workspace",
+                Some(self.authority_id.clone()),
+                None,
+            )),
+        }
     }
 }
 
@@ -1647,13 +1701,32 @@ impl RemoteRunnerStagingEnvelope {
         {
             return Err(Error::validation_invalid_argument(
                 "remote_runner_staging",
-                "remote staging requires its v1 schema, bound handoff identities, and no controller-local source path",
+                "remote staging requires its v2 schema, bound handoff identities, and no controller-local source path",
                 Some(self.handoff.run_id.clone()),
                 None,
             ));
         }
         self.handoff.recipe.validate_for_runner_staging()?;
-        self.materialization.validate()
+        self.materialization.validate()?;
+        if let Some(workspace) = &self.materialization.workspace {
+            let plan = canonical_json_bytes(&self.handoff.durable_plan).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("canonicalize staged durable plan".to_string()),
+                )
+            })?;
+            if workspace.durable_plan_digest
+                != format!("sha256:{}", content_hash::sha256_hex(&plan))
+            {
+                return Err(Error::validation_invalid_argument(
+                    "controller_workspace_materialization.durable_plan_digest",
+                    "controller-materialized workspace is not bound to this durable plan",
+                    Some(self.handoff.run_id.clone()),
+                    None,
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1692,18 +1765,21 @@ impl RemoteRunnerStagingReceipt {
                 None,
             ));
         }
-        self.artifacts
-            .source_artifact
-            .as_ref()
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "remote_runner_staging_receipt.source_artifact",
-                    "remote staging receipt is missing its immutable source artifact",
+        match (
+            &self.artifacts.source_artifact,
+            &envelope.materialization.workspace,
+        ) {
+            (Some(artifact), None) => artifact.validate()?,
+            (None, Some(_)) => {}
+            _ => {
+                return Err(Error::validation_invalid_argument(
+                    "remote_runner_staging_receipt.source_materialization",
+                    "remote staging receipt does not match its accepted source materialization",
                     Some(envelope.handoff.run_id.clone()),
                     None,
-                )
-            })?
-            .validate()?;
+                ));
+            }
+        }
         self.handoff.validate_for(&envelope.handoff)
     }
 }
@@ -1745,7 +1821,17 @@ pub fn submit_remote_runner_staging(
             Vec::new(),
         ));
     }
-    if !transport.supports_capability(REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY) {
+    if !transport.supports_capability(REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY) {
+        return Err(Error::runner_capability_missing(
+            &envelope.handoff.runner_id,
+            "versioned runner source materialization",
+            vec![REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string()],
+            Vec::new(),
+        ));
+    }
+    if envelope.materialization.source_artifact.is_some()
+        && !transport.supports_capability(REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY)
+    {
         return Err(Error::runner_capability_missing(
             &envelope.handoff.runner_id,
             "sealed runner source artifact transfer",
@@ -1797,6 +1883,8 @@ pub(crate) mod tests_support {
         }
         fn supports_capability(&self, capability: &str) -> bool {
             (self.compatible && capability == REMOTE_RUNNER_STAGING_CAPABILITY)
+                || (self.compatible
+                    && capability == REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY)
                 || (self.source_artifact_compatible
                     && capability == REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY)
                 || (self.symlink_artifact_compatible
@@ -1903,6 +1991,7 @@ pub(crate) mod tests_support {
                     "source-package-1",
                     b"source package",
                 )),
+                workspace: None,
             },
         )
         .expect("sealed envelope")
@@ -1954,6 +2043,36 @@ pub(crate) mod tests_support {
         assert!(submit_remote_runner_staging(&mut disconnected, &envelope).is_err());
         assert_eq!(disconnected.calls, 0);
         assert_eq!(disconnected.provider_budget, 0);
+    }
+
+    #[test]
+    fn controller_materialized_workspace_is_accepted_without_source_bytes() {
+        let mut envelope = envelope();
+        let durable_plan_digest = format!(
+            "sha256:{}",
+            content_hash::sha256_hex(
+                &canonical_json_bytes(&envelope.handoff.durable_plan).expect("canonical plan"),
+            )
+        );
+        envelope.materialization.source_artifact = None;
+        envelope.materialization.workspace = Some(ControllerWorkspaceMaterialization::new(
+            "runner-workspace-1",
+            "/runner/workspaces/run-1",
+            "git:abc123",
+            durable_plan_digest,
+        ));
+        let receipt = submit_remote_runner_staging(&mut transport(), &envelope)
+            .expect("accept controller-materialized source");
+        assert!(receipt.artifacts.source_artifact.is_none());
+        assert_eq!(
+            envelope
+                .materialization
+                .workspace
+                .as_ref()
+                .expect("workspace")
+                .remote_cwd,
+            "/runner/workspaces/run-1"
+        );
     }
 
     #[test]

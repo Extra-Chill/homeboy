@@ -1006,7 +1006,39 @@ fn materialize_staged_source_artifact(
     job_id: &str,
     envelope: &mut RunnerExecutionEnvelope,
 ) -> Result<()> {
-    let Some(source) = envelope.metadata.get("staged_source_artifact") else {
+    if let Some(workspace) = envelope
+        .metadata
+        .get("staged_workspace_materialization")
+        .filter(|workspace| !workspace.is_null())
+    {
+        let workspace: crate::runner_staging_operation::ControllerWorkspaceMaterialization =
+            serde_json::from_value(workspace.clone()).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "staged_workspace_materialization",
+                    format!("invalid staged workspace materialization: {error}"),
+                    None,
+                    None,
+                )
+            })?;
+        workspace.validate()?;
+        let dispatch = envelope.dispatch.as_ref().ok_or_else(|| {
+            Error::internal_unexpected("staged runner job has no execution dispatch")
+        })?;
+        if dispatch.cwd.as_deref() != Some(workspace.remote_cwd.as_str()) {
+            return Err(Error::validation_invalid_argument(
+                "staged_workspace_materialization",
+                "staged runner workspace does not match the claimed execution target",
+                Some(workspace.workspace_id),
+                None,
+            ));
+        }
+        return Ok(());
+    }
+    let Some(source) = envelope
+        .metadata
+        .get("staged_source_artifact")
+        .filter(|source| !source.is_null())
+    else {
         return Ok(());
     };
     let source = serde_json::from_value(source.clone()).map_err(|error| {
