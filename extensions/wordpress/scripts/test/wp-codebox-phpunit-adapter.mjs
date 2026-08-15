@@ -451,9 +451,13 @@ function phpunitChangedTestFiles() {
   const scoped = process.env.HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES;
   const raw = scoped === undefined || scoped === '' ? process.env.HOMEBOY_CHANGED_TEST_FILES || '' : scoped;
   const entries = raw.split('\n').map((entry) => entry.trim()).filter(Boolean);
-  const selected = scoped === undefined || scoped === ''
-    ? entries.filter((entry) => /(?:Test\.php|\/test-[^/]*\.php)$/.test(`/${entry}`))
-    : entries;
+  const selected = entries.filter((entry) => /(?:Test\.php|\/test-[^/]*\.php)$/.test(`/${entry}`));
+  if (scoped !== undefined && scoped !== '') {
+    const rejected = entries.filter((entry) => !selected.includes(entry));
+    if (rejected.length > 0) {
+      throw new Error(`HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES contains non-PHPUnit paths: ${rejected.join(', ')}`);
+    }
+  }
   return [...new Set(selected)];
 }
 function canonicalMounts(value) {
