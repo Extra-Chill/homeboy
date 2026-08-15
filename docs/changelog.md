@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.2] - 2026-08-15
+
+### Changed
+- root Cook promotion stores
+
+### Fixed
+- clear stale planned handoffs
+
 ## [0.350.1] - 2026-08-15
 
 ### Changed
