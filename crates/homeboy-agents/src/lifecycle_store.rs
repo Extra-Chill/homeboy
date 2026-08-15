@@ -155,6 +155,37 @@ impl AgentTaskLifecycleStore {
         super::record_pre_execution_failure_in_store(self, run_id, plan, phase, error)
     }
 
+    pub fn claim_cook_operation(
+        &self,
+        run_id: &str,
+        operation_key: &str,
+        lease: Duration,
+    ) -> Result<super::ClaimOutcome> {
+        super::operation_claims::claim_cook_operation_in_store(self, run_id, operation_key, lease)
+    }
+
+    pub fn complete_cook_operation(
+        &self,
+        run_id: &str,
+        operation_key: &str,
+        result: Value,
+    ) -> Result<()> {
+        super::operation_claims::complete_cook_operation_in_store(
+            self,
+            run_id,
+            operation_key,
+            result,
+        )
+    }
+
+    pub fn operation_claim(
+        &self,
+        run_id: &str,
+        operation_key: &str,
+    ) -> Result<Option<super::OperationClaim>> {
+        super::operation_claims::operation_claim_in_store(self, run_id, operation_key)
+    }
+
     pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {
         read_controller_plan_in_store(self, run_id)
     }

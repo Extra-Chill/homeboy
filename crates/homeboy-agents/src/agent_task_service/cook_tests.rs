@@ -1405,6 +1405,150 @@ fn pre_artifact_interruption_claim_is_restart_and_concurrent_controller_idempote
 }
 
 #[test]
+fn pre_artifact_interruption_claim_isolated_store_pairs_recover_identical_ids() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_recipe_store = CookRecipeStore::new(left_context.path_roots());
+    let right_recipe_store = CookRecipeStore::new(right_context.path_roots());
+    let left_lifecycle_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_lifecycle_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let cook_id = "same-pre-artifact-cook";
+    let run_id = "same-pre-artifact-run";
+    let mut left_options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    left_options.initial_run_id = run_id.to_string();
+    left_options.initial_plan.plan_id = "left-pre-artifact-plan".to_string();
+    let mut right_options =
+        batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    right_options.initial_run_id = run_id.to_string();
+    right_options.initial_plan.plan_id = "right-pre-artifact-plan".to_string();
+    left_recipe_store
+        .persist_initial_recipe(&left_options)
+        .expect("persist left recipe");
+    let left_plan = left_recipe_store
+        .load_recipe(cook_id)
+        .expect("load left recipe")
+        .attempts[0]
+        .plan
+        .clone();
+    right_recipe_store
+        .persist_initial_recipe(&right_options)
+        .expect("persist right recipe");
+    let right_plan = right_recipe_store
+        .load_recipe(cook_id)
+        .expect("load right recipe")
+        .attempts[0]
+        .plan
+        .clone();
+    left_lifecycle_store
+        .submit_plan_with_runtime_admission(&left_plan, run_id, |_| {
+            Ok(serde_json::json!({ "store": "left" }))
+        })
+        .expect("seed left lifecycle");
+    right_lifecycle_store
+        .submit_plan_with_runtime_admission(&right_plan, run_id, |_| {
+            Ok(serde_json::json!({ "store": "right" }))
+        })
+        .expect("seed right lifecycle");
+    let barrier = Arc::new(Barrier::new(2));
+
+    let (left_result, right_result) = std::thread::scope(|scope| {
+        let left_barrier = Arc::clone(&barrier);
+        let recipe_store = left_recipe_store.clone();
+        let lifecycle_store = left_lifecycle_store.clone();
+        let plan = left_plan.clone();
+        let left = scope.spawn(move || {
+            left_barrier.wait();
+            claim_pre_artifact_interruption_retry_with_stores(
+                (&recipe_store, &lifecycle_store),
+                cook_id,
+                1,
+                run_id,
+                &plan,
+                false,
+            )
+            .expect("claim left retry")
+            .expect("left retry acquired")
+        });
+        let right_barrier = Arc::clone(&barrier);
+        let recipe_store = right_recipe_store.clone();
+        let lifecycle_store = right_lifecycle_store.clone();
+        let plan = right_plan.clone();
+        let right = scope.spawn(move || {
+            right_barrier.wait();
+            claim_pre_artifact_interruption_retry_with_stores(
+                (&recipe_store, &lifecycle_store),
+                cook_id,
+                1,
+                run_id,
+                &plan,
+                false,
+            )
+            .expect("claim right retry")
+            .expect("right retry acquired")
+        });
+        (left.join().unwrap(), right.join().unwrap())
+    });
+
+    assert_eq!(left_result.0, 2);
+    assert_eq!(right_result.0, 2);
+    assert_ne!(left_result.1, right_result.1);
+    for (recipe_store, lifecycle_store, plan, expected_plan_id, expected_result) in [
+        (
+            &left_recipe_store,
+            &left_lifecycle_store,
+            &left_plan,
+            "left-pre-artifact-plan",
+            &left_result,
+        ),
+        (
+            &right_recipe_store,
+            &right_lifecycle_store,
+            &right_plan,
+            "right-pre-artifact-plan",
+            &right_result,
+        ),
+    ] {
+        let persisted = recipe_store.load_recipe(cook_id).expect("load recipe");
+        assert_eq!(persisted.attempts[1].plan, *plan);
+        let persisted_claim = lifecycle_store
+            .operation_claim(run_id, &pre_artifact_interruption_operation_key(run_id))
+            .expect("read completed operation claim")
+            .expect("completed operation claim exists");
+        assert_eq!(
+            persisted_claim.result.as_ref().unwrap()["next_run_id"],
+            expected_result.1
+        );
+        let resumed = claim_pre_artifact_interruption_retry_with_stores(
+            (recipe_store, lifecycle_store),
+            cook_id,
+            1,
+            run_id,
+            plan,
+            false,
+        )
+        .expect("resume completed claim")
+        .expect("completed retry retained");
+        assert_eq!(&resumed, expected_result);
+        let recipe = recipe_store.load_recipe(cook_id).expect("load recipe");
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[1].plan.plan_id, expected_plan_id);
+        let claim = lifecycle_store
+            .operation_claim(run_id, &pre_artifact_interruption_operation_key(run_id))
+            .expect("read operation claim")
+            .expect("operation claim exists");
+        assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
+        assert_eq!(
+            claim.result.as_ref().unwrap()["next_run_id"],
+            expected_result.1
+        );
+    }
+    assert_ne!(
+        left_lifecycle_store.run_dir(run_id),
+        right_lifecycle_store.run_dir(run_id)
+    );
+}
+
+#[test]
 fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
     let _env_lock = homeboy_core::test_support::env_lock();
     let prior = std::env::var_os(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV);

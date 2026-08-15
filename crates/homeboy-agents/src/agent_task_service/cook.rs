@@ -14,7 +14,7 @@ use crate::agent_task_cook_loop::{
 use crate::agent_task_dispatch_plan::{build_dispatch_plan, validate_single_cook_prompt_source};
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
 use crate::agent_task_gate::VerifyGateOptions;
-use crate::agent_task_lifecycle;
+use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore};
 use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -255,18 +255,46 @@ fn claim_pre_artifact_interruption_retry(
     run_id: &str,
     plan: &AgentTaskPlan,
 ) -> Result<Option<(u32, String)>> {
-    let store = CookRecipeStore::from_current_data_root()?;
-    claim_pre_artifact_interruption_retry_with_store(&store, cook_id, attempt, run_id, plan, false)
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    claim_pre_artifact_interruption_retry_with_stores(
+        (&recipe_store, &lifecycle_store),
+        cook_id,
+        attempt,
+        run_id,
+        plan,
+        false,
+    )
 }
 
 fn claim_pre_artifact_interruption_retry_with_store(
-    store: &CookRecipeStore,
+    recipe_store: &CookRecipeStore,
     cook_id: &str,
     attempt: u32,
     run_id: &str,
     plan: &AgentTaskPlan,
     replace_semantic_attempt: bool,
 ) -> Result<Option<(u32, String)>> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    claim_pre_artifact_interruption_retry_with_stores(
+        (recipe_store, &lifecycle_store),
+        cook_id,
+        attempt,
+        run_id,
+        plan,
+        replace_semantic_attempt,
+    )
+}
+
+fn claim_pre_artifact_interruption_retry_with_stores(
+    stores: (&CookRecipeStore, &AgentTaskLifecycleStore),
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    replace_semantic_attempt: bool,
+) -> Result<Option<(u32, String)>> {
+    let (recipe_store, lifecycle_store) = stores;
     let next_attempt = if replace_semantic_attempt {
         attempt
     } else {
@@ -281,7 +309,7 @@ fn claim_pre_artifact_interruption_retry_with_store(
     };
     let operation_key = pre_artifact_interruption_operation_key(run_id);
     let recipe_next_attempt = || {
-        store.load_recipe(cook_id).map(|recipe| {
+        recipe_store.load_recipe(cook_id).map(|recipe| {
             recipe
                 .attempts
                 .iter()
@@ -290,7 +318,7 @@ fn claim_pre_artifact_interruption_retry_with_store(
         })
     };
 
-    match agent_task_lifecycle::claim_cook_operation(
+    match lifecycle_store.claim_cook_operation(
         run_id,
         &operation_key,
         PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE,
@@ -302,11 +330,11 @@ fn claim_pre_artifact_interruption_retry_with_store(
                 agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt)
             };
             if replace_semantic_attempt {
-                store.record_recipe_attempt_replacement(cook_id, run_id, &next_run_id)?;
+                recipe_store.record_recipe_attempt_replacement(cook_id, run_id, &next_run_id)?;
             } else {
-                store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
+                recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
             }
-            agent_task_lifecycle::complete_cook_operation(
+            lifecycle_store.complete_cook_operation(
                 run_id,
                 &operation_key,
                 serde_json::json!({
@@ -336,7 +364,7 @@ fn claim_pre_artifact_interruption_retry_with_store(
             // A crash after recipe append but before claim completion is safe to
             // finish: the immutable next attempt is already fully identified.
             if let Some(next_run_id) = recipe_next_attempt()? {
-                agent_task_lifecycle::complete_cook_operation(
+                lifecycle_store.complete_cook_operation(
                     run_id,
                     &operation_key,
                     serde_json::json!({
