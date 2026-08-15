@@ -1169,6 +1169,8 @@ mod tests {
 
     #[test]
     fn automatic_cook_refusal_names_when_no_runner_is_eligible() {
+        let _lock = env_lock();
+        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
         let command = lab_supported_hot("agent-task cook/run-plan/retry --run");
         let unavailable = LabRunnerReadiness {
             state: crate::runner::runners::LabRunnerReadinessState::ConnectedIneligible,
@@ -1586,6 +1588,7 @@ mod tests {
     fn hot_lab_or_local_requires_admission_before_local_fallback() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
         let placement = crate::cli_surface::Placement::LabOrLocal;
         let disconnected = LabRunnerReadiness {
             state: crate::runner::runners::LabRunnerReadinessState::Disconnected,
