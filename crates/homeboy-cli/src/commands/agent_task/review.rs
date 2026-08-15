@@ -1125,8 +1125,21 @@ fn providers_with_catalog(
         ));
     }
     let route = resolve_provider_route(&args, &catalog);
+    // An absent `--backend` sweeps every declared backend instead of inheriting
+    // Cook's default-backend precondition (#12569).
+    let declared_backends = (args.validate_readiness && args.backend.is_none())
+        .then(|| declared_backend_readiness(&args, &catalog));
     let validated_provider = if args.validate_readiness {
-        validate_effective_provider_route(route.as_ref(), &catalog)?
+        match validate_effective_provider_route(route.as_ref(), &catalog) {
+            Ok(validated) => validated,
+            // The sweep already reports this backend's verdict alongside every
+            // other one, so an unusable effective route must not fail the
+            // command that exists to find a usable backend (#12569). A supplied
+            // `--backend` still fails fast: that query names one backend and
+            // has no fuller picture to report.
+            Err(_) if declared_backends.is_some() => None,
+            Err(error) => return Err(error),
+        }
     } else {
         None
     };
@@ -1245,6 +1258,7 @@ fn providers_with_catalog(
                 validated_provider,
                 route.as_ref(),
                 args.validate_readiness,
+                declared_backends,
             ),
             "diagnostics": shown_diagnostics,
             "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
@@ -1391,9 +1405,20 @@ fn resolve_provider_route(
     args: &ProvidersArgs,
     catalog: &AgentTaskProviderCatalog,
 ) -> Option<ProviderRoute> {
+    resolve_provider_route_for(args.backend.clone(), args.selector.clone(), catalog)
+}
+
+/// Resolve the route one explicit backend/selector pair produces. The
+/// per-backend readiness sweep reuses this so each backend's verdict comes from
+/// exactly the resolution `--backend <backend>` would take (#12569).
+fn resolve_provider_route_for(
+    backend: Option<String>,
+    selector: Option<String>,
+    catalog: &AgentTaskProviderCatalog,
+) -> Option<ProviderRoute> {
     let command = agent_task_dispatch_service::AgentTaskDispatchCommand {
-        backend: args.backend.clone(),
-        selector: args.selector.clone(),
+        backend,
+        selector,
         ..Default::default()
     };
     let route = match agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
@@ -1480,6 +1505,70 @@ fn validate_effective_provider_route(
     Ok(Some((backend.clone(), provider_id.clone())))
 }
 
+/// Readiness for every backend the catalog declares, one entry per backend.
+///
+/// `--validate-readiness` used to inherit Cook's default-backend precondition,
+/// so the command Cook's own error tells an operator to run in order to *find* a
+/// usable backend failed with that same missing-default error. The only way
+/// forward was guessing declared backends one at a time (#12569). An absent
+/// `--backend` now validates each declared backend exactly the way
+/// `--backend <backend> --validate-readiness` would, and reports every verdict:
+/// a backend that fails readiness is captured here, never propagated, because
+/// the failing backends are half of the picture this sweep exists to produce.
+fn declared_backend_readiness(
+    args: &ProvidersArgs,
+    catalog: &AgentTaskProviderCatalog,
+) -> Vec<Value> {
+    catalog
+        .backends()
+        .into_iter()
+        .map(|backend| {
+            // A selector is a provider id, so it belongs to exactly one
+            // backend. Apply it where it resolves and let every other backend
+            // report its own default provider instead of a selector mismatch.
+            let selector = args
+                .selector
+                .as_deref()
+                .filter(|selector| {
+                    catalog
+                        .providers()
+                        .iter()
+                        .any(|provider| provider.backend == backend && provider.id == *selector)
+                })
+                .map(str::to_string);
+            let route = resolve_provider_route_for(Some(backend.clone()), selector, catalog);
+            let (identity, failure) =
+                match validate_effective_provider_route(route.as_ref(), catalog) {
+                    Ok(identity) => (identity, None),
+                    Err(error) => (None, Some(error.message)),
+                };
+            let provider = identity.as_ref().and_then(|(_, provider_id)| {
+                catalog
+                    .providers()
+                    .iter()
+                    .find(|provider| &provider.id == provider_id)
+            });
+            let mut value = readiness_validation_projection(
+                identity.as_ref(),
+                provider,
+                route.as_ref(),
+                true,
+                None,
+            );
+            if let Some(object) = value.as_object_mut() {
+                object.insert("backend".to_string(), Value::String(backend));
+                if let Some(failure) = failure {
+                    object.insert(
+                        "reason".to_string(),
+                        Value::String(bounded_text(&failure, DEFAULT_TEXT_LIMIT)),
+                    );
+                }
+            }
+            value
+        })
+        .collect()
+}
+
 fn live_dispatch_readiness(
     provider: Option<&AgentTaskExecutorProvider>,
     validation_requested: bool,
@@ -1498,7 +1587,18 @@ fn readiness_validation_projection(
     provider: Option<&AgentTaskExecutorProvider>,
     route: Option<&ProviderRoute>,
     validation_requested: bool,
+    declared_backends: Option<Vec<Value>>,
 ) -> Value {
+    // Present only when the sweep ran (`--validate-readiness` with no
+    // `--backend`): `null` means "not swept", an array means "this is every
+    // declared backend", so an empty array stays distinguishable (#12569).
+    let ready_backends = declared_backends.as_ref().map(|backends| {
+        backends
+            .iter()
+            .filter(|backend| backend["validated"].as_bool().unwrap_or(false))
+            .filter_map(|backend| backend["backend"].as_str().map(str::to_string))
+            .collect::<Vec<_>>()
+    });
     let resolved = route.and_then(ProviderRoute::resolved);
     let (effective_backend, effective_provider_id, effective_model) = match resolved {
         Some(ProviderRoute::Resolved {
@@ -1525,6 +1625,11 @@ fn readiness_validation_projection(
         "route_state": route.map(ProviderRoute::state),
         "next_command": route.map(ProviderRoute::next_command),
         "reason": match route { Some(ProviderRoute::Blocked { reason, .. }) => Some(reason), _ => None },
+        // One entry per declared backend, each carrying this same projection
+        // plus the `backend` it describes, so an operator with no configured
+        // default can read which `--backend` value is usable here (#12569).
+        "backends": declared_backends,
+        "ready_backends": ready_backends,
     })
 }
 
@@ -2367,6 +2472,73 @@ mod tests {
         });
     }
 
+    /// `--validate-readiness` with no `--backend` and no configured default is
+    /// exactly the discovery question Cook's missing-default error sends the
+    /// operator here to answer, so it must sweep instead of inheriting Cook's
+    /// precondition — and a backend that fails readiness must be reported, not
+    /// propagated (#12569).
+    #[test]
+    fn providers_validate_readiness_without_backend_sweeps_every_declared_backend() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let mut ready = provider("ready.provider", "ready");
+            ready.readiness_invocation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "argv": ["sh", "-c", "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                }))
+                .expect("ready readiness invocation"),
+            );
+            let mut failing = provider("failing.provider", "failing");
+            failing.readiness_invocation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "argv": ["sh", "-c", "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"configuration\",\"retryable\":false,\"remediation\":\"install the executable\",\"reason\":\"executable_not_found\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                }))
+                .expect("failing readiness invocation"),
+            );
+            let mut args = providers_args();
+            args.validate_readiness = true;
+
+            let (output, status) =
+                providers_with_catalog(args, provider_catalog(vec![ready, failing]))
+                    .expect("an unusable backend is reported, not propagated");
+
+            assert_eq!(status, 0);
+            let validation = &output["readiness_validation"];
+            let backends = validation["backends"]
+                .as_array()
+                .expect("every declared backend is reported");
+            assert_eq!(backends.len(), 2);
+            let failing = backends
+                .iter()
+                .find(|backend| backend["backend"] == "failing")
+                .expect("failing backend readiness");
+            assert_eq!(failing["validated"], false);
+            assert!(
+                failing["reason"]
+                    .as_str()
+                    .expect("failure reason")
+                    .contains("executable_not_found"),
+                "the readiness failure detail is captured per backend"
+            );
+            let ready = backends
+                .iter()
+                .find(|backend| backend["backend"] == "ready")
+                .expect("ready backend readiness");
+            assert_eq!(ready["validated"], true);
+            assert_eq!(ready["effective_provider_id"], "ready.provider");
+            assert_eq!(ready["live_dispatch"], "validated");
+            assert_eq!(
+                validation["ready_backends"],
+                serde_json::json!(["ready"]),
+                "the usable --backend values are named directly"
+            );
+            // The effective route stays blocked because no default backend is
+            // configured; the sweep is what makes that recoverable.
+            assert_eq!(output["operator_summary"]["state"], "blocked");
+            assert_eq!(validation["validated"], false);
+        });
+    }
+
     #[test]
     fn providers_end_to_end_reports_ambiguous_and_missing_default_routes() {
         crate::test_support::with_isolated_home(|_| {
@@ -2507,11 +2679,15 @@ mod tests {
         );
 
         let projection =
-            readiness_validation_projection(Some(&identity), Some(&provider), None, true);
+            readiness_validation_projection(Some(&identity), Some(&provider), None, true, None);
 
         assert_eq!(projection["effective_backend"], "resolved-backend");
         assert_eq!(projection["effective_provider_id"], "resolved.provider");
         assert_eq!(projection["live_dispatch"], "validated");
+        // A single-backend query is not a sweep: it reports no per-backend
+        // readiness rather than an empty one (#12569).
+        assert!(projection["backends"].is_null());
+        assert!(projection["ready_backends"].is_null());
         assert!(projection.get("backend").is_none());
         assert!(projection.get("selector").is_none());
     }

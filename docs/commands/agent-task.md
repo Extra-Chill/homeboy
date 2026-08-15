@@ -1038,6 +1038,18 @@ on the selected runner before `agent-task cook` dispatches work internally, so a
 missing provider executable/config blocks the run before a multi-cell task wave
 is queued.
 
+Run `homeboy agent-task providers --validate-readiness` with **no** `--backend`
+to discover which backend to pass. Without `--backend` the command validates
+every declared backend and reports each verdict in
+`readiness_validation.backends[]` — one entry per backend, carrying the same
+fields as the single-backend `readiness_validation` object plus the `backend` it
+describes, with a failed backend's detail in its `reason`. The usable values are
+listed directly in `readiness_validation.ready_backends`. A backend that fails
+readiness is reported, not propagated, so this sweep answers `agent-task cook`'s
+missing-`--backend` error instead of failing with the same precondition (#12569).
+A supplied `--backend` still fails fast: that query names one backend and has no
+fuller picture to report.
+
 ## Repo-Local Gate Tasks
 
 Use `execution_kind: repo_local_gate` for deterministic, repo-local gate
