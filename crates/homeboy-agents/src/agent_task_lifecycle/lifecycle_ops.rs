@@ -2979,6 +2979,77 @@ pub struct AgentTaskRunnerProbePlan {
     pub controller_local: bool,
 }
 
+/// Bounded runner-owned evidence for a diagnostic read. Unlike status
+/// reconciliation, this never changes the durable lifecycle record.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskRunnerDiagnosticProbe {
+    pub performed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+const RUNNER_DIAGNOSTIC_EVENT_LIMIT: usize = 12;
+
+/// Read bounded evidence from the runner that owns an active or abnormal
+/// terminal run. Controller-local and healthy successful records remain fully
+/// local reads.
+pub fn runner_diagnostic_probe(record: &AgentTaskRunRecord) -> AgentTaskRunnerDiagnosticProbe {
+    let runner_id = record.runner_id().map(str::to_string);
+    let runner_job_id = record.runner_job_id().map(str::to_string);
+    let applicable = record.state == AgentTaskRunState::Running
+        || (record.state.is_terminal() && record.state != AgentTaskRunState::Succeeded);
+    let skipped_reason = if is_controller_local(record) {
+        Some(RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL)
+    } else if !applicable {
+        Some("healthy_terminal_record")
+    } else if runner_id.is_none() {
+        Some("missing_runner_id")
+    } else if runner_job_id.is_none() {
+        Some("missing_runner_job_id")
+    } else {
+        None
+    };
+    let mut probe = AgentTaskRunnerDiagnosticProbe {
+        performed: false,
+        skipped_reason,
+        runner_id,
+        runner_job_id,
+        snapshot: None,
+        error: None,
+    };
+    let (Some(runner_id), Some(runner_job_id)) =
+        (probe.runner_id.as_deref(), probe.runner_job_id.as_deref())
+    else {
+        return probe;
+    };
+    if probe.skipped_reason.is_some() {
+        return probe;
+    }
+    probe.performed = true;
+    match super::runner_continuation::with_runner_continuation(|provider| {
+        provider.runner_job_log_snapshot(runner_id, runner_job_id)
+    }) {
+        Ok(snapshot) => {
+            let event_count = snapshot.events.len();
+            probe.snapshot = Some(json!({
+                "job": snapshot.job,
+                "events": snapshot.events.into_iter().take(RUNNER_DIAGNOSTIC_EVENT_LIMIT).collect::<Vec<_>>(),
+                "events_omitted": event_count.saturating_sub(RUNNER_DIAGNOSTIC_EVENT_LIMIT),
+            }));
+        }
+        Err(error) => probe.error = Some(error.message),
+    }
+    probe
+}
+
 /// The record is fully controller-local; the runner is irrelevant to the answer.
 pub const RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL: &str = "controller_local_record";
 /// The caller explicitly asked for a local-only answer.

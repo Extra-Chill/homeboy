@@ -1578,15 +1578,23 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
 pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let target = resolve_cook_reader_target(&args.run_id, false)?;
     let run_id = &target.run_id;
-    // Keep diagnosis within the same durable-local inspection contract as
-    // status and logs; reconciliation is explicitly requested separately.
-    let record = agent_task_service_direct::persisted_status(run_id)?;
-    let aggregate = completed_run_aggregate(run_id).transpose()?;
+    // Diagnosis starts from the bounded controller-local snapshot, then adds a
+    // read-only runner snapshot only when that runner owns an abnormal run.
+    let durable_read = agent_task_lifecycle::durable_local_read(run_id)?;
+    let record = durable_read.record;
+    let aggregate = durable_read.aggregate;
+    let runner_diagnostic_probe = agent_task_lifecycle::runner_diagnostic_probe(&record);
     let mut hydrated_evidence = Vec::new();
     let mut total_hydrated_evidence = 0;
     let mut nested_reasons = persisted_cook_failure_diagnostic(&record)
         .into_iter()
         .collect::<Vec<_>>();
+    let runner_cancellation = runner_cancellation_diagnostic(&record);
+    let causal_phase = runner_cancellation
+        .as_ref()
+        .and_then(|diagnostic| diagnostic.data["causal_phase"].as_str())
+        .map(str::to_string);
+    nested_reasons.extend(runner_cancellation.clone());
     nested_reasons.extend(
         aggregate
             .as_ref()
@@ -1634,10 +1642,21 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         .as_ref()
         .map(missing_artifact_summaries)
         .unwrap_or_default();
-    let causal_chain = aggregate
+    let mut causal_chain = aggregate
         .as_ref()
         .map(causal_chain_from_aggregate)
         .unwrap_or_default();
+    if causal_chain.is_empty() {
+        if let Some(diagnostic) = runner_cancellation.as_ref() {
+            causal_chain.push(json!({
+                "task_id": diagnostic.task_id,
+                "surface": "runner",
+                "phase": diagnostic.data["causal_phase"],
+                "status": record.state,
+                "failure_classification": "runner_cancellation",
+            }));
+        }
+    }
     let retry = retry_replay_action(&record);
     let next_commands =
         diagnose_next_commands(&record, retry.action.as_ref(), retry.continuation.as_ref());
@@ -1653,10 +1672,13 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "hydrated_evidence": hydrated_evidence,
         "hydrated_evidence_total": total_hydrated_evidence,
         "diagnostic_collection": diagnostic_collection_projection(&diagnostic_truncations),
+        "causal_phase": causal_phase,
+        "runner_diagnostic_probe": runner_diagnostic_probe,
         "continuation_admission": record.metadata.get("cook_continuation_admission"),
         "retry_replay": retry.projection(),
         "next_commands": next_commands,
     });
+    attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     attach_cook_completion(&mut value, &record);
     if let Some(selection) = target.selection {
         value["candidate_selection"] = selection;
@@ -1683,6 +1705,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         record.runner_id(),
         retry.action.as_ref(),
         retry.continuation.as_ref(),
+        runner_cancellation.is_some(),
     );
     preserve_controller_owner_placement(&mut value, run_id);
     Ok((value, 0))
@@ -1772,6 +1795,7 @@ fn attach_diagnose_actionable(
     runner_id: Option<&str>,
     retry_action: Option<&CommandNextAction>,
     continuation_action: Option<&CommandNextAction>,
+    runner_cancellation: bool,
 ) {
     let run_id = record.run_id.as_str();
     let candidate_payload = candidate_result_payload(
@@ -1800,6 +1824,7 @@ fn attach_diagnose_actionable(
             missing_artifacts,
             runner_id,
             retry_action,
+            runner_cancellation,
         )
     };
     if let Value::Object(map) = value {
@@ -1830,6 +1855,7 @@ fn diagnose_next_actions(
     missing_artifacts: &[Value],
     runner_id: Option<&str>,
     retry_action: Option<&CommandNextAction>,
+    runner_cancellation: bool,
 ) -> (Vec<CommandNextAction>, &'static str) {
     let mut actions: Vec<CommandNextAction> = Vec::new();
     for failure in failures {
@@ -1840,6 +1866,11 @@ fn diagnose_next_actions(
     for action in missing_artifact_next_actions(run_id, missing_artifacts) {
         push_unique_next_action(&mut actions, action);
     }
+    if runner_cancellation {
+        for action in runner_cancellation_next_actions(run_id, runner_id, retry_action) {
+            push_unique_next_action(&mut actions, action);
+        }
+    }
     if actions.is_empty() {
         return (
             generic_diagnose_next_actions(run_id, retry_action),
@@ -1847,6 +1878,25 @@ fn diagnose_next_actions(
         );
     }
     (actions, DIAGNOSE_ACTION_BASIS_DIAGNOSIS)
+}
+
+/// A pre-provider runner cancellation is not an unclassified provider failure.
+/// Inspect the owning runner first; retry is included only when the persisted
+/// replay admission already proved it safe.
+fn runner_cancellation_next_actions(
+    run_id: &str,
+    runner_id: Option<&str>,
+    retry_action: Option<&CommandNextAction>,
+) -> Vec<CommandNextAction> {
+    let run = quote_arg(run_id);
+    let mut actions = vec![CommandNextAction::new(
+        "show the durable runner cancellation evidence",
+        format!("homeboy agent-task status {run} --full"),
+    )
+    .with_kind(CommandNextActionKind::Show)];
+    actions.extend(lost_runner_actions(runner_id));
+    actions.extend(retry_action.cloned());
+    actions
 }
 
 fn push_unique_next_action(actions: &mut Vec<CommandNextAction>, action: CommandNextAction) {
@@ -2506,6 +2556,7 @@ mod diagnose_actionable_tests {
             &[],
             runner_id,
             Some(&retry),
+            false,
         );
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         actions
@@ -2676,6 +2727,7 @@ mod diagnose_actionable_tests {
             &[],
             None,
             None,
+            false,
         );
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
@@ -2691,7 +2743,7 @@ mod diagnose_actionable_tests {
 
     #[test]
     fn a_run_with_no_diagnosis_at_all_falls_back_to_the_generic_set() {
-        let (actions, basis) = diagnose_next_actions("run-1", &[], &[], None, None);
+        let (actions, basis) = diagnose_next_actions("run-1", &[], &[], None, None, false);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
         assert_eq!(actions.len(), 3);
@@ -2704,7 +2756,7 @@ mod diagnose_actionable_tests {
             "missing": ["concept_packet", "design_packet"],
         })];
 
-        let (actions, basis) = diagnose_next_actions("run-1", &[], &missing, None, None);
+        let (actions, basis) = diagnose_next_actions("run-1", &[], &missing, None, None, false);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
@@ -2728,6 +2780,7 @@ mod diagnose_actionable_tests {
             &missing,
             None,
             None,
+            false,
         );
 
         let commands = commands(&actions);
@@ -2759,6 +2812,7 @@ mod diagnose_actionable_tests {
             &[],
             None,
             None,
+            false,
         );
 
         assert_eq!(
@@ -2766,6 +2820,24 @@ mod diagnose_actionable_tests {
             vec![
                 "homeboy agent-task evidence 'run with spaces' --task 'task with spaces' --failure-only",
                 "homeboy agent-task replay-provider-boundary 'run with spaces' --task 'task with spaces'",
+            ]
+        );
+    }
+
+    #[test]
+    fn runner_cancellation_uses_runner_evidence_before_a_proven_replay() {
+        let retry = owner_bound_retry_action("run-1", Some("homeboy-lab"), json!({}));
+        let (actions, basis) =
+            diagnose_next_actions("run-1", &[], &[], Some("homeboy-lab"), Some(&retry), true);
+
+        assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task status run-1 --full",
+                "homeboy runner status homeboy-lab",
+                "homeboy runner doctor homeboy-lab --repair",
+                "homeboy --runner homeboy-lab agent-task retry run-1 --run",
             ]
         );
     }
@@ -4262,6 +4334,31 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             json!({
                 "field": cause.get("field"),
             })
+        }),
+    })
+}
+
+/// Cancellation is controller-owned lifecycle evidence, even when the runner
+/// never produced an aggregate. Preserve its typed reason rather than treating
+/// a pre-provider cancellation as an unclassified provider failure.
+fn runner_cancellation_diagnostic(record: &AgentTaskRunRecord) -> Option<CollectedDiagnostic> {
+    let reason = record.metadata.get("cancel_reason")?.as_str()?;
+    if reason != "missing_runner_pid" {
+        return None;
+    }
+    Some(CollectedDiagnostic {
+        task_id: "runner".to_string(),
+        class: "agent_task.runner_missing_pid".to_string(),
+        message: "Runner-owned execution was cancelled before a runner PID was recorded."
+            .to_string(),
+        source: "runner_cancellation".to_string(),
+        data: json!({
+            "cancellation_reason": reason,
+            "causal_phase": "runner_submission",
+            "runner_id": record.runner_id(),
+            "runner_job_id": record.runner_job_id(),
+            "provider_executions_consumed": record.metadata.get("provider_executions_consumed"),
+            "runner_execution_status": record.metadata.pointer("/runner_execution_record/status"),
         }),
     })
 }

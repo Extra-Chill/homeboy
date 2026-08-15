@@ -1188,6 +1188,81 @@ fn diagnose_full_preserves_durable_promotion_io_details() {
 }
 
 #[test]
+fn diagnose_projects_missing_runner_pid_without_an_aggregate_and_keeps_replay_readiness() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-missing-runner-pid";
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.root = Some("/runner/workspace/homeboy".to_string());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = AgentTaskRunState::Cancelled;
+            record.metadata["runner_id"] = json!("homeboy-lab");
+            record.metadata["cancel_reason"] = json!("missing_runner_pid");
+            record.metadata["provider_executions_consumed"] = json!(0);
+            record.metadata["runner_execution_record"] = json!({
+                "status": "planned",
+                "runner_id": "homeboy-lab"
+            });
+        })
+        .expect("persist missing runner PID cancellation");
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose cancellation");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "agent_task.runner_missing_pid"
+        );
+        assert_eq!(diagnosis["causal_phase"], "runner_submission");
+        assert_eq!(
+            diagnosis["causal_chain"][0]["failure_classification"],
+            "runner_cancellation"
+        );
+        assert_eq!(diagnosis["runner_diagnostic_probe"]["performed"], false);
+        assert_eq!(
+            diagnosis["runner_diagnostic_probe"]["skipped_reason"],
+            "missing_runner_job_id"
+        );
+        assert_eq!(
+            diagnosis["durable_read"]["unavailable_sources"][0]["source"],
+            "aggregate"
+        );
+        assert_eq!(diagnosis["next_action_basis"], "diagnosis");
+        assert_eq!(diagnosis["retry_replay"]["readiness"], "ready");
+    });
+}
+
+#[test]
+fn diagnose_probes_a_runner_owned_terminal_record_when_the_job_is_known() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-runner-evidence";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = AgentTaskRunState::Cancelled;
+            record.metadata["runner_id"] = json!("homeboy-lab");
+            record.metadata["runner_job_id"] = json!("job-12506");
+        })
+        .expect("persist runner-owned cancellation");
+
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose runner-owned terminal record");
+
+        assert_eq!(diagnosis["runner_diagnostic_probe"]["performed"], true);
+        assert!(diagnosis["runner_diagnostic_probe"]["error"]
+            .as_str()
+            .expect("runner probe error")
+            .contains("runner subsystem is unavailable"));
+    });
+}
+
+#[test]
 fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
     with_temp_home(|| {
         let command = vec![
