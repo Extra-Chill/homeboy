@@ -219,6 +219,7 @@ mod store_init_tests {
                 connection: rusqlite::Connection::open(&path).expect("open test store"),
                 path: path.clone(),
                 readonly: false,
+                artifact_root: None,
             };
             let run = store
                 .start_run(sample_run("test", "homeboy"))

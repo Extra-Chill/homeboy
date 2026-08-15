@@ -2060,6 +2060,60 @@ fn status_marks_running_run_without_owner_as_stale() {
 }
 
 #[test]
+fn status_keeps_fresh_planned_runner_submission_live() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let run_id = "run-planned-runner-submission";
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+        mark_running(run_id).expect("running");
+        rewrite_record_for_test(run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .expect("metadata object")
+                .remove("runner_pid");
+        })
+        .expect("controller owner removed");
+        let stale = status(run_id).expect("pre-planning status loaded");
+        assert_eq!(stale.metadata["stale_running"], true);
+
+        record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "materializing",
+            None,
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("planned runner submission recorded");
+
+        let loaded = status(run_id).expect("status loaded");
+
+        assert_eq!(loaded.state, AgentTaskRunState::Running);
+        assert_eq!(
+            loaded.metadata["runner_execution_record"]["status"],
+            "planned"
+        );
+        assert!(loaded.metadata.get("stale_running").is_none());
+
+        rewrite_record_for_test(run_id, |record| {
+            record.updated_at = Some(
+                (chrono::Utc::now()
+                    - chrono::Duration::minutes(
+                        homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES,
+                    ))
+                .to_rfc3339(),
+            );
+        })
+        .expect("planned submission aged past heartbeat threshold");
+        let stale = status(run_id).expect("stale status loaded");
+        assert_eq!(stale.metadata["stale_running"], true);
+        assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
+    });
+}
+
+#[test]
 fn cancel_run_marks_queued_record_cancelled() {
     with_isolated_home(|_| {
         let plan = test_plan();

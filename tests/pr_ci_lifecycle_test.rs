@@ -134,6 +134,16 @@ fn ci_admits_only_the_configured_shard_budget_and_publishes_timing_evidence() {
     assert_eq!(config["queue_delay_slo_seconds"]["p99"], 600);
 
     let workflow = ci_workflow();
+    let test = job_section(workflow, "homeboy");
+    let shard_p95 = config["execution_slo_seconds"]["test_shard_p95"]
+        .as_u64()
+        .expect("Test shard p95");
+    let critical_p95 = config["execution_slo_seconds"]["required_critical_path_p95"]
+        .as_u64()
+        .expect("required critical-path p95");
+    assert!(test.contains(&format!("test-timeout-seconds: '{shard_p95}'")));
+    assert!(test.contains(&format!("execution-timeout-seconds: '{critical_p95}'")));
+
     let admission = job_section(workflow, "ci-capacity-admission");
     assert!(admission.contains("bash .github/ci-capacity-admission.sh"));
     let evidence = job_section(workflow, "ci-capacity-evidence");

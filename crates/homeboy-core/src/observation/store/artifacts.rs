@@ -235,8 +235,13 @@ impl ObservationStore {
                 // A concurrent publisher may be preparing the same logical
                 // artifact before either SQLite transaction commits. Its final
                 // bytes must therefore be owned by this publication token.
-                let stored_path =
-                    publication_artifact_path(&run.id, &publication.id, source, &publication_id)?;
+                let stored_path = publication_artifact_path(
+                    &self.artifact_root()?,
+                    &run.id,
+                    &publication.id,
+                    source,
+                    &publication_id,
+                )?;
                 let size_bytes = (publication.artifact_type == ArtifactPublicationType::File)
                     .then(|| i64::try_from(metadata.len()).ok())
                     .flatten();
@@ -871,7 +876,7 @@ impl ObservationStore {
             .filter(|id| !id.trim().is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let stored_path = persisted_artifact_path(run_id, &id, path)?;
+        let stored_path = persisted_artifact_path_at(&self.artifact_root()?, run_id, &id, path)?;
         preflight_artifact_capacity(&stored_path)?;
         let staged_path = staged_artifact_path(&stored_path, Uuid::new_v4());
         copy_artifact_file(path, &staged_path)?;
@@ -1118,7 +1123,7 @@ impl ObservationStore {
             ));
         }
         let created_at = chrono::Utc::now().to_rfc3339();
-        let stored_path = persisted_artifact_path(run_id, &id, path)?;
+        let stored_path = persisted_artifact_path_at(&self.artifact_root()?, run_id, &id, path)?;
         preflight_artifact_capacity(&stored_path)?;
         copy_artifact_directory(path, &stored_path)?;
         let path_string = stored_path.to_string_lossy().to_string();
@@ -1968,12 +1973,13 @@ impl ObservationStore {
 }
 
 fn publication_artifact_path(
+    artifact_root: &Path,
     run_id: &str,
     artifact_id: &str,
     source: &Path,
     publication_id: &str,
 ) -> Result<PathBuf> {
-    let canonical = persisted_artifact_path(run_id, artifact_id, source)?;
+    let canonical = persisted_artifact_path_at(artifact_root, run_id, artifact_id, source)?;
     let file_name = canonical
         .file_name()
         .and_then(|name| name.to_str())
@@ -2634,6 +2640,7 @@ mod tests {
                 connection,
                 path: database.clone(),
                 readonly: false,
+                artifact_root: None,
             };
             let staging = home.path().join("retry.staging");
             let final_path = home.path().join("retry.final");
