@@ -22,8 +22,8 @@ use crate::agent_task_secrets::validate_secret_env;
 use homeboy_core::{defaults, worktree, worktree_providers, Error, Result};
 
 use super::agent_task_dispatch_service::{
-    AgentTaskDispatchRequest, AgentTaskModelSelection, AgentTaskModelSelectionReason,
-    DispatchCoreInputs,
+    initial_provider_route_from_policy, AgentTaskDispatchRequest, AgentTaskModelSelection,
+    AgentTaskModelSelectionReason, DispatchCoreInputs,
 };
 
 mod command_policy;
@@ -151,44 +151,26 @@ pub fn build_dispatch_plan_with_provider_requirements(
     let client_context = dispatch_client_context(request)?;
     let mut provider_config =
         dispatch_provider_config(request, &repo, workspace_target.as_ref(), &client_context)?;
-    let mut policy_backend = request
-        .core
-        .resolved_provider_policy
+    let policy = request.core.resolved_provider_policy.clone();
+    let initial_route = policy.map(initial_provider_route_from_policy);
+    let policy_backend = initial_route
         .as_ref()
-        .map(|policy| policy.backend.clone())
+        .map(|route| route.backend.clone())
         .unwrap_or_else(|| request.backend.clone());
-    let mut policy_selector = request
-        .core
-        .resolved_provider_policy
+    let policy_selector = initial_route
         .as_ref()
-        .and_then(|policy| policy.selector.clone())
+        .and_then(|route| route.selector.clone())
         .or_else(|| request.selector.clone());
-    let mut policy_model = request
-        .core
-        .resolved_provider_policy
+    let policy_model = initial_route
         .as_ref()
-        .and_then(|policy| policy.model.clone())
+        .and_then(|route| route.model.clone())
         .or_else(|| request.model.clone());
-    let mut resolved_rotation = request
-        .core
-        .resolved_provider_policy
+    let resolved_rotation = initial_route
         .as_ref()
-        .and_then(|policy| policy.rotation.clone());
-    let rotation_selected_initial_model = request
-        .core
-        .resolved_provider_policy
+        .and_then(|route| route.rotation.clone());
+    let rotation_selected_initial_model = initial_route
         .as_ref()
-        .is_some_and(|policy| policy.rotation_starts_with_first_entry);
-    if rotation_selected_initial_model {
-        if let Some(rotation) = resolved_rotation.as_mut() {
-            if !rotation.entries.is_empty() {
-                let first = rotation.entries.remove(0);
-                policy_backend = first.backend.unwrap_or(policy_backend);
-                policy_selector = first.selector.or(policy_selector);
-                policy_model = first.model.or(policy_model);
-            }
-        }
-    }
+        .is_some_and(|route| route.rotation_selected_initial);
     let model_selection = AgentTaskModelSelection {
         requested: request.model.clone(),
         selected: policy_model.clone(),

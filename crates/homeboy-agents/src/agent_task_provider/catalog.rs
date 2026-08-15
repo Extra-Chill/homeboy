@@ -344,7 +344,7 @@ pub fn validate_provider_runner_readiness_for_backend(
     validate_provider_runner_readiness_for_backend_with_catalog(&catalog, backend, selector)
 }
 
-fn validate_provider_runner_readiness_for_backend_with_catalog(
+pub fn validate_provider_runner_readiness_for_backend_with_catalog(
     catalog: &AgentTaskProviderCatalog,
     backend: &str,
     selector: Option<&str>,

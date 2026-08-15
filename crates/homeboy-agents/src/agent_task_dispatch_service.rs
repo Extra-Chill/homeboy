@@ -147,6 +147,17 @@ pub struct AgentTaskDispatchRequest {
     pub backend_selection: Option<BackendSelection>,
 }
 
+/// The initial backend, provider selector, and model Cook will use after its
+/// configured rotation policy is applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTaskInitialProviderRoute {
+    pub backend: String,
+    pub selector: Option<String>,
+    pub model: Option<String>,
+    pub rotation: Option<AgentTaskProviderRotationPolicy>,
+    pub rotation_selected_initial: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentTaskDispatchReport {
     pub schema: &'static str,
@@ -377,13 +388,71 @@ pub fn controller_resolved_execution_policy(
     request: &AgentTaskDispatchRequest,
 ) -> ResolvedAgentTaskProviderPolicy {
     let catalog = AgentTaskProviderCatalog::discover();
-    let rotation = homeboy_core::defaults::load_config()
+    controller_resolved_execution_policy_with_sources(
+        request,
+        &catalog,
+        configured_rotation_policy(),
+    )
+}
+
+/// Resolve the initial provider route using the same default and rotation
+/// selection that Cook persists into its dispatch plan.
+pub fn resolve_cook_initial_provider_route(
+    command: AgentTaskDispatchCommand,
+) -> Result<AgentTaskInitialProviderRoute> {
+    let catalog = AgentTaskProviderCatalog::discover();
+    resolve_cook_initial_provider_route_with_catalog(command, &catalog)
+}
+
+/// Resolve Cook's initial route against a caller-supplied catalog. Controller
+/// preflight and provider introspection use this to share one exact selection.
+pub fn resolve_cook_initial_provider_route_with_catalog(
+    command: AgentTaskDispatchCommand,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<AgentTaskInitialProviderRoute> {
+    let request = resolve_dispatch_request(command)?;
+    Ok(initial_provider_route_from_policy(
+        controller_resolved_execution_policy_with_sources(
+            &request,
+            catalog,
+            configured_rotation_policy(),
+        ),
+    ))
+}
+
+fn configured_rotation_policy() -> Option<AgentTaskProviderRotationPolicy> {
+    homeboy_core::defaults::load_config()
         .agent_task
         .rotation
-        .and_then(|rotation| {
-            serde_json::from_value::<AgentTaskProviderRotationPolicy>(rotation).ok()
-        });
-    controller_resolved_execution_policy_with_sources(request, &catalog, rotation)
+        .and_then(|rotation| serde_json::from_value(rotation).ok())
+}
+
+/// Project the first invocation from a resolved provider policy. The dispatch
+/// plan builder uses this too, keeping operator introspection aligned with Cook.
+pub fn initial_provider_route_from_policy(
+    policy: ResolvedAgentTaskProviderPolicy,
+) -> AgentTaskInitialProviderRoute {
+    let mut backend = policy.backend;
+    let mut selector = policy.selector;
+    let mut model = policy.model;
+    let mut rotation = policy.rotation;
+    if policy.rotation_starts_with_first_entry {
+        if let Some(rotation) = rotation.as_mut() {
+            if !rotation.entries.is_empty() {
+                let first = rotation.entries.remove(0);
+                backend = first.backend.unwrap_or(backend);
+                selector = first.selector.or(selector);
+                model = first.model.or(model);
+            }
+        }
+    }
+    AgentTaskInitialProviderRoute {
+        backend,
+        selector,
+        model,
+        rotation,
+        rotation_selected_initial: policy.rotation_starts_with_first_entry,
+    }
 }
 
 fn controller_resolved_execution_policy_with_sources(
@@ -857,6 +926,58 @@ mod tests {
         assert_eq!(selection.backend, "opencode");
         assert_eq!(selection.source, BackendSelectionSource::Config);
         assert!(!selection.overrides_default);
+    }
+
+    #[test]
+    fn configured_default_projects_the_same_initial_cook_route() {
+        let request = resolve_dispatch_request_with_default_and_config(
+            command_with_backend(None),
+            |_| Ok(Some("opencode".to_string())),
+            || Some("opencode".to_string()),
+        )
+        .expect("configured default request");
+        let route =
+            initial_provider_route_from_policy(controller_resolved_execution_policy_with_sources(
+                &request,
+                &AgentTaskProviderCatalog::default(),
+                None,
+            ));
+
+        assert_eq!(route.backend, "opencode");
+        assert!(route.selector.is_none());
+        assert!(route.model.is_none());
+        assert!(route.rotation_selected_initial);
+    }
+
+    #[test]
+    fn unavailable_default_with_rotation_projects_the_first_rotation_route() {
+        let request = resolve_dispatch_request_with_default_and_config(
+            command_with_backend(None),
+            |_| Ok(Some("unavailable-default".to_string())),
+            || Some("unavailable-default".to_string()),
+        )
+        .expect("configured default request");
+        let route =
+            initial_provider_route_from_policy(controller_resolved_execution_policy_with_sources(
+                &request,
+                &AgentTaskProviderCatalog::default(),
+                Some(AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            backend: Some("available-rotation".to_string()),
+                            selector: Some("rotation-provider".to_string()),
+                            model: Some("rotation-model".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }),
+            ));
+
+        assert_eq!(route.backend, "available-rotation");
+        assert_eq!(route.selector.as_deref(), Some("rotation-provider"));
+        assert_eq!(route.model.as_deref(), Some("rotation-model"));
+        assert!(route.rotation_selected_initial);
     }
 
     #[test]
