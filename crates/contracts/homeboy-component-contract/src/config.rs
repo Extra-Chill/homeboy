@@ -243,6 +243,12 @@ pub struct GithubHostConfig {
 pub struct ComponentReleaseConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_release: Option<ComponentGithubReleaseConfig>,
+    /// Whether extension-provided registry or package publication is permitted.
+    ///
+    /// Absent preserves the extension capability's default behavior. Set this to
+    /// `false` when release assets are the component's deliverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<bool>,
     /// Allow contributors to edit `changelog_target` outside Homeboy releases.
     /// Disabled by default because configured changelogs are release-generated.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -262,6 +268,10 @@ pub struct ComponentReleaseConfig {
 impl ComponentReleaseConfig {
     pub fn is_default(value: &Self) -> bool {
         value == &Self::default()
+    }
+
+    pub fn publish_enabled(&self) -> bool {
+        self.publish.unwrap_or(true)
     }
 
     pub fn validate_package_coverage(&self) -> HomeboyResult<()> {
@@ -520,8 +530,19 @@ mod tests {
     fn manual_changelog_edit_policy_is_absent_when_defaulted() {
         let value = serde_json::to_value(ComponentReleaseConfig::default()).expect("serialize");
 
+        assert!(value.get("publish").is_none());
         assert!(value.get("allow_manual_changelog_edits").is_none());
         assert!(value.get("manual_version_targets").is_none());
         assert!(value.get("manual_release_lockfiles").is_none());
+    }
+
+    #[test]
+    fn release_publish_defaults_to_enabled_and_accepts_an_explicit_opt_out() {
+        let disabled: ComponentReleaseConfig =
+            serde_json::from_value(serde_json::json!({ "publish": false }))
+                .expect("release configuration");
+
+        assert!(ComponentReleaseConfig::default().publish_enabled());
+        assert!(!disabled.publish_enabled());
     }
 }

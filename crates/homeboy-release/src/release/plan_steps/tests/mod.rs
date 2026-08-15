@@ -46,6 +46,42 @@ fn test_build_preflight_steps() {
 }
 
 #[test]
+fn release_publish_defaults_to_extension_provided_registry_publication() {
+    let component = github_fixture_component();
+    let extension = release_extension("nodejs", &["release.package", "release.publish"]);
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        dry_run: true,
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[extension],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    assert_eq!(
+        steps
+            .iter()
+            .find(|step| step.id == "publish.nodejs")
+            .expect("public registry publish step")
+            .status,
+        PlanStepStatus::Ready
+    );
+}
+
+#[test]
 fn release_plan_marks_git_identity_ready_when_requested() {
     let options = ReleaseOptions {
         bump_type: "patch".to_string(),
@@ -649,6 +685,57 @@ fn skip_publish_with_package_provider_still_packages_before_github_release() {
     assert!(!ids.contains(&"publish.artifact-packager"));
     assert_eq!(
         steps[step_index(&ids, "cleanup")].needs,
+        vec!["github.release"]
+    );
+}
+
+#[test]
+fn release_publish_false_disables_registry_publication_but_keeps_github_assets() {
+    let mut component = github_fixture_component();
+    component.release.publish = Some(false);
+    let extension = release_extension("nodejs", &["release.package", "release.publish"]);
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        dry_run: true,
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[extension],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    let publish = steps
+        .iter()
+        .find(|step| step.id == "publish.nodejs")
+        .expect("disabled publish step remains visible");
+    assert_eq!(publish.status, PlanStepStatus::Disabled);
+    assert_eq!(
+        publish
+            .inputs
+            .get("reason")
+            .and_then(|value| value.as_str()),
+        Some("component release.publish=false")
+    );
+    assert!(steps.iter().any(|step| step.id == "package"));
+    assert!(steps.iter().any(|step| step.id == "github.release"));
+    assert_eq!(
+        steps
+            .iter()
+            .find(|step| step.id == "cleanup")
+            .expect("cleanup")
+            .needs,
         vec!["github.release"]
     );
 }

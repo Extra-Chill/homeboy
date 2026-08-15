@@ -1045,6 +1045,57 @@ mod tests {
     }
 
     #[test]
+    fn disabled_publish_step_is_not_dispatched() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let component_path = tempfile::tempdir().expect("component path");
+            let marker = component_path.path().join("publish-invoked");
+            let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+                "name": "Registry",
+                "version": "1.0.0",
+                "actions": [{
+                    "id": "release.publish",
+                    "label": "Publish release",
+                    "type": "command",
+                    "command": format!("touch {}", marker.display())
+                }]
+            }))
+            .expect("extension manifest");
+            extension.id = "registry".to_string();
+            homeboy_extension::save_manifest(&extension).expect("save extension manifest");
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: component_path.path().to_string_lossy().to_string(),
+                ..Component::default()
+            };
+            let options = ReleaseOptions::default();
+            let extensions = vec![extension];
+            let mut context = ReleaseExecutionContext {
+                component: &component,
+                extensions: &extensions,
+                component_id: "fixture",
+                options: &options,
+                state: ReleaseState::default(),
+                publish_failed: false,
+            };
+            let step = PlanStep::disabled("publish.registry", "publish.registry")
+                .input_value(
+                    "reason",
+                    serde_json::json!("component release.publish=false"),
+                )
+                .build();
+
+            assert!(execute_release_plan_step(&step, &mut context)
+                .expect("disabled publish dispatch")
+                .is_none());
+            assert!(
+                !marker.exists(),
+                "disabled publication must not invoke its action"
+            );
+            assert!(!context.publish_failed);
+        });
+    }
+
+    #[test]
     fn release_package_builds_once_and_validates_the_uploaded_durable_bytes() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let repo = tempfile::tempdir().expect("repo");

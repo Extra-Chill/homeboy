@@ -96,6 +96,7 @@ Component configuration defines buildable and deployable units stored in `compon
   - Deploy planning fails closed when a selection includes only part of a declared group. Select all coupled components explicitly or use `--all` for the project.
 - **`release`** (object): Component-scoped release configuration
   - **`enabled`** (boolean): Whether release pipeline is enabled
+  - **`publish`** (boolean): Whether extension-provided registry/package publication is permitted; defaults to enabled when absent. Set `false` for components delivered exclusively through GitHub Release assets. GitHub Release creation and asset upload remain enabled independently.
   - **`steps`** (array): Release step definitions
   - **`settings`** (object): Release pipeline settings
   - **`package_coverage`** (array): Optional ZIP completeness mappings for transformed archive layouts
