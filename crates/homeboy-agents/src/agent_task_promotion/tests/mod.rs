@@ -232,6 +232,16 @@ pub(super) fn record_controller_projection(
 ) -> PathBuf {
     let store =
         homeboy_core::observation::ObservationStore::open_initialized().expect("observation store");
+    record_controller_projection_in_store(&store, run_id, task_id, artifact_id, contents)
+}
+
+pub(super) fn record_controller_projection_in_store(
+    store: &homeboy_core::observation::ObservationStore,
+    run_id: &str,
+    task_id: &str,
+    artifact_id: &str,
+    contents: &str,
+) -> PathBuf {
     store
         .upsert_imported_run(&homeboy_core::observation::RunRecord {
             id: run_id.to_string(),

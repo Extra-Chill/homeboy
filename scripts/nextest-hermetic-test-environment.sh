@@ -53,9 +53,14 @@ hermetic_exec_probe() {
 
 hermetic_workspace_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 hermetic_tmp_parent=""
-for hermetic_candidate in "${TMPDIR:-/tmp}" /tmp /var/tmp /dev/shm; do
+# The outer Homeboy invocation exports its own durable TMPDIR. Nesting test
+# roots there makes short-path aliases resolve to a different physical path and
+# lets invocation cleanup own the parent of live test state. Prefer canonical
+# system roots; retain an unrelated caller TMPDIR as a portable fallback.
+for hermetic_candidate in /tmp /var/tmp /dev/shm "${TMPDIR:-}"; do
+    [ -n "$hermetic_candidate" ] || continue
     if hermetic_exec_probe "$hermetic_candidate"; then
-        hermetic_tmp_parent="$hermetic_candidate"
+        hermetic_tmp_parent="$(CDPATH= cd -- "$hermetic_candidate" && pwd -P)"
         break
     fi
 done

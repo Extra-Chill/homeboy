@@ -450,6 +450,7 @@ fn preview_placement_policy() -> Value {
 }
 
 fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
+    let argv = crate::command_capability::homeboy_owned_args(argv);
     let placement = argv
         .iter()
         .enumerate()
@@ -789,8 +790,12 @@ mod preview_tests {
             "--placement=lab-or-local".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
+            "--".to_string(),
+            "--placement=local".to_string(),
+            "--runner=forwarded".to_string(),
         ]);
         assert_eq!(policy["requested"], "lab-or-local");
+        assert_eq!(policy["runner"], Value::Null);
         assert_eq!(policy["route_executed"], false);
     }
 

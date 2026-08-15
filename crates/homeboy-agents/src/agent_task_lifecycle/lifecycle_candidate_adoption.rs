@@ -228,7 +228,16 @@ pub fn checkpoint_candidate_adoption_remediation(
     run_id: &str,
     remediation_run_id: &str,
 ) -> Result<()> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    checkpoint_candidate_adoption_remediation_in_store(&lifecycle_store, run_id, remediation_run_id)
+}
+
+pub(crate) fn checkpoint_candidate_adoption_remediation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    remediation_run_id: &str,
+) -> Result<()> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     let Some(attempt) = record.candidate_adoption.as_mut() else {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -247,7 +256,7 @@ pub fn checkpoint_candidate_adoption_remediation(
     attempt.remediation_status_command = Some(format!(
         "homeboy agent-task status {remediation_run_id} --full"
     ));
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(())
 }
 

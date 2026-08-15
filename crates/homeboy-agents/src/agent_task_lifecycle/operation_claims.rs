@@ -267,19 +267,20 @@ pub fn recover_completed_cook_operation(
 /// Failed claims retain their exact bounded diagnostic but are intentionally
 /// reclaimable by a later explicit continuation.
 pub fn fail_cook_operation(run_id: &str, operation_key: &str, result: Value) -> Result<()> {
-    transition_cook_operation(run_id, operation_key, "failed", result)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    fail_cook_operation_in_store(&lifecycle_store, run_id, operation_key, result)
 }
 
-fn transition_cook_operation(
+pub(crate) fn fail_cook_operation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     operation_key: &str,
-    state: &str,
     result: Value,
 ) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
     let now = now_timestamp();
     let mut found = false;
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         let Some(claim) = record
             .ensure_metadata_object()
             .get_mut(OPERATION_CLAIMS_KEY)
@@ -296,7 +297,7 @@ fn transition_cook_operation(
         if claim["state"] == json!("completed") {
             return false;
         }
-        claim["state"] = json!(state);
+        claim["state"] = json!("failed");
         claim["completed_at"] = json!(now);
         claim["result"] = result.clone();
         record.updated_at = Some(now.clone());

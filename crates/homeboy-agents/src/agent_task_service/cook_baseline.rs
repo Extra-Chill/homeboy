@@ -277,7 +277,22 @@ pub(crate) fn materialize_follow_up_baseline(
     source_run_id: &str,
     bound_task_id: &str,
 ) -> Result<CookFollowUpBaseline> {
-    materialize_follow_up_baseline_at(promotion, None, source_run_id, bound_task_id)
+    materialize_follow_up_baseline_at(promotion, None, None, source_run_id, bound_task_id)
+}
+
+pub(crate) fn materialize_follow_up_baseline_in_root(
+    promotion: &AgentTaskPromotionReport,
+    artifact_root: &std::path::Path,
+    source_run_id: &str,
+    bound_task_id: &str,
+) -> Result<CookFollowUpBaseline> {
+    materialize_follow_up_baseline_at(
+        promotion,
+        Some(artifact_root),
+        None,
+        source_run_id,
+        bound_task_id,
+    )
 }
 
 /// Replay unresolved failed gates against the immutable verified base. This is
@@ -519,7 +534,13 @@ pub(crate) fn re_materialize_follow_up_baseline(
     source_run_id: &str,
     bound_task_id: &str,
 ) -> Result<CookFollowUpBaseline> {
-    materialize_follow_up_baseline_at(promotion, Some(target_path), source_run_id, bound_task_id)
+    materialize_follow_up_baseline_at(
+        promotion,
+        None,
+        Some(target_path),
+        source_run_id,
+        bound_task_id,
+    )
 }
 
 /// Shared worktree/patch materialization logic. When `target_path` is `None` a
@@ -528,6 +549,7 @@ pub(crate) fn re_materialize_follow_up_baseline(
 /// recovery to re-materialize a reaped baseline at its original location).
 fn materialize_follow_up_baseline_at(
     promotion: &AgentTaskPromotionReport,
+    artifact_root: Option<&std::path::Path>,
     target_path: Option<&std::path::Path>,
     source_run_id: &str,
     bound_task_id: &str,
@@ -625,7 +647,11 @@ fn materialize_follow_up_baseline_at(
             // Same reasoning as the initial-candidate baseline above: a whole
             // working-tree checkout belongs under the artifact root, not in
             // the process temp dir where nothing can see or reap it (#11128).
-            let parent = homeboy_core::artifacts::root()?.join("cook-baseline");
+            let root = match artifact_root {
+                Some(root) => root.to_path_buf(),
+                None => homeboy_core::artifacts::root()?,
+            };
+            let parent = root.join("cook-baseline");
             std::fs::create_dir_all(&parent).map_err(|error| {
                 Error::internal_io(
                     error.to_string(),

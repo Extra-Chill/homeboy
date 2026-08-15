@@ -10,11 +10,13 @@ use super::super::cook_adoption::{
 use super::super::cook_baseline::git_output;
 use super::super::cook_promotion::{
     canonical_cook_patch_artifact_id, canonical_cook_recovery_run_id, cook_finalization_options,
-    cook_promotion_argv, cook_report, finalize_cook_pr_with_backend,
-    finalize_or_load_cook_pr_with_backend, moving_base_recovery_for_run,
-    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
-    persist_manual_finalization_intent, persist_manual_finalization_receipt,
-    persisted_promotion_for_attempt, prepare_manual_finalization_identity,
+    cook_finalization_options_with_stores, cook_promotion_argv, cook_report,
+    finalize_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend,
+    finalize_or_load_cook_pr_with_backend_with_stores, moving_base_recovery_for_run,
+    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
+    moving_base_recovery_report, next_moving_base_recovery, persist_manual_finalization_intent,
+    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
+    persisted_promotion_for_attempt_in_store, prepare_manual_finalization_identity,
     record_replacement_gate_proof, recover_cook_pr_with_backend,
     recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
     CookReportInput, MovingBaseCookRecovery,
@@ -594,46 +596,46 @@ fn durable_cook_inspection_reports_an_unsupported_run_schema() {
 }
 
 fn seed_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
+    let aggregate = review_form_aggregate(plan);
+    agent_task_lifecycle::record_run_aggregate(run_id, plan, &aggregate).unwrap();
+}
+
+fn review_form_aggregate(plan: &AgentTaskPlan) -> crate::agent_task_scheduler::AgentTaskAggregate {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     };
     let form = test_review_form();
     let task = plan.tasks.first().expect("review form plan has one task");
-    agent_task_lifecycle::record_run_aggregate(
-        run_id,
-        plan,
-        &AgentTaskAggregate {
-            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-            plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
-            totals: AgentTaskAggregateTotals {
-                succeeded: 1,
-                ..Default::default()
-            },
-            outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                task_id: task.task_id.clone(),
-                status: AgentTaskOutcomeStatus::Succeeded,
-                summary: Some("provider dispatched once".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: serde_json::json!({ "review_form": form }),
-                workflow: None,
-                follow_up: None,
-                metadata: serde_json::json!({ "model": task.executor.model() }),
-            }],
-            events: Vec::new(),
-            artifact_lineage: Vec::new(),
-            child_runs: Vec::new(),
-            artifact_bindings: Vec::new(),
-            queue: Default::default(),
+    AgentTaskAggregate {
+        schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        status: AgentTaskAggregateStatus::Succeeded,
+        totals: AgentTaskAggregateTotals {
+            succeeded: 1,
+            ..Default::default()
         },
-    )
-    .unwrap();
+        outcomes: vec![AgentTaskOutcome {
+            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: task.task_id.clone(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("provider dispatched once".to_string()),
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: serde_json::json!({ "review_form": form }),
+            workflow: None,
+            follow_up: None,
+            metadata: serde_json::json!({ "model": task.executor.model() }),
+        }],
+        events: Vec::new(),
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: Default::default(),
+    }
 }
 
 fn seed_timeout_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
@@ -1024,6 +1026,7 @@ impl CookSideEffectService for CanonicalSelectionSideEffects {
 
     fn recover_moving_base(
         &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
         _options: &AgentTaskCookServiceOptions,
         _recovery: &MovingBaseCookRecovery,
     ) -> Result<AgentTaskPromotionReport> {
@@ -1032,6 +1035,7 @@ impl CookSideEffectService for CanonicalSelectionSideEffects {
 
     fn finalize(
         &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
         _options: &AgentTaskCookServiceOptions,
         _run_id: &str,
         _promotion: &AgentTaskPromotionReport,
@@ -1821,6 +1825,62 @@ fn moving_base_recovery_refreshes_authenticated_candidate_before_retrying_finali
         "rebased"
     );
     assert_eq!(refreshed.base_movements, 0);
+}
+
+#[test]
+fn moving_base_recovery_isolates_identical_attempts_across_explicit_stores() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_recipe_store = CookRecipeStore::new(left_context.path_roots());
+    let right_recipe_store = CookRecipeStore::new(right_context.path_roots());
+    let left_lifecycle_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_lifecycle_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let cook_id = "same-moving-base-cook";
+    let run_id = "same-moving-base-run";
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = run_id.to_string();
+
+    for (recipe_store, lifecycle_store, blocker) in [
+        (&left_recipe_store, &left_lifecycle_store, "left blocker"),
+        (&right_recipe_store, &right_lifecycle_store, "right blocker"),
+    ] {
+        recipe_store.persist_initial_recipe(&options).unwrap();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&options.initial_plan, run_id, |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        lifecycle_store
+            .mutate_record(run_id, |record| {
+                record.metadata["cook_id"] = serde_json::json!(cook_id);
+                true
+            })
+            .unwrap();
+        let mut recovery = moving_base_recovery_from_promotion(cook_id, run_id, promotion(run_id));
+        recovery.blocker = blocker.to_string();
+        lifecycle_store
+            .record_cook_moving_base_recovery(run_id, serde_json::to_value(recovery).unwrap())
+            .unwrap();
+    }
+
+    let left =
+        moving_base_recovery_for_run_with_stores(&left_recipe_store, &left_lifecycle_store, run_id)
+            .unwrap()
+            .expect("left recovery");
+    let right = moving_base_recovery_for_run_with_stores(
+        &right_recipe_store,
+        &right_lifecycle_store,
+        run_id,
+    )
+    .unwrap()
+    .expect("right recovery");
+
+    assert_eq!(left.blocker, "left blocker");
+    assert_eq!(right.blocker, "right blocker");
+    assert_ne!(
+        left_lifecycle_store.run_dir(run_id),
+        right_lifecycle_store.run_dir(run_id)
+    );
 }
 
 #[test]
@@ -5886,7 +5946,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
         let result = run_cook_with_boundaries_observed_inner(
             options.clone(),
             UnusedExecutor,
-            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
             false,
         )
@@ -5894,7 +5954,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
         let repeated = run_cook_with_boundaries_observed_inner(
             options,
             UnusedExecutor,
-            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
             false,
         )
@@ -9735,6 +9795,42 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
             promotion: promotion(run_id),
         })
     }
+    fn hydrate_run_in_store(
+        &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<RunLifecycleRecord> {
+        if self.hydrate_run_id.is_some() {
+            return RealAgentTaskPrFinalizationBackend
+                .hydrate_run_in_store(lifecycle_store, run_id);
+        }
+        self.hydrate_run(run_id)
+    }
+    fn hydrate_gate_proof_in_store(
+        &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<AgentTaskPrDurableGateProof> {
+        if self.hydrate_run_id.is_some() || self.hydrate_gate_proof_run_id.is_some() {
+            return RealAgentTaskPrFinalizationBackend
+                .hydrate_gate_proof_in_store(lifecycle_store, run_id);
+        }
+        if let Some(mut promotion) = self.synthetic_gate_proof.clone() {
+            promotion.source.run_id = Some(run_id.to_string());
+            if let Ok(Some(persisted)) =
+                persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)
+            {
+                if let Some(follow_up) = persisted.provenance.get("cook_follow_up") {
+                    promotion.provenance["cook_follow_up"] = follow_up.clone();
+                }
+            }
+            return Ok(AgentTaskPrDurableGateProof {
+                run_id: run_id.to_string(),
+                promotion,
+            });
+        }
+        self.hydrate_gate_proof(run_id)
+    }
     fn current_branch(&mut self, _path: &str) -> Result<String> {
         Ok("fix/8058".to_string())
     }
@@ -10294,7 +10390,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         let result = run_cook_with_boundaries_observed_policy(
             historical.clone(),
             executor.clone(),
-            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
             true,
         )
@@ -10324,7 +10420,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         let result = run_cook_with_boundaries_observed_policy(
             historical.clone(),
             executor.clone(),
-            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
             true,
         )
@@ -10360,7 +10456,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         let result = run_cook_with_boundaries_observed_policy(
             historical.clone(),
             executor.clone(),
-            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
             true,
         )
@@ -10547,7 +10643,7 @@ fn closed_observer_pipe_does_not_stop_explicitly_accepted_inherited_gate_finaliz
         let result = run_cook_with_boundaries_observed(
             options,
             UnusedExecutor,
-            DefaultCookSideEffects::new(move |_, received_run, promotion| {
+            DefaultCookSideEffects::new(move |_, _, received_run, promotion| {
                 finalization_count.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(received_run, expected_run_id);
                 assert_eq!(promotion.verified_base.as_ref().unwrap().sha, expected_base);
@@ -10716,43 +10812,105 @@ fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
 }
 
 #[test]
+fn promotion_claim_and_replay_isolate_identical_ids_across_lifecycle_stores() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let cook_id = "same-cook-promote-claim";
+    let run_id = "same-run-promote-claim";
+    let options = promotion_claim_options(cook_id, run_id);
+    let operation_key = promotion_operation_key(run_id);
+
+    for store in [&left_store, &right_store] {
+        store
+            .submit_plan_with_runtime_admission(
+                &AgentTaskPlan::new(cook_id, Vec::new()),
+                run_id,
+                |_| Ok(serde_json::json!({})),
+            )
+            .unwrap();
+        store
+            .record_promotion(run_id, serde_json::to_value(promotion(run_id)).unwrap())
+            .unwrap();
+
+        let first = promote_with_operation_claim_in_store(store, &options, run_id).unwrap();
+        let replayed = promote_with_operation_claim_in_store(store, &options, run_id).unwrap();
+        assert_eq!(replayed.patch_artifact.id, first.patch_artifact.id);
+        assert_eq!(
+            store
+                .operation_claim(run_id, &operation_key)
+                .unwrap()
+                .expect("rooted promotion claim")
+                .state,
+            agent_task_lifecycle::ClaimState::Completed
+        );
+    }
+
+    assert_ne!(left_store.run_dir(run_id), right_store.run_dir(run_id));
+}
+
+#[test]
 fn retry_dispatch_operation_key_claim_dispatches_once() {
     // #8357: the detached retry-dispatch path reserves a durable claim keyed by
     // the retry run id before the handoff and completes it after. A resumed pass
     // (or a concurrent one) observes the completed claim / held lease and must
     // not send a second handoff. This exercises that exactly-once contract at the
     // claim boundary without the full git-backed cook loop.
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-dispatch-claim";
-        let next_run_id = "run-dispatch-claim-attempt-2";
-        let plan = AgentTaskPlan::new(cook_id, Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some(next_run_id)).unwrap();
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-dispatch-claim";
+    let next_run_id = "run-dispatch-claim-attempt-2";
+    let plan = AgentTaskPlan::new(cook_id, Vec::new());
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, next_run_id, |_| Ok(serde_json::json!({})))
+        .unwrap();
 
-        let operation_key = retry_dispatch_operation_key(next_run_id);
-        let lease = std::time::Duration::from_secs(60);
+    let operation_key = retry_dispatch_operation_key(next_run_id);
+    let lease = std::time::Duration::from_secs(60);
 
-        // First pass acquires the claim → performs the (modeled) dispatch → completes.
-        assert_eq!(
-            agent_task_lifecycle::claim_cook_operation(next_run_id, &operation_key, lease).unwrap(),
-            agent_task_lifecycle::ClaimOutcome::Acquired
-        );
-        agent_task_lifecycle::complete_cook_operation(
+    // First pass acquires the claim → performs the (modeled) dispatch → completes.
+    assert_eq!(
+        lifecycle_store
+            .claim_cook_operation(next_run_id, &operation_key, lease)
+            .unwrap(),
+        agent_task_lifecycle::ClaimOutcome::Acquired
+    );
+    lifecycle_store
+        .complete_cook_operation(
             next_run_id,
             &operation_key,
             serde_json::json!({ "dispatched_run_id": next_run_id }),
         )
         .unwrap();
 
-        // A resumed pass observes AlreadyCompleted and must not re-dispatch.
-        match agent_task_lifecycle::claim_cook_operation(next_run_id, &operation_key, lease)
-            .unwrap()
-        {
-            agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
-                assert_eq!(result["dispatched_run_id"], next_run_id);
-            }
-            other => panic!("expected AlreadyCompleted, got {other:?}"),
+    // A resumed pass observes AlreadyCompleted and must not re-dispatch.
+    match lifecycle_store
+        .claim_cook_operation(next_run_id, &operation_key, lease)
+        .unwrap()
+    {
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
+            assert_eq!(result["dispatched_run_id"], next_run_id);
         }
-    });
+        other => panic!("expected AlreadyCompleted, got {other:?}"),
+    }
+}
+
+#[test]
+fn cook_follow_up_store_boundary_accepts_local_execution_and_rejects_split_roots() {
+    let first = homeboy_core::test_support::HermeticTestContext::new();
+    let second = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(first.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(first.path_roots());
+    let other_lifecycle_store = AgentTaskLifecycleStore::new(second.path_roots());
+
+    validate_cook_follow_up_stores(&recipe_store, &lifecycle_store).unwrap();
+
+    let split_root_error =
+        validate_cook_follow_up_stores(&recipe_store, &other_lifecycle_store).unwrap_err();
+    assert!(split_root_error
+        .to_string()
+        .contains("recipe and lifecycle stores must share one data root"));
 }
 
 #[test]
@@ -10802,6 +10960,55 @@ fn finalization_operation_claim_revalidates_completed_publication() {
             .expect("finalization claim recorded");
         assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
     });
+}
+
+#[test]
+fn finalization_claims_isolate_identical_run_ids_across_lifecycle_stores() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let cook_id = "same-cook-finalize-claim";
+    let run_id = "same-run-finalize-claim";
+    let plan = AgentTaskPlan::new(cook_id, Vec::new());
+    let options = promotion_claim_options(cook_id, run_id);
+    let promotion = promotion(run_id);
+
+    for (store, root) in [(&left_store, "left"), (&right_store, "right")] {
+        store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(serde_json::json!({})))
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let mut finalize =
+            move |_: &AgentTaskCookServiceOptions, _: &str, _: &AgentTaskPromotionReport| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({ "root": root }))
+            };
+
+        for _ in 0..2 {
+            let result = finalize_with_operation_claim_in_store(
+                store,
+                &options,
+                run_id,
+                &promotion,
+                &mut finalize,
+            )
+            .unwrap();
+            assert_eq!(result["root"], root);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store
+                .operation_claim(run_id, &finalization_operation_key(run_id, &promotion))
+                .unwrap()
+                .expect("rooted finalization claim")
+                .state,
+            agent_task_lifecycle::ClaimState::Completed
+        );
+    }
+
+    assert_ne!(left_store.run_dir(run_id), right_store.run_dir(run_id));
 }
 
 #[test]
@@ -10868,16 +11075,22 @@ fn duplicate_controller_passes_revalidate_one_promoted_candidate() {
         // side-effect boundary, exactly as three restarted/concurrent controllers
         // would. The injected finalize effect increments a shared counter.
         let mut finalizations = Vec::new();
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
         for _ in 0..3 {
             let calls = Arc::clone(&finalize_calls);
             let mut side_effects = DefaultCookSideEffects::new(
-                move |_: &AgentTaskCookServiceOptions, rid: &str, _: &AgentTaskPromotionReport| {
+                move |_: &AgentTaskLifecycleStore,
+                      _: &AgentTaskCookServiceOptions,
+                      rid: &str,
+                      _: &AgentTaskPromotionReport| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(serde_json::json!({"status": "review_ready", "run_id": rid}))
                 },
             );
             let promotion = side_effects.promote(&options, run_id).unwrap();
-            let finalization = side_effects.finalize(&options, run_id, &promotion).unwrap();
+            let finalization = side_effects
+                .finalize(&lifecycle_store, &options, run_id, &promotion)
+                .unwrap();
             finalizations.push(finalization);
         }
 
@@ -10921,54 +11134,71 @@ fn concurrent_retry_dispatch_claims_admit_exactly_one_dispatcher() {
     // held lease (or a completed claim) and do not send a second handoff. This
     // exercises the claim's atomic converge-on-one-owner contract for the
     // retry-dispatch key across real threads.
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-concurrent-dispatch";
-        let next_run_id = "run-concurrent-dispatch-attempt-2";
-        let plan = AgentTaskPlan::new(cook_id, Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some(next_run_id)).unwrap();
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let next_run_id = "same-concurrent-dispatch-attempt-2";
+    for (store, plan_id) in [(&left_store, "left-plan"), (&right_store, "right-plan")] {
+        store
+            .submit_plan_with_runtime_admission(
+                &AgentTaskPlan::new(plan_id, Vec::new()),
+                next_run_id,
+                |_| Ok(serde_json::json!({})),
+            )
+            .unwrap();
+    }
+    let operation_key = retry_dispatch_operation_key(next_run_id);
+    let lease = std::time::Duration::from_secs(300);
+    let left_acquired = Arc::new(AtomicUsize::new(0));
+    let right_acquired = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(4));
+    let mut handles = Vec::new();
 
-        let operation_key = retry_dispatch_operation_key(next_run_id);
-        let lease = std::time::Duration::from_secs(300);
-        let acquired = Arc::new(AtomicUsize::new(0));
-        let barrier = Arc::new(Barrier::new(4));
-
-        let handles: Vec<_> = (0..4)
-            .map(|_| {
-                let key = operation_key.clone();
-                let run = next_run_id.to_string();
-                let acquired = Arc::clone(&acquired);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    if let agent_task_lifecycle::ClaimOutcome::Acquired =
-                        agent_task_lifecycle::claim_cook_operation(&run, &key, lease).unwrap()
-                    {
-                        acquired.fetch_add(1, Ordering::SeqCst);
-                        // The winning dispatcher records completion after its handoff.
-                        agent_task_lifecycle::complete_cook_operation(
-                            &run,
+    for (store, acquired) in [
+        (left_store.clone(), Arc::clone(&left_acquired)),
+        (right_store.clone(), Arc::clone(&right_acquired)),
+    ] {
+        for _ in 0..2 {
+            let store = store.clone();
+            let key = operation_key.clone();
+            let acquired = Arc::clone(&acquired);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                if let agent_task_lifecycle::ClaimOutcome::Acquired = store
+                    .claim_cook_operation(next_run_id, &key, lease)
+                    .unwrap()
+                {
+                    acquired.fetch_add(1, Ordering::SeqCst);
+                    store
+                        .complete_cook_operation(
+                            next_run_id,
                             &key,
-                            serde_json::json!({ "dispatched_run_id": run }),
+                            serde_json::json!({ "dispatched_run_id": next_run_id }),
                         )
                         .unwrap();
-                    }
-                })
-            })
-            .collect();
-        for handle in handles {
-            handle.join().unwrap();
+                }
+            }));
         }
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
 
-        assert_eq!(
-            acquired.load(Ordering::SeqCst),
-            1,
-            "exactly one concurrent pass may dispatch the retry"
-        );
-        let claim = agent_task_lifecycle::operation_claim(next_run_id, &operation_key)
+    assert_eq!(left_acquired.load(Ordering::SeqCst), 1);
+    assert_eq!(right_acquired.load(Ordering::SeqCst), 1);
+    for store in [&left_store, &right_store] {
+        let claim = store
+            .operation_claim(next_run_id, &operation_key)
             .unwrap()
             .expect("dispatch claim recorded");
         assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
-    });
+    }
+    assert_ne!(
+        left_store.run_dir(next_run_id),
+        right_store.run_dir(next_run_id)
+    );
 }
 
 #[test]
@@ -11162,6 +11392,122 @@ fn cook_finalization_adopts_validated_review_form_used_for_when_option_is_empty(
             "Operator-authored disclosure."
         );
     });
+}
+
+#[test]
+fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_recipe_store = CookRecipeStore::new(left_context.path_roots());
+    let right_recipe_store = CookRecipeStore::new(right_context.path_roots());
+    let left_lifecycle_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_lifecycle_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let cook_id = "same-cook-finalization-dossier";
+    let run_id = "same-run-finalization-dossier";
+    let target = tempfile::tempdir().expect("fixture target");
+
+    let mut left_options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    left_options.initial_run_id = run_id.to_string();
+    left_options.initial_plan.tasks[0].executor.model = Some("left-model".to_string());
+    let mut right_options = left_options.clone();
+    right_options.initial_plan.tasks[0].executor.model = Some("right-model".to_string());
+
+    for (recipe_store, lifecycle_store, options, artifact_id) in [
+        (
+            &left_recipe_store,
+            &left_lifecycle_store,
+            &left_options,
+            "left-patch",
+        ),
+        (
+            &right_recipe_store,
+            &right_lifecycle_store,
+            &right_options,
+            "right-patch",
+        ),
+    ] {
+        recipe_store.persist_initial_recipe(options).unwrap();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&options.initial_plan, run_id, |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        lifecycle_store
+            .record_cook_attempt(cook_id, 1, run_id)
+            .unwrap();
+        lifecycle_store
+            .record_run_aggregate(
+                run_id,
+                &options.initial_plan,
+                &review_form_aggregate(&options.initial_plan),
+            )
+            .unwrap();
+        let mut rooted_promotion = promotion_with_existing_path(run_id, target.path());
+        rooted_promotion.patch_artifact.id = artifact_id.to_string();
+        lifecycle_store
+            .record_promotion(run_id, serde_json::to_value(rooted_promotion).unwrap())
+            .unwrap();
+    }
+
+    let promotion = promotion_with_existing_path(run_id, target.path());
+    let left = cook_finalization_options_with_stores(
+        &left_recipe_store,
+        &left_lifecycle_store,
+        &left_options,
+        run_id,
+        &promotion,
+        Vec::new(),
+    )
+    .unwrap();
+    let right = cook_finalization_options_with_stores(
+        &right_recipe_store,
+        &right_lifecycle_store,
+        &right_options,
+        run_id,
+        &promotion,
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(left.review_dossier.ai_assistance.model, "left-model");
+    assert_eq!(right.review_dossier.ai_assistance.model, "right-model");
+
+    let mut backend = RealAgentTaskPrFinalizationBackend;
+    let left_proof = backend
+        .hydrate_gate_proof_in_store(&left_lifecycle_store, run_id)
+        .unwrap();
+    let right_proof = backend
+        .hydrate_gate_proof_in_store(&right_lifecycle_store, run_id)
+        .unwrap();
+    assert_eq!(left_proof.promotion.patch_artifact.id, "left-patch");
+    assert_eq!(right_proof.promotion.patch_artifact.id, "right-patch");
+
+    for (recipe_store, lifecycle_store, options) in [
+        (&left_recipe_store, &left_lifecycle_store, &left_options),
+        (&right_recipe_store, &right_lifecycle_store, &right_options),
+    ] {
+        let mut backend = CaptureBackend {
+            synthetic_gate_proof: Some(promotion.clone()),
+            ..Default::default()
+        };
+        let finalization = finalize_or_load_cook_pr_with_backend_with_stores(
+            recipe_store,
+            lifecycle_store,
+            options,
+            run_id,
+            &promotion,
+            &mut backend,
+        )
+        .unwrap();
+
+        assert_eq!(finalization["status"], "review_ready");
+        assert!(backend.created);
+        assert!(lifecycle_store
+            .read_record(run_id)
+            .unwrap()
+            .metadata
+            .get("cook_finalization")
+            .is_some());
+    }
 }
 
 #[test]

@@ -78,6 +78,24 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
             )
         })
     }
+    fn hydrate_run_in_store(
+        &mut self,
+        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<RunLifecycleRecord> {
+        if self.hydrate_run_id.is_some() {
+            return RealAgentTaskPrFinalizationBackend
+                .hydrate_run_in_store(lifecycle_store, run_id);
+        }
+        self.hydrate_run(run_id)
+    }
+    fn hydrate_gate_proof_in_store(
+        &mut self,
+        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<AgentTaskPrDurableGateProof> {
+        self.hydrate_gate_proof(run_id)
+    }
     fn validate_candidate(&mut self, options: &AgentTaskPrFinalizationOptions) -> Result<()> {
         let Some(expected) = self.candidate.as_ref() else {
             return Ok(());
