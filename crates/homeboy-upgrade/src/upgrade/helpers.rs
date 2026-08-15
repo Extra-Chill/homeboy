@@ -159,12 +159,6 @@ pub fn run_upgrade_with_method(
         return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
     }
 
-    let promotion_lease = homeboy_core::runtime_promotion::acquire(
-        "controller upgrade",
-        source_path
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "active controller".to_string()),
-    )?;
     ensure_controller_upgrade_admission()?;
     let install_method = method_override.unwrap_or_else(detect_install_method);
 
@@ -258,6 +252,10 @@ pub fn run_upgrade_with_method(
             } else {
                 update_all_extensions()
             };
+            let promotion_lease = homeboy_core::runtime_promotion::acquire(
+                "controller upgrade completion",
+                "active controller",
+            )?;
             let (runners_updated, runners_skipped) = if skip_runners {
                 (vec![], vec![])
             } else {
@@ -373,9 +371,19 @@ pub fn run_upgrade_with_method(
             )
         })?
     };
+    // Packaged installers still own their download-and-swap command. Keep their
+    // established full-operation lease until that contract is moved in-process;
+    // source builds use the narrower lease at the final rename instead.
+    let controller_mutation_lease = (install_method != InstallMethod::Source)
+        .then(|| {
+            homeboy_core::runtime_promotion::acquire("controller upgrade", "active controller")
+        })
+        .transpose()?;
     let controller_upgrade =
         run_controller_mutation_after_runner_preflight(runner_preflight, || {
-            promotion_lease.assert_generation()?;
+            if let Some(lease) = &controller_mutation_lease {
+                lease.assert_generation()?;
+            }
             execute_upgrade(
                 install_method,
                 source_upgrade_path.as_deref(),
@@ -385,18 +393,19 @@ pub fn run_upgrade_with_method(
                 selected_release.as_ref(),
             )
         })?;
-    let (success, new_version, new_build_identity, source_revision) = match controller_upgrade {
-        Ok(result) => result,
-        Err(runners_skipped) => {
-            return Ok(runner_preflight_failure_result(
-                install_method,
-                previous_version,
-                previous_build_identity,
-                runners_skipped,
-            ));
-        }
-    };
-    let upgrade_completed = should_sync_after_upgrade(new_version.as_deref());
+    let (success, new_version, new_build_identity, source_revision, superseded) =
+        match controller_upgrade {
+            Ok(result) => result,
+            Err(runners_skipped) => {
+                return Ok(runner_preflight_failure_result(
+                    install_method,
+                    previous_version,
+                    previous_build_identity,
+                    runners_skipped,
+                ));
+            }
+        };
+    let upgrade_completed = !superseded && should_sync_after_upgrade(new_version.as_deref());
     if upgrade_completed {
         // This is deliberately a short switch, not a drain: records admitted
         // before it retain their immutable runtime pin and remain executable.
@@ -414,6 +423,10 @@ pub fn run_upgrade_with_method(
         (vec![], vec![])
     };
 
+    let promotion_lease = homeboy_core::runtime_promotion::acquire(
+        "controller upgrade completion",
+        "active controller",
+    )?;
     promotion_lease.assert_generation()?;
     let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
         upgrade_phase("refreshing configured runners");
@@ -463,10 +476,22 @@ pub fn run_upgrade_with_method(
         new_build_identity: new_build_identity.clone(),
         source_revision,
         upgraded: success,
-        outcome: Some(upgrade_outcome(success, runner_disposition).to_string()),
+        outcome: Some(if superseded {
+            "controller_superseded".to_string()
+        } else {
+            upgrade_outcome(success, runner_disposition).to_string()
+        }),
         controller: Some(component_status(
-            if success { "updated" } else { "failed" },
-            if success {
+            if superseded {
+                "superseded"
+            } else if success {
+                "updated"
+            } else {
+                "failed"
+            },
+            if superseded {
+                "controller promotion was superseded by the active build"
+            } else if success {
                 "controller installation completed"
             } else {
                 "controller installation did not complete"
@@ -1649,7 +1674,7 @@ fn portable_extension_source_url(result: &homeboy_extension::UpdateResult) -> Op
 ///   dirty-state identity and those identities differ;
 /// - an identical, older, or unverifiable candidate is a safe no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SourceUpgradeDecision {
+pub(crate) enum SourceUpgradeDecision {
     NewerVersion,
     DifferentIdentity,
     SameIdentity,
@@ -1658,7 +1683,7 @@ enum SourceUpgradeDecision {
 }
 
 impl SourceUpgradeDecision {
-    fn upgrades(self) -> bool {
+    pub(crate) fn upgrades(self) -> bool {
         matches!(self, Self::NewerVersion | Self::DifferentIdentity)
     }
 
@@ -1699,7 +1724,7 @@ fn resolve_source_upgrade_target(
     }
 }
 
-fn source_upgrade_decision(
+pub(crate) fn source_upgrade_decision(
     active_version: &str,
     active_identity: &build_identity::BuildIdentity,
     source_path: &Path,
@@ -1708,6 +1733,46 @@ fn source_upgrade_decision(
         return SourceUpgradeDecision::IdentityUnavailable;
     };
     source_upgrade_decision_for_identity(active_version, active_identity, &source)
+}
+
+/// Re-evaluate an already-built source candidate immediately before promotion.
+/// A Git candidate may replace an installed Git revision only when the active
+/// revision is an ancestor of its source HEAD; divergent or older candidates
+/// are safe no-ops unless the caller explicitly forces a downgrade.
+pub(crate) fn source_promotion_decision(
+    active_identity: &build_identity::BuildIdentity,
+    source_path: &Path,
+) -> SourceUpgradeDecision {
+    let decision = source_upgrade_decision(&active_identity.version, active_identity, source_path);
+    if decision != SourceUpgradeDecision::DifferentIdentity
+        || git::output_allow_empty(source_path, &["rev-parse", "--is-inside-work-tree"]).as_deref()
+            != Some("true")
+    {
+        return decision;
+    }
+
+    let Some(active_commit) = active_identity.git_commit.as_deref() else {
+        return SourceUpgradeDecision::IdentityUnavailable;
+    };
+    let active_object = format!("{active_commit}^{{commit}}");
+    let object_exists = Command::new("git")
+        .arg("-C")
+        .arg(source_path)
+        .args(["cat-file", "-e", &active_object])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !object_exists {
+        return SourceUpgradeDecision::IdentityUnavailable;
+    }
+
+    Command::new("git")
+        .arg("-C")
+        .arg(source_path)
+        .args(["merge-base", "--is-ancestor", active_commit, "HEAD"])
+        .status()
+        .is_ok_and(|status| status.success())
+        .then_some(SourceUpgradeDecision::DifferentIdentity)
+        .unwrap_or(SourceUpgradeDecision::OlderVersion)
 }
 
 fn source_upgrade_decision_for_identity(
@@ -2225,6 +2290,41 @@ version = "0.0.0"
             Some(against_target),
             false
         ));
+    }
+
+    #[test]
+    fn source_promotion_requires_candidate_descend_from_active_revision() {
+        let source = tempdir().expect("source");
+        init_git_source(source.path(), "1.2.3");
+        let first =
+            git::output_allow_empty(source.path(), &["rev-parse", "HEAD"]).expect("first revision");
+        std::fs::write(source.path().join("next"), "next").expect("next source");
+        git(source.path(), &["add", "."]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-m",
+                "next",
+            ],
+        );
+        let second = git::output_allow_empty(source.path(), &["rev-parse", "HEAD"])
+            .expect("second revision");
+
+        assert_eq!(
+            source_promotion_decision(&active_identity(&first), source.path()),
+            SourceUpgradeDecision::DifferentIdentity
+        );
+
+        git(source.path(), &["reset", "--hard", &first]);
+        assert_eq!(
+            source_promotion_decision(&active_identity(&second), source.path()),
+            SourceUpgradeDecision::OlderVersion
+        );
     }
 
     #[test]
