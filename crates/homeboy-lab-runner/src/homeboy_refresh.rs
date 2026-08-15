@@ -16,7 +16,7 @@ use homeboy_core::output::MergeOutput;
 
 use super::connection::{
     active_jobs_before_daemon_replacement, configured_runner_homeboy_build_identity,
-    disconnect_with_session, rotate_daemon_generation,
+    disconnect_with_session, reconcile_status, rotate_daemon_generation,
 };
 use super::execution::exec_with_status_snapshot;
 use super::execution::{reserve_daemon_admission, DaemonAdmissionPolicy};
@@ -477,7 +477,10 @@ pub fn refresh_homeboy_binary(
 
     let runner = load(&plan.runner_id)?;
     let previous_homeboy_path = runner.settings.homeboy_path.clone();
-    let admission = super::runner_admission_snapshot(&plan.runner_id)?;
+    // Reconciliation settles retained generation counts from the daemon's typed
+    // job view. Consume that postcondition rather than immediately replacing it
+    // with a new observation that can include this recovery operation's records.
+    let admission = reconciled_refresh_admission(&plan.runner_id)?;
     let connection_status = admission.status.clone();
     let execution_route = refresh_execution_route(&runner, &admission)?;
     let diagnostic_ssh_bootstrap = execution_route.uses_diagnostic_ssh();
@@ -1722,6 +1725,30 @@ fn refresh_execution_route(
         Some(runner.id.clone()),
         admission.summary.next_action.clone().map(|action| vec![action]),
     ))
+}
+
+/// Refresh is a mutation path, so it first settles the generation ledger and
+/// then derives route selection from that exact post-reconcile status. The
+/// later pre-rotation job probe remains the fail-closed check for work that
+/// appears while materialization is in progress.
+fn reconciled_refresh_admission(runner_id: &str) -> Result<super::RunnerAdmissionSnapshot> {
+    reconciled_refresh_admission_with(
+        runner_id,
+        reconcile_status,
+        super::runner_admission_snapshot_for_status,
+    )
+}
+
+fn reconciled_refresh_admission_with<Reconcile, Project>(
+    runner_id: &str,
+    reconcile: Reconcile,
+    project: Project,
+) -> Result<super::RunnerAdmissionSnapshot>
+where
+    Reconcile: FnOnce(&str) -> Result<super::RunnerStatusReport>,
+    Project: FnOnce(super::RunnerStatusReport) -> Result<super::RunnerAdmissionSnapshot>,
+{
+    project(reconcile(runner_id)?)
 }
 
 #[derive(Debug, Clone)]
