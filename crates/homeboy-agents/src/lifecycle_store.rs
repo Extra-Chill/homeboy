@@ -114,6 +114,7 @@ impl AgentTaskLifecycleStore {
         &self,
         plan: &AgentTaskPlan,
         run_id: &str,
+        execution_runner_id: Option<String>,
         admission_status: &dyn Fn(&str) -> Option<Value>,
         admit_runtime: impl FnOnce(&str) -> Result<Value>,
     ) -> Result<AgentTaskRunRecord> {
@@ -121,7 +122,7 @@ impl AgentTaskLifecycleStore {
             self,
             plan,
             Some(run_id),
-            None,
+            execution_runner_id,
             None,
             Some(admission_status),
             admit_runtime,

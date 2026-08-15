@@ -28,6 +28,8 @@ use super::cook_promotion::{cook_report, CookReportInput};
 use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
 
+type AdmissionStatus<'a> = Option<&'a dyn Fn(&str) -> Option<Value>>;
+
 /// Durable preparation boundary for one Cook execution attempt.
 ///
 /// Recipe and lifecycle authority travel together so callers cannot
@@ -61,6 +63,7 @@ impl<'a> CookExecutionPreparation<'a> {
             run_id,
             plan,
             None,
+            None,
             admit_runtime,
             reconcile_reserved_cancellation,
         )
@@ -71,7 +74,8 @@ impl<'a> CookExecutionPreparation<'a> {
         cook_id: &str,
         run_id: &str,
         plan: &AgentTaskPlan,
-        admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
+        admission_status: AdmissionStatus<'_>,
+        execution_runner_id: Option<String>,
         admit_runtime: impl FnOnce(&str) -> Result<Value>,
         reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
     ) -> Result<()> {
@@ -82,6 +86,7 @@ impl<'a> CookExecutionPreparation<'a> {
             run_id,
             plan,
             admission_status,
+            execution_runner_id,
             admit_runtime,
             reconcile_reserved_cancellation,
         )
@@ -113,15 +118,61 @@ impl<'a> CookExecutionPreparation<'a> {
         self.recover_with_runtime(
             cook_or_attempt_id,
             None,
+            None,
             admit_runtime,
             reconcile_reserved_cancellation,
+        )
+    }
+
+    pub(crate) fn recover_for_adoption_with_admission(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+        admit_runtime: impl FnOnce(&str) -> Result<Value>,
+        reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+        self.recover_for_adoption_with_runtime(
+            cook_id,
+            run_id,
+            None,
+            None,
+            admit_runtime,
+            reconcile_reserved_cancellation,
+        )
+    }
+
+    fn recover_for_adoption_with_runtime(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+        admission_status: AdmissionStatus<'_>,
+        execution_runner_id: Option<String>,
+        admit_runtime: impl FnOnce(&str) -> Result<Value>,
+        reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+        self.recover_with_runtime(
+            run_id,
+            admission_status,
+            execution_runner_id,
+            admit_runtime,
+            reconcile_reserved_cancellation,
+        )?
+        .ok_or_else(|| Error::internal_unexpected("Cook adoption recovery returned no record"))?;
+        self.record_pre_execution_failure(
+            cook_id,
+            run_id,
+            "transport_dispatcher_prepare",
+            &Error::internal_unexpected(
+                "recovered orphaned durable cook recipe before provider dispatch".to_string(),
+            ),
         )
     }
 
     fn recover_with_runtime(
         &self,
         cook_or_attempt_id: &str,
-        admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
+        admission_status: AdmissionStatus<'_>,
+        execution_runner_id: Option<String>,
         admit_runtime: impl FnOnce(&str) -> Result<Value>,
         reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
     ) -> Result<Option<agent_task_lifecycle::AgentTaskRunRecord>> {
@@ -163,6 +214,7 @@ impl<'a> CookExecutionPreparation<'a> {
             &attempt.run_id,
             &attempt.plan,
             admission_status,
+            execution_runner_id,
             admit_runtime,
             reconcile_reserved_cancellation,
         )?;
@@ -210,6 +262,7 @@ fn materialize_initial_cook_attempt_with_store_and_lifecycle(
         &options.initial_run_id,
         &options.initial_plan,
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
         reconcile_reserved_cancellation,
     )
@@ -230,6 +283,7 @@ pub(crate) fn materialize_cook_attempt(
         run_id,
         plan,
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(&lifecycle_store),
         reconcile_reserved_cancellation,
     )
@@ -247,6 +301,7 @@ pub(crate) fn materialize_cook_attempt_with_store(
         run_id,
         plan,
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(&lifecycle_store),
         reconcile_reserved_cancellation,
     )
@@ -258,7 +313,8 @@ fn materialize_cook_attempt_with_stores_and_runtime(
     cook_id: &str,
     run_id: &str,
     plan: &AgentTaskPlan,
-    admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
+    admission_status: AdmissionStatus<'_>,
+    execution_runner_id: Option<String>,
     admit_runtime: impl FnOnce(&str) -> Result<Value>,
     reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
 ) -> Result<()> {
@@ -272,6 +328,7 @@ fn materialize_cook_attempt_with_stores_and_runtime(
             Some(project) => lifecycle_store.submit_plan_with_runtime_admission_status(
                 plan,
                 run_id,
+                execution_runner_id,
                 project,
                 admit_runtime,
             ),
@@ -412,9 +469,27 @@ pub fn recover_recipe_attempt(
     CookExecutionPreparation::new(&recipe_store, &lifecycle_store).recover_with_runtime(
         cook_or_attempt_id,
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(&lifecycle_store),
         reconcile_reserved_cancellation,
     )
+}
+
+pub(crate) fn recover_adoption_attempt(
+    cook_id: &str,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    CookExecutionPreparation::new(&recipe_store, &lifecycle_store)
+        .recover_for_adoption_with_runtime(
+            cook_id,
+            run_id,
+            Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+            agent_task_lifecycle::execution_runner_id(),
+            production_runtime_admission(&lifecycle_store),
+            reconcile_reserved_cancellation,
+        )
 }
 
 pub(crate) fn retryable_pre_execution_failure(
@@ -1007,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_stores_record_divergent_pre_execution_failures_in_parallel() {
+    fn explicit_stores_recover_adoption_failures_in_parallel() {
         let left_context = homeboy_core::test_support::HermeticTestContext::new();
         let right_context = homeboy_core::test_support::HermeticTestContext::new();
         let left_recipe_store = CookRecipeStore::new(left_context.path_roots());
@@ -1033,81 +1108,43 @@ mod tests {
             let recipe_store = left_recipe_store.clone();
             let lifecycle_store = left_lifecycle_store.clone();
             scope.spawn(move || {
-                let preparation = CookExecutionPreparation::new(&recipe_store, &lifecycle_store);
-                preparation
-                    .materialize_with_admission(
+                CookExecutionPreparation::new(&recipe_store, &lifecycle_store)
+                    .recover_for_adoption_with_runtime(
                         cook_id,
                         run_id,
-                        &left_plan,
+                        Some(&|_| None),
+                        Some("left-runner".to_string()),
                         |_| {
                             left_barrier.wait();
                             Ok(serde_json::json!({ "store": "left" }))
                         },
                         |_| Ok(()),
                     )
-                    .expect("materialize left");
-                preparation
-                    .record_pre_execution_failure(
-                        cook_id,
-                        run_id,
-                        "left_phase",
-                        &Error::validation_invalid_argument(
-                            "left_error",
-                            "left pre-execution failure",
-                            None,
-                            None,
-                        ),
-                    )
-                    .expect("record left failure");
+                    .expect("recover left adoption");
             });
             let right_barrier = Arc::clone(&barrier);
             let recipe_store = right_recipe_store.clone();
             let lifecycle_store = right_lifecycle_store.clone();
             scope.spawn(move || {
-                let preparation = CookExecutionPreparation::new(&recipe_store, &lifecycle_store);
-                preparation
-                    .materialize_with_admission(
+                CookExecutionPreparation::new(&recipe_store, &lifecycle_store)
+                    .recover_for_adoption_with_runtime(
                         cook_id,
                         run_id,
-                        &right_plan,
+                        Some(&|_| None),
+                        Some("right-runner".to_string()),
                         |_| {
                             right_barrier.wait();
                             Ok(serde_json::json!({ "store": "right" }))
                         },
                         |_| Ok(()),
                     )
-                    .expect("materialize right");
-                preparation
-                    .record_pre_execution_failure(
-                        cook_id,
-                        run_id,
-                        "right_phase",
-                        &Error::validation_invalid_argument(
-                            "right_error",
-                            "right pre-execution failure",
-                            None,
-                            None,
-                        ),
-                    )
-                    .expect("record right failure");
+                    .expect("recover right adoption");
             });
         });
 
-        for (lifecycle_store, expected_plan, expected_phase, expected_code, expected_message) in [
-            (
-                &left_lifecycle_store,
-                "left-plan",
-                "left_phase",
-                "left_error",
-                "Invalid argument 'left_error': left pre-execution failure",
-            ),
-            (
-                &right_lifecycle_store,
-                "right-plan",
-                "right_phase",
-                "right_error",
-                "Invalid argument 'right_error': right pre-execution failure",
-            ),
+        for (lifecycle_store, expected_plan, expected_runner) in [
+            (&left_lifecycle_store, "left-plan", "left-runner"),
+            (&right_lifecycle_store, "right-plan", "right-runner"),
         ] {
             let record = lifecycle_store.read_record(run_id).expect("read record");
             let aggregate = lifecycle_store
@@ -1115,16 +1152,17 @@ mod tests {
                 .expect("read aggregate");
             assert_eq!(
                 record.metadata["pre_execution_failure"]["phase"],
-                expected_phase
+                "transport_dispatcher_prepare"
             );
-            assert_eq!(
-                record.metadata["pre_execution_failure"]["message"],
-                expected_message
-            );
-            assert_eq!(
-                record.metadata["pre_execution_failure"]["failure_code"],
-                expected_code
-            );
+            assert!(record.metadata["pre_execution_failure"]["message"]
+                .as_str()
+                .expect("recovery message")
+                .contains("recovered orphaned durable cook recipe"));
+            assert_eq!(record.metadata["runner_id"], expected_runner);
+            assert!(record
+                .metadata
+                .get("execution_placement_decision")
+                .is_none());
             assert_eq!(aggregate.plan_id, expected_plan);
             assert_eq!(aggregate.totals.failed, 1);
             assert_eq!(
