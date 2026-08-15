@@ -1187,11 +1187,14 @@ fn submit_deferred_runner_staging(
                 )
         }
     };
-    let handoff = DirectLabHandoffEnvelope::new(
+    let mut handoff = DirectLabHandoffEnvelope::new(
         homeboy_product_identity::build_identity().display,
         recipe,
         plan.clone(),
     );
+    if source_artifact.is_some() {
+        handoff.schema = crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1.to_string();
+    }
     let envelope = RemoteRunnerStagingEnvelope::from_direct_handoff(
         &handoff,
         RunnerMaterializationAuthority {

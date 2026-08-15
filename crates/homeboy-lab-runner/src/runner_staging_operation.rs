@@ -22,8 +22,10 @@ use homeboy_engine_primitives::content_hash;
 
 use crate::direct_lab_handoff::{DirectLabHandoffEnvelope, DirectLabHandoffReceipt};
 
+pub const REMOTE_RUNNER_STAGING_SCHEMA_V1: &str = "homeboy/remote-runner-staging/v1";
 pub const REMOTE_RUNNER_STAGING_SCHEMA: &str = "homeboy/remote-runner-staging/v2";
 pub const REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA: &str = "homeboy/remote-runner-staging-receipt/v1";
+pub const REMOTE_RUNNER_STAGING_CAPABILITY_V1: &str = "remote-runner-staging/v1";
 pub const REMOTE_RUNNER_STAGING_CAPABILITY: &str = "remote-runner-staging/v2";
 pub const REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY: &str =
     "remote-runner-source-materialization/v2";
@@ -1717,7 +1719,11 @@ impl RemoteRunnerStagingEnvelope {
         let mut handoff = handoff.clone();
         handoff.recipe.source_path = None;
         let envelope = Self {
-            schema: REMOTE_RUNNER_STAGING_SCHEMA.to_string(),
+            schema: if handoff.schema == crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1 {
+                REMOTE_RUNNER_STAGING_SCHEMA_V1.to_string()
+            } else {
+                REMOTE_RUNNER_STAGING_SCHEMA.to_string()
+            },
             handoff,
             materialization,
         };
@@ -1726,9 +1732,15 @@ impl RemoteRunnerStagingEnvelope {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.schema != REMOTE_RUNNER_STAGING_SCHEMA
-            || self.handoff.recipe.source_path.is_some()
-            || self.handoff.schema != crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA
+        if !matches!(
+            self.schema.as_str(),
+            REMOTE_RUNNER_STAGING_SCHEMA_V1 | REMOTE_RUNNER_STAGING_SCHEMA
+        ) || self.handoff.recipe.source_path.is_some()
+            || !matches!(
+                self.handoff.schema.as_str(),
+                crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1
+                    | crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA
+            )
             || self.handoff.run_id.trim().is_empty()
             || self.handoff.runner_id.trim().is_empty()
             || self.handoff.idempotency_key != self.handoff.run_id
@@ -1746,6 +1758,18 @@ impl RemoteRunnerStagingEnvelope {
         }
         self.handoff.recipe.validate_for_runner_staging()?;
         self.materialization.validate()?;
+        if self.schema == REMOTE_RUNNER_STAGING_SCHEMA_V1
+            && (self.handoff.schema != crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1
+                || self.materialization.source_artifact.is_none()
+                || self.materialization.workspace.is_some())
+        {
+            return Err(Error::validation_invalid_argument(
+                "remote_runner_staging",
+                "v1 staging accepts bounded source artifacts only",
+                Some(self.handoff.run_id.clone()),
+                None,
+            ));
+        }
         if let Some(workspace) = &self.materialization.workspace {
             let plan = canonical_json_bytes(&self.handoff.durable_plan).map_err(|error| {
                 Error::internal_json(
@@ -1851,15 +1875,22 @@ pub fn submit_remote_runner_staging(
             None,
         ));
     }
-    if !transport.supports_capability(REMOTE_RUNNER_STAGING_CAPABILITY) {
+    let staging_capability = if envelope.schema == REMOTE_RUNNER_STAGING_SCHEMA_V1 {
+        REMOTE_RUNNER_STAGING_CAPABILITY_V1
+    } else {
+        REMOTE_RUNNER_STAGING_CAPABILITY
+    };
+    if !transport.supports_capability(staging_capability) {
         return Err(Error::runner_capability_missing(
             &envelope.handoff.runner_id,
             "sealed runner staging",
-            vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()],
+            vec![staging_capability.to_string()],
             Vec::new(),
         ));
     }
-    if !transport.supports_capability(REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY) {
+    if envelope.materialization.workspace.is_some()
+        && !transport.supports_capability(REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY)
+    {
         return Err(Error::runner_capability_missing(
             &envelope.handoff.runner_id,
             "versioned runner source materialization",
@@ -1920,7 +1951,11 @@ pub(crate) mod tests_support {
             self.connected
         }
         fn supports_capability(&self, capability: &str) -> bool {
-            (self.compatible && capability == REMOTE_RUNNER_STAGING_CAPABILITY)
+            (self.compatible
+                && matches!(
+                    capability,
+                    REMOTE_RUNNER_STAGING_CAPABILITY | REMOTE_RUNNER_STAGING_CAPABILITY_V1
+                ))
                 || (self.compatible
                     && capability == REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY)
                 || (self.source_artifact_compatible
@@ -2114,6 +2149,17 @@ pub(crate) mod tests_support {
                 .remote_cwd,
             "/runner/workspaces/run-1"
         );
+    }
+
+    #[test]
+    fn bounded_artifact_v1_interoperates_with_a_new_runner() {
+        let mut envelope = envelope();
+        envelope.handoff.schema =
+            crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1.to_string();
+        envelope.schema = REMOTE_RUNNER_STAGING_SCHEMA_V1.to_string();
+        let receipt = submit_remote_runner_staging(&mut transport(), &envelope)
+            .expect("new runner accepts old bounded staging");
+        assert!(receipt.artifacts.source_artifact.is_some());
     }
 
     #[test]

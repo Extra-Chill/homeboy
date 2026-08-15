@@ -24,7 +24,7 @@ use crate::runner_staging_operation::{
     RunnerSourceArtifact, RunnerStagingArtifacts, SourcePackageEntryKind,
     REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY, REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY,
     REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY, REMOTE_RUNNER_STAGING_CAPABILITY,
-    REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA,
+    REMOTE_RUNNER_STAGING_CAPABILITY_V1, REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA,
 };
 use crate::{broker_submit_token_for_runner, RunnerSession, RunnerTunnelMode};
 
@@ -730,6 +730,7 @@ impl<M: RunnerStagingMaterializer> RemoteRunnerStagingTransport for RunnerStagin
             && (matches!(
                 capability,
                 REMOTE_RUNNER_STAGING_CAPABILITY
+                    | REMOTE_RUNNER_STAGING_CAPABILITY_V1
                     | REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY
                     | REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY
             ) || (cfg!(unix) && capability == REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY))
@@ -962,6 +963,7 @@ struct ProductionStagingProvider;
 impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionStagingProvider {
     fn capabilities(&self, _runner_id: &str) -> Result<Vec<String>> {
         let mut capabilities = vec![
+            REMOTE_RUNNER_STAGING_CAPABILITY_V1.to_string(),
             REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
             REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
             REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),

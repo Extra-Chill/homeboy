@@ -427,7 +427,11 @@ fn run_once_output(
             claim.job.id.to_string(),
         )?,
         || {
-            verify_staged_workspace_before_execution(&options.runner_id, &execution_envelope)?;
+            verify_staged_workspace_before_execution(
+                &options.runner_id,
+                &execution_envelope,
+                _staged_workspace.as_ref(),
+            )?;
             let recovered =
                 resolve_runner_execution_context(&options.runner_id, execution_context.id())?;
             consume_execution(
@@ -448,6 +452,8 @@ fn run_once_output(
             // must not be used to recompute the pre-consumption receipt.
             Ok(())
         },
+        #[cfg(unix)]
+        _staged_workspace.as_ref().map(StagedWorkspaceDirectory::fd),
         || {
             if cancel_seen || last_cancel_poll.elapsed() < BROKER_CANCEL_POLL_INTERVAL {
                 return cancel_seen;
@@ -1040,7 +1046,7 @@ fn materialize_staged_source_artifact(
                 None,
             ));
         }
-        let directory = verify_controller_workspace(runner_id, &workspace)?;
+        let directory = verify_controller_workspace(runner_id, &workspace, None)?;
         return Ok(Some(directory));
     }
     let Some(source) = envelope
@@ -1081,9 +1087,17 @@ struct StagedWorkspaceDirectory {
     directory: File,
 }
 
+impl StagedWorkspaceDirectory {
+    #[cfg(unix)]
+    fn fd(&self) -> std::os::fd::RawFd {
+        self.directory.as_raw_fd()
+    }
+}
+
 fn verify_staged_workspace_before_execution(
     runner_id: &str,
     envelope: &RunnerExecutionEnvelope,
+    authority: Option<&StagedWorkspaceDirectory>,
 ) -> Result<()> {
     let Some(raw) = envelope
         .metadata
@@ -1100,7 +1114,10 @@ fn verify_staged_workspace_before_execution(
             None,
         )
     })?;
-    let _directory = verify_controller_workspace(runner_id, &workspace)?;
+    let authority = authority.ok_or_else(|| {
+        Error::internal_unexpected("staged workspace authority was not retained until execution")
+    })?;
+    verify_controller_workspace(runner_id, &workspace, Some(authority))?;
     Ok(())
 }
 
@@ -1108,6 +1125,7 @@ fn verify_staged_workspace_before_execution(
 fn verify_controller_workspace(
     runner_id: &str,
     workspace: &crate::runner_staging_operation::ControllerWorkspaceMaterialization,
+    retained: Option<&StagedWorkspaceDirectory>,
 ) -> Result<StagedWorkspaceDirectory> {
     use std::fs::OpenOptions;
 
@@ -1119,7 +1137,7 @@ fn verify_controller_workspace(
     options
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY);
-    let directory = options.open(&workspace.remote_cwd).map_err(|error| {
+    let opened = options.open(&workspace.remote_cwd).map_err(|error| {
         Error::validation_invalid_argument(
             "staged_workspace_materialization",
             format!("open runner-owned workspace without following links: {error}"),
@@ -1127,21 +1145,9 @@ fn verify_controller_workspace(
             None,
         )
     })?;
-    let descriptor_flags = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_GETFD) };
-    if descriptor_flags < 0
-        || unsafe {
-            libc::fcntl(
-                directory.as_raw_fd(),
-                libc::F_SETFD,
-                descriptor_flags & !libc::FD_CLOEXEC,
-            )
-        } < 0
-    {
-        return Err(Error::internal_io(
-            std::io::Error::last_os_error().to_string(),
-            Some("retain staged workspace descriptor for execution".to_string()),
-        ));
-    }
+    let directory = retained
+        .map(|authority| &authority.directory)
+        .unwrap_or(&opened);
     let metadata = read_workspace_metadata_nofollow(&directory)?;
     let actual_path = metadata
         .get("remote_path")
@@ -1223,13 +1229,14 @@ fn verify_controller_workspace(
             None,
         ));
     }
-    Ok(StagedWorkspaceDirectory { directory })
+    Ok(StagedWorkspaceDirectory { directory: opened })
 }
 
 #[cfg(not(unix))]
 fn verify_controller_workspace(
     _runner_id: &str,
     _workspace: &crate::runner_staging_operation::ControllerWorkspaceMaterialization,
+    _retained: Option<&StagedWorkspaceDirectory>,
 ) -> Result<StagedWorkspaceDirectory> {
     Err(Error::validation_invalid_argument(
         "staged_workspace_materialization",

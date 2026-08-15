@@ -511,10 +511,24 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     progress_sink: Option<RunnerCommandProgressSink>,
     require_child_identity_acknowledgement: bool,
     child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
+    #[cfg(unix)] verified_cwd_fd: Option<std::os::fd::RawFd>,
 ) -> Result<ProcessOutput> {
     let temp_owner = runner_temp_owner(&plan.env)?;
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
+    #[cfg(unix)]
+    if let Some(fd) = verified_cwd_fd {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fchdir(fd) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
     apply_runner_process_env(&mut command, plan, &temp_owner)?;
 
     command_output_until_cancelled_with_progress(

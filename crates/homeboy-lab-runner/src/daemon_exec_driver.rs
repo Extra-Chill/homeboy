@@ -183,6 +183,8 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             progress_sink,
             require_child_identity_acknowledgement,
             child_started,
+            #[cfg(unix)]
+            None,
         )?;
         let (stdout, stderr) = super::execution::redaction::redact_runner_exec_streams(
             output.stdout,
