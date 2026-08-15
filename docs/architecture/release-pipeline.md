@@ -74,6 +74,11 @@ Extensions should own ecosystem-specific release semantics:
 Core should own generic sequencing, state, git operations, output contracts, and
 failure handling.
 
+Components that ship only release assets can declare `release.publish: false`.
+The plan retains each extension-derived `publish.<target>` as a disabled step
+with the declaration as its reason; GitHub Release creation and asset upload are
+separate release operations and remain planned.
+
 ## Commands
 
 Preview a release without executing mutating steps:

@@ -1,4 +1,4 @@
-use super::builders::{ready_step, string_array_config, string_config, StepConfig};
+use super::builders::{disabled_step, ready_step, string_array_config, string_config, StepConfig};
 use super::changelog::build_changelog_steps;
 use super::hints::{github_release_applies, push_publish_vs_github_release_hints};
 use crate::release::pipeline_capabilities::{
@@ -53,6 +53,7 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
 ) -> Result<Vec<PlanStep>> {
     let mut steps = Vec::new();
     let publish_targets = get_publish_targets(extensions);
+    let registry_publish_enabled = component.release.publish_enabled();
 
     push_publish_vs_github_release_hints(component, options, &publish_targets, hints);
 
@@ -70,7 +71,10 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
         );
     }
 
-    if !publish_targets.is_empty() && !has_package_capability(extensions) {
+    if registry_publish_enabled
+        && !publish_targets.is_empty()
+        && !has_package_capability(extensions)
+    {
         warnings.push(
             "Publish targets derived from extensions but no extension provides 'release.package'. \
              Add an extension that provides packaging."
@@ -221,7 +225,7 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
     }
 
     let mut publish_step_ids: Vec<String> = Vec::new();
-    if !publish_targets.is_empty() && !options.pipeline.skip_publish {
+    if !publish_targets.is_empty() && !options.pipeline.skip_publish && registry_publish_enabled {
         for target in &publish_targets {
             let step_id = format!("publish.{}", target);
             publish_step_ids.push(step_id.clone());
@@ -233,6 +237,8 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
                 StepConfig::new(),
             ));
         }
+    } else if !publish_targets.is_empty() && !registry_publish_enabled {
+        add_disabled_publish_steps(&mut steps, &publish_targets);
     } else if options.pipeline.skip_publish && !publish_targets.is_empty() {
         homeboy_core::log_status!(
             "release",
@@ -264,7 +270,10 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
     if !post_release_hooks.is_empty() {
         let post_release_needs = if package_step_needed && !options.pipeline.deploy {
             vec!["cleanup".to_string()]
-        } else if !options.pipeline.skip_publish && !publish_targets.is_empty() {
+        } else if !options.pipeline.skip_publish
+            && registry_publish_enabled
+            && !publish_targets.is_empty()
+        {
             if options.pipeline.deploy {
                 publish_step_ids.clone()
             } else {
@@ -286,7 +295,10 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
     if options.pipeline.deploy {
         let deploy_needs = if !post_release_hooks.is_empty() {
             vec!["post_release".to_string()]
-        } else if !options.pipeline.skip_publish && !publish_step_ids.is_empty() {
+        } else if !options.pipeline.skip_publish
+            && registry_publish_enabled
+            && !publish_step_ids.is_empty()
+        {
             publish_step_ids
         } else {
             vec!["git.push".to_string()]
@@ -315,10 +327,12 @@ fn build_head_release_steps(
 ) -> Result<Vec<PlanStep>> {
     let mut steps = Vec::new();
     let mut artifact_need = "preflight.head_identity".to_string();
+    let registry_publish_enabled = component.release.publish_enabled();
     let package_step_needed = options.pipeline.from_artifacts.is_none()
         && head_package_step_needed(component, extensions, publish_targets, options);
 
-    if !publish_targets.is_empty()
+    if registry_publish_enabled
+        && !publish_targets.is_empty()
         && !options.pipeline.skip_publish
         && options.pipeline.from_artifacts.is_none()
         && !has_package_capability(extensions)
@@ -383,7 +397,7 @@ fn build_head_release_steps(
     }
 
     let mut publish_step_ids: Vec<String> = Vec::new();
-    if !publish_targets.is_empty() && !options.pipeline.skip_publish {
+    if !publish_targets.is_empty() && !options.pipeline.skip_publish && registry_publish_enabled {
         for target in publish_targets {
             let step_id = format!("publish.{}", target);
             publish_step_ids.push(step_id.clone());
@@ -395,6 +409,8 @@ fn build_head_release_steps(
                 StepConfig::new(),
             ));
         }
+    } else if !publish_targets.is_empty() && !registry_publish_enabled {
+        add_disabled_publish_steps(&mut steps, publish_targets);
     }
 
     if package_step_needed && !options.pipeline.deploy {
@@ -421,7 +437,10 @@ fn build_head_release_steps(
     if !post_release_hooks.is_empty() {
         let post_release_needs = if package_step_needed && !options.pipeline.deploy {
             vec!["cleanup".to_string()]
-        } else if !options.pipeline.skip_publish && !publish_targets.is_empty() {
+        } else if !options.pipeline.skip_publish
+            && registry_publish_enabled
+            && !publish_targets.is_empty()
+        {
             if options.pipeline.deploy {
                 publish_step_ids.clone()
             } else {
@@ -445,7 +464,10 @@ fn build_head_release_steps(
     if options.pipeline.deploy {
         let deploy_needs = if !post_release_hooks.is_empty() {
             vec!["post_release".to_string()]
-        } else if !options.pipeline.skip_publish && !publish_step_ids.is_empty() {
+        } else if !options.pipeline.skip_publish
+            && registry_publish_enabled
+            && !publish_step_ids.is_empty()
+        {
             publish_step_ids
         } else if github_release_needed(component, options) {
             vec!["github.release".to_string()]
@@ -507,7 +529,9 @@ fn package_step_needed(
     github_release_needed: bool,
 ) -> bool {
     (has_package_capability(extensions) || has_component_package_contract(component))
-        && ((!publish_targets.is_empty() && !options.pipeline.skip_publish)
+        && ((component.release.publish_enabled()
+            && !publish_targets.is_empty()
+            && !options.pipeline.skip_publish)
             || github_release_needed)
 }
 
@@ -518,7 +542,9 @@ fn head_package_step_needed(
     options: &ReleaseOptions,
 ) -> bool {
     (has_package_capability(extensions) || has_component_package_contract(component))
-        && ((!publish_targets.is_empty() && !options.pipeline.skip_publish)
+        && ((component.release.publish_enabled()
+            && !publish_targets.is_empty()
+            && !options.pipeline.skip_publish)
             || github_release_needed(component, options))
 }
 
@@ -528,6 +554,18 @@ fn has_component_package_contract(component: &Component) -> bool {
         .as_deref()
         .is_some_and(|path| !path.trim().is_empty())
         && component.has_script(ExtensionCapability::Build)
+}
+
+fn add_disabled_publish_steps(steps: &mut Vec<PlanStep>, publish_targets: &[String]) {
+    for target in publish_targets {
+        let step_id = format!("publish.{}", target);
+        steps.push(disabled_step(
+            &step_id,
+            &step_id,
+            format!("Publish to {} (disabled)", target),
+            string_config("reason", "component release.publish=false"),
+        ));
+    }
 }
 
 fn add_release_extension_diagnostics(
