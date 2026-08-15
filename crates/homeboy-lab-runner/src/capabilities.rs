@@ -6,13 +6,13 @@ use homeboy_agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy_core::engine::shell;
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use homeboy_core::server::{
     self, execute_local_command_in_dir, execute_local_command_in_dir_with_timeout, SshClient,
 };
 
-use super::runner_probe_gate::deduplicated_probe;
+use super::runner_probe_gate::{deduplicated_probe, deduplicated_probe_until};
 use super::{remote_runner_homeboy_path, Runner, RunnerKind, RunnerToolRegistry};
 
 /// Stable label for the remote capability probe in the probe-gate ledger.
@@ -286,11 +286,41 @@ pub struct RunnerCapabilityInventory {
 }
 
 pub fn runner_capability_inventory(runner_id: &str) -> Result<RunnerCapabilityInventory> {
+    runner_capability_inventory_with_preflight(runner_id, RunnerCapabilityPreflight::default())
+}
+
+/// Read the runner capability inventory under the caller's shared observation
+/// deadline. `execute_with_timeout` terminates the SSH process group when the
+/// remaining budget expires, so admission cannot leave a probe behind.
+pub fn runner_capability_inventory_until(
+    runner_id: &str,
+    deadline: std::time::Instant,
+) -> Result<RunnerCapabilityInventory> {
+    let timeout = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|timeout| !timeout.is_zero())
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::RemoteCommandTimeout,
+                "Runner capability inventory deadline expired before probing",
+                serde_json::json!({ "runner_id": runner_id }),
+            )
+        })?;
+    runner_capability_inventory_with_preflight(
+        runner_id,
+        RunnerCapabilityPreflight {
+            timeout: Some(timeout),
+            ..RunnerCapabilityPreflight::default()
+        },
+    )
+}
+
+fn runner_capability_inventory_with_preflight(
+    runner_id: &str,
+    preflight: RunnerCapabilityPreflight,
+) -> Result<RunnerCapabilityInventory> {
     let runner = super::load(runner_id)?;
-    let snapshot = RunnerCapabilitySnapshot::from_runner_probe(
-        &runner,
-        &RunnerCapabilityPreflight::default(),
-    )?;
+    let snapshot = RunnerCapabilitySnapshot::from_runner_probe(&runner, &preflight)?;
     let mut capabilities = snapshot
         .tools
         .iter()
@@ -436,25 +466,47 @@ impl RunnerCapabilitySnapshot {
         // script and the environment it runs under are identical, so collapse
         // concurrent askers onto one connection and cap how many can be open to
         // this runner at all.
-        let fingerprint = batch_probe_fingerprint(&script, &client.env);
-        deduplicated_probe(
-            &runner.id,
-            RUNNER_CAPABILITY_PROBE,
-            &fingerprint,
-            move || {
-                let output = preflight
-                    .timeout
-                    .map(|timeout| client.execute_with_timeout(&script, timeout))
-                    .unwrap_or_else(|| client.execute(&script));
-                Ok(parse_batch_probe_output(
-                    &output.stdout,
-                    &tool_commands,
-                    &command_names,
-                    &capability_probes,
-                    &preflight.required_toolchain_probes,
-                ))
-            },
-        )
+        let fingerprint = format!(
+            "{}:timeout_ms={}",
+            batch_probe_fingerprint(&script, &client.env),
+            preflight
+                .timeout
+                .map(|timeout| timeout.as_millis())
+                .unwrap_or(0),
+        );
+        let probe = move || {
+            let output = preflight
+                .timeout
+                .map(|timeout| client.execute_with_timeout(&script, timeout))
+                .unwrap_or_else(|| client.execute(&script));
+            if output.timed_out {
+                return Err(Error::new(
+                    ErrorCode::RemoteCommandTimeout,
+                    "Runner capability inventory probe timed out",
+                    serde_json::json!({
+                        "runner_id": runner.id,
+                        "timeout_ms": preflight.timeout.map(|timeout| timeout.as_millis()),
+                    }),
+                ));
+            }
+            Ok(parse_batch_probe_output(
+                &output.stdout,
+                &tool_commands,
+                &command_names,
+                &capability_probes,
+                &preflight.required_toolchain_probes,
+            ))
+        };
+        match preflight.timeout {
+            Some(timeout) => deduplicated_probe_until(
+                &runner.id,
+                RUNNER_CAPABILITY_PROBE,
+                &fingerprint,
+                std::time::Instant::now() + timeout,
+                probe,
+            ),
+            None => deduplicated_probe(&runner.id, RUNNER_CAPABILITY_PROBE, &fingerprint, probe),
+        }
     }
 
     fn local_batch_probe(
@@ -1106,6 +1158,15 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(snapshot.tool_capabilities.is_empty());
+    }
+
+    #[test]
+    fn deadline_aware_inventory_fails_with_a_structured_timeout_before_probing() {
+        let error = runner_capability_inventory_until("lab", std::time::Instant::now())
+            .expect_err("expired admission budget must not start a capability probe");
+
+        assert_eq!(error.code, ErrorCode::RemoteCommandTimeout);
+        assert_eq!(error.details["runner_id"], "lab");
     }
 
     #[test]
