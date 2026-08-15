@@ -512,6 +512,16 @@ mod tests {
             let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
             agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
             agent_task_lifecycle::mark_running(run_id).expect("running");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_pid");
+            })
+            .expect("controller owner removed");
+            let stale = agent_task_lifecycle::status(run_id).expect("pre-planning status");
+            assert_eq!(stale.metadata["stale_running"], true);
             agent_task_lifecycle::record_lab_offload_phase(
                 run_id,
                 "homeboy-lab",
@@ -522,14 +532,6 @@ mod tests {
                 Some(&plan),
             )
             .expect("planned runner submission recorded");
-            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-                record
-                    .metadata
-                    .as_object_mut()
-                    .expect("metadata object")
-                    .remove("runner_pid");
-            })
-            .expect("controller owner removed");
 
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("tick pass");

@@ -608,6 +608,8 @@ fn record_lab_offload_proxy(
         metadata.insert("remote_command".to_string(), json!(remote_command));
     }
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
+    metadata.remove(METADATA_KEY_STALE_RUNNING);
+    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
     metadata.insert(
         "runner_execution_record".to_string(),
         serde_json::to_value(
