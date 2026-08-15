@@ -7,14 +7,24 @@
 # This script can answer two questions, and they are NOT the same question:
 #
 #   declaration - every context named by the versioned payload is emitted by
-#                 `.github/workflows/ci.yml` on every pull request. This is
-#                 repository content, so a PR can both break it and fix it, and
-#                 it is checked from the checkout with no network.
+#                 `.github/workflows/ci.yml` on every pull request, and every
+#                 skippable gate job is wired into the terminal execution gate.
+#                 This is repository content, so a PR can both break it and fix
+#                 it, and it is checked from the checkout with no network.
 #   enforcement - GitHub actually *requires* those contexts before `main` can be
 #                 updated. This is repository STATE. A pull request cannot
 #                 change it and, until #10795's payload is installed by an
 #                 administrator, it can be false while the declaration is
 #                 perfect.
+#
+# There is a THIRD question neither half can answer, because both are evaluated
+# before the gates finish: did the declared gates actually EXECUTE? PR #12567
+# merged with this check green in a run whose gates were all cancelled, then
+# skipped entirely in the replacement run that concluded `success` (#12573).
+# `.github/ci-required-gates-executed.sh` owns that claim at the END of a run.
+# What a pull request CAN break about it — the wiring that makes the terminal
+# gate cover every skippable gate job — is checked below, fail-closed, because
+# it is repository content like the rest of the declaration.
 #
 # Before #11084 the CI job ran `--local` and reported a plain green tick named
 # "Required Gates Policy". That tick asserted the second claim while only ever
@@ -142,6 +152,76 @@ if ! jq -e '
   echo "required-gates policy must require checks on the current PR head" >&2
   exit 1
 fi
+
+# ── Claim 1b: the declaration must reach a TERMINAL execution gate (#12573) ───
+#
+# Emitting a context is not running it. Every gate in `ci.yml` is conditional on
+# `pr-state`, and a `skipped` needs-dependency does not fail a run, so a run that
+# skipped all seven declared gates concluded `success` with this check green in
+# the run before it and skipped in the run itself. The end-of-run assertion lives
+# in `.github/ci-required-gates-executed.sh`; the part a pull request can break
+# is its WIRING, so that is verified here from the checkout with no network.
+#
+# The terminal job must exist, must run under `always()` (a gate that skips
+# alongside the gates it guards is not a gate), must invoke the execution
+# assertion, and must depend on EVERY skippable gate job — otherwise a newly
+# added gate could be skipped with nothing left to notice.
+
+terminal_job='required-gates-executed'
+terminal_section="$(awk -v key="  ${terminal_job}:" '
+  $0 == key { inside = 1; next }
+  inside && /^  [A-Za-z0-9_-]+:$/ { inside = 0 }
+  inside { print }
+' "${ci_workflow}")"
+
+if [ -z "${terminal_section}" ]; then
+  echo "${ci_workflow} declares no '${terminal_job}' job, so a run that skips every required gate can still conclude success" >&2
+  exit 1
+fi
+
+for marker in \
+  'name: homeboy / Required Gates Executed' \
+  'if: ${{ always() }}' \
+  'bash .github/ci-required-gates-executed.sh'; do
+  if ! printf '%s\n' "${terminal_section}" | grep -Fq "${marker}"; then
+    echo "the '${terminal_job}' job must contain '${marker}' to be a terminal gate" >&2
+    exit 1
+  fi
+done
+
+terminal_needs="$(printf '%s\n' "${terminal_section}" \
+  | sed -n 's/^    needs: *//p' \
+  | tr -d '[]' \
+  | tr ',' ' ' \
+  | tr -s ' ')"
+
+if [ -z "${terminal_needs//[[:space:]]/}" ]; then
+  echo "the '${terminal_job}' job must declare its dependencies as one inline 'needs: [...]' list" >&2
+  exit 1
+fi
+
+# A job is skippable exactly when it carries the PR-state condition. Deriving the
+# set from the workflow rather than hardcoding it is what makes this survive a
+# gate being added: the new gate is covered the moment it is written.
+gate_condition="if: \${{ needs.pr-state.outputs.active == 'true' }}"
+gate_jobs="$(awk -v cond="${gate_condition}" '
+  /^  [A-Za-z0-9_-]+:$/ { job = substr($0, 3, length($0) - 3); next }
+  job != "" && index($0, cond) { print job; job = "" }
+' "${ci_workflow}")"
+
+if [ -z "${gate_jobs}" ]; then
+  echo "${ci_workflow} declares no PR-state-conditional gate jobs, which contradicts the required-gates policy" >&2
+  exit 1
+fi
+
+for gate_job in ${gate_jobs}; do
+  case " ${terminal_needs} " in
+    *" ${gate_job} "*) continue ;;
+  esac
+
+  echo "gate job '${gate_job}' is skippable but is not a dependency of '${terminal_job}', so skipping it would still conclude success" >&2
+  exit 1
+done
 
 if [ "${mode}" = "--local" ]; then
   exit 0
@@ -314,7 +394,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo
     echo "| claim | result |"
     echo "| --- | --- |"
-    echo "| declaration (\`ci.yml\` emits every declared context) | **verified** |"
+    echo "| declaration (\`ci.yml\` emits every declared context and wires every gate into \`required-gates-executed\`) | **verified** |"
     echo "| enforcement (GitHub requires them on \`${branch}\`) | **${outcome}** |"
     echo
     echo "${headline}"
