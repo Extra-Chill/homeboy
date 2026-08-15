@@ -39,7 +39,7 @@ use super::cook_budget::{
     validate_effective_cook_budget, ExecutionBudgetUsage,
 };
 use super::cook_pre_execution::{
-    materialize_cook_attempt_with_store, materialize_initial_cook_attempt_with_store,
+    materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores,
     pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
     record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
     with_pre_execution_phase,
@@ -4187,7 +4187,7 @@ where
     // Recipe persistence and lifecycle materialization are a recoverable saga.
     // Complete it before any capacity, workspace, or provider-facing work so a
     // controller interruption leaves a status-addressable, resumable attempt.
-    materialize_initial_cook_attempt_with_store(store, &options)?;
+    materialize_initial_cook_attempt_with_stores(store, &lifecycle_store, &options)?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -4429,8 +4429,9 @@ where
         ));
     }
     if let Some(latest_attempt) = recipe.attempts.last() {
-        materialize_cook_attempt_with_store(
+        materialize_cook_attempt_with_stores(
             store,
+            &lifecycle_store,
             &recipe.cook_id,
             &latest_attempt.run_id,
             &latest_attempt.plan,
@@ -4989,7 +4990,13 @@ where
                 }
                 let next_run_id = format!("{run_id}-transport-retry");
                 store.record_recipe_attempt_replacement(&cook_id, &run_id, &next_run_id)?;
-                materialize_cook_attempt_with_store(store, &cook_id, &next_run_id, &plan)?;
+                materialize_cook_attempt_with_stores(
+                    store,
+                    &lifecycle_store,
+                    &cook_id,
+                    &next_run_id,
+                    &plan,
+                )?;
                 run_id = next_run_id;
                 next_plan = Some(plan);
                 continue;

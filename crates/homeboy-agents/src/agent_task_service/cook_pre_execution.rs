@@ -240,14 +240,6 @@ pub(crate) fn materialize_initial_cook_attempt(
     materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, options)
 }
 
-pub(crate) fn materialize_initial_cook_attempt_with_store(
-    store: &CookRecipeStore,
-    options: &AgentTaskCookServiceOptions,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    materialize_initial_cook_attempt_with_stores(store, &lifecycle_store, options)
-}
-
 /// Persist the controller-owned initial attempt through explicit recipe and
 /// lifecycle stores so the run record and Cook index always land beside the
 /// recipe's authority instead of the ambient environment.
@@ -290,16 +282,6 @@ pub(crate) fn materialize_cook_attempt(
     let recipe_store = CookRecipeStore::from_current_data_root()?;
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     materialize_cook_attempt_with_stores(&recipe_store, &lifecycle_store, cook_id, run_id, plan)
-}
-
-pub(crate) fn materialize_cook_attempt_with_store(
-    store: &CookRecipeStore,
-    cook_id: &str,
-    run_id: &str,
-    plan: &AgentTaskPlan,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    materialize_cook_attempt_with_stores(store, &lifecycle_store, cook_id, run_id, plan)
 }
 
 /// Complete recipe, run-record, and index registration through explicit recipe
