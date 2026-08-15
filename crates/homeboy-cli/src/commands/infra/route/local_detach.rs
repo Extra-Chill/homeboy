@@ -66,18 +66,19 @@ const HANDOFF_TIMEOUT_ENV: &str = "HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS";
 const LOCAL_COOK_LAUNCH_TOKEN_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN";
 const LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_PATH";
 
-/// Whether this is an unsupervised local Cook controller invocation.
+/// Whether this is an unsupervised Cook requesting detached supervision.
 ///
-/// Every accepted local Cook is re-executed under the durable controller job.
 /// The one-use launch token prevents only that exact child from handing itself
 /// off again; ambient environment variables cannot bypass supervision.
 fn is_unsupervised_local_cook(cli: &Cli) -> bool {
-    matches!(
-        cli.command,
-        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
-        })
-    ) && !consume_local_cook_launch_token()
+    cli.detach_after_handoff
+        && matches!(
+            cli.command,
+            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+            })
+        )
+        && !consume_local_cook_launch_token()
 }
 
 fn consume_local_cook_launch_token() -> bool {
@@ -130,9 +131,7 @@ pub(super) fn intercept_local_detached_cook(
     provider_placement: Option<&str>,
     provider_runner_id: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
-    if !is_unsupervised_local_cook(cli)
-        || (!cli.detach_after_handoff && provider_placement != Some("local"))
-    {
+    if !is_unsupervised_local_cook(cli) {
         return Ok(None);
     }
     if !local_cook_supervision_supported() {
@@ -948,16 +947,49 @@ mod tests {
         );
     }
 
-    /// Every unsupervised local Cook is intercepted; non-local and non-Cook
-    /// invocations continue through normal routing untouched.
+    /// Only a Cook explicitly requesting detachment is intercepted; attached
+    /// local callers continue through normal routing untouched.
     /// These cases must not spawn anything.
     #[test]
-    fn only_a_local_cook_is_intercepted() {
-        let (local, _) = cook_cli(&[]);
-        assert!(is_unsupervised_local_cook(&local));
+    fn only_a_detaching_cook_is_intercepted() {
+        let normalized = args(&[
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "cook",
+            "--run-id",
+            "attached",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "repo@branch",
+            "--verify",
+            "true",
+        ]);
+        let local = Cli::try_parse_from(&normalized).expect("parse attached local Cook");
+        assert!(!is_unsupervised_local_cook(&local));
+        crate::test_support::with_isolated_home(|_| {
+            assert_eq!(
+                intercept_local_detached_cook(
+                    &local,
+                    &normalized,
+                    None,
+                    false,
+                    Some("local"),
+                    None,
+                )
+                .expect("attached caller falls through"),
+                None,
+            );
+            assert!(
+                agent_task_lifecycle::exact_record("attached").is_err(),
+                "an attached caller must not create the detached parent, supervisor, or attempt reservation"
+            );
+        });
 
         let (auto, normalized) = cook_cli(&["--placement", "auto"]);
-        assert!(is_unsupervised_local_cook(&auto));
+        assert!(!is_unsupervised_local_cook(&auto));
         assert_eq!(
             intercept_local_detached_cook(&auto, &normalized, None, false, Some("lab"), None,)
                 .expect("non-local route falls through"),
