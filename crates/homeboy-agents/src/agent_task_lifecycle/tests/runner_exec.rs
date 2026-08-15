@@ -3,7 +3,9 @@
 #![cfg(test)]
 
 use super::*;
-use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStatus, RunnerJobLogSnapshot};
+use homeboy_core::api_jobs::{
+    Job, JobEvent, JobEventKind, JobStatus, RunnerJobLogSnapshot, RunnerJobProjection,
+};
 use homeboy_core::test_support::with_isolated_home;
 
 #[test]
@@ -708,6 +710,50 @@ fn generic_runner_exec_rejects_stale_terminal_snapshot_binding() {
             .expect("read")
             .expect("run");
         assert_eq!(run.status, "running");
+    });
+}
+
+#[test]
+fn generic_runner_exec_accepts_exact_direct_job_projection_binding() {
+    with_isolated_home(|_| {
+        let run_id = "runner-projection-direct";
+        record_runner_exec_job_identity(
+            run_id,
+            "homeboy-lab",
+            "00000000-0000-0000-0000-000000000123",
+            "/runner/workspace",
+            &["composer".to_string(), "install".to_string()],
+        )
+        .expect("bound direct run");
+        let mut snapshot = runner_snapshot("succeeded");
+        snapshot.job.target_runner_id = None;
+        snapshot.job.runner_job_projection = Some(RunnerJobProjection {
+            runner_id: "other-runner".to_string(),
+            command: "composer install".to_string(),
+            cwd: Some("/runner/workspace".to_string()),
+            source: "runner-daemon".to_string(),
+            kind: "runner.exec".to_string(),
+            lifecycle: None,
+        });
+
+        let error = project_terminal_runner_exec_result(run_id, &snapshot)
+            .expect_err("mismatched direct runner projection is rejected");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+
+        snapshot
+            .job
+            .runner_job_projection
+            .as_mut()
+            .expect("projection")
+            .runner_id = "homeboy-lab".to_string();
+        project_terminal_runner_exec_result(run_id, &snapshot)
+            .expect("exact direct runner projection is accepted");
+        let run = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .get_run(run_id)
+            .expect("read")
+            .expect("run");
+        assert_eq!(run.status, "pass");
     });
 }
 
