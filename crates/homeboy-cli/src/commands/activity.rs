@@ -660,7 +660,9 @@ mod tests {
     use super::*;
     use crate::cli_surface::Cli;
     use clap::Parser;
-    use homeboy::core::activity::{ActivityCrossRefs, ActivityNextAction, ActivityRunnerRefs};
+    use homeboy::core::activity::{
+        ActivityContext, ActivityCrossRefs, ActivityNextAction, ActivityRunnerRefs,
+    };
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
     use homeboy::test_support::with_isolated_home;
     use serde_json::json;
@@ -678,6 +680,7 @@ mod tests {
             cwd: None,
             runner: ActivityRunnerRefs::default(),
             refs: ActivityCrossRefs::default(),
+            context: ActivityContext::default(),
             artifacts: Vec::new(),
             evidence: Vec::new(),
             source_projections: Vec::new(),

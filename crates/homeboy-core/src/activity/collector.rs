@@ -28,12 +28,23 @@ impl ActivityCollector {
             .or_insert(item);
     }
 
+    #[cfg(test)]
     pub(crate) fn items(self, scope: ActivityScope, limit: usize) -> Vec<ActivityItem> {
+        self.items_filtered(scope, limit, &super::ActivityFilter::default())
+    }
+
+    pub(crate) fn items_filtered(
+        self,
+        scope: ActivityScope,
+        limit: usize,
+        filter: &super::ActivityFilter,
+    ) -> Vec<ActivityItem> {
         let mut items = self.items.into_values().collect::<Vec<_>>();
         for item in &mut items {
             finalize_item(item);
         }
         items.sort_by_key(|item| std::cmp::Reverse(item_sort_key(item)));
+        items.retain(|item| filter.matches(item));
         if scope == ActivityScope::ActiveRecent {
             items.retain(|item| is_active(item.state) || item.finished_at.is_some());
         }
@@ -157,6 +168,20 @@ fn merge_refs(existing: &mut ActivityItem, incoming: &ActivityItem) {
     }
     if existing.runner.transport.is_none() {
         existing.runner.transport = incoming.runner.transport.clone();
+    }
+    if existing.context.task_url.is_none() {
+        existing.context.task_url = incoming.context.task_url.clone();
+    }
+    if existing.context.repository.is_none() {
+        existing.context.repository = incoming.context.repository.clone();
+    }
+    if existing.context.worktree.is_none() {
+        existing.context.worktree = incoming.context.worktree.clone();
+    }
+    for identity in &incoming.context.identities {
+        if !existing.context.identities.contains(identity) {
+            existing.context.identities.push(identity.clone());
+        }
     }
 }
 

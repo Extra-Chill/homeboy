@@ -62,6 +62,9 @@ List persisted observation runs
 
 | Option | Value | Description |
 | --- | --- | --- |
+| `--active` | flag | Project active and recent work from every activity source, including connected runner jobs. Supports task identity filters rather than the observation-store-only filters below |
+| `--task-url` | `<TASK_URL>` | Match one durable task URL in the unified active projection |
+| `--repo` | `<REPO>` | Match one repository slug in the unified active projection |
 | `--runner` | `<RUNNER>` | Query runs from a connected execution runner daemon |
 | `--kind` | `<KIND>` | Run kind: bench, rig, trace, etc |
 | `--component` | `<COMPONENT_ID>` | Component ID |

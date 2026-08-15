@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use super::{
-    action, is_active, metadata_string, ActivityCollector, ActivityCrossRefs, ActivityEvidenceRef,
-    ActivityItem, ActivityNextAction, ActivityRunnerRefs, ActivityState,
+    action, is_active, metadata_string, ActivityCollector, ActivityContext, ActivityCrossRefs,
+    ActivityEvidenceRef, ActivityFilter, ActivityItem, ActivityNextAction, ActivityRunnerRefs,
+    ActivityState,
 };
 use crate::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use crate::Result;
@@ -18,26 +19,45 @@ pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
     }
 }
 
-pub(super) fn collect(collector: &mut ActivityCollector, limit: usize) -> Result<()> {
+pub(super) fn collect(
+    collector: &mut ActivityCollector,
+    limit: usize,
+    filter: &ActivityFilter,
+    exhaustive: bool,
+) -> Result<()> {
     let store = ObservationStore::open_readonly()?;
-    let mut records = store.list_runs(RunListFilter {
-        limit: Some(limit as i64),
-        ..Default::default()
-    })?;
+    let mut records = if exhaustive {
+        // `list_runs(None)` is a display page (100 rows), not an exhaustive
+        // lookup. The store-owned all-record walk either returns every row or
+        // errors; it never turns an incomplete page into an absence claim.
+        store.list_runs_all(RunListFilter::default())?
+    } else {
+        store.list_runs(RunListFilter {
+            limit: filter.is_empty().then_some(limit as i64),
+            ..Default::default()
+        })?
+    };
     let listed_ids = records
         .iter()
         .map(|record| record.id.clone())
         .collect::<BTreeSet<_>>();
     // Recent terminal records are bounded for display, but active work is
     // always included before the canonical report applies its final limit.
+    let active = if !exhaustive && filter.is_empty() {
+        store.list_active_runs_bounded(limit as i64)?
+    } else {
+        store.list_active_runs()?
+    };
     records.extend(
-        store
-            .list_active_runs_bounded(limit as i64)?
+        active
             .into_iter()
             .filter(|record| !listed_ids.contains(&record.id)),
     );
     for run in records {
-        collector.insert(item_from_run(&store, run)?);
+        let item = item_from_run(&store, run)?;
+        if filter.matches(&item) {
+            collector.insert(item);
+        }
     }
     Ok(())
 }
@@ -80,6 +100,7 @@ fn item_from_run(store: &ObservationStore, run: RunRecord) -> Result<ActivityIte
             agent_task_run_id: None,
             runner_job_id: job_id,
         },
+        context: ActivityContext::default(),
         artifacts,
         evidence: Vec::new(),
         source_projections: Vec::new(),

@@ -49,6 +49,49 @@ pub struct ActivityCrossRefs {
     pub runner_job_id: Option<String>,
 }
 
+/// Stable task identity carried by sources that know the submitted work.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityContext {
+    /// Legacy single-task identity. Retained for existing persisted activity
+    /// consumers; new agent-task projections populate `identities`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    /// Every canonical task/destination identity represented by this activity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<ActivityTaskIdentity>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityTaskIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+}
+
+impl ActivityContext {
+    pub fn is_empty(&self) -> bool {
+        self.task_url.is_none()
+            && self.repository.is_none()
+            && self.worktree.is_none()
+            && self.identities.is_empty()
+    }
+}
+
+/// Exact identity selectors for a bounded unified activity lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityFilter {
+    pub task_url: Option<String>,
+    pub repository: Option<String>,
+    pub worktree: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityEvidenceRef {
     pub id: String,
@@ -97,6 +140,8 @@ pub struct ActivityItem {
     pub runner: ActivityRunnerRefs,
     #[serde(default)]
     pub refs: ActivityCrossRefs,
+    #[serde(default, skip_serializing_if = "ActivityContext::is_empty")]
+    pub context: ActivityContext,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ActivityEvidenceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -107,6 +152,40 @@ pub struct ActivityItem {
     pub state_conflicts: Vec<ActivityStateConflict>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<ActivityNextAction>,
+}
+
+impl ActivityFilter {
+    pub fn matches(&self, item: &ActivityItem) -> bool {
+        self.is_empty()
+            || item
+                .context
+                .identities
+                .iter()
+                .any(|identity| self.matches_identity(identity))
+            || self.matches_identity(&ActivityTaskIdentity {
+                task_url: item.context.task_url.clone(),
+                repository: item.context.repository.clone(),
+                worktree: item.context.worktree.clone().or_else(|| item.cwd.clone()),
+            })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.task_url.is_none() && self.repository.is_none() && self.worktree.is_none()
+    }
+
+    fn matches_identity(&self, identity: &ActivityTaskIdentity) -> bool {
+        self.task_url
+            .as_deref()
+            .is_none_or(|value| identity.task_url.as_deref() == Some(value))
+            && self
+                .repository
+                .as_deref()
+                .is_none_or(|value| identity.repository.as_deref() == Some(value))
+            && self
+                .worktree
+                .as_deref()
+                .is_none_or(|value| identity.worktree.as_deref() == Some(value))
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

@@ -9,6 +9,8 @@ use super::{
     RunsListArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER,
 };
 
+use crate::cli_surface::Cli;
+use clap::Parser;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{
     NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
@@ -97,6 +99,9 @@ fn run_list_filters_kind_component_rig_and_status() {
 
         let (output, _) = list_runs(
             RunsListArgs {
+                active: false,
+                task_url: None,
+                repo: None,
                 runner: None,
                 kind: Some("bench".to_string()),
                 component_id: Some("homeboy".to_string()),
@@ -137,6 +142,9 @@ fn run_list_reads_durable_record_without_reconciliation() {
 
         let (output, _) = list_runs(
             RunsListArgs {
+                active: false,
+                task_url: None,
+                repo: None,
                 runner: None,
                 kind: Some("bench".to_string()),
                 component_id: Some("homeboy".to_string()),
@@ -223,8 +231,72 @@ fn run_list_does_not_classify_terminal_runs_as_stale() {
     });
 }
 
+#[test]
+fn active_list_uses_the_unified_activity_projection_without_changing_runs_list() {
+    with_isolated_home(|_home| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let active = store
+            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+            .expect("active run");
+
+        let (output, _) = list_runs(
+            RunsListArgs {
+                active: true,
+                limit: 20,
+                ..list_args()
+            },
+            "runs.list",
+        )
+        .expect("active list");
+
+        let RunsOutput::Active(report) = output else {
+            panic!("expected unified activity output");
+        };
+        assert_eq!(report.schema, "homeboy/activity-report/v1");
+        assert_eq!(report.command, "runs.list_active");
+        assert!(report.items.iter().any(|item| item.id == active.id));
+
+        let (ordinary, _) = list_runs(list_args(), "runs.list").expect("ordinary list");
+        assert!(matches!(ordinary, RunsOutput::List(_)));
+    });
+}
+
+#[test]
+fn active_list_identity_filters_parse_and_reject_observation_only_combinations() {
+    Cli::try_parse_from([
+        "homeboy",
+        "runs",
+        "list",
+        "--active",
+        "--task-url",
+        "https://example.test/issues/12146",
+        "--repo",
+        "Extra-Chill/homeboy",
+        "--workspace",
+        "homeboy@fix-12146",
+    ])
+    .expect("identity lookup parses");
+    assert!(Cli::try_parse_from(["homeboy", "runs", "list", "--task-url", "task"]).is_err());
+    assert!(Cli::try_parse_from(["homeboy", "runs", "list", "--active", "--running"]).is_err());
+}
+
+#[test]
+fn ordinary_runs_list_stays_in_its_existing_serialized_variant() {
+    with_isolated_home(|_| {
+        let output = list_runs(list_args(), "runs.list")
+            .expect("ordinary list")
+            .0;
+        let value = serde_json::to_value(output).expect("serialize ordinary list");
+        assert_eq!(value["variant"], "list");
+        assert_eq!(value["payload"]["command"], "runs.list");
+    });
+}
+
 fn list_args() -> RunsListArgs {
     RunsListArgs {
+        active: false,
+        task_url: None,
+        repo: None,
         runner: None,
         kind: None,
         component_id: None,
@@ -2036,6 +2108,9 @@ fn bench_history_orders_and_filters_by_scenario() {
 
         let (output, _) = list_runs(
             RunsListArgs {
+                active: false,
+                task_url: None,
+                repo: None,
                 runner: None,
                 kind: Some("bench".to_string()),
                 component_id: Some("homeboy".to_string()),

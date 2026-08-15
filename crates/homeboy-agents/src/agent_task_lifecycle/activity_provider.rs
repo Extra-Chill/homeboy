@@ -12,8 +12,8 @@ use homeboy_core::activity::agent_task_provider::{
     register_activity_agent_task_provider, ActivityAgentTaskProvider,
 };
 use homeboy_core::activity::{
-    is_active, is_failure, ActivityCrossRefs, ActivityEvidenceRef, ActivityItem,
-    ActivityNextAction, ActivityRunnerRefs, ActivityState,
+    is_active, is_failure, ActivityContext, ActivityCrossRefs, ActivityEvidenceRef, ActivityFilter,
+    ActivityItem, ActivityNextAction, ActivityRunnerRefs, ActivityState, ActivityTaskIdentity,
 };
 
 use super::{load_controller_plan, plan_has_retry_materialization_identity, resolve_run_id};
@@ -44,6 +44,32 @@ impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
     fn agent_task_activity(&self, limit: usize) -> Result<(Vec<ActivityItem>, Value)> {
         let (records, health) = agent_task_lifecycle::read_records_with_health_bounded(limit)?;
         let items = records.into_iter().map(item_from_agent_task).collect();
+        let health = serde_json::to_value(health).map_err(|error| {
+            homeboy_core::Error::internal_json(
+                error.to_string(),
+                Some("serialize agent-task record health".to_string()),
+            )
+        })?;
+        Ok((items, health))
+    }
+
+    fn agent_task_activity_filtered(
+        &self,
+        limit: usize,
+        filter: &ActivityFilter,
+    ) -> Result<(Vec<ActivityItem>, Value)> {
+        if filter.is_empty() {
+            return self.agent_task_activity(limit);
+        }
+        // An identity lookup must search before its display cap. The durable
+        // registry is controller-local, so this complete read is the explicit
+        // exhaustive path rather than a bounded page that could claim absence.
+        let (records, health) = agent_task_lifecycle::read_all_records_with_health()?;
+        let items = records
+            .into_iter()
+            .map(item_from_agent_task)
+            .filter(|item| filter.matches(item))
+            .collect();
         let health = serde_json::to_value(health).map_err(|error| {
             homeboy_core::Error::internal_json(
                 error.to_string(),
@@ -126,6 +152,7 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
             agent_task_run_id: Some(record.run_id.clone()),
             runner_job_id: job_id,
         },
+        context: activity_context(&record),
         artifacts: record
             .artifact_refs
             .into_iter()
@@ -160,6 +187,71 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
                     .is_ok_and(plan_has_retry_materialization_identity),
         ),
     }
+}
+
+fn activity_context(record: &AgentTaskRunRecord) -> ActivityContext {
+    let context = record.metadata.get("activity_context");
+    let mut identities = record
+        .metadata
+        .get("activity_contexts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect::<Vec<ActivityTaskIdentity>>();
+    if identities.is_empty() {
+        if let Ok(plan) = load_controller_plan(&record.run_id) {
+            identities = plan.tasks.iter().map(task_identity).collect();
+        }
+    }
+    let legacy = ActivityTaskIdentity {
+        task_url: context
+            .and_then(|value| value.get("task_url"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
+        repository: context
+            .and_then(|value| value.get("repository"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
+        worktree: context
+            .and_then(|value| value.get("worktree"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| metadata_string(&record.metadata, &["remote_workspace"])),
+    };
+    if identities.is_empty() && legacy != ActivityTaskIdentity::default() {
+        identities.push(legacy.clone());
+    }
+    ActivityContext {
+        task_url: legacy.task_url,
+        repository: legacy.repository,
+        worktree: legacy.worktree,
+        identities,
+    }
+}
+
+fn task_identity(task: &crate::agent_task::AgentTaskRequest) -> ActivityTaskIdentity {
+    let task_url = task.workspace.task_url.clone().or_else(|| {
+        task.source_refs
+            .iter()
+            .find(|source| source.kind == "task")
+            .or_else(|| task.source_refs.first())
+            .map(|source| source.uri.clone())
+    });
+    ActivityTaskIdentity {
+        repository: repository_from_task_url(task_url.as_deref()),
+        task_url,
+        worktree: task.workspace.root.clone(),
+    }
+}
+
+fn repository_from_task_url(task_url: Option<&str>) -> Option<String> {
+    let path = task_url?.split("github.com/").nth(1)?;
+    let mut segments = path.split('/');
+    Some(format!("{}/{}", segments.next()?, segments.next()?))
 }
 
 fn actions_for_agent_task(
@@ -231,6 +323,33 @@ mod tests {
         let actions = actions_for_agent_task("run-1", None, ActivityState::Failed, false);
 
         assert!(!actions.iter().any(|action| action.label == "retry"));
+    }
+
+    #[test]
+    fn task_identity_context_is_projected_from_the_durable_record() {
+        with_isolated_home(|_| {
+            let run_id = seed_record("run-activity-context");
+            let mut record = agent_task_lifecycle::exact_record(&run_id).expect("record");
+            record.metadata = serde_json::json!({
+                "activity_context": {
+                    "task_url": "https://example.test/issues/12146",
+                    "repository": "Extra-Chill/homeboy",
+                    "worktree": "homeboy@fix-12146"
+                }
+            });
+
+            let item = item_from_agent_task(record);
+
+            assert_eq!(
+                item.context.task_url.as_deref(),
+                Some("https://example.test/issues/12146")
+            );
+            assert_eq!(
+                item.context.repository.as_deref(),
+                Some("Extra-Chill/homeboy")
+            );
+            assert_eq!(item.context.worktree.as_deref(), Some("homeboy@fix-12146"));
+        });
     }
 
     #[test]

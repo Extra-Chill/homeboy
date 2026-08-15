@@ -33,8 +33,8 @@
 //! anything at all.
 
 use super::{
-    action, daemon_jobs, is_active, is_failure, ms_to_rfc3339, ActivityCollector,
-    ActivityCrossRefs, ActivityItem, ActivityNextAction, ActivityRunnerFederation,
+    action, daemon_jobs, is_active, is_failure, ms_to_rfc3339, ActivityCollector, ActivityContext,
+    ActivityCrossRefs, ActivityFilter, ActivityItem, ActivityNextAction, ActivityRunnerFederation,
     ActivityRunnerRefs, ActivityRunnerSource, ActivityState,
 };
 use crate::api_jobs::ActiveRunnerJobSummary;
@@ -48,12 +48,13 @@ use crate::observation::runs_service::{
 pub(super) fn collect(
     collector: &mut ActivityCollector,
     enabled: bool,
+    filter: &ActivityFilter,
 ) -> ActivityRunnerFederation {
     if !enabled || !has_runner_evidence_provider() {
         return ActivityRunnerFederation::default();
     }
     let statuses = with_runner_evidence(|provider| provider.statuses_indexed());
-    federate(collector, statuses)
+    federate(collector, statuses, filter)
 }
 
 /// Split from [`collect`] so the bounded/best-effort contract is testable
@@ -61,6 +62,7 @@ pub(super) fn collect(
 fn federate(
     collector: &mut ActivityCollector,
     statuses: Vec<RunnerConnectionInfo>,
+    filter: &ActivityFilter,
 ) -> ActivityRunnerFederation {
     let mut federation = ActivityRunnerFederation {
         enabled: true,
@@ -91,10 +93,14 @@ fn federate(
             })
         });
 
-        let items = if queried { active_jobs.len() } else { 0 };
+        let mut items = 0;
         if queried {
             for job in active_jobs {
-                collector.insert(item_from_active_runner_job(job));
+                let item = item_from_active_runner_job(job);
+                if filter.matches(&item) {
+                    collector.insert(item);
+                    items += 1;
+                }
             }
         }
 
@@ -134,7 +140,7 @@ fn item_from_active_runner_job(job: ActiveRunnerJobSummary) -> ActivityItem {
         updated_at: Some(ms_to_rfc3339(job.updated_at_ms)),
         finished_at: None,
         command: Some(job.command.clone()),
-        cwd: job.cwd,
+        cwd: job.cwd.clone(),
         runner: ActivityRunnerRefs {
             runner_id: Some(job.runner_id.clone()),
             job_id: Some(job.job_id.clone()),
@@ -144,6 +150,10 @@ fn item_from_active_runner_job(job: ActiveRunnerJobSummary) -> ActivityItem {
             run_id: job.durable_run_id,
             agent_task_run_id,
             runner_job_id: Some(job.job_id.clone()),
+        },
+        context: ActivityContext {
+            worktree: job.cwd.clone(),
+            ..Default::default()
         },
         artifacts: Vec::new(),
         evidence: Vec::new(),
@@ -199,7 +209,7 @@ mod tests {
     #[test]
     fn federation_is_inert_when_disabled() {
         let mut collector = ActivityCollector::default();
-        let federation = collect(&mut collector, false);
+        let federation = collect(&mut collector, false, &ActivityFilter::default());
 
         assert!(!federation.enabled);
         assert!(!federation.partial);
@@ -212,7 +222,11 @@ mod tests {
     #[test]
     fn a_disconnected_runner_is_not_queried_and_is_not_a_degradation() {
         let mut collector = ActivityCollector::default();
-        let federation = federate(&mut collector, vec![runner("lab-offline", false, false)]);
+        let federation = federate(
+            &mut collector,
+            vec![runner("lab-offline", false, false)],
+            &ActivityFilter::default(),
+        );
 
         assert!(federation.enabled);
         assert!(!federation.partial);
@@ -233,7 +247,11 @@ mod tests {
         wedged.active_jobs_error = Some("probe timed out after 15s".to_string());
 
         let mut collector = ActivityCollector::default();
-        let federation = federate(&mut collector, vec![healthy, wedged]);
+        let federation = federate(
+            &mut collector,
+            vec![healthy, wedged],
+            &ActivityFilter::default(),
+        );
 
         assert!(federation.partial, "a connected runner failed to answer");
         let items = collector.items(ActivityScope::All, 10);
@@ -270,7 +288,11 @@ mod tests {
     #[test]
     fn a_connected_idle_runner_is_complete_not_partial() {
         let mut collector = ActivityCollector::default();
-        let federation = federate(&mut collector, vec![runner("lab-idle", true, true)]);
+        let federation = federate(
+            &mut collector,
+            vec![runner("lab-idle", true, true)],
+            &ActivityFilter::default(),
+        );
 
         assert!(!federation.partial);
         assert!(federation.runners[0].queried);
@@ -286,7 +308,7 @@ mod tests {
         connected.active_jobs = vec![job("job-1", Some("agent-task-run-1"))];
 
         let mut collector = ActivityCollector::default();
-        let federation = federate(&mut collector, vec![connected]);
+        let federation = federate(&mut collector, vec![connected], &ActivityFilter::default());
 
         assert!(!federation.partial);
         let items = collector.items(ActivityScope::All, 10);

@@ -1267,6 +1267,23 @@ where
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
+    let activity_contexts = plan
+        .tasks
+        .iter()
+        .map(|task| {
+            json!({
+                "task_url": task.workspace.task_url.clone().or_else(|| task.source_refs.iter().find(|source| source.kind == "task").or_else(|| task.source_refs.first()).map(|source| source.uri.clone())),
+                "repository": task.workspace.task_url.as_deref().or_else(|| task.source_refs.iter().find(|source| source.kind == "task").or_else(|| task.source_refs.first()).map(|source| source.uri.as_str())).and_then(|url| url.split("github.com/").nth(1)).and_then(|path| { let mut segments = path.split('/'); Some(format!("{}/{}", segments.next()?, segments.next()?)) }),
+                "worktree": task.workspace.root,
+            })
+        })
+        .collect::<Vec<_>>();
+    if let Some(context) = activity_contexts.first() {
+        // Keep the original single-task context readable for mixed-version
+        // consumers while publishing every identity in the additive array.
+        metadata["activity_context"] = context.clone();
+        metadata["activity_contexts"] = json!(activity_contexts);
+    }
     let acceptance_requirement = plan
         .metadata
         .get("acceptance")
