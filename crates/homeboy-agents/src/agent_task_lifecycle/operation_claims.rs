@@ -91,11 +91,21 @@ pub fn claim_cook_operation(
     operation_key: &str,
     lease: Duration,
 ) -> Result<ClaimOutcome> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    claim_cook_operation_in_store(&lifecycle_store, run_id, operation_key, lease)
+}
+
+pub(crate) fn claim_cook_operation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    operation_key: &str,
+    lease: Duration,
+) -> Result<ClaimOutcome> {
     let run_id = sanitize_run_id(run_id);
     let now = now_timestamp();
     let lease_deadline = timestamp_after(&now, lease);
     let mut outcome = ClaimOutcome::LeaseHeld;
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         let metadata = record.ensure_metadata_object();
         let claims = metadata
             .entry(OPERATION_CLAIMS_KEY.to_string())
@@ -167,10 +177,20 @@ pub fn claim_cook_operation(
 /// terminal result without its durable lease is a lifecycle invariant break,
 /// mirroring [`record_provider_execution_terminal`]).
 pub fn complete_cook_operation(run_id: &str, operation_key: &str, result: Value) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    complete_cook_operation_in_store(&lifecycle_store, run_id, operation_key, result)
+}
+
+pub(crate) fn complete_cook_operation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    operation_key: &str,
+    result: Value,
+) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
     let now = now_timestamp();
     let mut found = false;
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         let metadata = record.ensure_metadata_object();
         let Some(claims) = metadata
             .get_mut(OPERATION_CLAIMS_KEY)
@@ -292,8 +312,17 @@ fn transition_cook_operation(
 
 /// Read a single operation claim for reconciliation, if present.
 pub fn operation_claim(run_id: &str, operation_key: &str) -> Result<Option<OperationClaim>> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    operation_claim_in_store(&lifecycle_store, run_id, operation_key)
+}
+
+pub(crate) fn operation_claim_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    operation_key: &str,
+) -> Result<Option<OperationClaim>> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::read_record(&run_id)?;
+    let record = lifecycle_store.read_record(&run_id)?;
     Ok(record
         .metadata
         .get(OPERATION_CLAIMS_KEY)
