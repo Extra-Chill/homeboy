@@ -1301,6 +1301,23 @@ impl SourceArtifactTransfer {
                     entries,
                 },
             };
+            // The HTTP envelope carries Base64, not raw package bytes. Keep the
+            // inline transport bound truthful and route its overflow through
+            // the same typed scalable-materialization decision.
+            if transfer.content_base64.len() as u64 > MAX_SOURCE_ARTIFACT_BYTES {
+                let mut error = Error::validation_invalid_argument(
+                    "source_path",
+                    "source package exceeds the encoded inline transfer bound",
+                    Some(root.display().to_string()),
+                    None,
+                );
+                error.details["source_package"] = json!({
+                    "schema": SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA,
+                    "measured": { "file_count": transfer.package.entries.len(), "bytes": transfer.content_base64.len(), "largest_entries": [] },
+                    "limits": { "entry_limit": MAX_SOURCE_PACKAGE_ENTRIES, "byte_limit": MAX_SOURCE_ARTIFACT_BYTES, "file_byte_limit": MAX_SOURCE_PACKAGE_FILE_BYTES, "exclusion_limit": MAX_SOURCE_PACKAGE_EXCLUSIONS }
+                });
+                return Err(error);
+            }
             transfer.decode_verified()?;
             Ok((transfer, exclusions))
         }

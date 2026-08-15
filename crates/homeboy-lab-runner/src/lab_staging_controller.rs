@@ -4472,7 +4472,7 @@ mod tests {
             // never ask the reverse worker to reach the private origin.
             std::fs::write(
                 source.join("input.txt"),
-                [b"staged-source\n".as_slice(), &vec![b'x'; 4 * 1024 * 1024]].concat(),
+                [b"staged-source\n".as_slice(), &vec![b'x'; 3 * 1024 * 1024]].concat(),
             )
             .expect("write source");
             for args in [
