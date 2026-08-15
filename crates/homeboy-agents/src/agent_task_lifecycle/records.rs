@@ -740,7 +740,7 @@ impl AgentTaskRunRecord {
             })
     }
 
-    fn has_planned_runner_execution(&self) -> bool {
+    pub(crate) fn has_planned_runner_execution(&self) -> bool {
         let execution = self.metadata.get("runner_execution_record");
         execution
             .and_then(|value| value.get("status"))
