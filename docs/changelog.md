@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.0] - 2026-08-15
+
+### Fixed
+- guard source promotion CAS
+- reject stale controller daemons
+
 ## [0.349.0] - 2026-08-15
 
 ### Added
