@@ -327,45 +327,36 @@ fn release_concurrency_scopes_recovery_runs_to_the_requested_tag() {
     ));
 }
 
-/// A push release run must never be QUEUED behind another one (#11749).
-///
-/// `cancel-in-progress: false` protects a run that is already executing. It
-/// does not protect a run that is waiting: GitHub keeps at most one *pending*
-/// run per concurrency group and cancels the previously pending one whenever a
-/// newer run is queued. With every push on main sharing
-/// `release-refs/heads/main`, and merges arriving faster than a ~35-minute
-/// release finishes, the pending slot was displaced continuously — 27 of the
-/// last 30 Release runs on 2026-08-06 ended `cancelled` having dispatched
-/// **zero** jobs, so none of their guards could fire and releases published
-/// with partial platform assets.
-///
-/// The branch-shaped group is therefore the bug, and pinning its absence is the
-/// point of this test. Correctness comes from the `check` job's supersession
-/// test and tag idempotency, not from the concurrency queue.
+/// Three rapid main pushes must collapse their expensive read-only planning to
+/// the latest SHA without allowing a workflow-level cancellation to interrupt
+/// a release that has already entered mutation or publication (#12504, #10645).
 #[test]
-fn release_push_runs_are_never_queued_behind_another_release() {
+fn release_coalesces_only_dry_run_planning_and_serializes_mutation() {
     let workflow = release_workflow();
+    let check = job_section(workflow, "check");
+    let prepare = job_section(workflow, "prepare");
 
     assert!(
         workflow.contains("group: release-${{ inputs.release_tag || github.run_id }}"),
-        "a push release must get a concurrency group of its own so nothing can displace it"
+        "workflow-level concurrency must stay per-run so a coalesced waiter retains its workflow"
     );
     assert!(
-        !workflow.contains("group: release-${{ inputs.release_tag || github.ref }}"),
-        "a branch-shaped concurrency group makes every push run queue behind the last one, \
-         where a newer push cancels it before it dispatches a single job (#11749)"
+        check.contains("group: release-check-${{ inputs.release_tag || github.ref }}")
+            && check.contains("cancel-in-progress: ${{ inputs.release_tag == '' }}"),
+        "rapid main pushes must cancel only the stale check job, leaving the latest exact SHA to plan"
     );
-
-    // Recovery keeps serializing per TAG: two runs repairing the same release
-    // must not race on its assets.
     assert!(
-        workflow.contains("inputs.release_tag ||"),
-        "a recovery dispatch must still be scoped to the tag it repairs"
+        prepare.contains("group: release-mutation-${{ inputs.release_tag || github.ref }}")
+            && prepare.contains("cancel-in-progress: false"),
+        "version/tag mutation must serialize without cancelling an active release"
     );
 
-    // Per-run concurrency is only affordable if a superseded run is cheap, so
-    // the expensive dry run must be skipped once supersession is proven.
-    let check = job_section(workflow, "check");
+    assert!(
+        check.contains("inputs.release_tag || github.ref")
+            && prepare.contains("inputs.release_tag || github.ref"),
+        "recovery runs must use their tag, not the main-push lock"
+    );
+
     let dry_run = release_step_block(check, "name: Dry-run release check");
     assert!(
         dry_run.contains("steps.attach.outputs.superseded != 'true'"),
@@ -382,6 +373,8 @@ fn release_is_a_direct_non_cancellable_rolling_main_pipeline() {
     assert!(workflow.contains(
         "concurrency:\n  group: release-${{ inputs.release_tag || github.run_id }}\n  cancel-in-progress: false"
     ));
+    assert!(job_section(workflow, "check")
+        .contains("group: release-check-${{ inputs.release_tag || github.ref }}"));
     assert!(!workflow.contains("workflow_run:"));
     assert!(!workflow.contains("release-qualification:"));
     assert!(!workflow.contains("Main Guard"));
@@ -1763,6 +1756,7 @@ fn release_head_attach_refuses_any_commit_that_is_not_the_branch_tip() {
     git(&["init", "-q", "-b", "main", "."], &upstream);
     git(&["commit", "-q", "--allow-empty", "-m", "c1"], &upstream);
     git(&["commit", "-q", "--allow-empty", "-m", "c2"], &upstream);
+    git(&["commit", "-q", "--allow-empty", "-m", "c3"], &upstream);
     git(&["clone", "-q", upstream.to_str().unwrap(), "work"], &dir);
     let work = dir.join("work");
 
@@ -1808,8 +1802,9 @@ fn release_head_attach_refuses_any_commit_that_is_not_the_branch_tip() {
         recorded()
     );
 
-    // An older commit is NOT the branch tip. Attaching it would let a release
-    // be cut from an arbitrary SHA — the exact thing the guard exists to stop.
+    // Two rapid pushes have each become stale behind c3. Attaching either
+    // source identity would let a release be cut from an arbitrary SHA — the
+    // exact thing the guard exists to stop.
     git(&["checkout", "-q", "--detach", "HEAD~1"], &work);
     let out = attach(&work);
     assert!(
@@ -1839,6 +1834,23 @@ fn release_head_attach_refuses_any_commit_that_is_not_the_branch_tip() {
     assert!(
         recorded_refusal.contains(&format!("branch-tip={tip}")),
         "a superseded commit must name the tip that beat it: {recorded_refusal}"
+    );
+
+    git(&["checkout", "-q", "--detach", "HEAD~2"], &work);
+    let out = attach(&work);
+    assert!(
+        out.status.success(),
+        "the oldest rapid push must also resolve as superseded"
+    );
+    assert_eq!(
+        branch_of(&work),
+        "HEAD",
+        "every stale source identity must remain detached"
+    );
+    assert!(
+        recorded().contains(&format!("branch-tip={tip}")),
+        "every superseded source must retain the same latest successor: {}",
+        recorded()
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -45,38 +45,16 @@ env:
   # re-attaches HEAD to this branch so the action's branch guard can resolve it.
   RELEASE_BRANCH: main
 
-# ── Concurrency: never queue a push release behind another one (#11749) ──
+# ── Workflow concurrency: never cancel an active release ──
 #
-# This used to be `release-${{ inputs.release_tag || github.ref }}`, so every
-# push run on main shared ONE group, on the theory quoted below: "the queued run
-# starts after the first finishes and its check job exits in seconds because
-# HEAD is already tagged — zero wasted work."
-#
-# The queued run never started. GitHub keeps at most ONE pending run per
-# concurrency group and CANCELS the previously pending one when a newer run is
-# queued — `cancel-in-progress: false` only protects runs that are already
-# in progress, not runs that are waiting. At ~65 merges/day the pending slot is
-# displaced long before a ~35-minute release finishes, so runs were displaced,
-# not deferred. Measured on 2026-08-06: 27 of the last 30 Release runs ended
-# `cancelled` with `total_count: 0` jobs — they never dispatched a single job,
-# so not one of their guards, including `verify-published`, could fire.
-#
-# A push run now gets a group of its OWN. Nothing is ever queued behind another
-# release, so nothing can displace it. Serialization was never what made this
-# correct anyway: the `check` job's supersession test (HEAD vs the branch tip)
-# and `homeboy release`'s tag idempotency (`release-already-at-head`) are what
-# stop two runs preparing the same version, and both cost seconds rather than a
-# 35-minute queue slot. Superseded runs now skip the dry run outright, so the
-# merge path is not slowed and the wasted work is genuinely near zero.
+# Each workflow run gets its own group. A workflow-level main lock can cancel a
+# pending run before it starts, losing its successor/waiter lineage (#10645), or
+# cancel an active run if cancellation is enabled. The check and prepare jobs
+# below carry the narrower coalescing and mutation locks instead.
 #
 # A recovery dispatch still serializes per TAG: two runs repairing the same
 # release must never race on its assets.
 #
-# The tradeoff, stated rather than hidden: two pushes landing close enough that
-# both observe themselves as the branch tip can now both reach `prepare` and
-# compute the same next version. That collision resolves at the tag push, where
-# the loser fails loudly. Recovery of an existing tag is explicit through
-# `workflow_dispatch`; push runs always prioritize current main.
 concurrency:
   group: release-${{ inputs.release_tag || github.run_id }}
   cancel-in-progress: false
@@ -87,6 +65,13 @@ jobs:
   check:
     name: Check for releasable commits
     runs-on: ubuntu-latest
+    # Coalesce only the read-only planning phase. A new main push interrupts an
+    # in-flight dry run before gates or mutation begin; the latest push retains
+    # its exact event SHA and becomes the sole planner. Recovery checks remain
+    # serialized by their explicit tag instead of being cancelled.
+    concurrency:
+      group: release-check-${{ inputs.release_tag || github.ref }}
+      cancel-in-progress: ${{ inputs.release_tag == '' }}
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
       bump-type: ${{ steps.check.outputs['release-bump-type'] }}
@@ -550,6 +535,11 @@ jobs:
       - release-quality-policy
     if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (needs.check.outputs.recovery-release == 'true' || inputs.release_tag != '' || needs.release-quality-policy.result == 'success') }}
     runs-on: ubuntu-latest
+    # Version, tag, and release-state transitions are the only serialized
+    # section. Unlike check, this lock never cancels an active mutation.
+    concurrency:
+      group: release-mutation-${{ inputs.release_tag || github.ref }}
+      cancel-in-progress: false
     outputs:
       release-version: ${{ steps.outputs.outputs['release-version'] }}
       release-tag: ${{ steps.outputs.outputs['release-tag'] }}
