@@ -26,10 +26,17 @@ pub(super) fn collect(
     exhaustive: bool,
 ) -> Result<()> {
     let store = ObservationStore::open_readonly()?;
-    let mut records = store.list_runs(RunListFilter {
-        limit: (!exhaustive && filter.is_empty()).then_some(limit as i64),
-        ..Default::default()
-    })?;
+    let mut records = if exhaustive {
+        // `list_runs(None)` is a display page (100 rows), not an exhaustive
+        // lookup. The store-owned all-record walk either returns every row or
+        // errors; it never turns an incomplete page into an absence claim.
+        store.list_runs_all(RunListFilter::default())?
+    } else {
+        store.list_runs(RunListFilter {
+            limit: filter.is_empty().then_some(limit as i64),
+            ..Default::default()
+        })?
+    };
     let listed_ids = records
         .iter()
         .map(|record| record.id.clone())

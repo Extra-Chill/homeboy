@@ -934,6 +934,42 @@ mod tests {
     }
 
     #[test]
+    fn exhaustive_observation_lookup_finds_terminal_row_after_the_default_page() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            for index in 0..101 {
+                let cwd = if index == 100 {
+                    "/worktree/matching"
+                } else {
+                    "/worktree/other"
+                };
+                let run = store
+                    .start_run(
+                        NewRunRecord::builder(format!("terminal-{index}"))
+                            .cwd_path(std::path::Path::new(cwd))
+                            .build(),
+                    )
+                    .expect("run");
+                store
+                    .finish_run(&run.id, RunStatus::Pass, None)
+                    .expect("finish");
+            }
+            let mut collector = ActivityCollector::default();
+            observation::collect(
+                &mut collector,
+                1,
+                &ActivityFilter {
+                    worktree: Some("/worktree/matching".to_string()),
+                    ..Default::default()
+                },
+                true,
+            )
+            .expect("exhaustive collect");
+            assert_eq!(collector.items(ActivityScope::All, 10).len(), 1);
+        });
+    }
+
+    #[test]
     fn show_activity_resolves_run_id_through_targeted_probe() {
         // #9762: `activity show <run-id>` for a known observation run must
         // resolve via the indexed probe (get_run) rather than a full corpus
