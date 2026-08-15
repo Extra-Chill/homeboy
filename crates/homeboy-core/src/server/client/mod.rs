@@ -19,7 +19,7 @@ pub use host::{
 };
 pub use local_exec::{
     execute_local_command, execute_local_command_in_dir, execute_local_command_in_dir_with_timeout,
-    execute_local_command_interactive, execute_local_command_passthrough,
+    execute_local_command_interactive, execute_local_command_passthrough, CHILD_PROGRESS_LABEL_ENV,
     CHILD_SECRET_ENV_NAMES_ENV,
 };
 pub use local_exec::{

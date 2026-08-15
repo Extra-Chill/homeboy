@@ -180,7 +180,7 @@ fn run_local_command(
         }
     };
     let mut cleanup_guard = Some(ProcessGroupCleanupGuard::new(child.id()));
-    let mut supervision = ChildSupervision::start(env, command, child.id());
+    let mut supervision = ChildSupervision::start(env, command, current_dir, child.id());
     let _invocation_child_guard = invocation_child_guard(
         env,
         child.id(),
@@ -772,6 +772,11 @@ fn wait_for_child_or_delegated_failure(
 const CHILD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const CHILD_OUTPUT_TAIL_BYTES: usize = 16 * 1024;
 pub const CHILD_SECRET_ENV_NAMES_ENV: &str = "HOMEBOY_CHILD_SECRET_ENV_NAMES";
+/// Opt in to concise lifecycle messages for a supervised local child.
+///
+/// The value is a generic operation label. Callers that own machine-readable
+/// stdout can use it to make long-running child work visible on stderr.
+pub const CHILD_PROGRESS_LABEL_ENV: &str = "HOMEBOY_CHILD_PROGRESS_LABEL";
 static CHILD_SUPERVISION_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -788,6 +793,8 @@ struct ChildSupervisionRecord {
     timeout_ms: Option<u128>,
     cancellation_reason: Option<String>,
     exit_code: Option<i32>,
+    duration_ms: Option<u128>,
+    termination: Option<String>,
     stdout_tail: String,
     stderr_tail: String,
 }
@@ -797,15 +804,35 @@ struct ChildSupervision {
     record: ChildSupervisionRecord,
     redaction_values: Vec<String>,
     last_heartbeat: Instant,
+    started: Instant,
+    progress_label: Option<String>,
 }
 
 impl ChildSupervision {
-    fn start(env: Option<&[(&str, &str)]>, command: &str, child_pid: u32) -> Option<Self> {
+    fn start(
+        env: Option<&[(&str, &str)]>,
+        command: &str,
+        current_dir: Option<&str>,
+        child_pid: u32,
+    ) -> Option<Self> {
         let run_dir = env?.iter().find_map(|(key, value)| {
             (*key == crate::engine::run_dir::run_dir_env()).then_some(*value)
         })?;
         let now = Utc::now().to_rfc3339();
         let redaction_values = child_secret_values(env);
+        let progress_label = env.and_then(|pairs| {
+            pairs.iter().find_map(|(key, value)| {
+                (*key == CHILD_PROGRESS_LABEL_ENV && !value.trim().is_empty())
+                    .then_some((*value).to_string())
+            })
+        });
+        if let Some(label) = &progress_label {
+            eprintln!(
+                "[{label}] started command={} cwd={}",
+                redact_child_secret_values(command, &redaction_values),
+                current_dir.unwrap_or(".")
+            );
+        }
         let supervision = Self {
             path: PathBuf::from(run_dir).join(crate::engine::run_dir::files::CHILD_SUPERVISION),
             record: ChildSupervisionRecord {
@@ -820,11 +847,15 @@ impl ChildSupervision {
                 timeout_ms: None,
                 cancellation_reason: None,
                 exit_code: None,
+                duration_ms: None,
+                termination: None,
                 stdout_tail: String::new(),
                 stderr_tail: String::new(),
             },
             redaction_values,
             last_heartbeat: Instant::now(),
+            started: Instant::now(),
+            progress_label,
         };
         supervision.persist();
         Some(supervision)
@@ -836,6 +867,12 @@ impl ChildSupervision {
         }
         self.record.heartbeat_at = Utc::now().to_rfc3339();
         self.last_heartbeat = Instant::now();
+        if let Some(label) = &self.progress_label {
+            eprintln!(
+                "[{label}] still running elapsed={}s",
+                self.started.elapsed().as_secs()
+            );
+        }
         self.persist();
     }
 
@@ -861,6 +898,14 @@ impl ChildSupervision {
             signal.map(|signal| format!("signal:{signal}"))
         };
         self.record.exit_code = Some(output.exit_code);
+        self.record.duration_ms = Some(self.started.elapsed().as_millis());
+        self.record.termination = Some(if timed_out {
+            "timeout".to_string()
+        } else if signal.is_some() {
+            "cancelled".to_string()
+        } else {
+            "completed".to_string()
+        });
         self.record.stdout_tail = bounded_redacted_tail(&output.stdout, &self.redaction_values);
         self.record.stderr_tail = bounded_redacted_tail(&output.stderr, &self.redaction_values);
         self.persist();

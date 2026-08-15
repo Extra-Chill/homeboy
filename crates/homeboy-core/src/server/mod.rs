@@ -16,7 +16,7 @@ pub use client::{
     execute_local_command, execute_local_command_in_dir, execute_local_command_in_dir_with_timeout,
     execute_local_command_interactive, execute_local_command_passthrough, is_transient_ssh_error,
     server_host_resolves_only_to_loopback, server_uses_loopback_transport, CommandOutput,
-    SshClient, CHILD_SECRET_ENV_NAMES_ENV, TRANSIENT_SSH_STDERR_PATTERNS,
+    SshClient, CHILD_PROGRESS_LABEL_ENV, CHILD_SECRET_ENV_NAMES_ENV, TRANSIENT_SSH_STDERR_PATTERNS,
 };
 pub use client::{
     execute_local_command_passthrough_with_timeout, execute_local_command_stderr_passthrough,
