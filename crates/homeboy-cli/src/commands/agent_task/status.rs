@@ -49,6 +49,7 @@ const COMPACT_ACTION_BYTE_LIMIT: usize = 512;
 const COMPACT_PROMOTION_FILE_LIMIT: usize = 12;
 const COMPACT_PROMOTION_FILE_BYTE_LIMIT: usize = 256;
 const COMPACT_STATUS_BYTE_LIMIT: usize = 16 * 1024;
+const COMPACT_MANDATORY_SCALAR_BYTE_LIMIT: usize = 512;
 const STATUS_WATCH_CHANGE_LIMIT: usize = 12;
 
 /// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
@@ -3793,7 +3794,7 @@ fn compact_status_summary_with_aggregate(
     }
     if let Some(adoption) = record.get("candidate_adoption") {
         if !adoption.is_null() {
-            summary["candidate_adoption"] = compact_candidate_adoption(adoption);
+            summary["candidate_adoption"] = compact_candidate_adoption(adoption, run_id);
         }
     }
     if let Some(cook_finalization) = record
@@ -3899,7 +3900,9 @@ fn compact_cook_status(cook: Option<&Value>, run_id: &str) -> Value {
         .or_else(|| cook.get("gate_results"))
         .and_then(Value::as_array)
     {
-        summary["gates"] = compact_gate_summaries(gates);
+        let (gates, omitted) = compact_gate_summaries(gates);
+        summary["gates"] = gates;
+        summary["gates_omitted"] = json!(omitted);
         summary["gates_detail_command"] = json!(format!(
             "homeboy agent-task status {} --full",
             quote_arg(run_id)
@@ -3908,13 +3911,15 @@ fn compact_cook_status(cook: Option<&Value>, run_id: &str) -> Value {
     summary
 }
 
-fn compact_gate_summaries(gates: &[Value]) -> Value {
-    Value::Array(
-        gates
-            .iter()
-            .take(COMPACT_REF_LIMIT)
-            .map(|gate| compact_fields(gate, &["id", "type", "kind", "status", "state", "private"]))
-            .collect(),
+fn compact_gate_summaries(gates: &[Value]) -> (Value, usize) {
+    let summaries = gates
+        .iter()
+        .take(COMPACT_REF_LIMIT)
+        .map(|gate| compact_fields(gate, &["id", "type", "kind", "status", "state", "private"]))
+        .collect();
+    (
+        Value::Array(summaries),
+        gates.len().saturating_sub(COMPACT_REF_LIMIT),
     )
 }
 
@@ -3925,6 +3930,7 @@ fn enforce_compact_status_budget(mut value: Value) -> Value {
     let Some(object) = value.as_object_mut() else {
         return value;
     };
+    let mut mandatory_omissions = compact_mandatory_scalars(object);
     let full_command = object
         .get("full_command")
         .and_then(Value::as_str)
@@ -3962,25 +3968,111 @@ fn enforce_compact_status_budget(mut value: Value) -> Value {
         "execution_budget",
         "cook",
         "timestamps",
+        "candidate_selection",
+        "identity",
+        "runner_probe",
+        ACTIONABLE_METADATA_KEY,
     ] {
         if let Some(removed) = object.remove(section) {
             omitted.push(json!({ "section": section, "count": compact_section_count(&removed) }));
         }
-        if compact_budget_value(object, &full_command, &omitted) <= COMPACT_STATUS_BYTE_LIMIT {
+        if compact_budget_value(object, &full_command, &omitted, &mandatory_omissions)
+            <= COMPACT_STATUS_BYTE_LIMIT
+        {
             break;
+        }
+    }
+    // Future enrichments must not bypass the ceiling: remove any remaining
+    // non-core section in lexical order after the named projection sections.
+    let mut remaining_sections = object
+        .keys()
+        .filter(|key| !compact_mandatory_field(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    remaining_sections.sort();
+    for section in remaining_sections {
+        if compact_budget_value(object, &full_command, &omitted, &mandatory_omissions)
+            <= COMPACT_STATUS_BYTE_LIMIT
+        {
+            break;
+        }
+        if let Some(removed) = object.remove(&section) {
+            omitted.push(json!({ "section": section, "count": compact_section_count(&removed) }));
         }
     }
     object.insert("full_command".to_string(), Value::String(full_command));
     if !omitted.is_empty() {
         object.insert("omitted_sections".to_string(), Value::Array(omitted));
     }
+    if !mandatory_omissions.is_empty() {
+        object.insert(
+            "mandatory_scalar_omissions".to_string(),
+            Value::Array(std::mem::take(&mut mandatory_omissions)),
+        );
+    }
     value
+}
+
+fn compact_mandatory_scalars(object: &mut serde_json::Map<String, Value>) -> Vec<Value> {
+    let mut omissions = Vec::new();
+    for field in [
+        "schema",
+        "view",
+        "run_id",
+        "cook_id",
+        "latest_run_id",
+        "status",
+        "state",
+    ] {
+        let Some(text) = object.get(field).and_then(Value::as_str) else {
+            continue;
+        };
+        if text.len() <= COMPACT_MANDATORY_SCALAR_BYTE_LIMIT {
+            continue;
+        }
+        let bytes = text.len();
+        let sha256 = content_hash::sha256_hex(text.as_bytes());
+        object.insert(field.to_string(), Value::String(format!("sha256:{sha256}")));
+        omissions.push(json!({ "field": field, "bytes": bytes, "sha256": sha256 }));
+    }
+    if object
+        .get("full_command")
+        .and_then(Value::as_str)
+        .is_some_and(|command| command.len() > COMPACT_MANDATORY_SCALAR_BYTE_LIMIT)
+    {
+        let command = object["full_command"].as_str().unwrap_or_default();
+        omissions.push(json!({
+            "field": "full_command",
+            "bytes": command.len(),
+            "sha256": content_hash::sha256_hex(command.as_bytes()),
+        }));
+        object.insert(
+            "full_command".to_string(),
+            json!("homeboy agent-task status <run-id> --full"),
+        );
+    }
+    omissions
+}
+
+fn compact_mandatory_field(field: &str) -> bool {
+    matches!(
+        field,
+        "schema"
+            | "view"
+            | "run_id"
+            | "cook_id"
+            | "latest_run_id"
+            | "status"
+            | "state"
+            | "full_command"
+    )
 }
 
 fn compact_budget_value(
     object: &serde_json::Map<String, Value>,
     full_command: &str,
     omitted: &[Value],
+    mandatory_omissions: &[Value],
 ) -> usize {
     let mut projected = object.clone();
     projected.insert("full_command".to_string(), json!(full_command));
@@ -3988,6 +4080,12 @@ fn compact_budget_value(
         projected.insert(
             "omitted_sections".to_string(),
             Value::Array(omitted.to_vec()),
+        );
+    }
+    if !mandatory_omissions.is_empty() {
+        projected.insert(
+            "mandatory_scalar_omissions".to_string(),
+            Value::Array(mandatory_omissions.to_vec()),
         );
     }
     serialized_len(&Value::Object(projected))
@@ -4274,7 +4372,9 @@ fn compact_promotion_summary(promotion: &Value, run_id: &str) -> Value {
         .or_else(|| promotion.get("gate_results"))
         .and_then(Value::as_array)
     {
-        summary["gates"] = compact_gate_summaries(gates);
+        let (gates, omitted) = compact_gate_summaries(gates);
+        summary["gates"] = gates;
+        summary["gates_omitted"] = json!(omitted);
         summary["gates_detail_command"] = json!(format!(
             "homeboy agent-task status {} --full",
             quote_arg(run_id)
@@ -4287,7 +4387,7 @@ fn compact_promotion_summary(promotion: &Value, run_id: &str) -> Value {
     summary
 }
 
-fn compact_candidate_adoption(adoption: &Value) -> Value {
+fn compact_candidate_adoption(adoption: &Value, run_id: &str) -> Value {
     let mut summary = compact_fields(
         adoption,
         &[
@@ -4295,7 +4395,6 @@ fn compact_candidate_adoption(adoption: &Value) -> Value {
             "ai_model",
             "state",
             "phase",
-            "active_gate",
             "updated_at",
             "completed_at",
             "remediation_run_id",
@@ -4304,6 +4403,12 @@ fn compact_candidate_adoption(adoption: &Value) -> Value {
     if let Some(result) = adoption.get("result") {
         summary["result"] = compact_fields(result, &["status", "reason_code"]);
     }
+    // `active_gate` is an execution command in durable adoption records. Compact
+    // status exposes only the authorized full-detail reader, never that command.
+    summary["gates_detail_command"] = json!(format!(
+        "homeboy agent-task status {} --full",
+        quote_arg(run_id)
+    ));
     if let Some(command) = adoption
         .get("remediation_status_command")
         .and_then(Value::as_str)
@@ -6005,6 +6110,124 @@ mod tests {
             summary["latest_promotion"]["gates_detail_command"],
             "homeboy agent-task status run-private-gate --full"
         );
+    }
+
+    #[test]
+    fn compact_status_redacts_private_candidate_adoption_gate_command() {
+        let secret = "private-adoption-gate --token adoption-secret";
+        let record = json!({
+            "run_id": "run-private-adoption",
+            "state": "running",
+            "tasks": [],
+            "candidate_adoption": {
+                "candidate_sha": "candidate",
+                "state": "verification_running",
+                "phase": "gates",
+                "active_gate": secret,
+                "gate_output_tail": "adoption-secret"
+            }
+        });
+
+        let summary = compact_status_summary(&record, "run-private-adoption");
+        let serialized = serde_json::to_string(&summary).unwrap();
+
+        assert!(!serialized.contains(secret));
+        assert!(!serialized.contains("adoption-secret"));
+        assert!(summary["candidate_adoption"].get("active_gate").is_none());
+        assert_eq!(
+            summary["candidate_adoption"]["gates_detail_command"],
+            "homeboy agent-task status run-private-adoption --full"
+        );
+    }
+
+    #[test]
+    fn compact_gate_summaries_report_truthful_omitted_counts() {
+        let gates = (0..(COMPACT_REF_LIMIT + 3))
+            .map(|index| {
+                json!({
+                    "id": format!("gate-{index}"),
+                    "kind": "command",
+                    "status": "passed",
+                    "command": "private command must not project"
+                })
+            })
+            .collect::<Vec<_>>();
+        let cook = compact_cook_status(
+            Some(&json!({ "deterministic_gates": gates.clone() })),
+            "run-gates",
+        );
+        let promotion =
+            compact_promotion_summary(&json!({ "deterministic_gates": gates }), "run-gates");
+
+        for value in [&cook, &promotion] {
+            assert_eq!(value["gates"].as_array().unwrap().len(), COMPACT_REF_LIMIT);
+            assert_eq!(value["gates_omitted"], 3);
+            assert!(!serde_json::to_string(value)
+                .unwrap()
+                .contains("private command must not project"));
+        }
+    }
+
+    #[test]
+    fn compact_budget_hashes_mandatory_scalars_and_removes_all_variable_sections() {
+        let large = "x".repeat(COMPACT_STATUS_BYTE_LIMIT);
+        let value = json!({
+            "schema": large,
+            "view": large,
+            "run_id": large,
+            "cook_id": large,
+            "latest_run_id": large,
+            "status": large,
+            "state": large,
+            "full_command": large,
+            "candidate_selection": { "evidence": large },
+            "identity": { "cook_alias": { "evidence": large } },
+            "runner_probe": { "evidence": large },
+            ACTIONABLE_METADATA_KEY: { "next_actions": [{ "command": large }] },
+            "unknown_future_enrichment": { "evidence": large }
+        });
+
+        let compact = enforce_compact_status_budget(value);
+        let omissions = compact["mandatory_scalar_omissions"]
+            .as_array()
+            .expect("mandatory omission metadata");
+
+        assert!(serialized_len(&compact) <= COMPACT_STATUS_BYTE_LIMIT);
+        for field in [
+            "schema",
+            "view",
+            "run_id",
+            "cook_id",
+            "latest_run_id",
+            "status",
+            "state",
+        ] {
+            assert!(
+                compact[field].as_str().unwrap().starts_with("sha256:"),
+                "{field}"
+            );
+        }
+        assert_eq!(
+            compact["full_command"],
+            "homeboy agent-task status <run-id> --full"
+        );
+        assert_eq!(omissions.len(), 8);
+        for section in [
+            "candidate_selection",
+            "identity",
+            "runner_probe",
+            ACTIONABLE_METADATA_KEY,
+            "unknown_future_enrichment",
+        ] {
+            assert!(compact.get(section).is_none(), "{section}");
+        }
+        assert!(compact["omitted_sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| {
+                item["section"].as_str().is_some() && item["count"].as_u64().is_some()
+            }));
     }
 
     #[test]
