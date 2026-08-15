@@ -41,6 +41,15 @@ fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
     assert!(!compact.contains("--max-provider-rotations"), "{compact}");
     assert!(full.contains("--max-provider-rotations"), "{full}");
     assert!(full.contains("--provider-command"), "{full}");
+    for advanced in [
+        "--placement",
+        "--private-verify",
+        "--gate-env",
+        "--provider-config",
+        "--require-acceptance",
+    ] {
+        assert!(full.contains(advanced), "missing {advanced}:\n{full}");
+    }
 
     // The routine path stays readable while the complete reference remains
     // deliberately available through `--help-full`.

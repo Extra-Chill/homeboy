@@ -222,7 +222,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),
         AgentTaskCommand::Cook(cook_args) => {
             if cook_args.preview {
-                return run::preview_cook(*cook_args);
+                return run::preview_cook(*cook_args, provenance);
             }
             // Reject unsupported Cook source shapes before discovering a provider
             // or preparing the local/Lab execution route.
