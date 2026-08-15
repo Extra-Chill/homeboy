@@ -1386,6 +1386,35 @@ fn managed_runner_context_bypasses_auto_routing_once() {
 }
 
 #[test]
+fn explicit_local_cook_skips_the_second_interception_pass() {
+    let local = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "local",
+        "agent-task",
+        "cook",
+        "--prompt",
+        "run locally",
+    ]);
+    assert!(!needs_provider_resolved_cook_interception(&local, None));
+
+    let automatic = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "auto",
+        "agent-task",
+        "cook",
+        "--prompt",
+        "resolve provider placement",
+    ]);
+    assert!(needs_provider_resolved_cook_interception(&automatic, None));
+    assert!(needs_provider_resolved_cook_interception(
+        &automatic,
+        Some("ready-runner")
+    ));
+}
+
+#[test]
 fn runner_resident_run_plan_does_not_require_a_second_controller_session() {
     let _env = EnvGuard::set_many(&[
         (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
