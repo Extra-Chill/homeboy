@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.35.3] - 2026-08-15
+
+### Fixed
+- avoid executing dependency entrypoints in PHPStan
+
 ## [3.35.2] - 2026-08-14
 
 ### Changed
