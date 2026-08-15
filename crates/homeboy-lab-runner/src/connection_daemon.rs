@@ -473,8 +473,20 @@ pub(crate) fn daemon_http_lab_handoff_capabilities(
     local_url: &str,
 ) -> std::result::Result<Vec<LabCapabilityVersion>, String> {
     let response = daemon_http_body(local_url)?;
-    serde_json::from_value(response.body["lab_handoff_capabilities"].clone()).map_err(|_| {
-        "remote daemon version response did not include Lab handoff capabilities".to_string()
+    daemon_lab_handoff_capabilities_from_body(&response.body)
+}
+
+pub(super) fn daemon_lab_handoff_capabilities_from_body(
+    body: &Value,
+) -> std::result::Result<Vec<LabCapabilityVersion>, String> {
+    let capabilities = body
+        .get("lab_handoff_capabilities")
+        .or_else(|| body.pointer("/data/lab_handoff_capabilities"))
+        .ok_or_else(|| {
+            "remote daemon version response did not include Lab handoff capabilities".to_string()
+        })?;
+    serde_json::from_value(capabilities.clone()).map_err(|_| {
+        "remote daemon version response included malformed Lab handoff capabilities".to_string()
     })
 }
 

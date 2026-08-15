@@ -523,6 +523,45 @@ fn extracts_current_daemon_version_shape() {
 }
 
 #[test]
+fn extracts_daemon_lab_capabilities_from_supported_response_shapes() {
+    let capabilities = serde_json::json!([
+        {"id": "daemon-protocol", "version": 1},
+        {"id": "artifact-transport", "version": 1}
+    ]);
+
+    for body in [
+        serde_json::json!({"lab_handoff_capabilities": capabilities.clone()}),
+        serde_json::json!({
+            "success": true,
+            "data": {"lab_handoff_capabilities": capabilities}
+        }),
+    ] {
+        let parsed = daemon_lab_handoff_capabilities_from_body(&body)
+            .expect("supported daemon capability response");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "daemon-protocol");
+        assert_eq!(parsed[1].id, "artifact-transport");
+    }
+}
+
+#[test]
+fn rejects_missing_or_malformed_daemon_lab_capabilities() {
+    let missing = daemon_lab_handoff_capabilities_from_body(&serde_json::json!({
+        "success": true,
+        "data": {}
+    }))
+    .expect_err("missing capabilities must fail closed");
+    assert!(missing.contains("did not include"));
+
+    let malformed = daemon_lab_handoff_capabilities_from_body(&serde_json::json!({
+        "success": true,
+        "data": {"lab_handoff_capabilities": "daemon-protocol"}
+    }))
+    .expect_err("malformed capabilities must fail closed");
+    assert!(malformed.contains("malformed"));
+}
+
+#[test]
 fn parses_self_identity_json_envelope() {
     let identity = parse_self_identity_output(
         r#"{"success":true,"data":{"version":"0.228.13","display":"homeboy 0.228.13+19a41cd5102d"}}"#,
