@@ -214,6 +214,10 @@ assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, 'access-token-mu
 assert.equal(process.env.UNDECLARED_SECRET, undefined);
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
 assert.equal(config.agent.title.disable, true);
+assert.equal(config.permission.external_directory['*'], 'deny');
+assert.equal(config.permission.external_directory[${JSON.stringify(concretePath(executorWorkspace))}], 'allow');
+assert.equal(config.agent.build.permission.external_directory['*'], 'deny');
+assert.equal(config.agent.build.permission.external_directory[${JSON.stringify(concretePath(executorWorkspace))}], 'allow');
 if (instruction === 'Prove two attached runtime tools without leaking secrets.') {
   assert.equal(typeof config.mcp, 'object');
   assert.equal(config.mcp['fixture.mcp'].command[0], process.execPath);
@@ -322,6 +326,7 @@ assert.equal(config.agent.title.disable, true);
 	  edit: { '*': 'allow' },
 	  bash: { '*': 'allow', 'git push *': 'deny' },
 	  external_directory: {
+	    '*': 'deny',
 	    '/unrelated/**': 'deny',
 	    ${JSON.stringify(realModelWorkspace)}: 'allow',
 	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow'
@@ -340,6 +345,7 @@ assert.equal(config.agent.title.disable, true);
 	  edit: { '*': 'allow' },
 	  bash: { '*': 'allow', 'git push *': 'deny' },
 	  external_directory: {
+	    '*': 'deny',
 	    ${JSON.stringify(realModelWorkspace)}: 'allow',
 	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow'
 	  }
