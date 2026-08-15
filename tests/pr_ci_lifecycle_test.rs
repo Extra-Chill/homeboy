@@ -114,6 +114,12 @@ fn closed_prs_stop_candidate_admission_at_every_fanout_boundary() {
     assert!(test.contains("uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@"));
     assert!(test.contains("needs: [pr-state, ci-capacity-admission]"));
     assert!(test.contains("test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}"));
+    assert!(test.contains(
+        "execution-timeout-seconds: ${{ needs.ci-capacity-admission.outputs.required-critical-path-p95-seconds }}"
+    ));
+    assert!(test.contains(
+        "test-timeout-seconds: ${{ needs.ci-capacity-admission.outputs.test-shard-p95-seconds }}"
+    ));
 }
 
 #[test]

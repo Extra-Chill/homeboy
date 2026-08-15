@@ -262,8 +262,8 @@ jobs:
       differential-gating: 'true'
       baseline-commands: none
       test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}
-      execution-timeout-seconds: '1800'
-      test-timeout-seconds: '1500'
+      execution-timeout-seconds: ${{ needs.ci-capacity-admission.outputs.required-critical-path-p95-seconds }}
+      test-timeout-seconds: ${{ needs.ci-capacity-admission.outputs.test-shard-p95-seconds }}
       comment-section-key: test
       comment-section-title: Test
     secrets: inherit
