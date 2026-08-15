@@ -84,6 +84,10 @@ impl AgentTaskLifecycleStore {
         self.roots.data().to_path_buf()
     }
 
+    pub(crate) fn matches_current_environment(&self) -> Result<bool> {
+        Ok(self.roots == paths::PathRoots::from_environment()?)
+    }
+
     pub(crate) fn workspace_claim_store(
         &self,
     ) -> homeboy_core::workspace_claim::WorkspaceClaimStore {
@@ -126,6 +130,26 @@ impl AgentTaskLifecycleStore {
             None,
             Some(admission_status),
             admit_runtime,
+        )
+    }
+
+    pub(crate) fn submit_plan_with_current_runtime(
+        &self,
+        plan: &AgentTaskPlan,
+        run_id: &str,
+    ) -> Result<AgentTaskRunRecord> {
+        self.submit_plan_with_runtime_admission_status(
+            plan,
+            run_id,
+            super::lifecycle_ops::execution_runner_id(),
+            &|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok(),
+            |run_id| {
+                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+                    run_id,
+                    || Ok(self.read_record(run_id)?.state.is_terminal()),
+                )
+                .map(|admission| admission.runtime)
+            },
         )
     }
 
@@ -184,6 +208,22 @@ impl AgentTaskLifecycleStore {
         operation_key: &str,
     ) -> Result<Option<super::OperationClaim>> {
         super::operation_claims::operation_claim_in_store(self, run_id, operation_key)
+    }
+
+    pub fn checkpoint_candidate_adoption_remediation(
+        &self,
+        run_id: &str,
+        remediation_run_id: &str,
+    ) -> Result<()> {
+        super::lifecycle_candidate_adoption::checkpoint_candidate_adoption_remediation_in_store(
+            self,
+            run_id,
+            remediation_run_id,
+        )
+    }
+
+    pub fn record_promotion(&self, run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_promotion_in_store(self, run_id, promotion)
     }
 
     pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {
@@ -246,6 +286,22 @@ impl AgentTaskLifecycleStore {
 
     pub fn read_cook_index(&self, cook_id: &str) -> Result<AgentTaskCookIndex> {
         read_cook_index_in_store(self, cook_id)
+    }
+
+    pub(crate) fn update_cook_index(
+        &self,
+        cook_id: &str,
+        mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,
+    ) -> Result<Option<AgentTaskCookIndex>> {
+        let path = self.cook_index_path(cook_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let mut index = read_json(&path)?;
+        if mutate(&mut index) {
+            write_json(&path, &index)?;
+        }
+        Ok(Some(index))
     }
 
     pub fn cook_index_exists(&self, cook_id: &str) -> bool {
@@ -1002,17 +1058,7 @@ pub(super) fn update_cook_index(
     cook_id: &str,
     mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,
 ) -> Result<Option<AgentTaskCookIndex>> {
-    let path = cook_index_path(&sanitize_run_id(cook_id))?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let mut index = read_json(&path)?;
-    if mutate(&mut index) {
-        // `write_json` is atomic; this makes the pointer update one durable
-        // index transaction without nesting the configuration lock it owns.
-        write_json(&path, &index)?;
-    }
-    Ok(Some(index))
+    default_store()?.update_cook_index(cook_id, mutate)
 }
 
 pub(super) fn record_exists(run_id: &str) -> Result<bool> {

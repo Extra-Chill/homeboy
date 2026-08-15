@@ -46,6 +46,10 @@ impl CookRecipeStore {
         Ok(Self::from_data_root(paths::homeboy_data()?))
     }
 
+    pub(crate) fn data_root(&self) -> PathBuf {
+        self.data_root.clone()
+    }
+
     fn recipe_root(&self) -> PathBuf {
         self.data_root.join("agent-task-cooks")
     }
