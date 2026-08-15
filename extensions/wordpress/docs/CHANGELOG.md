@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.35.4] - 2026-08-15
+
+### Fixed
+- initialize stale wrapper target
+- preflight WP Codebox version
+
 ## [3.35.3] - 2026-08-15
 
 ### Fixed
