@@ -1246,6 +1246,22 @@ fn cleanup_block_reason(
     now: chrono::DateTime<chrono::Utc>,
     retention_override_seconds: Option<i64>,
 ) -> Result<Option<String>> {
+    cleanup_block_reason_with_observation(
+        &ObservationStore::open_initialized()?,
+        resource,
+        path,
+        now,
+        retention_override_seconds,
+    )
+}
+
+fn cleanup_block_reason_with_observation(
+    observation: &ObservationStore,
+    resource: &mut ControllerScratchResource,
+    path: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    retention_override_seconds: Option<i64>,
+) -> Result<Option<String>> {
     if !resource.reconstructable {
         return Ok(Some(
             "resource is not explicitly reconstructable".to_string(),
@@ -1263,7 +1279,7 @@ fn cleanup_block_reason(
             "resource escaped its registered root bound".to_string(),
         ));
     }
-    let terminal = ObservationStore::open_initialized()?
+    let terminal = observation
         .get_run(&resource.run_id)?
         .map(|run| run.status != "running")
         .unwrap_or(true);
@@ -2136,6 +2152,29 @@ mod tests {
             .expect("scratch index")
     }
 
+    fn observation_store() -> (tempfile::TempDir, ObservationStore) {
+        let root = tempfile::tempdir().expect("observation root");
+        let store = ObservationStore::open_initialized_at(root.path().join("homeboy.sqlite"))
+            .expect("observation store");
+        (root, store)
+    }
+
+    fn cleanup_reason(
+        observation: &ObservationStore,
+        resource: &mut ControllerScratchResource,
+        path: &Path,
+        retention_override_seconds: Option<i64>,
+    ) -> Option<String> {
+        cleanup_block_reason_with_observation(
+            observation,
+            resource,
+            path,
+            chrono::Utc::now(),
+            retention_override_seconds,
+        )
+        .expect("cleanup eligibility")
+    }
+
     fn resource(path: &Path, root: &Path) -> ControllerScratchResource {
         ControllerScratchResource {
             path: path.display().to_string(),
@@ -2162,6 +2201,7 @@ mod tests {
 
     #[test]
     fn active_owner_protects_expired_reconstructable_resource() {
+        let (_observation_root, observation) = observation_store();
         let root = tempfile::tempdir().expect("root");
         let scratch = root.path().join("scratch");
         fs::create_dir(&scratch).expect("scratch");
@@ -2169,33 +2209,30 @@ mod tests {
         resource.owner_pid = std::process::id();
 
         assert_eq!(
-            cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), None).expect("check"),
+            cleanup_reason(&observation, &mut resource, &scratch, None),
             Some("owner process is still running".to_string())
         );
     }
 
     #[test]
     fn active_durable_run_protects_a_stale_lease_pid() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            fs::create_dir(&scratch).expect("scratch");
-            let run = ObservationStore::open_initialized()
-                .expect("store")
-                .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
-                .expect("running run");
-            let mut resource = resource(&scratch, root.path());
-            resource.run_id = run.id;
-            resource.finalized_at = None;
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        let run = observation
+            .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+            .expect("running run");
+        let mut resource = resource(&scratch, root.path());
+        resource.run_id = run.id;
+        resource.finalized_at = None;
 
-            assert_eq!(
-                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), None)
-                    .expect("check"),
-                Some("owning run is still active".to_string())
-            );
-            assert_eq!(resource.lifecycle_state, "active");
-            assert!(resource.finalized_at.is_none());
-        });
+        assert_eq!(
+            cleanup_reason(&observation, &mut resource, &scratch, None),
+            Some("owning run is still active".to_string())
+        );
+        assert_eq!(resource.lifecycle_state, "active");
+        assert!(resource.finalized_at.is_none());
     }
 
     #[test]
@@ -2513,6 +2550,7 @@ mod tests {
 
     #[test]
     fn released_resource_waits_for_its_configured_retention() {
+        let (_observation_root, observation) = observation_store();
         let root = tempfile::tempdir().expect("root");
         let scratch = root.path().join("scratch");
         fs::create_dir(&scratch).expect("scratch");
@@ -2521,102 +2559,93 @@ mod tests {
         resource.retention = "P7D".to_string();
 
         assert_eq!(
-            cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), None).expect("check"),
+            cleanup_reason(&observation, &mut resource, &scratch, None),
             Some("retention has not expired".to_string())
         );
     }
 
     #[test]
     fn retention_override_lets_clean_released_resource_converge() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            // A finalized, clean, terminal resource WITHIN its P7D window is
-            // skipped by default but becomes eligible with `Some(0)` override.
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            fs::create_dir(&scratch).expect("scratch");
-            let mut resource = resource(&scratch, root.path());
-            resource.lifecycle_state = "released".to_string();
-            resource.retention = "P7D".to_string();
+        let (_observation_root, observation) = observation_store();
+        // A finalized, clean, terminal resource WITHIN its P7D window is
+        // skipped by default but becomes eligible with `Some(0)` override.
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        let mut resource = resource(&scratch, root.path());
+        resource.lifecycle_state = "released".to_string();
+        resource.retention = "P7D".to_string();
 
-            // Default: still within the 7-day window, so it is retained.
-            assert_eq!(
-                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), None)
-                    .expect("default check"),
-                Some("retention has not expired".to_string())
-            );
+        // Default: still within the 7-day window, so it is retained.
+        assert_eq!(
+            cleanup_reason(&observation, &mut resource, &scratch, None),
+            Some("retention has not expired".to_string())
+        );
 
-            // Pressure override (expire-immediately): now eligible (no block).
-            assert_eq!(
-                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), Some(0))
-                    .expect("override check"),
-                None
-            );
-        });
+        // Pressure override (expire-immediately): now eligible (no block).
+        assert_eq!(
+            cleanup_reason(&observation, &mut resource, &scratch, Some(0)),
+            None
+        );
     }
 
     #[test]
     fn retention_override_does_not_bypass_dirty_guard() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            // A dirty/unpushed resource stays skipped EVEN with an aggressive
-            // override — the override only relaxes the time window, never the
-            // dirty/unpushed safety guard.
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            fs::create_dir(&scratch).expect("scratch");
-            run_git(&scratch, &["init", "-b", "main"]);
-            fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
-            let mut resource = resource(&scratch, root.path());
-            resource.lifecycle_state = "released".to_string();
+        let (_observation_root, observation) = observation_store();
+        // A dirty/unpushed resource stays skipped EVEN with an aggressive
+        // override — the override only relaxes the time window, never the
+        // dirty/unpushed safety guard.
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        run_git(&scratch, &["init", "-b", "main"]);
+        fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
+        let mut resource = resource(&scratch, root.path());
+        resource.lifecycle_state = "released".to_string();
 
-            assert_eq!(
-                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), Some(0))
-                    .expect("override check"),
-                Some("git checkout has dirty or unpushed state".to_string())
-            );
-            assert!(scratch.exists());
-        });
+        assert_eq!(
+            cleanup_reason(&observation, &mut resource, &scratch, Some(0)),
+            Some("git checkout has dirty or unpushed state".to_string())
+        );
+        assert!(scratch.exists());
     }
 
     #[test]
     fn generated_nested_dirty_repo_does_not_retain_scheduler_scratch() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            let generated = scratch.join("generated-repo");
-            fs::create_dir_all(&generated).expect("generated repo");
-            run_git(&generated, &["init", "-b", "main"]);
-            fs::write(generated.join("untracked.txt"), "generated").expect("dirty fixture");
-            let mut resource = resource(&scratch, root.path());
-            resource.plan_id = "scheduler-plan".to_string();
-            resource.lifecycle_state = "released".to_string();
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        let generated = scratch.join("generated-repo");
+        fs::create_dir_all(&generated).expect("generated repo");
+        run_git(&generated, &["init", "-b", "main"]);
+        fs::write(generated.join("untracked.txt"), "generated").expect("dirty fixture");
+        let mut resource = resource(&scratch, root.path());
+        resource.plan_id = "scheduler-plan".to_string();
+        resource.lifecycle_state = "released".to_string();
 
-            assert_eq!(
-                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), Some(0))
-                    .expect("cleanup check"),
-                None
-            );
-        });
+        assert_eq!(
+            cleanup_reason(&observation, &mut resource, &scratch, Some(0)),
+            None
+        );
     }
 
     #[test]
     fn dirty_scheduler_attempt_workspace_retains_its_scratch() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            let workspace = scratch.join("workspace");
-            fs::create_dir_all(&workspace).expect("attempt workspace");
-            run_git(&workspace, &["init", "-b", "main"]);
-            fs::write(workspace.join("untracked.txt"), "candidate").expect("dirty candidate");
-            let mut resource = resource(&scratch, root.path());
-            resource.plan_id = "scheduler-plan".to_string();
-            resource.lifecycle_state = "released".to_string();
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        let workspace = scratch.join("workspace");
+        fs::create_dir_all(&workspace).expect("attempt workspace");
+        run_git(&workspace, &["init", "-b", "main"]);
+        fs::write(workspace.join("untracked.txt"), "candidate").expect("dirty candidate");
+        let mut resource = resource(&scratch, root.path());
+        resource.plan_id = "scheduler-plan".to_string();
+        resource.lifecycle_state = "released".to_string();
 
-            assert_eq!(
-                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), Some(0))
-                    .expect("cleanup check"),
-                Some("git checkout has dirty or unpushed state".to_string())
-            );
-        });
+        assert_eq!(
+            cleanup_reason(&observation, &mut resource, &scratch, Some(0)),
+            Some("git checkout has dirty or unpushed state".to_string())
+        );
     }
 
     #[test]
@@ -2853,6 +2882,7 @@ mod tests {
 
     #[test]
     fn retention_override_does_not_bypass_running_owner_guard() {
+        let (_observation_root, observation) = observation_store();
         // A resource whose owner process is still running stays skipped even
         // with the override — the override never relaxes the running-owner guard.
         let root = tempfile::tempdir().expect("root");
@@ -2863,8 +2893,7 @@ mod tests {
         resource.owner_pid = std::process::id();
 
         assert_eq!(
-            cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), Some(0))
-                .expect("override check"),
+            cleanup_reason(&observation, &mut resource, &scratch, Some(0)),
             Some("owner process is still running".to_string())
         );
     }
@@ -3080,22 +3109,20 @@ mod tests {
 
     #[test]
     fn dirty_or_unpushed_checkout_is_preserved() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            fs::create_dir(&scratch).expect("scratch");
-            run_git(&scratch, &["init", "-b", "main"]);
-            fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
-            let mut resource = resource(&scratch, root.path());
-            resource.lifecycle_state = "released".to_string();
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        run_git(&scratch, &["init", "-b", "main"]);
+        fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
+        let mut resource = resource(&scratch, root.path());
+        resource.lifecycle_state = "released".to_string();
 
-            assert_eq!(
-                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), None)
-                    .expect("check"),
-                Some("git checkout has dirty or unpushed state".to_string())
-            );
-            assert!(scratch.exists());
-        });
+        assert_eq!(
+            cleanup_reason(&observation, &mut resource, &scratch, None),
+            Some("git checkout has dirty or unpushed state".to_string())
+        );
+        assert!(scratch.exists());
     }
 
     #[test]
