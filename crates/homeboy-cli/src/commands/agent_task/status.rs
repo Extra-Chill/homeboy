@@ -1735,6 +1735,24 @@ fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRecord) {
     ) {
         value["cook_completion"] = serde_json::to_value(completion).expect("completion serializes");
     }
+    // The completion projection answers whether a PR exists; it does not carry
+    // the PR's identity. Project that beside it so `status` can answer "is there
+    // a PR, and where" without a second command (#12571).
+    if let Some(pr_url) = cook_finalization_pr_url(record) {
+        value["pr_url"] = Value::String(pr_url.to_string());
+    }
+}
+
+/// The published pull request for this Cook attempt, read from the durable
+/// finalization receipt that `has_finalized_pr` accepts as publication proof.
+fn cook_finalization_pr_url(record: &AgentTaskRunRecord) -> Option<&str> {
+    let finalization = record.metadata.get("cook_finalization")?;
+    let url = finalization
+        .get("pr_url")
+        .or_else(|| finalization.get("pull_request_url"))
+        .and_then(Value::as_str)?
+        .trim();
+    (!url.is_empty()).then_some(url)
 }
 
 /// Basis marker for `next_actions`: the diagnosis mapped a typed failure
@@ -3886,6 +3904,19 @@ fn compact_status_summary_with_aggregate(
                     "created_at",
                 ],
             );
+        }
+    }
+    // Provider success is nested evidence, not a published PR. The compact view
+    // is the default answer, so the Cook-level completion projection and the PR
+    // identity travel with it instead of living only in `diagnose` (#12571).
+    if let Some(cook_completion) = record.get("cook_completion") {
+        if !cook_completion.is_null() {
+            summary["cook_completion"] = cook_completion.clone();
+        }
+    }
+    if let Some(pr_url) = record.get("pr_url") {
+        if !pr_url.is_null() {
+            summary["pr_url"] = pr_url.clone();
         }
     }
     if let Some(delivery) = record.get("notification_delivery") {
@@ -6400,6 +6431,55 @@ mod tests {
         assert!(summary["notification_delivery"]
             .get("raw_destination")
             .is_none());
+    }
+
+    #[test]
+    fn compact_status_carries_cook_completion_and_pull_request_identity() {
+        // #12571: `pr_finalized` and the PR URL were only reachable through
+        // `diagnose`, so the default status view could not answer whether the
+        // Cook published anything.
+        let summary = compact_status_summary(
+            &json!({
+                "run_id": "cook-attempt-1",
+                "state": "succeeded",
+                "tasks": [{ "task_id": "cook", "state": "succeeded" }],
+                "metadata": { "latest_promotion": {
+                    "status": "applied", "patch_artifact": { "id": "patch" }
+                }},
+                "cook_completion": {
+                    "schema": "homeboy/agent-task-cook-completion/v1",
+                    "candidate_produced": true,
+                    "finalization_requested": true,
+                    "pr_finalized": false,
+                    "state": "candidate_awaiting_finalization"
+                },
+                "pr_url": "https://example.test/pull/1"
+            }),
+            "cook-attempt-1",
+        );
+
+        assert_eq!(
+            summary["cook_completion"]["state"],
+            "candidate_awaiting_finalization"
+        );
+        assert_eq!(summary["cook_completion"]["pr_finalized"], false);
+        assert_eq!(summary["pr_url"], "https://example.test/pull/1");
+        assert_eq!(summary["canonical_candidate"]["state"], "promoted");
+
+        let rendered = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+            &summary,
+        )
+        .expect("status summary");
+
+        assert!(
+            rendered.contains("Status: provider_succeeded_finalization_incomplete"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Status: succeeded"), "{rendered}");
+        assert!(rendered.contains("Candidate state: promoted"), "{rendered}");
+        assert!(rendered.contains("PR finalized: no"));
+        assert!(rendered.contains("Pull request: https://example.test/pull/1"));
     }
 
     #[test]
