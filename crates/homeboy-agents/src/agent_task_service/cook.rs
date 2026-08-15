@@ -429,6 +429,7 @@ impl CookProgressEvent<'_> {
 pub type CookProgressObserver<'a> = dyn Fn(&CookProgressEvent<'_>) -> Result<()> + Send + Sync + 'a;
 
 fn report_cook_progress(
+    lifecycle_store: &AgentTaskLifecycleStore,
     observer: Option<&CookProgressObserver<'_>>,
     cook_id: &str,
     run_id: &str,
@@ -436,10 +437,20 @@ fn report_cook_progress(
     attempt: u32,
     detail: Option<&str>,
 ) -> Result<()> {
-    report_cook_progress_with_activity(observer, cook_id, run_id, phase, attempt, detail, None)
+    report_cook_progress_with_activity(
+        lifecycle_store,
+        observer,
+        cook_id,
+        run_id,
+        phase,
+        attempt,
+        detail,
+        None,
+    )
 }
 
 fn report_cook_progress_with_activity(
+    lifecycle_store: &AgentTaskLifecycleStore,
     observer: Option<&CookProgressObserver<'_>>,
     cook_id: &str,
     run_id: &str,
@@ -448,7 +459,7 @@ fn report_cook_progress_with_activity(
     detail: Option<&str>,
     activity: Option<&CookProviderActivity>,
 ) -> Result<()> {
-    agent_task_lifecycle::record_cook_progress_with_activity(
+    lifecycle_store.record_cook_progress_with_activity(
         run_id,
         phase,
         attempt,
@@ -3928,7 +3939,12 @@ where
             .map(|attempt| attempt.attempt)
             .unwrap_or(1);
         let phase = result.value.disposition.phase();
+        // Last ambient lifecycle reach on this path: run_cook_with_boundaries_reported
+        // has no store in scope, and giving it one requires threading a parameter
+        // through the 3623-3961 boundary chain (#7505).
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
         if let Err(error) = report_cook_progress(
+            &lifecycle_store,
             durable_observer,
             &result.value.cook_id,
             run_id,
@@ -4230,6 +4246,7 @@ where
     agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
     if cook_workspace_lookup_pending(&options.initial_plan) {
         report_cook_progress(
+            &lifecycle_store,
             durable_observer,
             &options.cook_id,
             &options.initial_run_id,
@@ -4245,6 +4262,9 @@ where
         let lookup_control =
             homeboy_core::worktree_providers::WorktreeProviderCommandControl::default();
         let heartbeat_control = lookup_control.clone();
+        // Bound before the `move` closure: naming the store inside it would
+        // capture the store itself by value rather than this borrow.
+        let lookup_lifecycle_store = &lifecycle_store;
         let lookup_result = std::thread::scope(|scope| {
             scope.spawn(move || {
                 let mut next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
@@ -4265,6 +4285,7 @@ where
                     if Instant::now() >= next_heartbeat {
                         next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
                         let _ = report_cook_progress(
+                            lookup_lifecycle_store,
                             durable_observer,
                             &lookup_cook_id,
                             &lookup_run_id,
@@ -4330,6 +4351,7 @@ where
     // to be the first identity-bearing observer event, which put the operator
     // handle behind work that can outlive a client timeout (#10419, #9163).
     report_cook_progress(
+        &lifecycle_store,
         durable_observer,
         &options.cook_id,
         &options.initial_run_id,
@@ -4447,6 +4469,7 @@ where
         ));
     }
     report_cook_progress(
+        &lifecycle_store,
         durable_observer,
         &options.cook_id,
         &options.initial_run_id,
@@ -4563,6 +4586,7 @@ where
                 lifecycle_store.submit_plan_with_current_runtime(&plan, &run_id)?;
             }
             report_cook_progress(
+                &lifecycle_store,
                 durable_observer,
                 &cook_id,
                 &run_id,
@@ -4752,6 +4776,10 @@ where
                     // thread-local, and the heartbeat runs on a thread of its
                     // own that would otherwise start unbudgeted.
                     let heartbeat_deadline = capture_cook_deadline();
+                    // Bound before the `move` closure: naming the store inside
+                    // it would capture the store itself by value rather than
+                    // this borrow.
+                    let heartbeat_lifecycle_store = &lifecycle_store;
                     std::thread::scope(|scope| {
                         scope.spawn(move || {
                             let mut supervisor =
@@ -4792,6 +4820,7 @@ where
                                 let tick = supervisor.observe(&activity);
                                 let detail = tick.detail_line();
                                 let _ = report_cook_progress_with_activity(
+                                    heartbeat_lifecycle_store,
                                     durable_observer,
                                     &heartbeat_cook_id,
                                     &heartbeat_run_id,
@@ -5282,6 +5311,7 @@ where
             ));
         }
         report_cook_progress(
+            &lifecycle_store,
             durable_observer,
             &cook_id,
             &run_id,
@@ -5537,6 +5567,7 @@ where
                     None => promotion,
                 };
                 report_cook_progress(
+                    &lifecycle_store,
                     durable_observer,
                     &cook_id,
                     &run_id,
@@ -5632,6 +5663,7 @@ where
                 if options.gates.accept_inherited_failures && promotion.finalization_eligible(true)
                 {
                     report_cook_progress(
+                        &lifecycle_store,
                         durable_observer,
                         &cook_id,
                         &run_id,
