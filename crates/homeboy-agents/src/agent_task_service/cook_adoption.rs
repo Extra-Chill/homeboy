@@ -1157,17 +1157,8 @@ fn materialize_adoption_attempt(
         .iter()
         .find(|attempt| attempt.run_id == run_id)
         .expect("selected adoption attempt remains in its recipe");
-    agent_task_lifecycle::submit_plan(&attempt.plan, Some(&attempt.run_id))?;
-    agent_task_lifecycle::record_cook_attempt(&recipe.cook_id, attempt.attempt, &attempt.run_id)?;
-    let recovery = Error::internal_unexpected(
-        "recovered orphaned durable cook recipe before provider dispatch".to_string(),
-    );
-    let record = agent_task_lifecycle::record_pre_execution_failure(
-        &attempt.run_id,
-        &attempt.plan,
-        "transport_dispatcher_prepare",
-        &recovery,
-    )?;
+    let record =
+        super::cook_pre_execution::recover_adoption_attempt(&recipe.cook_id, &attempt.run_id)?;
     Ok((record, recipe))
 }
 
