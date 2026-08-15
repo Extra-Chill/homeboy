@@ -45,7 +45,9 @@ const COMPACT_REF_LIMIT: usize = 12;
 const COMPACT_TASK_LIMIT: usize = 12;
 const COMPACT_TEXT_LIMIT: usize = 512;
 const COMPACT_ACTION_LIMIT: usize = 4;
-const COMPACT_ACTION_TEXT_LIMIT: usize = 256;
+const COMPACT_ACTION_BYTE_LIMIT: usize = 512;
+const COMPACT_PROMOTION_FILE_LIMIT: usize = 12;
+const COMPACT_PROMOTION_FILE_BYTE_LIMIT: usize = 256;
 const STATUS_WATCH_CHANGE_LIMIT: usize = 12;
 
 /// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
@@ -3784,22 +3786,12 @@ fn compact_status_summary_with_aggregate(
         .and_then(|metadata| metadata.get("latest_promotion"))
     {
         if !latest_promotion.is_null() {
-            summary["latest_promotion"] = compact_fields(
-                latest_promotion,
-                &[
-                    "schema",
-                    "status",
-                    "run_id",
-                    "task_id",
-                    "artifact_id",
-                    "patch_artifact_id",
-                    "patch_artifact",
-                    "patch",
-                    "updated_at",
-                    "created_at",
-                    "command",
-                ],
-            );
+            summary["latest_promotion"] = compact_promotion_summary(latest_promotion, run_id);
+        }
+    }
+    if let Some(adoption) = record.get("candidate_adoption") {
+        if !adoption.is_null() {
+            summary["candidate_adoption"] = compact_candidate_adoption(adoption);
         }
     }
     if let Some(cook_finalization) = record
@@ -3945,9 +3937,16 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         );
         for field in ["legal_actions", "next_actions"] {
             if let Some(actions) = failure_context.get(field).and_then(Value::as_array) {
-                summary["failure_context"][field] = compact_action_samples(actions);
-                summary["failure_context"][format!("{field}_omitted")] =
-                    json!(actions.len().saturating_sub(COMPACT_ACTION_LIMIT));
+                let (samples, omitted) = compact_action_samples(actions);
+                if field == "next_actions" {
+                    if let Some(next_action) =
+                        samples.as_array().and_then(|samples| samples.first())
+                    {
+                        summary["failure_context"]["next_action"] = next_action.clone();
+                    }
+                }
+                summary["failure_context"][field] = samples;
+                summary["failure_context"][format!("{field}_omitted")] = json!(omitted);
             }
         }
         if let Some(diagnostic) = failure_context.get("diagnostic") {
@@ -4063,6 +4062,12 @@ fn compact_fields(value: &Value, fields: &[&str]) -> Value {
     let mut object = serde_json::Map::new();
     for field in fields {
         if let Some(value) = value.get(*field) {
+            if value
+                .as_str()
+                .is_some_and(|text| text.len() > COMPACT_TEXT_LIMIT)
+            {
+                continue;
+            }
             object.insert((*field).to_string(), bounded_value(value));
         }
     }
@@ -4072,33 +4077,116 @@ fn compact_fields(value: &Value, fields: &[&str]) -> Value {
 /// Recovery actions are executable operator guidance, not evidence. Keep a
 /// small copyable sample in the default view and leave the complete list in the
 /// explicit `--full` report.
-fn compact_action_samples(actions: &[Value]) -> Value {
-    Value::Array(
-        actions
-            .iter()
-            .take(COMPACT_ACTION_LIMIT)
-            .map(|action| {
-                compact_fields_with_text_limit(
-                    action,
-                    &["action", "command"],
-                    COMPACT_ACTION_TEXT_LIMIT,
-                )
-            })
-            .collect(),
-    )
+fn compact_action_samples(actions: &[Value]) -> (Value, usize) {
+    let mut samples = Vec::new();
+    let mut omitted = 0;
+    for action in actions {
+        let Some(action_name) = action.get("action").and_then(Value::as_str) else {
+            omitted += 1;
+            continue;
+        };
+        let Some(command) = action.get("command").and_then(Value::as_str) else {
+            omitted += 1;
+            continue;
+        };
+        let sample = json!({ "action": action_name, "command": command });
+        let sample_bytes = serde_json::to_vec(&sample).map_or(usize::MAX, |bytes| bytes.len());
+        if samples.len() >= COMPACT_ACTION_LIMIT || sample_bytes > COMPACT_ACTION_BYTE_LIMIT {
+            omitted += 1;
+            continue;
+        }
+        samples.push(sample);
+    }
+    (Value::Array(samples), omitted)
 }
 
-fn compact_fields_with_text_limit(value: &Value, fields: &[&str], text_limit: usize) -> Value {
-    let mut object = serde_json::Map::new();
-    for field in fields {
-        if let Some(value) = value.get(*field) {
-            object.insert(
-                (*field).to_string(),
-                bounded_value_with_limit(value, text_limit),
-            );
-        }
+fn compact_promotion_summary(promotion: &Value, run_id: &str) -> Value {
+    let mut summary = compact_fields(
+        promotion,
+        &[
+            "schema",
+            "status",
+            "run_id",
+            "task_id",
+            "artifact_id",
+            "patch_artifact_id",
+            "updated_at",
+            "created_at",
+            "to_worktree",
+        ],
+    );
+    if let Some(target) = promotion.get("target") {
+        summary["target"] = compact_fields(target, &["worktree", "branch", "head", "dirty"]);
     }
-    Value::Object(object)
+    if let Some(base) = promotion.get("verified_base") {
+        summary["base"] = compact_fields(base, &["base", "sha"]);
+    }
+    let (changed_files, changed_files_omitted) = compact_string_samples(
+        promotion
+            .get("changed_files")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        COMPACT_PROMOTION_FILE_LIMIT,
+        COMPACT_PROMOTION_FILE_BYTE_LIMIT,
+    );
+    summary["changed_files"] = changed_files;
+    summary["changed_files_omitted"] = json!(changed_files_omitted);
+    if let Some(adoption) = promotion.pointer("/provenance/adoption") {
+        summary["adoption"] = compact_fields(
+            adoption,
+            &["candidate_ref", "recovery", "ai_model", "ai_model_source"],
+        );
+    }
+    summary["next_action"] = json!(format!(
+        "homeboy agent-task status {} --full",
+        quote_arg(run_id)
+    ));
+    summary
+}
+
+fn compact_candidate_adoption(adoption: &Value) -> Value {
+    let mut summary = compact_fields(
+        adoption,
+        &[
+            "candidate_sha",
+            "ai_model",
+            "state",
+            "phase",
+            "active_gate",
+            "updated_at",
+            "completed_at",
+            "remediation_run_id",
+        ],
+    );
+    if let Some(result) = adoption.get("result") {
+        summary["result"] = compact_fields(result, &["status", "reason_code"]);
+    }
+    if let Some(command) = adoption
+        .get("remediation_status_command")
+        .and_then(Value::as_str)
+        .filter(|command| command.len() <= COMPACT_ACTION_BYTE_LIMIT)
+    {
+        summary["next_action"] = json!(command);
+    }
+    summary
+}
+
+fn compact_string_samples(values: &[Value], limit: usize, byte_limit: usize) -> (Value, usize) {
+    let mut samples = Vec::new();
+    let mut omitted = 0;
+    for value in values {
+        let Some(value) = value.as_str() else {
+            omitted += 1;
+            continue;
+        };
+        if samples.len() >= limit || value.len() > byte_limit {
+            omitted += 1;
+            continue;
+        }
+        samples.push(json!(value));
+    }
+    (Value::Array(samples), omitted)
 }
 
 fn bounded_failure_reasons(value: &Value) -> Value {
@@ -4117,15 +4205,8 @@ fn bounded_failure_reasons(value: &Value) -> Value {
 }
 
 fn bounded_value(value: &Value) -> Value {
-    bounded_value_with_limit(value, COMPACT_TEXT_LIMIT)
-}
-
-fn bounded_value_with_limit(value: &Value, text_limit: usize) -> Value {
     match value {
-        Value::String(text) if text.chars().count() > text_limit => Value::String(format!(
-            "{}...",
-            text.chars().take(text_limit).collect::<String>()
-        )),
+        Value::String(text) if text.len() > COMPACT_TEXT_LIMIT => Value::Null,
         _ => value.clone(),
     }
 }
@@ -4428,13 +4509,7 @@ fn first_sentence(prompt: &str) -> Option<String> {
         .map(|index| index + 1)
         .unwrap_or(trimmed.len());
     let sentence = trimmed[..end].trim().trim_end_matches('.').trim();
-    const MAX_CHARS: usize = 140;
-    let title = if sentence.chars().count() > MAX_CHARS {
-        let truncated: String = sentence.chars().take(MAX_CHARS).collect();
-        format!("{truncated}…")
-    } else {
-        sentence.to_string()
-    };
+    let title = (sentence.len() <= COMPACT_TEXT_LIMIT).then_some(sentence.to_string())?;
     (!title.is_empty()).then_some(title)
 }
 
@@ -4836,17 +4911,21 @@ fn collected_diagnostic_value_with_details(
     let mut value = json!({
         "task_id": item.task_id,
         "class": item.class,
-        "message": bounded_diagnostic_value(&Value::String(item.message)),
+        "message": bounded_diagnostic_value(&Value::String(item.message)).unwrap_or(Value::Null),
         "source": item.source,
         "owner": owner,
     });
     if include_details && !item.data.is_null() {
-        value["details"] = bounded_diagnostic_value(&item.data);
+        if let Some(details) = bounded_diagnostic_value(&item.data) {
+            value["details"] = details;
+        }
     } else if let Some(details) = policy_denial_details(&item.data) {
         value["details"] = details;
     }
     if let Some(field) = item.data.get("field").filter(|field| !field.is_null()) {
-        value["field"] = bounded_diagnostic_value(field);
+        if let Some(field) = bounded_diagnostic_value(field) {
+            value["field"] = field;
+        }
     }
     value
 }
@@ -4892,33 +4971,34 @@ fn policy_denial_details(data: &Value) -> Option<Value> {
     let details = fields.into_iter().filter_map(|field| {
         data.get(field)
             .filter(|value| !value.is_null())
-            .map(|value| (field.to_string(), bounded_diagnostic_value(value)))
+            .and_then(|value| {
+                bounded_diagnostic_value(value).map(|value| (field.to_string(), value))
+            })
     });
     let details = serde_json::Map::from_iter(details);
     (!details.is_empty()).then(|| Value::Object(details))
 }
 
-fn bounded_diagnostic_value(value: &Value) -> Value {
+fn bounded_diagnostic_value(value: &Value) -> Option<Value> {
     match value {
-        Value::String(text) if text.chars().count() > COMPACT_TEXT_LIMIT => {
-            let prefix: String = text.chars().take(COMPACT_TEXT_LIMIT).collect();
-            Value::String(format!("{prefix}..."))
-        }
-        Value::Array(values) => Value::Array(
+        Value::String(text) if text.len() > COMPACT_TEXT_LIMIT => None,
+        Value::Array(values) => Some(Value::Array(
             values
                 .iter()
                 .take(COMPACT_REF_LIMIT)
-                .map(bounded_diagnostic_value)
+                .filter_map(bounded_diagnostic_value)
                 .collect(),
-        ),
-        Value::Object(values) => Value::Object(
+        )),
+        Value::Object(values) => Some(Value::Object(
             values
                 .iter()
                 .take(COMPACT_REF_LIMIT)
-                .map(|(key, value)| (key.clone(), bounded_diagnostic_value(value)))
+                .filter_map(|(key, value)| {
+                    bounded_diagnostic_value(value).map(|value| (key.clone(), value))
+                })
                 .collect(),
-        ),
-        _ => value.clone(),
+        )),
+        _ => Some(value.clone()),
     }
 }
 
@@ -5392,13 +5472,9 @@ mod tests {
             data: json!({ "canonical_path": "x".repeat(COMPACT_TEXT_LIMIT + 1) }),
         });
 
-        assert_eq!(
-            value["details"]["canonical_path"]
-                .as_str()
-                .expect("bounded path")
-                .chars()
-                .count(),
-            COMPACT_TEXT_LIMIT + 3
+        assert!(
+            value["details"].get("canonical_path").is_none(),
+            "oversized diagnostic text is omitted atomically"
         );
     }
 
@@ -5569,11 +5645,41 @@ mod tests {
                     "source_run_id": "agent-task-run-1",
                     "patch_artifact_id": "patch.diff",
                     "to_worktree": "homeboy@fix-5055",
+                    "target": {
+                        "worktree": "homeboy@fix-5055",
+                        "branch": "fix/5055",
+                        "head": "candidate-sha",
+                        "dirty": false
+                    },
+                    "verified_base": { "base": "main", "sha": "base-sha" },
+                    "changed_files": (0..(COMPACT_PROMOTION_FILE_LIMIT + 1))
+                        .map(|index| format!("src/file-{index}.rs"))
+                        .chain(std::iter::once("👩‍💻".repeat(100)))
+                        .collect::<Vec<_>>(),
+                    "provenance": {
+                        "adoption": {
+                            "candidate_ref": "candidate-sha",
+                            "recovery": "verified",
+                            "ai_model": "gpt-5.6",
+                            "ai_model_source": "review-form"
+                        }
+                    },
                     "operator_notification": {
                         "status": "completed",
                         "message": "patch promoted"
                     }
                 }
+            },
+            "candidate_adoption": {
+                "candidate_sha": "candidate-sha",
+                "ai_model": "gpt-5.6",
+                "state": "completed",
+                "phase": "finalized",
+                "active_gate": "cargo test",
+                "updated_at": "2026-08-15T00:00:00Z",
+                "result": { "status": "review_ready", "reason_code": "accepted" },
+                "remediation_run_id": "adoption-remediation",
+                "remediation_status_command": "homeboy agent-task status adoption-remediation --full"
             }
         });
 
@@ -5583,6 +5689,40 @@ mod tests {
         assert!(summary["latest_promotion"]
             .get("operator_notification")
             .is_none());
+        assert_eq!(
+            summary["latest_promotion"]["to_worktree"],
+            "homeboy@fix-5055"
+        );
+        assert_eq!(
+            summary["latest_promotion"]["target"]["worktree"],
+            "homeboy@fix-5055"
+        );
+        assert_eq!(summary["latest_promotion"]["base"]["base"], "main");
+        assert_eq!(
+            summary["latest_promotion"]["changed_files"]
+                .as_array()
+                .unwrap()
+                .len(),
+            COMPACT_PROMOTION_FILE_LIMIT
+        );
+        assert_eq!(summary["latest_promotion"]["changed_files_omitted"], 2);
+        assert_eq!(
+            summary["latest_promotion"]["adoption"]["candidate_ref"],
+            "candidate-sha"
+        );
+        assert_eq!(
+            summary["latest_promotion"]["next_action"],
+            "homeboy agent-task status agent-task-run-1 --full"
+        );
+        assert_eq!(summary["candidate_adoption"]["state"], "completed");
+        assert_eq!(
+            summary["candidate_adoption"]["next_action"],
+            "homeboy agent-task status adoption-remediation --full"
+        );
+        assert!(
+            serde_json::to_vec(&summary).unwrap().len() < 8 * 1024,
+            "promotion and adoption status stays within the compact byte budget"
+        );
         assert_eq!(
             summary["queue_visibility"]["commands"][0],
             "homeboy agent-task list"
@@ -6622,15 +6762,9 @@ mod tests {
             "blocking_claim carries claim payload evidence"
         );
 
-        // The compact text budget still applies to the fields that are kept.
-        assert_eq!(
-            context["recovery_reason"]
-                .as_str()
-                .expect("recovery_reason")
-                .chars()
-                .count(),
-            COMPACT_TEXT_LIMIT + 3,
-            "long prose must still be truncated to the compact budget"
+        assert!(
+            context.get("recovery_reason").is_none(),
+            "oversized prose is omitted atomically instead of splitting Unicode text"
         );
 
         assert_eq!(compact_cook_report(report.clone(), true), report);
@@ -6638,15 +6772,21 @@ mod tests {
 
     #[test]
     fn compact_cook_report_bounds_recovery_action_samples_and_keeps_full_report() {
-        let actions = (0..(COMPACT_ACTION_LIMIT + 20))
+        let mut actions = (0..COMPACT_ACTION_LIMIT)
             .map(|index| {
                 json!({
-                    "action": format!("recover-{index}-{}", "a".repeat(COMPACT_ACTION_TEXT_LIMIT)),
-                    "command": format!("homeboy agent-task recover run-1 --note={}", "x".repeat(COMPACT_ACTION_TEXT_LIMIT * 4)),
+                    "action": format!("recover-{index}"),
+                    "command": format!("homeboy agent-task recover run-1 --step={index}"),
                     "private_evidence": "must only appear in --full"
                 })
             })
             .collect::<Vec<_>>();
+        actions.extend((0..20).map(|index| {
+            json!({
+                "action": format!("oversized-{index}"),
+                "command": format!("homeboy agent-task recover run-1 --note={}", "x".repeat(COMPACT_ACTION_BYTE_LIMIT * 4)),
+            })
+        }));
         let report = json!({
             "schema": "homeboy/agent-task-cook/v1",
             "cook_id": "cook-action-budget",
@@ -6678,18 +6818,45 @@ mod tests {
             );
             assert!(context[field][0].get("private_evidence").is_none());
             assert_eq!(
-                context[field][0]["command"]
-                    .as_str()
-                    .unwrap()
-                    .chars()
-                    .count(),
-                COMPACT_ACTION_TEXT_LIMIT + 3
+                context[field][0]["command"], "homeboy agent-task recover run-1 --step=0",
+                "sampled commands remain exactly runnable"
             );
         }
+        assert_eq!(
+            context["next_action"]["command"],
+            "homeboy agent-task recover run-1 --step=0"
+        );
         assert!(
             serde_json::to_vec(&compact).unwrap().len() < 6 * 1024,
             "large recovery lists must stay within the compact terminal-output budget"
         );
+        assert_eq!(compact_cook_report(report.clone(), true), report);
+    }
+
+    #[test]
+    fn compact_cook_report_omits_oversized_unicode_action_without_splitting_it() {
+        let command = format!("homeboy agent-task retry run-1 --note={}", "👩‍💻".repeat(100));
+        let report = json!({
+            "schema": "homeboy/agent-task-cook/v1",
+            "cook_id": "cook-unicode",
+            "latest_run_id": "run-1",
+            "status": "durable_failure",
+            "attempts": [],
+            "failure_context": {
+                "legal_actions": [{ "action": "retry", "command": command }],
+                "next_actions": [{ "action": "retry", "command": command }]
+            }
+        });
+
+        let compact = compact_cook_report(report.clone(), false);
+        let context = &compact["failure_context"];
+
+        assert!(context["legal_actions"].as_array().unwrap().is_empty());
+        assert!(context["next_actions"].as_array().unwrap().is_empty());
+        assert_eq!(context["legal_actions_omitted"], 1);
+        assert_eq!(context["next_actions_omitted"], 1);
+        assert!(context.get("next_action").is_none());
+        assert!(serde_json::to_vec(&compact).unwrap().len() < 2 * 1024);
         assert_eq!(compact_cook_report(report.clone(), true), report);
     }
 
