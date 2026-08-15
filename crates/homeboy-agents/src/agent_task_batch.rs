@@ -14,6 +14,7 @@ use crate::agent_task_dependency_graph::{
 };
 use crate::agent_task_lifecycle::{self, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
+use crate::agent_task_service;
 use homeboy_core::{paths, Error, ErrorCode, Result};
 
 mod types;
@@ -322,6 +323,13 @@ fn heartbeat_fanout_run_batch_in_store(
                 )
             })?;
         coordinator.insert("heartbeat_at".to_string(), json!(now_timestamp()));
+        // An admitting coordinator can spend longer than one lease preparing
+        // gates, worktrees, and recipes. A live heartbeat renews that admission
+        // lease; a dead coordinator still expires when heartbeats stop.
+        coordinator.insert(
+            "admission_deadline_at".to_string(),
+            json!((Utc::now() + chrono::Duration::seconds(COORDINATOR_LEASE_SECONDS)).to_rfc3339()),
+        );
         batch.updated_at = Some(now_timestamp());
         Ok(())
     })
@@ -481,7 +489,7 @@ fn expire_stalled_fanout_admission_in_store(
             .as_str()
             .unwrap_or("admitting")
             .to_string();
-        let command = format!("homeboy agent-task fanout resume {batch_id}");
+        let command = stalled_admission_recovery_command(&batch)?;
         if !batch.metadata.is_object() {
             batch.metadata = Value::Object(serde_json::Map::new());
         }
@@ -504,6 +512,43 @@ fn expire_stalled_fanout_admission_in_store(
         store.write_batch(&batch)?;
         Ok(true)
     })
+}
+
+fn stalled_admission_recovery_command(batch: &AgentTaskBatchRecord) -> Result<String> {
+    stalled_admission_recovery_command_with(batch, |child| {
+        agent_task_service::recipe_exists(&child.task_id)
+    })
+}
+
+fn stalled_admission_recovery_command_with(
+    batch: &AgentTaskBatchRecord,
+    mut recipe_exists: impl FnMut(&AgentTaskBatchChildRun) -> Result<bool>,
+) -> Result<String> {
+    let recipes_exist = batch
+        .child_runs
+        .iter()
+        .map(&mut recipe_exists)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .all(|exists| exists);
+    if recipes_exist {
+        return Ok(format!(
+            "homeboy agent-task fanout resume {}",
+            batch.batch_id
+        ));
+    }
+    batch.metadata["replan_command"]
+        .as_str()
+        .filter(|command| !command.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "replan_command",
+                "stalled fanout admission has no persisted child recipes or replan command",
+                Some(batch.batch_id.clone()),
+                None,
+            )
+        })
 }
 
 fn status_in_store<S, P>(
@@ -1196,8 +1241,8 @@ impl AgentTaskBatchStore {
     fn status(&self, batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
         self.status_with(
             batch_id,
-            agent_task_lifecycle::status,
-            agent_task_lifecycle::terminal_artifact_projection_readiness,
+            agent_task_lifecycle::persisted_status,
+            agent_task_lifecycle::terminal_artifact_projection_readiness_bounded,
         )
     }
 
@@ -2459,6 +2504,8 @@ mod tests {
                 batch.metadata["coordinator"]["admission_deadline_at"] =
                     json!("2000-01-01T00:00:00Z");
                 batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
+                batch.metadata["replan_command"] =
+                    json!("homeboy agent-task fanout run-plan --input @plan.json");
                 Ok(())
             })
             .expect("expire admission");
@@ -2476,7 +2523,83 @@ mod tests {
         );
         assert_eq!(
             status.batch.metadata["terminal_failure"]["failure"]["next_action"],
-            "homeboy agent-task fanout resume stuck-wave"
+            "homeboy agent-task fanout run-plan --input @plan.json"
+        );
+    }
+
+    #[test]
+    fn stalled_admission_recovery_resumes_only_when_every_recipe_exists() {
+        let batch = AgentTaskBatchRecord {
+            schema: AGENT_TASK_BATCH_SCHEMA.to_string(),
+            batch_id: "recipe-wave".to_string(),
+            plan_id: "recipe-wave".to_string(),
+            state: AgentTaskBatchState::Admitting,
+            submitted_at: now_timestamp(),
+            updated_at: None,
+            task_count: 2,
+            child_runs: vec![
+                AgentTaskBatchChildRun {
+                    task_id: "a".to_string(),
+                    run_id: "a-run".to_string(),
+                    state: AgentTaskRunState::Queued,
+                },
+                AgentTaskBatchChildRun {
+                    task_id: "b".to_string(),
+                    run_id: "b-run".to_string(),
+                    state: AgentTaskRunState::Queued,
+                },
+            ],
+            metadata: json!({
+                "replan_command": "homeboy agent-task fanout run-plan --input @plan.json"
+            }),
+        };
+
+        assert_eq!(
+            stalled_admission_recovery_command_with(&batch, |_| Ok(false))
+                .expect("pre-recipe recovery command"),
+            "homeboy agent-task fanout run-plan --input @plan.json"
+        );
+        assert_eq!(
+            stalled_admission_recovery_command_with(&batch, |_| Ok(true))
+                .expect("recipe-backed recovery command"),
+            "homeboy agent-task fanout resume recipe-wave"
+        );
+    }
+
+    #[test]
+    fn a_heartbeat_renews_slow_preflight_admission_without_false_expiry() {
+        let (_temp, store) = batch_store();
+        let children = vec![FanoutRunBatchChild {
+            task_id: "slow-preflight".to_string(),
+            run_id: "slow-preflight-run".to_string(),
+        }];
+        store
+            .persist_fanout_run_batch("slow-preflight", "slow-preflight", &children, json!({}))
+            .expect("persist");
+        let claim_id = store
+            .claim_fanout_run_batch("slow-preflight")
+            .expect("claim")
+            .expect("claim id");
+        store
+            .mutate_batch("slow-preflight", |batch| {
+                batch.metadata["coordinator"]["admission_deadline_at"] =
+                    json!("2000-01-01T00:00:00Z");
+                batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
+                Ok(())
+            })
+            .expect("age initial admission lease");
+
+        store
+            .heartbeat_fanout_run_batch("slow-preflight", &claim_id)
+            .expect("healthy preflight heartbeat");
+
+        assert!(!store
+            .expire_stalled_fanout_admission("slow-preflight")
+            .expect("live preflight is retained"));
+        assert_ne!(
+            store.read_batch("slow-preflight").expect("batch").metadata["coordinator"]
+                ["admission_deadline_at"],
+            json!("2000-01-01T00:00:00Z")
         );
     }
 
