@@ -28,6 +28,83 @@ use super::cook_promotion::{cook_report, CookReportInput};
 use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
 
+/// Durable preparation boundary for one Cook execution attempt.
+///
+/// Recipe and lifecycle authority travel together so callers cannot
+/// materialize a recipe in one root while publishing its run in another.
+pub(crate) struct CookExecutionPreparation<'a> {
+    recipe_store: &'a CookRecipeStore,
+    lifecycle_store: &'a AgentTaskLifecycleStore,
+}
+
+impl<'a> CookExecutionPreparation<'a> {
+    pub(crate) fn new(
+        recipe_store: &'a CookRecipeStore,
+        lifecycle_store: &'a AgentTaskLifecycleStore,
+    ) -> Self {
+        Self {
+            recipe_store,
+            lifecycle_store,
+        }
+    }
+
+    pub(crate) fn materialize_with_admission(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+        admit_runtime: impl FnOnce(&str) -> Result<Value>,
+        reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<()> {
+        self.materialize_with_runtime(
+            cook_id,
+            run_id,
+            plan,
+            None,
+            admit_runtime,
+            reconcile_reserved_cancellation,
+        )
+    }
+
+    fn materialize_with_runtime(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+        admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
+        admit_runtime: impl FnOnce(&str) -> Result<Value>,
+        reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<()> {
+        materialize_cook_attempt_with_stores_and_runtime(
+            self.recipe_store,
+            self.lifecycle_store,
+            cook_id,
+            run_id,
+            plan,
+            admission_status,
+            admit_runtime,
+            reconcile_reserved_cancellation,
+        )
+    }
+
+    pub(crate) fn record_pre_execution_failure(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+        phase: &str,
+        error: &Error,
+    ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+        record_materialized_cook_pre_execution_failure(
+            self.recipe_store,
+            self.lifecycle_store,
+            cook_id,
+            run_id,
+            phase,
+            error,
+        )
+    }
+}
+
 /// Persist the controller-owned initial attempt before transport preparation so
 /// runner eligibility failures remain addressable through the cook alias.
 pub(crate) fn materialize_initial_cook_attempt(
@@ -55,14 +132,13 @@ fn materialize_initial_cook_attempt_with_store_and_lifecycle(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,
 ) -> Result<()> {
-    materialize_cook_attempt_with_stores_and_runtime(
-        recipe_store,
-        lifecycle_store,
+    CookExecutionPreparation::new(recipe_store, lifecycle_store).materialize_with_runtime(
         &options.cook_id,
         &options.initial_run_id,
         &options.initial_plan,
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
         production_runtime_admission(lifecycle_store),
+        reconcile_reserved_cancellation,
     )
 }
 
@@ -76,14 +152,13 @@ pub(crate) fn materialize_cook_attempt(
 ) -> Result<()> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    materialize_cook_attempt_with_stores_and_runtime(
-        &recipe_store,
-        &lifecycle_store,
+    CookExecutionPreparation::new(&recipe_store, &lifecycle_store).materialize_with_runtime(
         cook_id,
         run_id,
         plan,
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
         production_runtime_admission(&lifecycle_store),
+        reconcile_reserved_cancellation,
     )
 }
 
@@ -94,36 +169,13 @@ pub(crate) fn materialize_cook_attempt_with_store(
     plan: &AgentTaskPlan,
 ) -> Result<()> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    materialize_cook_attempt_with_stores_and_runtime(
-        store,
-        &lifecycle_store,
+    CookExecutionPreparation::new(store, &lifecycle_store).materialize_with_runtime(
         cook_id,
         run_id,
         plan,
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
         production_runtime_admission(&lifecycle_store),
-    )
-}
-
-/// Materialize an immutable Cook recipe attempt into explicitly rooted lifecycle
-/// storage. Detached handoff parents are supported only when they share this
-/// lifecycle store; a parent in another root is never consulted.
-pub(crate) fn materialize_cook_attempt_with_stores_and_admission(
-    recipe_store: &CookRecipeStore,
-    lifecycle_store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    run_id: &str,
-    plan: &AgentTaskPlan,
-    admit_runtime: impl FnOnce(&str) -> Result<Value>,
-) -> Result<()> {
-    materialize_cook_attempt_with_stores_and_runtime(
-        recipe_store,
-        lifecycle_store,
-        cook_id,
-        run_id,
-        plan,
-        None,
-        admit_runtime,
+        reconcile_reserved_cancellation,
     )
 }
 
@@ -135,6 +187,7 @@ fn materialize_cook_attempt_with_stores_and_runtime(
     plan: &AgentTaskPlan,
     admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
     admit_runtime: impl FnOnce(&str) -> Result<Value>,
+    reconcile_reserved_cancellation: impl FnOnce(&str) -> Result<()>,
 ) -> Result<()> {
     if !lifecycle_store.record_exists(run_id)? {
         agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
@@ -162,8 +215,13 @@ fn materialize_cook_attempt_with_stores_and_runtime(
     ensure_cook_attempt_index(recipe_store, lifecycle_store, cook_id, run_id)?;
     // If cancellation won while this first attempt was being submitted, index
     // it before cancelling so the durable child remains reachable by Cook ID.
-    agent_task_lifecycle::cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)?;
+    reconcile_reserved_cancellation(cook_id)?;
     Ok(())
+}
+
+fn reconcile_reserved_cancellation(cook_id: &str) -> Result<()> {
+    agent_task_lifecycle::cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)
+        .map(|_| ())
 }
 
 fn production_runtime_admission(
@@ -237,7 +295,7 @@ fn ensure_cook_attempt_index(
 ///
 /// `agent_task_lifecycle::status` is reconciliation, not a pure rooted read,
 /// so it is intentionally outside this exact-store seam.
-pub(crate) fn record_materialized_cook_pre_execution_failure_with_stores(
+fn record_materialized_cook_pre_execution_failure(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -584,6 +642,7 @@ fn terminal_provider_execution(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier};
 
     use super::*;
@@ -660,6 +719,8 @@ mod tests {
         let cook_id = "same-cook";
         let run_id = "same-run";
         let barrier = Arc::new(Barrier::new(2));
+        let left_reconciled = Arc::new(AtomicBool::new(false));
+        let right_reconciled = Arc::new(AtomicBool::new(false));
 
         let mut left_plan = plan("left-plan", "left");
         left_plan.metadata = serde_json::json!({ "store": "left" });
@@ -676,38 +737,65 @@ mod tests {
             let left_barrier = Arc::clone(&barrier);
             let left_recipe_store = left_recipe_store.clone();
             let left_lifecycle_store = left_lifecycle_store.clone();
+            let left_reconciled = Arc::clone(&left_reconciled);
             scope.spawn(move || {
-                materialize_cook_attempt_with_stores_and_admission(
-                    &left_recipe_store,
-                    &left_lifecycle_store,
-                    cook_id,
-                    run_id,
-                    &left_plan,
-                    |_| {
-                        left_barrier.wait();
-                        Ok(serde_json::json!({ "store": "left" }))
-                    },
-                )
-                .expect("materialize left");
+                CookExecutionPreparation::new(&left_recipe_store, &left_lifecycle_store)
+                    .materialize_with_admission(
+                        cook_id,
+                        run_id,
+                        &left_plan,
+                        |_| {
+                            left_barrier.wait();
+                            Ok(serde_json::json!({ "store": "left" }))
+                        },
+                        |received_cook_id| {
+                            assert_eq!(received_cook_id, cook_id);
+                            assert_eq!(
+                                left_lifecycle_store
+                                    .read_cook_index(received_cook_id)
+                                    .expect("left index before cancellation reconciliation")
+                                    .latest_run_id,
+                                run_id
+                            );
+                            left_reconciled.store(true, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
+                    .expect("materialize left");
             });
             let right_barrier = Arc::clone(&barrier);
             let right_recipe_store = right_recipe_store.clone();
             let right_lifecycle_store = right_lifecycle_store.clone();
+            let right_reconciled = Arc::clone(&right_reconciled);
             scope.spawn(move || {
-                materialize_cook_attempt_with_stores_and_admission(
-                    &right_recipe_store,
-                    &right_lifecycle_store,
-                    cook_id,
-                    run_id,
-                    &right_plan,
-                    |_| {
-                        right_barrier.wait();
-                        Ok(serde_json::json!({ "store": "right" }))
-                    },
-                )
-                .expect("materialize right");
+                CookExecutionPreparation::new(&right_recipe_store, &right_lifecycle_store)
+                    .materialize_with_admission(
+                        cook_id,
+                        run_id,
+                        &right_plan,
+                        |_| {
+                            right_barrier.wait();
+                            Ok(serde_json::json!({ "store": "right" }))
+                        },
+                        |received_cook_id| {
+                            assert_eq!(received_cook_id, cook_id);
+                            assert_eq!(
+                                right_lifecycle_store
+                                    .read_cook_index(received_cook_id)
+                                    .expect("right index before cancellation reconciliation")
+                                    .latest_run_id,
+                                run_id
+                            );
+                            right_reconciled.store(true, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
+                    .expect("materialize right");
             });
         });
+
+        assert!(left_reconciled.load(Ordering::SeqCst));
+        assert!(right_reconciled.load(Ordering::SeqCst));
 
         assert_eq!(
             left_lifecycle_store
@@ -798,63 +886,63 @@ mod tests {
             let recipe_store = left_recipe_store.clone();
             let lifecycle_store = left_lifecycle_store.clone();
             scope.spawn(move || {
-                materialize_cook_attempt_with_stores_and_admission(
-                    &recipe_store,
-                    &lifecycle_store,
-                    cook_id,
-                    run_id,
-                    &left_plan,
-                    |_| {
-                        left_barrier.wait();
-                        Ok(serde_json::json!({ "store": "left" }))
-                    },
-                )
-                .expect("materialize left");
-                record_materialized_cook_pre_execution_failure_with_stores(
-                    &recipe_store,
-                    &lifecycle_store,
-                    cook_id,
-                    run_id,
-                    "left_phase",
-                    &Error::validation_invalid_argument(
-                        "left_error",
-                        "left pre-execution failure",
-                        None,
-                        None,
-                    ),
-                )
-                .expect("record left failure");
+                let preparation = CookExecutionPreparation::new(&recipe_store, &lifecycle_store);
+                preparation
+                    .materialize_with_admission(
+                        cook_id,
+                        run_id,
+                        &left_plan,
+                        |_| {
+                            left_barrier.wait();
+                            Ok(serde_json::json!({ "store": "left" }))
+                        },
+                        |_| Ok(()),
+                    )
+                    .expect("materialize left");
+                preparation
+                    .record_pre_execution_failure(
+                        cook_id,
+                        run_id,
+                        "left_phase",
+                        &Error::validation_invalid_argument(
+                            "left_error",
+                            "left pre-execution failure",
+                            None,
+                            None,
+                        ),
+                    )
+                    .expect("record left failure");
             });
             let right_barrier = Arc::clone(&barrier);
             let recipe_store = right_recipe_store.clone();
             let lifecycle_store = right_lifecycle_store.clone();
             scope.spawn(move || {
-                materialize_cook_attempt_with_stores_and_admission(
-                    &recipe_store,
-                    &lifecycle_store,
-                    cook_id,
-                    run_id,
-                    &right_plan,
-                    |_| {
-                        right_barrier.wait();
-                        Ok(serde_json::json!({ "store": "right" }))
-                    },
-                )
-                .expect("materialize right");
-                record_materialized_cook_pre_execution_failure_with_stores(
-                    &recipe_store,
-                    &lifecycle_store,
-                    cook_id,
-                    run_id,
-                    "right_phase",
-                    &Error::validation_invalid_argument(
-                        "right_error",
-                        "right pre-execution failure",
-                        None,
-                        None,
-                    ),
-                )
-                .expect("record right failure");
+                let preparation = CookExecutionPreparation::new(&recipe_store, &lifecycle_store);
+                preparation
+                    .materialize_with_admission(
+                        cook_id,
+                        run_id,
+                        &right_plan,
+                        |_| {
+                            right_barrier.wait();
+                            Ok(serde_json::json!({ "store": "right" }))
+                        },
+                        |_| Ok(()),
+                    )
+                    .expect("materialize right");
+                preparation
+                    .record_pre_execution_failure(
+                        cook_id,
+                        run_id,
+                        "right_phase",
+                        &Error::validation_invalid_argument(
+                            "right_error",
+                            "right pre-execution failure",
+                            None,
+                            None,
+                        ),
+                    )
+                    .expect("record right failure");
             });
         });
 
