@@ -509,6 +509,12 @@ impl AgentTaskLifecycleStore {
         self.cook_index_path(cook_id).exists()
     }
 
+    /// Persist the latest bounded, secret-safe terminal notification outcome
+    /// beside this store's own Cook index rather than the ambient one.
+    pub fn write_cook_notification_outcome(&self, cook_id: &str, outcome: &Value) -> Result<()> {
+        write_cook_notification_outcome_in_store(self, cook_id, outcome)
+    }
+
     pub fn read_record(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         read_record_in_store(self, run_id)
     }
@@ -1256,8 +1262,17 @@ pub(super) fn release_cook_notification_claim(cook_id: &str) -> Result<()> {
 
 /// Persist the latest bounded, secret-safe terminal notification outcome.
 pub(super) fn write_cook_notification_outcome(cook_id: &str, outcome: &Value) -> Result<()> {
-    let path =
-        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification-outcome.json");
+    write_cook_notification_outcome_in_store(&default_store()?, cook_id, outcome)
+}
+
+fn write_cook_notification_outcome_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    outcome: &Value,
+) -> Result<()> {
+    let path = store
+        .cook_index_path(&sanitize_run_id(cook_id))
+        .with_file_name("notification-outcome.json");
     write_private_json(&path, outcome)
 }
 
