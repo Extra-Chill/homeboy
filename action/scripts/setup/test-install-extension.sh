@@ -33,6 +33,7 @@ chmod +x "${TMP_DIR}/bin/homeboy"
 
 export PATH="${TMP_DIR}/bin:${PATH}"
 export EXTENSION_SOURCE="/extensions"
+export EXTENSION_REF=""
 export EXTENSION_ID="wordpress"
 export COMPONENT_DIR="${TMP_DIR}/component"
 export HOMEBOY_CALL_LOG="${TMP_DIR}/calls.log"
@@ -67,6 +68,20 @@ assert_equals \
   $'extension uninstall nodejs\nextension install /extensions --id nodejs' \
   "$(cat "${HOMEBOY_CALL_LOG}")" \
   "explicit extension input refreshes cached copy before install"
+
+: > "${HOMEBOY_CALL_LOG}"
+EXTENSION_REF="aeb1bab" EXTENSION_INPUT="nodejs" bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null
+assert_equals \
+  $'extension uninstall nodejs\nextension install /extensions --id nodejs --ref aeb1bab' \
+  "$(cat "${HOMEBOY_CALL_LOG}")" \
+  "explicit extension input installs the requested revision"
+
+: > "${HOMEBOY_CALL_LOG}"
+EXTENSION_REF="aeb1bab" EXTENSION_INPUT="" bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null
+assert_equals \
+  $'extension uninstall nodejs\nextension install /extensions --id nodejs --ref aeb1bab\nextension uninstall wordpress\nextension install /extensions --id wordpress --ref aeb1bab' \
+  "$(cat "${HOMEBOY_CALL_LOG}")" \
+  "configured extensions install the requested revision"
 
 : > "${HOMEBOY_CALL_LOG}"
 if EXTENSION_INPUT="wordpress,nodejs" bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null 2>"${TMP_DIR}/comma.err"; then
