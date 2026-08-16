@@ -1825,7 +1825,7 @@
     "rust": {
       "settings": {
         "rust_cargo_test_threads": 1,
-        "rust_nextest_shard_threads": 0
+        "rust_nextest_shard_threads": 1
       }
     }
   },
