@@ -5168,7 +5168,21 @@ fn cook_failure_context_counts_preflight_cook_alias_as_zero_execution() {
         super::super::record_recipe_attempt(cook_id, 2, &provider_run_id, &options.initial_plan)
             .expect("append provider attempt to recipe");
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&provider_run_id))
-            .expect("materialize independent provider attempt");
+            .expect("submit provider attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 2, &provider_run_id)
+            .expect("index provider attempt");
+        assert_eq!(
+            agent_task_lifecycle::status(cook_id)
+                .expect("resolve Cook alias to provider attempt")
+                .run_id,
+            provider_run_id
+        );
+        assert_eq!(
+            agent_task_lifecycle::exact_record(cook_id)
+                .expect("retain exact preflight record")
+                .metadata["provider_executions_consumed"],
+            0
+        );
         assert_eq!(
             agent_task_lifecycle::reserve_provider_execution(
                 &provider_run_id,
@@ -6704,7 +6718,7 @@ fn run_cook_persists_recipe_in_explicit_store_only() {
         let result = run_cook_with_store(&store, options, UnusedExecutor)
             .expect("Cook reports the lifecycle materialization failure");
 
-        assert_eq!(result.value.status, "durable_failure");
+        assert_eq!(result.value.status, "pre_execution_failure");
         assert!(store.recipe_exists(cook_id));
         assert!(!super::super::recipe_exists(cook_id).expect("ambient recipe lookup"));
     });

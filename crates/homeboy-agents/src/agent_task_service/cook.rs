@@ -4635,7 +4635,7 @@ where
             }
             let mut failed_dispatch_plan = None;
             let execution = (|| {
-                if options.attempt_dispatcher.is_none() {
+                if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
                     validate_cook_workspace(&options)?;
                 }
                 if options.attempt_dispatcher.is_none() {
