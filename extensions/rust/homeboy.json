@@ -13,6 +13,8 @@
       "bash tests/fingerprint-policy-flow-smoke.sh",
       "bash tests/zero-test-scope-fallback-smoke.sh",
       "bash tests/test-shard-inventory-smoke.sh",
+      "bash tests/nextest-unsharded-counts-smoke.sh",
+      "bash scripts/rust-nextest-runner-smoke.sh",
       "bash tests/nextest-shard-real-smoke.sh",
       "bash ../tests/lint-findings-clean-pass-contract-smoke.sh"
     ]

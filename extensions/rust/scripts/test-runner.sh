@@ -60,6 +60,29 @@ rust_nextest_fallback_enabled() {
     [ "$(homeboy_setting_bool rust_nextest_fallback true '.rust_nextest_fallback // .nextest_fallback')" = "true" ]
 }
 
+# Whether an unsharded nextest run is measured.
+#
+# This does NOT decide cargo vs nextest. `rust_test_runner` still does, and it
+# still defaults to cargo, so no existing component silently changes runner.
+# This only decides whether a run that ALREADY selected nextest gets counted.
+#
+# It defaults on because the status quo it replaces is worse than either
+# alternative: nextest emits no `test result:` lines, so the cargo-test adapter
+# in parse-test-results.sh matched nothing and an unsharded nextest run produced
+# no Homeboy test result at all. Turning this on for those components is purely
+# additive. The knob exists as an escape hatch if a future nextest release
+# changes its libtest-json projection.
+rust_nextest_measured_counts_enabled() {
+    if [ -n "${HOMEBOY_RUST_NEXTEST_MEASURED_COUNTS:-}" ]; then
+        case "${HOMEBOY_RUST_NEXTEST_MEASURED_COUNTS}" in
+            1|true|TRUE|yes|YES|on|ON) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+
+    [ "$(homeboy_setting_bool rust_nextest_measured_counts true '.rust_nextest_measured_counts')" = "true" ]
+}
+
 rust_cargo_test_threads() {
     local value
     value="${HOMEBOY_RUST_CARGO_TEST_THREADS:-$(homeboy_setting rust_cargo_test_threads '.rust_cargo_test_threads // .cargo_test_threads' '')}"
@@ -459,12 +482,23 @@ rust_capture_stdout() {
 }
 
 rust_nextest_counts() {
-    python3 - "$1" "$2" "$3" <<'PY'
+    python3 - "${EXTENSION_PATH}/scripts" "$1" "$2" "$3" <<'PY'
 import json
 import sys
 
-expected = json.load(open(sys.argv[2], encoding="utf-8"))["selected"]
-failed_names_file = sys.argv[3]
+sys.path.insert(0, sys.argv[1])
+
+from nextest_events_lib import (
+    FAILED_STATUSES,
+    PASSED_STATUSES,
+    SKIPPED_STATUSES,
+    TERMINAL_STATUSES,
+    read_test_events,
+    retry_base_identity,
+)
+
+expected = json.load(open(sys.argv[3], encoding="utf-8"))["selected"]
+failed_names_file = sys.argv[4]
 
 def planned_identity(item):
     values = (item.get("package"), item.get("target_kind"), item.get("target"), item.get("name"))
@@ -477,18 +511,6 @@ def planned_outcome(item):
     if outcome not in {"executed", "skipped"}:
         raise SystemExit("Rust test shard error: shard manifest contains an invalid planned nextest outcome")
     return outcome
-
-def emitted_identity(value):
-    # libtest-json-plus omits Cargo's target kind and encodes its remaining
-    # identity as package::target$test. Reconcile that structured projection,
-    # rather than mutating either serialized identifier.
-    if not isinstance(value, str):
-        raise SystemExit("Rust test shard error: nextest emitted a malformed test identity")
-    package_target, separator, test = value.rpartition("$")
-    package, target_separator, target = package_target.partition("::")
-    if not separator or not target_separator or not all((package, target, test)):
-        raise SystemExit(f"Rust test shard error: nextest emitted a malformed test identity: {value!r}")
-    return package, target, test
 
 planned_by_emitted = {}
 expected_identities = set()
@@ -506,35 +528,9 @@ for item in expected:
         raise SystemExit(f"Rust test shard error: nextest output identity is ambiguous: {package}::{target}${test}")
     planned_by_emitted[emitted] = planned
 
-# nextest's retry count is u32 and its attempt number is retry_count + 1.
-# Its TestInstanceId appends the decimal attempt only when it exceeds one.
-MAX_RETRY_ATTEMPT = 2**32
-
-def retry_base_identity(emitted):
-    package, target, test = emitted
-    base, marker, attempt_text = test.rpartition("#")
-    if not marker:
-        return None
-    if not base or not attempt_text.isdecimal():
-        return "invalid"
-    attempt = int(attempt_text)
-    if attempt < 2 or attempt > MAX_RETRY_ATTEMPT or attempt_text != str(attempt):
-        return "invalid"
-    return package, target, base
-
 outcomes = {}
-for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    try:
-        event = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if not isinstance(event, dict):
-        continue
-    if event.get("type") != "test":
-        continue
-    try:
-        emitted = emitted_identity(event.get("name"))
-    except SystemExit:
+for name, emitted, status in read_test_events(sys.argv[2]):
+    if emitted is None:
         # Child processes inherit libtest JSON. Scheduler preflight, not their
         # diagnostics, is the authority for shard membership.
         continue
@@ -543,22 +539,21 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     if exact:
         normalized = planned_by_emitted.get(retry_base) if retry_base != "invalid" and retry_base else None
         if normalized:
-            raise SystemExit(f"Rust test shard error: nextest retry suffix is ambiguous between planned identities: {event.get('name')}")
+            raise SystemExit(f"Rust test shard error: nextest retry suffix is ambiguous between planned identities: {name}")
         planned = exact
     elif retry_base == "invalid":
         base = emitted[0], emitted[1], emitted[2].rpartition("#")[0]
         if base in planned_by_emitted:
-            raise SystemExit(f"Rust test shard error: nextest emitted a malformed retry suffix: {event.get('name')}")
+            raise SystemExit(f"Rust test shard error: nextest emitted a malformed retry suffix: {name}")
         continue
     else:
         planned = planned_by_emitted.get(retry_base) if retry_base else None
     if not planned:
         continue
-    status = event.get("event")
-    if status not in {"ok", "passed", "failed", "fail", "ignored", "skipped"}:
+    if status not in TERMINAL_STATUSES:
         continue
     if planned in outcomes:
-        raise SystemExit(f"Rust test shard error: nextest emitted an unexpected or duplicate test identity: {event.get('name')}")
+        raise SystemExit(f"Rust test shard error: nextest emitted an unexpected or duplicate test identity: {name}")
     outcomes[planned] = status
 missing = expected_identities - outcomes.keys()
 unexpected_missing = missing - expected_skipped
@@ -566,19 +561,92 @@ if unexpected_missing:
     raise SystemExit(f"Rust test shard error: nextest executed membership does not match the shard manifest (missing={sorted(unexpected_missing)[:1]})")
 # Nextest intentionally omits ignored tests from its default event stream.
 # Their listed disposition is canonical execution policy, not a relaxed match.
-passed = sum(status in {"ok", "passed"} for status in outcomes.values())
+passed = sum(status in PASSED_STATUSES for status in outcomes.values())
 failed_names = sorted(
     f"{package}::{target}${test}"
     for (package, _target_kind, target, test), status in outcomes.items()
-    if status in {"failed", "fail"}
+    if status in FAILED_STATUSES
 )
 failed = len(failed_names)
-skipped = sum(status in {"ignored", "skipped"} for status in outcomes.values()) + len(missing)
+skipped = sum(status in SKIPPED_STATUSES for status in outcomes.values()) + len(missing)
 with open(failed_names_file, "w", encoding="utf-8") as handle:
     handle.write("\n".join(failed_names))
     if failed_names:
         handle.write("\n")
 print(f"{passed}\t{failed}\t{skipped}")
+PY
+}
+
+# Counts for an unsharded nextest run.
+#
+# The sharded counter above reconciles emitted identities against a planned
+# manifest and hard-errors on any mismatch. That is correct for replay and
+# impossible here: nothing planned this run, so there is no `selected` list to
+# reconcile against. What survives is the event stream itself, which already
+# carries every terminal outcome nextest observed. Reading it is the shared half
+# (nextest_events_lib); only the reconciliation is dropped.
+#
+# Prints "total\tpassed\tfailed\tskipped" -- the same tuple the cargo adapter
+# emits through parse-test-results.sh -- and writes failed identities one per
+# line to the second argument, in the same `package::target$test` form the shard
+# path writes, so `rust_nextest_merge_failure_evidence` consumes either.
+#
+# Returns 1 and prints nothing when the stream carried no terminal test event.
+# A compile failure, a crash before the first test, and a filter that matched
+# nothing all land there, and all three must reach the caller as "unmeasured"
+# rather than as a fabricated zero that would read as a pass.
+rust_nextest_unsharded_counts() {
+    python3 - "${EXTENSION_PATH}/scripts" "$1" "$2" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+
+from nextest_events_lib import (
+    FAILED_STATUSES,
+    PASSED_STATUSES,
+    SKIPPED_STATUSES,
+    TERMINAL_STATUSES,
+    read_test_events,
+    retry_base_identity,
+)
+
+failed_names_file = sys.argv[3]
+
+outcomes = {}
+for name, emitted, status in read_test_events(sys.argv[2]):
+    # An unplanned identity is not evidence of anything wrong here. Child
+    # processes inherit libtest JSON, and with no manifest there is nothing to
+    # call it a mismatch against -- so it is simply not one of our tests.
+    if emitted is None or status not in TERMINAL_STATUSES:
+        continue
+    # Fold retry attempts onto the identity they retried. nextest appends the
+    # decimal attempt only above one, so `t` and `t#2` are one test with one
+    # outcome and the final attempt is the one nextest itself reports. Without
+    # this a flaky-then-green test would be counted twice, once red.
+    base = retry_base_identity(emitted)
+    if base is not None and base != "invalid":
+        emitted = base
+    outcomes[emitted] = status
+
+if not outcomes:
+    raise SystemExit(1)
+
+failed_names = sorted(
+    f"{package}::{target}${test}"
+    for (package, target, test), status in outcomes.items()
+    if status in FAILED_STATUSES
+)
+passed = sum(status in PASSED_STATUSES for status in outcomes.values())
+# nextest omits tests it never ran from its default event stream, so an
+# unsharded skip count reflects the skips nextest actually reported and does not
+# reconstruct `#[ignore]` membership the way a shard manifest can.
+skipped = sum(status in SKIPPED_STATUSES for status in outcomes.values())
+failed = len(failed_names)
+with open(failed_names_file, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(failed_names))
+    if failed_names:
+        handle.write("\n")
+print(f"{passed + failed + skipped}\t{passed}\t{failed}\t{skipped}")
 PY
 }
 
@@ -1104,6 +1172,19 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
     exit 0
 fi
 
+# Unsharded measurement state. Resolved once, before the command is built, so a
+# widened re-run and the zero-test checks below all read the same decision.
+NEXTEST_MEASURED=0
+RUST_MEASURED_STATUS=unmeasured
+RUST_MEASURED_TOTAL=0
+RUST_MEASURED_PASSED=0
+RUST_MEASURED_FAILED=0
+RUST_MEASURED_SKIPPED=0
+RUST_MEASURED_FAILED_NAMES=""
+if [ "$SELECTED_RUNNER" = "nextest" ] && rust_nextest_measured_counts_enabled; then
+    NEXTEST_MEASURED=1
+fi
+
 TEST_ARGS=(
     test
     --manifest-path "${PROJECT_PATH}/Cargo.toml"
@@ -1149,6 +1230,19 @@ rust_append_scope_args "$SCOPE_JSON"
 echo "Rust test scope kind: ${SCOPE_KIND}"
 echo "Rust test package selection: ${WORKSPACE_SELECTION}"
 echo "Rust test invocation: cargo ${TEST_ARGS[*]}"
+# Which runner ran, and whether its result was measured, must be readable
+# straight from the log. "Measured" and "unmeasured" are different outcomes for
+# the same green exit code, and an operator should never have to infer which
+# one they got from the absence of a sidecar.
+if [ "$SELECTED_RUNNER" = "nextest" ]; then
+    if [ "$NEXTEST_MEASURED" = "1" ]; then
+        echo "Rust test runner: cargo nextest (measured counts from libtest-json-plus)"
+    else
+        echo "Rust test runner: cargo nextest (unmeasured; rust_nextest_measured_counts is off)"
+    fi
+else
+    echo "Rust test runner: cargo test"
+fi
 
 # Builds COMMAND_LABEL/COMMAND_BINARY from the current TEST_ARGS. Shared so a
 # widened re-run reuses the exact runner selection the first attempt used.
@@ -1171,10 +1265,74 @@ rust_build_test_command() {
         rust_nextest_args_from_cargo_args
         COMMAND_LABEL="cargo nextest run"
         COMMAND_BINARY=(cargo nextest "${NEXTEST_ARGS[@]}")
+        if [ "$NEXTEST_MEASURED" = "1" ]; then
+            # `--no-fail-fast` matches shard replay for the same reason: a
+            # stream truncated at the first failure cannot be counted.
+            #
+            # `--no-tests` deliberately does NOT match it. Shard replay
+            # preflights exact membership, so an empty match there is a broken
+            # plan and `fail` is the right answer. Unsharded, the filter is
+            # derived from changed file paths, and an empty match is the
+            # scope-derivation gap the widening below exists to absorb -- a
+            # `#[path]`-mounted module compiles a filter that matches nothing.
+            # `fail` would exit non-zero, the widening requires exit 0, and the
+            # run would go red for code that was never executed. That is exactly
+            # the false failure #10477 documents, so `warn` is used to keep the
+            # empty match measurable and let the widening do its job.
+            NEXTEST_ARGS+=(
+                --no-fail-fast
+                --no-tests warn
+                --message-format libtest-json-plus
+                --message-format-version 0.1
+            )
+            COMMAND_BINARY=(env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest "${NEXTEST_ARGS[@]}")
+        fi
     fi
 }
 
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/parse-test-results.sh"
+
+# Turn the captured nextest stream into a Homeboy test result.
+#
+# The written tuple is (total, passed, failed, skipped, partial) -- the same
+# shape and the same helper the cargo path reaches through
+# parse-test-results.sh, which ends in `homeboy_write_test_results` with those
+# five values. `partial` is empty because an unsharded run is the whole run;
+# only shard replay has a partial slice to label.
+#
+# When the stream carried no terminal test event the result is deliberately not
+# written. Homeboy reads a missing test.results as "no structured counts", and
+# that is the signal a compile failure or an aborted run has to reach. Writing
+# an all-zero result instead would be indistinguishable from a suite that
+# legitimately ran nothing, and would report a broken build as a pass.
+rust_measure_nextest_run() {
+    RUST_MEASURED_STATUS=unmeasured
+    RUST_MEASURED_TOTAL=0
+    RUST_MEASURED_PASSED=0
+    RUST_MEASURED_FAILED=0
+    RUST_MEASURED_SKIPPED=0
+    RUST_MEASURED_FAILED_NAMES=""
+
+    local failed_names counts
+    if ! homeboy_runner_harness_temp failed_names "homeboy-rust-nextest-failed.XXXXXX"; then
+        echo "Rust nextest counts unavailable: could not allocate a failed-name file." >&2
+        return 0
+    fi
+
+    if ! counts="$(rust_nextest_unsharded_counts "$TEST_TMPFILE" "$failed_names")"; then
+        echo "Rust nextest reported no structured test counts: the run emitted no test events." >&2
+        rm -f "$failed_names"
+        return 0
+    fi
+
+    IFS=$'\t' read -r RUST_MEASURED_TOTAL RUST_MEASURED_PASSED RUST_MEASURED_FAILED RUST_MEASURED_SKIPPED <<< "$counts"
+    RUST_MEASURED_STATUS=measured
+    RUST_MEASURED_FAILED_NAMES="$failed_names"
+    if type homeboy_write_test_results >/dev/null 2>&1; then
+        homeboy_write_test_results "$RUST_MEASURED_TOTAL" "$RUST_MEASURED_PASSED" "$RUST_MEASURED_FAILED" "$RUST_MEASURED_SKIPPED" ""
+    fi
+    echo "Rust nextest result: total=${RUST_MEASURED_TOTAL} passed=${RUST_MEASURED_PASSED} failed=${RUST_MEASURED_FAILED} skipped=${RUST_MEASURED_SKIPPED}"
+}
 
 rust_execute_test_run() {
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -1184,6 +1342,14 @@ rust_execute_test_run() {
     rust_emit_test_plan "$SELECTED_RUNNER" "$COMMAND_LABEL" "$SCOPE_JSON" "started" 0
     homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "$COMMAND_LABEL" -- "${COMMAND_BINARY[@]}" "$@" || true
     rust_emit_test_plan "$SELECTED_RUNNER" "$COMMAND_LABEL" "$SCOPE_JSON" "completed" "$TEST_EXIT"
+
+    if [ "$NEXTEST_MEASURED" = "1" ]; then
+        # The cargo adapter keys on `test result:` lines, which a libtest-json
+        # stream never contains. Routing this run through it would parse nothing
+        # and write nothing.
+        rust_measure_nextest_run
+        return 0
+    fi
 
     # Parse test results for homeboy core (best-effort, non-blocking)
     if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
@@ -1195,6 +1361,16 @@ rust_execute_test_run() {
 # test binaries (unit, integration, doc-tests) and some legitimately have zero
 # tests, so only a zero total across every summary line counts.
 rust_run_executed_no_tests() {
+    if [ "$NEXTEST_MEASURED" = "1" ]; then
+        # A measured run states its own execution count, so ask it. Grepping
+        # "N passed" out of a libtest-json stream would find nothing on a run
+        # that passed hundreds of tests and widen every derived scope to the
+        # full suite -- the precise cost this whole path exists to avoid.
+        # An unmeasured stream did not execute anything we can account for,
+        # which on a green exit is the widening case too.
+        [ "$RUST_MEASURED_STATUS" != "measured" ] || [ "$RUST_MEASURED_TOTAL" -eq 0 ]
+        return
+    fi
     local total
     total=$( { grep -Eo '[0-9]+ passed' "$TEST_TMPFILE" || true; } | awk '{s+=$1} END {print s+0}' )
     [ "$total" -eq 0 ]
@@ -1232,10 +1408,31 @@ fi
 
 TEST_OUTPUT=$(cat "$TEST_TMPFILE")
 
+# A measured failure is a failure even if the runner exited zero. The counts are
+# the evidence and the exit code is a summary of it; when they disagree, trust
+# the evidence rather than let a red suite through on a green code.
+if [ "$NEXTEST_MEASURED" = "1" ] && [ "$TEST_EXIT" -eq 0 ] && [ "$RUST_MEASURED_FAILED" -gt 0 ]; then
+    echo "Rust nextest reported ${RUST_MEASURED_FAILED} failed test(s) with a zero exit code; treating the run as failed." >&2
+    TEST_EXIT=1
+fi
+
+# The cargo summary line does not exist in a libtest-json stream, so a measured
+# run reports the counts it derived instead of grepping for a line that is
+# structurally absent.
+rust_test_summary_line() {
+    if [ "$NEXTEST_MEASURED" = "1" ]; then
+        [ "$RUST_MEASURED_STATUS" = "measured" ] || return 0
+        printf 'test result: %s. %s passed; %s failed; %s ignored' \
+            "$([ "$RUST_MEASURED_FAILED" -eq 0 ] && printf 'ok' || printf 'FAILED')" \
+            "$RUST_MEASURED_PASSED" "$RUST_MEASURED_FAILED" "$RUST_MEASURED_SKIPPED"
+        return 0
+    fi
+    echo "$TEST_OUTPUT" | grep -E "^test result:" | tail -1 || true
+}
 
 if [ $TEST_EXIT -eq 0 ]; then
     # Extract test summary line
-    SUMMARY=$(echo "$TEST_OUTPUT" | grep -E "^test result:" | tail -1 || true)
+    SUMMARY=$(rust_test_summary_line)
     if [ -n "$SUMMARY" ]; then
         echo ""
         echo "$SUMMARY"
@@ -1245,7 +1442,7 @@ if [ $TEST_EXIT -eq 0 ]; then
     rm -f "$TEST_TMPFILE"
 else
     # Extract failure details
-    SUMMARY=$(echo "$TEST_OUTPUT" | grep -E "^test result:" | tail -1 || true)
+    SUMMARY=$(rust_test_summary_line)
     FAILURES=$(echo "$TEST_OUTPUT" | grep -E "^---- .* ----$|^test .* FAILED$" || true)
 
     if [ -n "$SUMMARY" ]; then
@@ -1253,7 +1450,12 @@ else
         echo "$SUMMARY"
     fi
 
-    if homeboy_test_failures_enabled; then
+    if [ "$NEXTEST_MEASURED" = "1" ]; then
+        # The identities came out of the event stream, so reuse the shard path's
+        # evidence writer rather than re-deriving them by scraping cargo-shaped
+        # text that a libtest-json run never produced.
+        rust_nextest_merge_failure_evidence "${RUST_MEASURED_FAILED_NAMES:-}" || true
+    elif homeboy_test_failures_enabled; then
         homeboy_runner_harness_temp TEST_FAILURES_TMP "homeboy-rust-test-failures.XXXXXX"
         python3 "${EXTENSION_PATH}/scripts/parse-test-failures.py" "$PROJECT_PATH" "$TEST_TMPFILE" "$TEST_FAILURES_TMP"
         homeboy_test_failures_merge_file "$TEST_FAILURES_TMP"
@@ -1272,13 +1474,22 @@ fi
 # A derived scope has already been widened to the full command by this point,
 # so reaching here on a changed-files run means the whole suite executed
 # nothing — a real configuration problem rather than a scoping gap.
-TOTAL_PASSED=$( { echo "$TEST_OUTPUT" | grep -Eo '[0-9]+ passed' || true; } | awk '{s+=$1} END {print s+0}' )
+#
+# A measured run already knows its own pass count. Grepping a libtest-json
+# stream for "N passed" would find nothing on a fully green suite and fire this
+# warning -- and, with HOMEBOY_CHANGED_TEST_FILES set, exit 1 on a run in which
+# every test passed.
+if [ "$NEXTEST_MEASURED" = "1" ]; then
+    TOTAL_PASSED="$RUST_MEASURED_PASSED"
+else
+    TOTAL_PASSED=$( { echo "$TEST_OUTPUT" | grep -Eo '[0-9]+ passed' || true; } | awk '{s+=$1} END {print s+0}' )
+fi
 if [ "$TOTAL_PASSED" -eq 0 ]; then
     TEST_FILE_COUNT=$(find "$PROJECT_PATH" -name "*test*" -name "*.rs" -not -path "*/target/*" 2>/dev/null | wc -l | tr -d ' ')
     if [ "$TEST_FILE_COUNT" -gt 0 ]; then
         echo ""
         echo "============================================"
-        echo "WARNING: cargo test ran 0 tests"
+        echo "WARNING: ${COMMAND_LABEL} ran 0 tests"
         echo "============================================"
         echo ""
         echo "Found ${TEST_FILE_COUNT} test files but no tests were executed."

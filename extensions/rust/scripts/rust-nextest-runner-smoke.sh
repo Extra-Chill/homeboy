@@ -110,7 +110,16 @@ if [[ "$OUTPUT" != *"Running cargo nextest"* ]]; then
     exit 1
 fi
 
-EXPECTED_ARGS=$'nextest\nrun\n--manifest-path\n'"$PROJECT_DIR"$'/Cargo.toml\n--workspace\n--test\nintegration_scope'
+if [[ "$OUTPUT" != *"Rust test runner: cargo nextest (measured counts from libtest-json-plus)"* ]]; then
+    printf 'Expected the measured nextest selection to be stated. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+# An unsharded nextest run is measured by default, so the scope args are
+# followed by the flags the libtest-json parser depends on. The scope args must
+# still come first and unchanged: measurement is appended to the selection, it
+# does not rewrite it.
+EXPECTED_ARGS=$'nextest\nrun\n--manifest-path\n'"$PROJECT_DIR"$'/Cargo.toml\n--workspace\n--test\nintegration_scope\n--no-fail-fast\n--no-tests\nwarn\n--message-format\nlibtest-json-plus\n--message-format-version\n0.1'
 ACTUAL_ARGS="$(cat "$WORKDIR/cargo-args.txt")"
 if [ "$ACTUAL_ARGS" != "$EXPECTED_ARGS" ]; then
     printf 'Expected nextest command shape:\n%s\nActual:\n%s\n' "$EXPECTED_ARGS" "$ACTUAL_ARGS" >&2
@@ -139,6 +148,40 @@ assert record["runner"] == "nextest", record
 assert record["scope"] == "rust_integration", record
 assert record["args"] == ["--test", "integration_scope"], record
 PY
+
+# Measurement off returns the invocation to exactly what it was before measured
+# counts existed, so the escape hatch is a real one rather than a renamed
+# variant of the new command.
+OUTPUT=$(
+    PATH="$BIN_DIR:$PATH" \
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_RUST_TEST_RUNNER=nextest \
+    HOMEBOY_RUST_NEXTEST_MEASURED_COUNTS=0 \
+    HOMEBOY_TEST_SCOPE_KIND='rust_integration' \
+    HOMEBOY_TEST_RUNNER_ARGS=$'--test\nintegration_scope' \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    HOMEBOY_RUNTIME_SIDECAR_WRITER="$HELPER_DIR/sidecar-writer.sh" \
+    HOMEBOY_SIDECAR_DIR="$SIDECAR_DIR" \
+    HOMEBOY_FAKE_CARGO_ARGS="$WORKDIR/cargo-args.txt" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+
+if [[ "$OUTPUT" != *"unmeasured; rust_nextest_measured_counts is off"* ]]; then
+    printf 'Expected the disabled measurement to be stated. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+EXPECTED_ARGS=$'nextest\nrun\n--manifest-path\n'"$PROJECT_DIR"$'/Cargo.toml\n--workspace\n--test\nintegration_scope'
+ACTUAL_ARGS="$(cat "$WORKDIR/cargo-args.txt")"
+if [ "$ACTUAL_ARGS" != "$EXPECTED_ARGS" ]; then
+    printf 'Expected legacy nextest command shape:\n%s\nActual:\n%s\n' "$EXPECTED_ARGS" "$ACTUAL_ARGS" >&2
+    exit 1
+fi
 
 cat > "$BIN_DIR/cargo" <<'EOF'
 #!/usr/bin/env bash
