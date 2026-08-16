@@ -21,6 +21,8 @@ for phase in candidate baseline; do
 
   GITHUB_WORKSPACE="${workspace}" bash "${PREPARE}"
   mkdir -p "${workspace}/.homeboy-action"
+  mkdir -p "${workspace}/homeboy-test-archive"
+  : > "${workspace}/homeboy-test-archive/homeboy-test-archive.tar.zst"
   : > "${workspace}/homeboy-test-inventory.json"
   : > "${workspace}/homeboy-test-shard-plan.json"
   : > "${workspace}/homeboy-test-shard.json"
@@ -77,7 +79,7 @@ if GITHUB_WORKSPACE="${workspace}" bash "${PREPARE}" >/dev/null 2>&1; then
   exit 1
 fi
 
-for collision in homeboy-test-inventory.json homeboy-test-shard-plan.json homeboy-test-shard.json; do
+for collision in homeboy-test-archive homeboy-test-inventory.json homeboy-test-shard-plan.json homeboy-test-shard.json; do
   workspace="${tmp}/collision-${collision}"
   mkdir -p "${workspace}"
   git -C "${workspace}" init -q
