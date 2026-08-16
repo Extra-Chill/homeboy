@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.13.0] - 2026-08-16
+
+### Added
+- allow pinned extension revisions
+
 ## [2.12.5] - 2026-08-16
 
 ### Fixed
