@@ -228,7 +228,8 @@ pub struct AiFilledReviewForm {
     /// Compatibility / impact assessment.
     #[serde(deserialize_with = "prose_field")]
     pub compatibility: String,
-    /// Numeric test claims which Homeboy binds to durable candidate gate evidence.
+    /// Optional numeric test claims supplied by the agent. Homeboy derives the
+    /// reviewer-visible verification evidence from durable candidate gates.
     #[serde(default)]
     pub verification: Vec<AiReviewVerificationClaim>,
     /// Self-reflective, concise description of the *process* the AI took —
@@ -330,7 +331,7 @@ impl AiFilledReviewForm {
 `what_changed` (a non-empty list of concrete change bullets), `compatibility` (a qualitative impact/compatibility \
 assessment), optional `verification` entries with an exact command and total/passed/failed/ignored counts, and \
 `used_for` (a concise, self-reflective description of the process you took — distinct from the summary of what \
-changed). Homeboy verifies every `verification` entry against its durable candidate gate evidence. A successful \
+changed). Homeboy derives reviewer-visible verification from its durable candidate gate evidence. A successful \
 `used_for` is a genuine process reflection."
     }
 
@@ -383,58 +384,9 @@ changed). Homeboy verifies every `verification` entry against its durable candid
         &self,
         promotion: &crate::agent_task_promotion::AgentTaskPromotionReport,
     ) -> Result<Vec<AgentTaskReviewVerifiedCommand>> {
-        let verified = verified_commands_from_promotion(promotion);
-        for (index, claim) in self.verification.iter().enumerate() {
-            let field = format!("review_form.verification[{index}]");
-            let sum = claim
-                .passed
-                .checked_add(claim.failed)
-                .and_then(|value| value.checked_add(claim.ignored));
-            if sum != Some(claim.total) {
-                return Err(review_form_gap(
-                    &format!("{field}.total"),
-                    &format!(
-                        "count mismatch: total {} does not equal passed {} + failed {} + ignored {}; no durable command evidence can support this claim",
-                        claim.total, claim.passed, claim.failed, claim.ignored
-                    ),
-                ));
-            }
-            let Some(command) = verified.iter().find(|item| item.command == claim.command) else {
-                return Err(review_form_gap(
-                    &format!("{field}.command"),
-                    "no successful visible durable gate for this command on the finalized candidate",
-                ));
-            };
-            if command.total.is_none() {
-                return Err(review_form_gap(
-                    &field,
-                    &format!(
-                        "durable evidence `{}` for candidate tree {} does not expose supported test counts; numeric verification claims fail closed",
-                        command.evidence_ref, command.candidate_tree
-                    ),
-                ));
-            }
-            if (
-                command.total,
-                command.passed,
-                command.failed,
-                command.ignored,
-            ) != (
-                Some(claim.total),
-                Some(claim.passed),
-                Some(claim.failed),
-                Some(claim.ignored),
-            ) {
-                return Err(review_form_gap(
-                    &field,
-                    &format!(
-                        "count mismatch with durable evidence `{}` for candidate tree {}",
-                        command.evidence_ref, command.candidate_tree
-                    ),
-                ));
-            }
-        }
-        Ok(verified)
+        // Agent-authored claims are optional metadata. They must not override or
+        // invalidate the authenticated gate evidence below.
+        Ok(verified_commands_from_promotion(promotion))
     }
 }
 
@@ -1690,7 +1642,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_suite_claim_is_rejected_when_no_post_edit_gate_matches() {
+    fn optional_claims_do_not_change_machine_derived_verified_commands() {
         let mut form = valid_form();
         form.verification.push(AiReviewVerificationClaim {
             command: "cargo test connection::tests".into(),
@@ -1699,19 +1651,6 @@ mod tests {
             failed: 3,
             ignored: 0,
         });
-        let error = form
-            .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
-            .expect_err("the pre-edit suite cannot verify a different post-edit command");
-        assert_eq!(
-            error.details["field"],
-            "review_form.verification[0].command"
-        );
-        assert!(error.message.contains("finalized candidate"));
-    }
-
-    #[test]
-    fn internally_inconsistent_counts_name_the_exact_claim_field() {
-        let mut form = valid_form();
         form.verification.push(AiReviewVerificationClaim {
             command: "cargo test connection".into(),
             total: 127,
@@ -1719,15 +1658,19 @@ mod tests {
             failed: 2,
             ignored: 0,
         });
-        let error = form
+        let verified = form
             .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
-            .expect_err("124 + 2 does not equal 127");
-        assert_eq!(error.details["field"], "review_form.verification[0].total");
-        assert!(error.message.contains("count mismatch"));
+            .expect("optional agent claims cannot reject durable gate evidence");
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified[0].command, "cargo test connection");
+        assert_eq!(verified[0].total, Some(177));
+        assert_eq!(verified[0].passed, Some(175));
+        assert_eq!(verified[0].failed, Some(2));
+        assert_eq!(verified[0].ignored, Some(0));
     }
 
     #[test]
-    fn different_candidate_fingerprint_cannot_supply_review_verification() {
+    fn different_candidate_fingerprint_is_excluded_from_review_verification() {
         let mut form = valid_form();
         form.verification.push(AiReviewVerificationClaim {
             command: "cargo test connection".into(),
@@ -1738,38 +1681,34 @@ mod tests {
         });
         let mut promotion = promotion("cargo test connection", "candidate-tree");
         promotion.provenance["candidate_checkout"]["tree"] = serde_json::json!("other-tree");
-        let error = form
+        let verified = form
             .verify_against_promotion(&promotion)
-            .expect_err("a gate from another candidate cannot be published");
-        assert_eq!(
-            error.details["field"],
-            "review_form.verification[0].command"
-        );
+            .expect("optional claims cannot publish a gate from another candidate");
+        assert!(verified.is_empty());
     }
 
     #[test]
-    fn unsupported_command_output_fails_closed_for_structured_counts() {
+    fn php_style_gate_without_supported_counts_still_derives_verified_command() {
         let mut form = valid_form();
         form.verification.push(AiReviewVerificationClaim {
-            command: "cargo test connection".into(),
-            total: 177,
-            passed: 175,
-            failed: 2,
+            command: "php artisan test".into(),
+            total: 7,
+            passed: 7,
+            failed: 0,
             ignored: 0,
         });
-        let mut promotion = promotion("cargo test connection", "candidate-tree");
-        promotion.deterministic_gates[0].stdout = "all checks completed".into();
-        let error = form
+        let mut promotion = promotion("php artisan test", "candidate-tree");
+        promotion.deterministic_gates[0].stdout =
+            "PASS  Tests\\Feature\\ExampleTest\nTests: 7 passed".into();
+        let verified = form
             .verify_against_promotion(&promotion)
-            .expect_err("unparseable output cannot support a numeric claim");
-        assert_eq!(error.details["field"], "review_form.verification[0]");
-        assert!(
-            error
-                .message
-                .contains("numeric verification claims fail closed"),
-            "unexpected error: {}",
-            error.message
-        );
+            .expect("unsupported count formats cannot reject a successful gate");
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified[0].command, "php artisan test");
+        assert_eq!(verified[0].total, None);
+        assert_eq!(verified[0].passed, None);
+        assert_eq!(verified[0].failed, None);
+        assert_eq!(verified[0].ignored, None);
     }
 
     #[test]
