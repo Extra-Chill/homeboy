@@ -9,7 +9,7 @@ use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_tasks::lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
@@ -1735,6 +1735,24 @@ fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRecord) {
     ) {
         value["cook_completion"] = serde_json::to_value(completion).expect("completion serializes");
     }
+    // The completion projection answers whether a PR exists; it does not carry
+    // the PR's identity. Project that beside it so `status` can answer "is there
+    // a PR, and where" without a second command (#12571).
+    if let Some(pr_url) = cook_finalization_pr_url(record) {
+        value["pr_url"] = Value::String(pr_url.to_string());
+    }
+}
+
+/// The published pull request for this Cook attempt, read from the durable
+/// finalization receipt that `has_finalized_pr` accepts as publication proof.
+fn cook_finalization_pr_url(record: &AgentTaskRunRecord) -> Option<&str> {
+    let finalization = record.metadata.get("cook_finalization")?;
+    let url = finalization
+        .get("pr_url")
+        .or_else(|| finalization.get("pull_request_url"))
+        .and_then(Value::as_str)?
+        .trim();
+    (!url.is_empty()).then_some(url)
 }
 
 /// Basis marker for `next_actions`: the diagnosis mapped a typed failure
@@ -2987,11 +3005,435 @@ pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdR
     Ok((report, 0))
 }
 
+/// Cancellation is only partly synchronous, so `cancel` reports what actually
+/// happened rather than an unqualified success word.
+///
+/// `agent_task_service::cancel` returns as soon as the cancellation *request* is
+/// durable. For a controller-owned staging job that is strictly an
+/// acknowledgement — `controller_job_cancellation` is persisted with phase
+/// `requested` and the controller keeps tearing its provider down afterwards —
+/// and for a run whose provider tree is not reachable from this host the durable
+/// terminal state is published by whoever owns it. Reporting `succeeded` for
+/// that acknowledgement is what made #12572 dishonest: the word claimed the run
+/// was cancelled while its process tree was still alive.
+///
+/// So this waits for the durable record to converge, and bounds that wait. The
+/// bound sits well above controller-local teardown (process termination allows a
+/// 2s SIGTERM grace plus a 2s SIGKILL reap grace) and well below the two-minute
+/// wrapper timeouts operators and agents run `cancel` under, so the command
+/// always answers before its caller gives up on it.
+const CANCEL_TERMINAL_WAIT: Duration = Duration::from_secs(15);
+
+/// Poll interval inside [`CANCEL_TERMINAL_WAIT`]. Each poll is a reconciling
+/// read, so it stays coarse rather than hammering the durable store.
+const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+const CANCELLATION_SCHEMA: &str = "homeboy/agent-task-cancellation/v1";
+
 pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
     let record = agent_task_service::cancel(&args.run_id, args.reason.as_deref())?;
+    if record.state.is_terminal() {
+        return Ok(cancel_output(
+            &args.run_id,
+            record,
+            CancelOutcome::Terminal {
+                waited: Duration::ZERO,
+                polls: 0,
+            },
+        ));
+    }
+    // A provider that reserved a terminal result before cancellation could apply
+    // deliberately keeps the run joinable for that import, so there is nothing to
+    // converge on and nothing to wait for. Say that instead of polling a record
+    // cancellation was intentionally not applied to.
+    if record
+        .metadata
+        .get("cancellation_deferred_for_terminal_provider")
+        .is_some()
+    {
+        return Ok(cancel_output(
+            &args.run_id,
+            record,
+            CancelOutcome::DeferredForTerminalProvider,
+        ));
+    }
+    Ok(wait_for_cancellation_to_settle(&args.run_id, record))
+}
+
+/// Poll the durable record of a run whose cancellation was accepted.
+///
+/// This is the reconciling read rather than a raw record read on purpose: an
+/// asynchronously cancelled controller-owned job converges through
+/// `reconcile_controller_job_cancellation`, which only runs on that path. The
+/// runner probe is disabled so an unavailable runner cannot stretch each poll
+/// and eat the bound.
+struct CancelTerminalPoller;
+
+impl WatchPoller for CancelTerminalPoller {
+    type Item = AgentTaskRunRecord;
+
+    fn poll(&self, run_id: &str) -> homeboy::core::Result<Self::Item> {
+        Ok(agent_task_lifecycle::status_with_options(
+            run_id,
+            agent_task_lifecycle::AgentTaskStatusOptions {
+                runner_probe: agent_task_lifecycle::AgentTaskRunnerProbe::Never,
+            },
+        )?
+        .record)
+    }
+
+    fn is_terminal(&self, item: &Self::Item) -> bool {
+        item.state.is_terminal()
+    }
+}
+
+/// Why `agent-task cancel` stopped waiting.
+enum CancelOutcome {
+    /// The run is durably terminal: either it already was when the cancellation
+    /// request returned, or it converged inside the bounded wait.
+    Terminal { waited: Duration, polls: u64 },
+    /// A provider reserved a terminal result first, so cancellation was
+    /// deliberately not applied and the run stays joinable for that import.
+    DeferredForTerminalProvider,
+    /// Cancellation is durably requested, but its teardown is owned elsewhere
+    /// and had not converged when the bound expired.
+    Requested {
+        waited: Duration,
+        polls: u64,
+        /// Set when the bounded observation itself failed. The cancellation
+        /// request is already durable, so a failed *read* of its convergence is
+        /// reported here rather than as a failed cancellation.
+        observation_error: Option<String>,
+    },
+}
+
+/// Wait a bounded time for an accepted cancellation to become durably terminal.
+fn wait_for_cancellation_to_settle(
+    requested_run_id: &str,
+    accepted: AgentTaskRunRecord,
+) -> (Value, i32) {
+    let run_id = accepted.run_id.clone();
+    // A command that is about to block for seconds says so, so the wait is
+    // legible instead of looking like the #12572 hang it replaces.
+    eprintln!(
+        "Cancellation of agent-task run {run_id} was accepted; waiting up to {}s for its durable terminal state.",
+        CANCEL_TERMINAL_WAIT.as_secs()
+    );
+    let started = Instant::now();
+    let waited = watch_loop(
+        &CancelTerminalPoller,
+        &run_id,
+        &WatchConfig {
+            interval: CANCEL_TERMINAL_POLL_INTERVAL,
+            timeout: Some(CANCEL_TERMINAL_WAIT),
+        },
+        std::thread::sleep,
+        || started.elapsed(),
+        |_, _| {},
+    );
+    match waited {
+        Ok(result) if result.timed_out() => cancel_output(
+            requested_run_id,
+            result.item,
+            CancelOutcome::Requested {
+                waited: result.waited,
+                polls: result.poll_count,
+                observation_error: None,
+            },
+        ),
+        Ok(result) => cancel_output(
+            requested_run_id,
+            result.item,
+            CancelOutcome::Terminal {
+                waited: result.waited,
+                polls: result.poll_count,
+            },
+        ),
+        // The cancellation request is already durable. A failed observation of
+        // its convergence is an unconverged wait, never a failed cancellation.
+        Err(error) => cancel_output(
+            requested_run_id,
+            accepted,
+            CancelOutcome::Requested {
+                waited: started.elapsed(),
+                polls: 0,
+                observation_error: Some(error.message),
+            },
+        ),
+    }
+}
+
+/// Project one cancellation attempt onto the durable record it acted on.
+///
+/// Every field is additive: the serialized record keeps its historical shape and
+/// gains `cancellation`, `summary`, and — only when the bound expired — the
+/// `timed_out` command status that stops this from reading as a completed
+/// cancellation.
+fn cancel_output(
+    requested_run_id: &str,
+    record: AgentTaskRunRecord,
+    outcome: CancelOutcome,
+) -> (Value, i32) {
+    let run_id = record.run_id.clone();
+    let state = run_state_name(record.state);
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     surface_cancellation_recovery(&mut value);
-    Ok((value, 0))
+    let (cancellation, summary, exit_code) =
+        cancellation_projection(requested_run_id, &run_id, &state, &outcome);
+    let status_command = cancellation["status_command"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let converged = cancellation["terminal"].as_bool().unwrap_or(false);
+    if let Value::Object(fields) = &mut value {
+        fields.insert("cancellation".to_string(), cancellation);
+        fields.insert("summary".to_string(), json!(&summary));
+        if exit_code != 0 {
+            fields.insert("status".to_string(), json!("timed_out"));
+        }
+    }
+
+    let mut metadata = CommandActionableMetadata {
+        refs: CommandResultRefs {
+            agent_tasks: vec![agent_task_ref(&run_id)],
+            ..Default::default()
+        },
+        next_actions: vec![CommandNextAction::new("show status", status_command)
+            .with_kind(CommandNextActionKind::Show)],
+        ..Default::default()
+    };
+    if !converged {
+        metadata.next_actions.push(
+            CommandNextAction::new(
+                "reconcile run",
+                format!(
+                    "homeboy agent-task reconcile {} --dry-run",
+                    quote_arg(&run_id)
+                ),
+            )
+            .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+    attach_actionable_metadata(&mut value, metadata);
+    (value, exit_code)
+}
+
+/// Build the cancellation projection, its operator-facing summary, and the exit
+/// code for one outcome. Pure so every reported wording is directly testable.
+fn cancellation_projection(
+    requested_run_id: &str,
+    run_id: &str,
+    state: &str,
+    outcome: &CancelOutcome,
+) -> (Value, String, i32) {
+    let status_command = format!("homeboy agent-task status {}", quote_arg(run_id));
+    let mut cancellation = json!({
+        "schema": CANCELLATION_SCHEMA,
+        "requested_run_id": requested_run_id,
+        "run_id": run_id,
+        "state": state,
+        "accepted": true,
+        "wait_timeout_secs": CANCEL_TERMINAL_WAIT.as_secs(),
+        "status_command": status_command,
+    });
+    let wait_accounting = match outcome {
+        CancelOutcome::Terminal { waited, polls } => Some((*waited, *polls)),
+        CancelOutcome::Requested { waited, polls, .. } => Some((*waited, *polls)),
+        CancelOutcome::DeferredForTerminalProvider => None,
+    };
+    if let Some((waited, polls)) = wait_accounting {
+        cancellation["waited_secs"] = json!(waited.as_secs());
+        cancellation["poll_count"] = json!(polls);
+    }
+
+    let (outcome_name, terminal, summary, exit_code) = match outcome {
+        CancelOutcome::Terminal { .. } if state == "cancelled" => (
+            "cancelled",
+            true,
+            format!(
+                "Cancellation of agent-task run {run_id} took effect: its durable state is cancelled."
+            ),
+            0,
+        ),
+        CancelOutcome::Terminal { .. } => (
+            "terminal_without_cancellation",
+            true,
+            format!(
+                "Cancellation of agent-task run {run_id} was requested, but the run reached terminal \
+                 state `{state}` instead of cancelled; that terminal result is authoritative."
+            ),
+            0,
+        ),
+        CancelOutcome::DeferredForTerminalProvider => (
+            "deferred_for_terminal_provider",
+            false,
+            format!(
+                "Cancellation of agent-task run {run_id} was deliberately not applied: a provider had \
+                 already reserved a terminal result, so the run stays joinable for that import. \
+                 Check `{status_command}`."
+            ),
+            0,
+        ),
+        CancelOutcome::Requested {
+            observation_error, ..
+        } => {
+            let mut summary = format!(
+                "Cancellation of agent-task run {run_id} was accepted and its teardown is still in \
+                 flight: the run did not reach a terminal state within {}s. Check \
+                 `{status_command}`.",
+                CANCEL_TERMINAL_WAIT.as_secs()
+            );
+            if let Some(error) = observation_error {
+                cancellation["observation_error"] = json!(error);
+                summary = format!("{summary} Observing that convergence failed: {error}.");
+            }
+            ("cancellation_requested", false, summary, TIMEOUT_EXIT_CODE)
+        }
+    };
+    cancellation["outcome"] = json!(outcome_name);
+    cancellation["terminal"] = json!(terminal);
+    cancellation["message"] = json!(&summary);
+    (cancellation, summary, exit_code)
+}
+
+fn run_state_name(state: agent_task_lifecycle::AgentTaskRunState) -> String {
+    serde_json::to_value(state)
+        .ok()
+        .and_then(|state| state.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod cancellation_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn a_converged_cancellation_reports_the_cancelled_state_and_succeeds() {
+        let (projection, summary, exit_code) = cancellation_projection(
+            "cook-12572",
+            "agent-task-12572",
+            "cancelled",
+            &CancelOutcome::Terminal {
+                waited: Duration::from_secs(2),
+                polls: 3,
+            },
+        );
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(projection["schema"], CANCELLATION_SCHEMA);
+        assert_eq!(projection["outcome"], "cancelled");
+        assert_eq!(projection["terminal"], true);
+        assert_eq!(projection["requested_run_id"], "cook-12572");
+        assert_eq!(projection["run_id"], "agent-task-12572");
+        assert_eq!(projection["waited_secs"], 2);
+        assert_eq!(projection["poll_count"], 3);
+        assert_eq!(projection["message"], summary);
+        assert!(
+            summary.contains("agent-task-12572"),
+            "unexpected: {summary}"
+        );
+    }
+
+    /// The #12572 acceptance: an unconverged cancellation must not be reported
+    /// with a success word, and it must name the run plus a next command.
+    #[test]
+    fn an_unconverged_cancellation_times_out_with_the_run_id_and_a_next_command() {
+        let (projection, summary, exit_code) = cancellation_projection(
+            "agent-task-12572",
+            "agent-task-12572",
+            "running",
+            &CancelOutcome::Requested {
+                waited: CANCEL_TERMINAL_WAIT,
+                polls: 15,
+                observation_error: None,
+            },
+        );
+
+        assert_eq!(exit_code, TIMEOUT_EXIT_CODE);
+        assert_eq!(projection["outcome"], "cancellation_requested");
+        assert_eq!(projection["terminal"], false);
+        assert_eq!(projection["accepted"], true);
+        assert_eq!(projection["state"], "running");
+        assert_eq!(
+            projection["wait_timeout_secs"],
+            CANCEL_TERMINAL_WAIT.as_secs()
+        );
+        assert_eq!(
+            projection["status_command"],
+            "homeboy agent-task status agent-task-12572"
+        );
+        assert!(
+            summary.contains("agent-task-12572"),
+            "unexpected: {summary}"
+        );
+        assert!(
+            summary.contains("homeboy agent-task status agent-task-12572"),
+            "unexpected: {summary}"
+        );
+        assert!(!summary.contains("succeeded"), "unexpected: {summary}");
+    }
+
+    #[test]
+    fn a_failed_convergence_observation_is_not_a_failed_cancellation() {
+        let (projection, summary, exit_code) = cancellation_projection(
+            "agent-task-12572",
+            "agent-task-12572",
+            "running",
+            &CancelOutcome::Requested {
+                waited: Duration::from_secs(1),
+                polls: 1,
+                observation_error: Some("daemon unreachable".to_string()),
+            },
+        );
+
+        assert_eq!(exit_code, TIMEOUT_EXIT_CODE);
+        assert_eq!(projection["outcome"], "cancellation_requested");
+        assert_eq!(projection["accepted"], true);
+        assert_eq!(projection["observation_error"], "daemon unreachable");
+        assert!(
+            summary.contains("daemon unreachable"),
+            "unexpected: {summary}"
+        );
+    }
+
+    /// A cancellation that lost the race to a terminal provider result must not
+    /// claim the run was cancelled.
+    #[test]
+    fn a_run_that_went_terminal_another_way_is_reported_as_such() {
+        let (projection, summary, exit_code) = cancellation_projection(
+            "agent-task-12572",
+            "agent-task-12572",
+            "succeeded",
+            &CancelOutcome::Terminal {
+                waited: Duration::from_secs(1),
+                polls: 2,
+            },
+        );
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(projection["outcome"], "terminal_without_cancellation");
+        assert_eq!(projection["terminal"], true);
+        assert!(summary.contains("succeeded"), "unexpected: {summary}");
+    }
+
+    #[test]
+    fn a_deferred_cancellation_reports_the_deferral_without_a_wait() {
+        let (projection, summary, exit_code) = cancellation_projection(
+            "agent-task-12572",
+            "agent-task-12572",
+            "running",
+            &CancelOutcome::DeferredForTerminalProvider,
+        );
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(projection["outcome"], "deferred_for_terminal_provider");
+        assert_eq!(projection["terminal"], false);
+        assert!(projection.get("waited_secs").is_none());
+        assert!(
+            summary.contains("deliberately not applied"),
+            "unexpected: {summary}"
+        );
+    }
 }
 
 pub(super) fn quarantine(args: QuarantineArgs) -> CmdResult<Value> {
@@ -3886,6 +4328,19 @@ fn compact_status_summary_with_aggregate(
                     "created_at",
                 ],
             );
+        }
+    }
+    // Provider success is nested evidence, not a published PR. The compact view
+    // is the default answer, so the Cook-level completion projection and the PR
+    // identity travel with it instead of living only in `diagnose` (#12571).
+    if let Some(cook_completion) = record.get("cook_completion") {
+        if !cook_completion.is_null() {
+            summary["cook_completion"] = cook_completion.clone();
+        }
+    }
+    if let Some(pr_url) = record.get("pr_url") {
+        if !pr_url.is_null() {
+            summary["pr_url"] = pr_url.clone();
         }
     }
     if let Some(delivery) = record.get("notification_delivery") {
@@ -6400,6 +6855,55 @@ mod tests {
         assert!(summary["notification_delivery"]
             .get("raw_destination")
             .is_none());
+    }
+
+    #[test]
+    fn compact_status_carries_cook_completion_and_pull_request_identity() {
+        // #12571: `pr_finalized` and the PR URL were only reachable through
+        // `diagnose`, so the default status view could not answer whether the
+        // Cook published anything.
+        let summary = compact_status_summary(
+            &json!({
+                "run_id": "cook-attempt-1",
+                "state": "succeeded",
+                "tasks": [{ "task_id": "cook", "state": "succeeded" }],
+                "metadata": { "latest_promotion": {
+                    "status": "applied", "patch_artifact": { "id": "patch" }
+                }},
+                "cook_completion": {
+                    "schema": "homeboy/agent-task-cook-completion/v1",
+                    "candidate_produced": true,
+                    "finalization_requested": true,
+                    "pr_finalized": false,
+                    "state": "candidate_awaiting_finalization"
+                },
+                "pr_url": "https://example.test/pull/1"
+            }),
+            "cook-attempt-1",
+        );
+
+        assert_eq!(
+            summary["cook_completion"]["state"],
+            "candidate_awaiting_finalization"
+        );
+        assert_eq!(summary["cook_completion"]["pr_finalized"], false);
+        assert_eq!(summary["pr_url"], "https://example.test/pull/1");
+        assert_eq!(summary["canonical_candidate"]["state"], "promoted");
+
+        let rendered = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+            &summary,
+        )
+        .expect("status summary");
+
+        assert!(
+            rendered.contains("Status: provider_succeeded_finalization_incomplete"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Status: succeeded"), "{rendered}");
+        assert!(rendered.contains("Candidate state: promoted"), "{rendered}");
+        assert!(rendered.contains("PR finalized: no"));
+        assert!(rendered.contains("Pull request: https://example.test/pull/1"));
     }
 
     #[test]

@@ -287,3 +287,39 @@ jobs:
           name: homeboy-ci-capacity-evidence-${{ github.run_attempt }}
           path: ci-capacity-evidence.json
           if-no-files-found: warn
+
+  # Terminal gate. A run's conclusion has to mean something (#12573).
+  #
+  # PR #12567 merged with ZERO gates executed. Its first run was cancelled with
+  # every gate mid-flight; the `pull_request.closed` run that cancelled it
+  # reported `pr-state` inactive, skipped every gate, and concluded SUCCESS. A
+  # `skipped` needs-dependency does not fail a run, so "nothing ran" and
+  # "everything passed" were the same green tick — and `gh pr checks`, which
+  # renders `cancelled` as `fail`, showed the superseded run's red at the same
+  # time. Neither reading was true.
+  #
+  # This job depends on every gate above, runs under `always()` so skipping
+  # cannot skip it too, and fails unless each dependency concluded `success` AND
+  # every context in `.github/required-gates-ruleset.json` appears in this run's
+  # job list having actually executed and passed. Two directions, because a
+  # declared context can be emitted by a job that never ran.
+  #
+  # Capacity admission and closure cancellation are untouched: skipping stays
+  # possible, it just stops being invisible. `homeboy / Required Gates
+  # Declaration` remains the required context for the DECLARATION claim; this is
+  # the EXECUTION claim, named for what it checks.
+  required-gates-executed:
+    name: homeboy / Required Gates Executed
+    needs: [pr-state, ci-capacity-admission, required-gates-declaration, workspace-tests-compile, warning-clean, windows-compile, rustfmt, homeboy-fast, homeboy]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert every required gate executed and passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_GATE_RESULTS: ${{ toJSON(needs) }}
+          CI_RUN_ACTIVE: ${{ needs.pr-state.outputs.active }}
+        run: bash .github/ci-required-gates-executed.sh

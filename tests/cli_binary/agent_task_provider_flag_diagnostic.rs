@@ -16,7 +16,7 @@ fn historical_cook_executor_flags_emit_the_migration_snapshot() {
 Example: `homeboy agent-task cook --backend opencode --selector opencode.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'cargo test' --no-finalize`\n\
 List available executor providers: `homeboy agent-task providers`\n\
 `--provider-argv` is promotion-only: it configures the deprecated promotion apply-provider invocation and cannot select an executor.\n\
-\nFor more information, try 'homeboy agent-task cook --help'\n"
+\nFor more information, try 'homeboy agent-task cook --help-full'\n"
             ),
             "{flag}"
         );
@@ -31,11 +31,14 @@ fn cook_accepts_current_executor_selection_flags() {
             "opencode",
             selector_flag,
             "opencode.agent-task-executor",
-            "--help",
+            "--help-full",
         ]);
 
         assert!(output.status.success(), "{selector_flag}: {output:?}");
-        assert!(String::from_utf8_lossy(&output.stdout).contains("--backend <BACKEND>"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("--backend <BACKEND>"));
+        assert!(stdout.contains("--selector <PROVIDER_ID>"));
+        assert!(stdout.contains("--dispatch-provider-id"));
     }
 }
 
