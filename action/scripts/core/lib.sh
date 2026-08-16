@@ -63,7 +63,9 @@ write_multiline_output() {
 }
 
 resolve_component_id() {
-  if [ -n "${COMPONENT_NAME:-}" ]; then
+  if [ -n "${PORTABLE_ID:-}" ]; then
+    printf '%s\n' "${PORTABLE_ID}"
+  elif [ -n "${COMPONENT_NAME:-}" ]; then
     printf '%s\n' "${COMPONENT_NAME}"
   elif [ -n "${component_id:-}" ]; then
     printf '%s\n' "${component_id}"

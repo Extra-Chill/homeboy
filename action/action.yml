@@ -515,7 +515,7 @@ runs:
       if: steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != ''
       shell: bash
       env:
-        COMPONENT_NAME: ${{ inputs.component }}
+        COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}
         EXTRA_ARGS: ${{ inputs.args }}
         BENCH_RIG: ${{ inputs.rig }}
         BENCH_SCENARIO: ${{ inputs.scenario }}
@@ -607,7 +607,7 @@ runs:
       shell: bash
       env:
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
-        COMPONENT_NAME: ${{ inputs.component }}
+        COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}
         EXTRA_ARGS: ${{ inputs.args }}
         BASELINE_COMMANDS: ${{ inputs.baseline-commands }}
         # A baseline can only excuse a FAILING candidate, so commands whose
@@ -650,7 +650,7 @@ runs:
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
-        COMPONENT_NAME: ${{ inputs.component }}
+        COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}
         HOMEBOY_CI_RESULTS_ARTIFACT: ${{ steps.artifact-names.outputs.homeboy-ci-results }}
         HOMEBOY_OBSERVATIONS_ARTIFACT: ${{ steps.artifact-names.outputs.homeboy-observations }}
         GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -672,7 +672,7 @@ runs:
         RELEASE_HEAD: ${{ inputs.release-head }}
         RELEASE_FROM_ARTIFACTS: ${{ inputs.release-from-artifacts }}
         HOMEBOY_VERIFY_GITHUB_RELEASE: ${{ inputs.release-verify-github-release }}
-        COMPONENT_NAME: ${{ inputs.component }}
+        COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
         HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
         HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF: true
@@ -750,7 +750,7 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.app-token }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
-        COMPONENT_NAME: ${{ inputs.component }}
+        COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}
         RESULTS: ${{ steps.select-results.outputs.results }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
@@ -782,7 +782,7 @@ runs:
         RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         EXPECTED_COMMANDS: ${{ inputs.expected-commands }}
-        COMPONENT_NAME: ${{ inputs.component }}
+        COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
       run: bash ${{ github.action_path }}/scripts/issues/auto-file-categorized-issues.sh
 

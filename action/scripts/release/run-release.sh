@@ -8,6 +8,7 @@
 #
 # Env vars:
 #   RELEASE_BRANCH      - branch to release from (default: main)
+#   PORTABLE_ID         - component ID resolved from homeboy.json
 #   COMPONENT_NAME      - component ID override
 #   RELEASE_DRY_RUN     - if "true", preview without making changes
 #   RELEASE_HEAD        - if "true", finish release at existing HEAD/tag
@@ -72,6 +73,11 @@ SH
 }
 
 resolve_component_id() {
+  if [ -n "${PORTABLE_ID:-}" ]; then
+    echo "${PORTABLE_ID}"
+    return 0
+  fi
+
   if [ -n "${COMPONENT_NAME:-}" ]; then
     echo "${COMPONENT_NAME}"
     return 0

@@ -206,6 +206,9 @@ run_wrapper() {
   GITHUB_OUTPUT="${OUTPUT_FILE}" \
   GITHUB_WORKSPACE="${WORKSPACE}" \
   GITHUB_REPOSITORY="Extra-Chill/homeboy-action" \
+  COMPONENT_NAME="${COMPONENT_NAME:-}" \
+  PORTABLE_ID="${PORTABLE_ID:-}" \
+  COMPONENT_DIR="${COMPONENT_DIR:-.}" \
   HOMEBOY_ARGS_FILE="${HOMEBOY_ARGS_FILE}" \
   HOMEBOY_AUTH_FILE="${HOMEBOY_AUTH_FILE}" \
   HOMEBOY_MOCK_SCENARIO="${HOMEBOY_MOCK_SCENARIO}" \
@@ -288,6 +291,19 @@ assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "release tag output is 
 assert_output_line 'release-bump-type=minor' "${OUTPUT_FILE}" "release bump type output is translated"
 assert_output_line 'bump-type=minor' "${OUTPUT_FILE}" "legacy step bump type output is preserved"
 assert_no_git_pull "wrapper does not run its own git pull (core owns tip-sync)"
+
+setup_fixture
+mkdir -p "${WORKSPACE}/packages/gutenberg"
+printf '%s\n' '{"id":"wp-native-gutenberg"}' > "${WORKSPACE}/packages/gutenberg/homeboy.json"
+HOMEBOY_MOCK_SCENARIO="released"
+COMPONENT_NAME="packages/gutenberg"
+PORTABLE_ID="wp-native-gutenberg"
+COMPONENT_DIR="packages/gutenberg"
+run_wrapper
+ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
+assert_contains 'wp-native-gutenberg --path '"${WORKSPACE}"'/packages/gutenberg' "${ARGS}" "subdirectory release separates component identity from workspace path"
+assert_not_contains 'packages/gutenberg --path' "${ARGS}" "subdirectory release never uses the directory as component identity"
+unset COMPONENT_NAME PORTABLE_ID COMPONENT_DIR
 
 # THE STRANDED-DRAFT REGRESSION (homeboy#10685).
 # `homeboy release` can report success while its github.release step leaves an
