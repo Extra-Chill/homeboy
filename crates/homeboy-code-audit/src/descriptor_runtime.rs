@@ -11,8 +11,9 @@ use super::doc_drift::detect_doc_drift;
 use super::reference::DeadCodeReferenceAnalysis;
 use super::{
     comment_hygiene, compiler_warnings, dead_code, fingerprint, shadow_modules, structural,
-    time_audit_detector, AuditExecutionPlan, AuditTiming, DetectorDescriptor, DetectorRuntime,
-    Finding, FingerprintDetectorRunner, GenericDetectorRunner, RootDetectorRunner,
+    time_audit_detector_isolated, AuditExecutionPlan, AuditTiming, AuditTimingSpan,
+    DetectorDescriptor, DetectorRuntime, Finding, FingerprintDetectorRunner, GenericDetectorRunner,
+    RootDetectorRunner,
 };
 use homeboy_audit_contract::AuditConfig;
 use homeboy_engine_primitives::codebase_scan::CodebaseSnapshot;
@@ -226,6 +227,112 @@ fn extend_descriptor_findings(
     all_findings.extend(findings);
 }
 
+/// One descriptor's completed work, carried back from whichever worker thread
+/// ran it.
+///
+/// Findings and spans travel together and are replayed in descriptor-table order
+/// by [`merge_descriptor_outcomes`], so completion order never reaches the audit
+/// result or the timing report.
+pub(super) struct DescriptorOutcome {
+    descriptor: &'static DetectorDescriptor,
+    findings: Vec<Finding>,
+    spans: Vec<AuditTimingSpan>,
+}
+
+/// Run a single descriptor's detector, timed into its own span list.
+///
+/// Pure with respect to everything it touches: it reads the shared immutable
+/// [`DetectorRunContext`] and the plan, and returns owned findings. That is what
+/// makes the fan-out below safe without any locking around detector execution.
+fn run_one_descriptor(
+    plan: &AuditExecutionPlan,
+    descriptor: &'static DetectorDescriptor,
+    context: &DetectorRunContext<'_>,
+) -> DescriptorOutcome {
+    let enabled = plan.detector_enabled(descriptor.id);
+    let (findings, spans) = match descriptor.runtime {
+        DetectorRuntime::Generic(runner) => time_audit_detector_isolated(
+            descriptor.timing_id,
+            enabled,
+            || run_generic_descriptor(runner, context),
+            Vec::new,
+        ),
+        DetectorRuntime::Fingerprint(runner) => time_audit_detector_isolated(
+            descriptor.timing_id,
+            enabled,
+            || run_fingerprint_descriptor(runner, context),
+            Vec::new,
+        ),
+        DetectorRuntime::Root(runner) => time_audit_detector_isolated(
+            descriptor.timing_id,
+            enabled,
+            || run_root_descriptor(runner, context),
+            Vec::new,
+        ),
+        // Filtered out before dispatch by `selected_descriptors`.
+        DetectorRuntime::Manual => (Vec::new(), Vec::new()),
+    };
+
+    DescriptorOutcome {
+        descriptor,
+        findings,
+        spans,
+    }
+}
+
+/// The descriptors this dispatch will run, in descriptor-table order.
+///
+/// `ids = None` selects every data-driven detector (the full-discovery path);
+/// `ids = Some(subset)` selects only the listed detectors (the root-only fast
+/// path). `Manual` descriptors — the convention pipeline, the multi-pass
+/// duplication family, and artifact portability — are sequenced by hand in
+/// `engine.rs` and excluded here.
+fn selected_descriptors(ids: Option<&[&str]>) -> Vec<&'static DetectorDescriptor> {
+    AuditExecutionPlan::descriptors()
+        .iter()
+        .filter(|descriptor| !matches!(descriptor.runtime, DetectorRuntime::Manual))
+        .filter(|descriptor| ids.is_none_or(|ids| ids.contains(&descriptor.id)))
+        .collect()
+}
+
+/// Run the selected descriptor detectors CONCURRENTLY and return their outcomes
+/// in descriptor-table order.
+///
+/// The detectors are independent by construction — each reads the shared
+/// immutable [`DetectorRunContext`] and returns owned findings — and the
+/// descriptor table is the only thing that ever ordered them. Determinism is
+/// therefore preserved exactly: `map_parallel` discards completion order and
+/// returns one outcome per descriptor in table order, and each outcome carries its
+/// own spans, so [`merge_descriptor_outcomes`] can replay both without ever
+/// observing thread scheduling.
+///
+/// Split from the merge so a caller running this concurrently with other detector
+/// families can still emit ITS log lines in the original sequence: the findings
+/// logging happens in the merge, on the caller's thread, after the fan-out.
+pub(super) fn descriptor_detector_outcomes(
+    plan: &AuditExecutionPlan,
+    context: &DetectorRunContext<'_>,
+    ids: Option<&[&str]>,
+) -> Vec<DescriptorOutcome> {
+    let descriptors = selected_descriptors(ids);
+    super::parallel::map_parallel(&descriptors, |descriptor| {
+        run_one_descriptor(plan, descriptor, context)
+    })
+}
+
+/// Replay descriptor outcomes into the audit's timing report and findings vector,
+/// in the descriptor-table order they arrived in.
+pub(super) fn merge_descriptor_outcomes(
+    timing: &mut AuditTiming,
+    all_findings: &mut Vec<Finding>,
+    outcomes: Vec<DescriptorOutcome>,
+) {
+    for outcome in outcomes {
+        timing.spans.extend(outcome.spans);
+        extend_descriptor_findings(all_findings, outcome.descriptor, outcome.findings);
+    }
+}
+
 /// Drive the descriptor table. `ids = None` runs every data-driven detector
 /// (the full-discovery path); `ids = Some(subset)` runs only the listed
 /// detectors (the root-only fast path). `Manual` descriptors — the convention
@@ -238,39 +345,8 @@ pub(super) fn run_descriptor_detectors(
     context: &DetectorRunContext<'_>,
     ids: Option<&[&str]>,
 ) {
-    for descriptor in AuditExecutionPlan::descriptors() {
-        if let Some(ids) = ids {
-            if !ids.contains(&descriptor.id) {
-                continue;
-            }
-        }
-
-        let findings = match descriptor.runtime {
-            DetectorRuntime::Generic(runner) => time_audit_detector(
-                timing,
-                descriptor.timing_id,
-                plan.detector_enabled(descriptor.id),
-                || run_generic_descriptor(runner, context),
-                Vec::new,
-            ),
-            DetectorRuntime::Fingerprint(runner) => time_audit_detector(
-                timing,
-                descriptor.timing_id,
-                plan.detector_enabled(descriptor.id),
-                || run_fingerprint_descriptor(runner, context),
-                Vec::new,
-            ),
-            DetectorRuntime::Root(runner) => time_audit_detector(
-                timing,
-                descriptor.timing_id,
-                plan.detector_enabled(descriptor.id),
-                || run_root_descriptor(runner, context),
-                Vec::new,
-            ),
-            DetectorRuntime::Manual => continue,
-        };
-        extend_descriptor_findings(all_findings, descriptor, findings);
-    }
+    let outcomes = descriptor_detector_outcomes(plan, context, ids);
+    merge_descriptor_outcomes(timing, all_findings, outcomes);
 }
 
 #[cfg(test)]
@@ -281,6 +357,84 @@ mod tests {
         AggregateDefinitionFact, AggregateFieldFact, AggregateProjectionFact, DecisionBranchFact,
         FactLocation, PolicyDecisionSink, PolicyFlowConfig, PolicyFlowRule, ProjectionFieldFact,
     };
+
+    /// A directory containing a single file well past the structural line
+    /// threshold, so the `structural` detector emits exactly one `GodFile`.
+    fn god_file_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut content = String::new();
+        for i in 0..1600 {
+            content.push_str(&format!("// line {i}\n"));
+        }
+        std::fs::write(dir.join("big.rs"), content).unwrap();
+        dir
+    }
+
+    /// Fingerprints that describe a policy aggregate, a lossy projection of it,
+    /// and the decision that consumes the projection.
+    fn policy_flow_fingerprints() -> Vec<fingerprint::FileFingerprint> {
+        let source = fingerprint::FileFingerprint {
+            relative_path: "src/policy.ext".to_string(),
+            aggregate_definitions: vec![AggregateDefinitionFact {
+                type_id: "domain::Policy".to_string(),
+                fields: vec![AggregateFieldFact {
+                    name: "threshold".to_string(),
+                    type_id: None,
+                }],
+                location: FactLocation { line: 1, column: 1 },
+            }],
+            ..Default::default()
+        };
+        let projection = fingerprint::FileFingerprint {
+            relative_path: "src/project.ext".to_string(),
+            aggregate_projections: vec![AggregateProjectionFact {
+                source_type_id: "domain::Policy".to_string(),
+                target_type_id: "domain::Carrier".to_string(),
+                callable_id: "domain::project".to_string(),
+                field_mappings: vec![ProjectionFieldFact {
+                    source_field: "id".to_string(),
+                    target_field: "id".to_string(),
+                }],
+                location: FactLocation { line: 4, column: 1 },
+            }],
+            ..Default::default()
+        };
+        let decision = fingerprint::FileFingerprint {
+            relative_path: "src/decide.ext".to_string(),
+            decision_branches: vec![DecisionBranchFact {
+                callable_id: "domain::decide".to_string(),
+                domain_type_id: "domain::Severity".to_string(),
+                discriminant_id: "severity".to_string(),
+                location: FactLocation { line: 7, column: 1 },
+            }],
+            ..Default::default()
+        };
+        vec![source, projection, decision]
+    }
+
+    /// The rule that makes [`policy_flow_fingerprints`] a lossy projection.
+    fn policy_flow_config() -> AuditConfig {
+        AuditConfig {
+            policy_flow: PolicyFlowConfig {
+                rules: vec![PolicyFlowRule {
+                    id: "policy".to_string(),
+                    source_type_id: "domain::Policy".to_string(),
+                    policy_fields: vec!["threshold".to_string()],
+                    authoritative_method_id: "domain::Policy::allows".to_string(),
+                    decision_sinks: vec![PolicyDecisionSink {
+                        carrier_type_id: "domain::Carrier".to_string(),
+                        callable_id: "domain::decide".to_string(),
+                        domain_type_id: "domain::Severity".to_string(),
+                    }],
+                    convention: "policy_flow".to_string(),
+                    severity: "warning".to_string(),
+                }],
+            },
+            ..Default::default()
+        }
+    }
 
     /// Only the three hand-sequenced families remain `Manual`; every other
     /// detector is dispatched through the data-driven runtime. This guards
@@ -305,18 +459,7 @@ mod tests {
     /// recorded — none of which touches a per-detector block.
     #[test]
     fn migrated_detector_runs_via_data_driven_dispatch() {
-        let dir = std::env::temp_dir().join(format!(
-            "homeboy_descriptor_dispatch_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // A god file well past the structural line threshold.
-        let mut content = String::new();
-        for i in 0..1600 {
-            content.push_str(&format!("// line {i}\n"));
-        }
-        std::fs::write(dir.join("big.rs"), content).unwrap();
+        let dir = god_file_dir("homeboy_descriptor_dispatch");
 
         // Confirm the descriptor is genuinely data-driven, not Manual.
         let structural = AuditExecutionPlan::descriptors()
@@ -376,61 +519,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let source = fingerprint::FileFingerprint {
-            relative_path: "src/policy.ext".to_string(),
-            aggregate_definitions: vec![AggregateDefinitionFact {
-                type_id: "domain::Policy".to_string(),
-                fields: vec![AggregateFieldFact {
-                    name: "threshold".to_string(),
-                    type_id: None,
-                }],
-                location: FactLocation { line: 1, column: 1 },
-            }],
-            ..Default::default()
-        };
-        let projection = fingerprint::FileFingerprint {
-            relative_path: "src/project.ext".to_string(),
-            aggregate_projections: vec![AggregateProjectionFact {
-                source_type_id: "domain::Policy".to_string(),
-                target_type_id: "domain::Carrier".to_string(),
-                callable_id: "domain::project".to_string(),
-                field_mappings: vec![ProjectionFieldFact {
-                    source_field: "id".to_string(),
-                    target_field: "id".to_string(),
-                }],
-                location: FactLocation { line: 4, column: 1 },
-            }],
-            ..Default::default()
-        };
-        let decision = fingerprint::FileFingerprint {
-            relative_path: "src/decide.ext".to_string(),
-            decision_branches: vec![DecisionBranchFact {
-                callable_id: "domain::decide".to_string(),
-                domain_type_id: "domain::Severity".to_string(),
-                discriminant_id: "severity".to_string(),
-                location: FactLocation { line: 7, column: 1 },
-            }],
-            ..Default::default()
-        };
-        let fingerprints = [&source, &projection, &decision];
-        let audit_config = AuditConfig {
-            policy_flow: PolicyFlowConfig {
-                rules: vec![PolicyFlowRule {
-                    id: "policy".to_string(),
-                    source_type_id: "domain::Policy".to_string(),
-                    policy_fields: vec!["threshold".to_string()],
-                    authoritative_method_id: "domain::Policy::allows".to_string(),
-                    decision_sinks: vec![PolicyDecisionSink {
-                        carrier_type_id: "domain::Carrier".to_string(),
-                        callable_id: "domain::decide".to_string(),
-                        domain_type_id: "domain::Severity".to_string(),
-                    }],
-                    convention: "policy_flow".to_string(),
-                    severity: "warning".to_string(),
-                }],
-            },
-            ..Default::default()
-        };
+        let owned = policy_flow_fingerprints();
+        let fingerprints: Vec<&fingerprint::FileFingerprint> = owned.iter().collect();
+        let audit_config = policy_flow_config();
         let context = DetectorRunContext {
             root: &dir,
             component_id: "fixture-component",
@@ -459,6 +550,69 @@ mod tests {
             .spans
             .iter()
             .any(|span| span.id == "detector.policy_flow" && span.status == "ok"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The detector fan-out must not leak thread scheduling into the audit's
+    /// output. Two detectors that both produce findings are dispatched together,
+    /// and BOTH the findings vector and the timing span list have to come back in
+    /// descriptor-table order — `structural` (table row 2) ahead of `policy_flow`
+    /// (table row 31) — on every run rather than on the lucky ones.
+    ///
+    /// The requested ids are deliberately passed in the OPPOSITE order to prove
+    /// the caller's argument order is not what produces the result order: the
+    /// descriptor table is, exactly as it was when the dispatch was a serial loop.
+    #[test]
+    fn parallel_dispatch_preserves_descriptor_table_order() {
+        let dir = god_file_dir("homeboy_descriptor_order");
+        let owned = policy_flow_fingerprints();
+        let fingerprints: Vec<&fingerprint::FileFingerprint> = owned.iter().collect();
+        let audit_config = policy_flow_config();
+        let context = DetectorRunContext {
+            root: &dir,
+            component_id: "fixture-component",
+            audit_config: &audit_config,
+            all_fingerprints: &fingerprints,
+            per_file_fingerprints: &fingerprints,
+            policy_fingerprints: &fingerprints,
+            source_snapshot: None,
+            dead_code_references: None,
+        };
+        let plan = AuditExecutionPlan::from_profile_and_filters(AuditProfile::Full, &[], &[]);
+
+        // One pass can agree with the table by luck. Repeating it cannot.
+        for attempt in 0..25 {
+            let mut timing = AuditTiming::default();
+            let mut findings = Vec::new();
+            run_descriptor_detectors(
+                &plan,
+                &mut timing,
+                &mut findings,
+                &context,
+                Some(&["policy_flow", "structural"]),
+            );
+
+            let span_ids: Vec<&str> = timing.spans.iter().map(|span| span.id.as_str()).collect();
+            assert_eq!(
+                span_ids,
+                vec!["detector.structural", "detector.policy_flow"],
+                "attempt {attempt}: spans must follow descriptor-table order, not completion order"
+            );
+
+            let kinds: Vec<crate::AuditFinding> = findings
+                .iter()
+                .map(|finding| finding.kind.clone())
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![
+                    crate::AuditFinding::GodFile,
+                    crate::AuditFinding::LossyPolicyProjection
+                ],
+                "attempt {attempt}: findings must be merged in descriptor-table order"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

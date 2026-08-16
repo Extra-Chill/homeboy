@@ -10,21 +10,34 @@
 //! they have a non-uniform shape — the convention pipeline, the multi-pass
 //! `duplication` family (five timing spans plus the `duplicate_groups` side
 //! output), and `artifact_portability` (logs scan statistics even when empty).
+//!
+//! The detector phase runs CONCURRENTLY (see `parallel`). Detectors are pure
+//! functions of an immutable corpus, so the only thing the serial loop ever
+//! provided was ordering — and ordering is now reimposed on the way out: every
+//! unit returns its findings and its timing spans, and the merge below replays
+//! them in the exact sequence the serial pipeline used. Reading the merge order in
+//! `audit_internal` is therefore still enough to know the output order.
 
 use std::collections::HashSet;
 use std::path::Path;
 
-use super::descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
+use super::descriptor_runtime::{
+    descriptor_detector_outcomes, merge_descriptor_outcomes, run_descriptor_detectors,
+    DetectorRunContext,
+};
 use super::detectors::{artifact_portability, source_policy};
 use super::entry::audit_config_for;
 use super::execution_plan::AuditExecutionPlan;
 use super::findings;
+use super::parallel::spawn_or_run;
 use super::reference::{build_convention_method_set, DeadCodeReferenceAnalysis};
 use super::types::{
-    time_audit_detector, AuditAnalysisContext, AuditSummary, AuditTiming, AuditWithAnalysis,
-    CodeAuditResult, ConventionReport, ScopedAuditExecution,
+    time_audit_detector, time_audit_detector_isolated, AuditAnalysisContext, AuditSummary,
+    AuditTiming, AuditTimingSpan, AuditWithAnalysis, CodeAuditResult, ConventionReport,
+    ScopedAuditExecution,
 };
 use super::{checks, conventions, discovery, duplication, fingerprint, impact, structural, walker};
+use homeboy_audit_contract::AuditConfig;
 use homeboy_engine_primitives::measurement::Measurement;
 use homeboy_error::Result;
 
@@ -100,6 +113,7 @@ pub(super) fn audit_internal(
             &mut timing,
         );
         timing.push_ok("detectors", detector_started.elapsed());
+        timing.log_detector_summary();
         return Ok(AuditWithAnalysis {
             result,
             analysis: AuditAnalysisContext::default(),
@@ -370,20 +384,41 @@ pub(super) fn audit_internal(
 
     // The duplication family stays hand-sequenced: it runs five timing spans and
     // also produces `duplicate_groups`, a side output threaded into the report.
-    let duplication_findings = time_audit_detector(
-        &mut timing,
-        "detector.duplication.exact",
-        plan.detector_enabled("duplication"),
-        || duplication::detect_duplicates(&all_fingerprints, &convention_methods),
-        Vec::new,
-    );
-    let duplicate_groups = time_audit_detector(
-        &mut timing,
-        "detector.duplication.groups",
-        plan.detector_enabled("duplication"),
-        || duplication::detect_duplicate_groups(&all_fingerprints),
-        Vec::new,
-    );
+    //
+    // "Hand-sequenced" describes the REPORTING, which is still the fixed sequence
+    // of blocks below: each pass owns a distinct log line, and one pass produces
+    // `duplicate_groups`. The passes themselves are independent pure functions of
+    // the same immutable corpus, so `run_duplication_family` runs them
+    // concurrently and hands back one named output per pass.
+    //
+    // Those three families — duplication, the descriptor table, and artifact
+    // portability — are independent of each other too, so all three run
+    // concurrently and every output is merged afterwards in the original order.
+    // Nothing below can observe which unit finished first.
+    let (duplication_unit, descriptor_outcomes, artifact_portability_unit) =
+        std::thread::scope(|scope| {
+            let duplication = spawn_or_run(scope, || {
+                run_duplication_family(plan, &all_fingerprints, &convention_methods, &audit_config)
+            });
+            let artifact = spawn_or_run(scope, || {
+                run_artifact_portability(plan, component_id, &audit_config)
+            });
+
+            // Every other detector — structural, dead code, comment hygiene, the
+            // policy packs, the fingerprint/root families, etc. — is dispatched by
+            // the descriptor table in one pass. Adding a detector is a descriptor
+            // row plus a `run_generic_descriptor` arm, never a new block here.
+            let descriptor_outcomes = descriptor_detector_outcomes(plan, &detector_context, None);
+
+            (duplication.join(), descriptor_outcomes, artifact.join())
+        });
+
+    // Merge order below is the pre-parallel execution order, span for span and
+    // finding for finding: the duplication passes in their fixed sequence, then the
+    // descriptor table in descriptor order, then artifact portability.
+    timing.spans.extend(duplication_unit.spans);
+    let duplicate_groups = duplication_unit.groups;
+    let duplication_findings = duplication_unit.exact;
     if !duplication_findings.is_empty() {
         log_status!(
             "audit",
@@ -395,13 +430,7 @@ pub(super) fn audit_internal(
     }
 
     // Phase 4c2: Intra-method duplication (duplicated blocks within a single method)
-    let intra_dup_findings = time_audit_detector(
-        &mut timing,
-        "detector.duplication.intra_method",
-        plan.detector_enabled("duplication"),
-        || duplication::detect_intra_method_duplicates(&all_fingerprints),
-        Vec::new,
-    );
+    let intra_dup_findings = duplication_unit.intra_method;
     if !intra_dup_findings.is_empty() {
         log_status!(
             "audit",
@@ -412,13 +441,7 @@ pub(super) fn audit_internal(
     }
 
     // Phase 4d: Near-duplicate detection (structural similarity)
-    let near_dup_findings = time_audit_detector(
-        &mut timing,
-        "detector.duplication.near_duplicate",
-        plan.detector_enabled("duplication"),
-        || duplication::detect_near_duplicates(&all_fingerprints),
-        Vec::new,
-    );
+    let near_dup_findings = duplication_unit.near_duplicate;
     if !near_dup_findings.is_empty() {
         log_status!(
             "audit",
@@ -432,13 +455,7 @@ pub(super) fn audit_internal(
     // The exact/near-duplicate detectors key on the method name, so a shared
     // primitive reimplemented under a local name is invisible to them. This pass
     // groups bodies by hash regardless of name.
-    let cross_name_dup_findings = time_audit_detector(
-        &mut timing,
-        "detector.duplication.cross_name_duplicate",
-        plan.detector_enabled("duplication"),
-        || duplication::detect_cross_name_duplicates(&all_fingerprints),
-        Vec::new,
-    );
+    let cross_name_dup_findings = duplication_unit.cross_name;
     if !cross_name_dup_findings.is_empty() {
         log_status!(
             "audit",
@@ -452,13 +469,7 @@ pub(super) fn audit_internal(
     // error/return tail). The near-duplicate pass still encodes each expression's
     // shape, so a primitive reimplemented with a different local error type hashes
     // apart. This coarser pass keys on the call/keyword skeleton and catches those.
-    let skeleton_dup_findings = time_audit_detector(
-        &mut timing,
-        "detector.duplication.skeleton_duplicate",
-        plan.detector_enabled("duplication"),
-        || duplication::detect_skeleton_duplicates(&all_fingerprints),
-        Vec::new,
-    );
+    let skeleton_dup_findings = duplication_unit.skeleton;
     if !skeleton_dup_findings.is_empty() {
         log_status!(
             "audit",
@@ -469,19 +480,7 @@ pub(super) fn audit_internal(
     }
 
     // Phase 4d2: Parallel implementation detection (similar call patterns across files)
-    let parallel_findings = time_audit_detector(
-        &mut timing,
-        "detector.duplication.parallel_implementation",
-        plan.detector_enabled("duplication"),
-        || {
-            duplication::detect_parallel_implementations(
-                &all_fingerprints,
-                &convention_methods,
-                &audit_config.duplication_detector,
-            )
-        },
-        Vec::new,
-    );
+    let parallel_findings = duplication_unit.parallel_implementation;
     if !parallel_findings.is_empty() {
         log_status!(
             "audit",
@@ -491,36 +490,12 @@ pub(super) fn audit_internal(
         all_findings.extend(parallel_findings);
     }
 
-    // Every other detector — structural, dead code, comment hygiene, the policy
-    // packs, the fingerprint/root families, etc. — is dispatched by the
-    // descriptor table in one pass. Adding a detector is a descriptor row plus a
-    // `run_generic_descriptor` arm, never a new block here.
-    run_descriptor_detectors(
-        plan,
-        &mut timing,
-        &mut all_findings,
-        &detector_context,
-        None,
-    );
+    merge_descriptor_outcomes(&mut timing, &mut all_findings, descriptor_outcomes);
 
     // `artifact_portability` stays hand-sequenced: it logs scan statistics (runs,
     // artifacts, metadata fields) even when it produces no findings.
-    let artifact_portability_report = time_audit_detector(
-        &mut timing,
-        "detector.artifact_portability",
-        plan.detector_enabled("artifact_portability"),
-        || {
-            if audit_config.artifact_portability.is_empty() {
-                artifact_portability::run_report(component_id)
-            } else {
-                artifact_portability::run_report_with_config(
-                    component_id,
-                    &audit_config.artifact_portability,
-                )
-            }
-        },
-        Default::default,
-    );
+    timing.spans.extend(artifact_portability_unit.spans);
+    let artifact_portability_report = artifact_portability_unit.report;
     if plan.detector_enabled("artifact_portability") {
         log_status!(
             "audit",
@@ -541,6 +516,7 @@ pub(super) fn audit_internal(
         all_findings.extend(artifact_portability_findings);
     }
     timing.push_ok("detectors", detectors_started.elapsed());
+    timing.log_detector_summary();
 
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,
     // filter findings down to the touched scope (changed files + impact call
@@ -683,6 +659,177 @@ pub(super) fn audit_internal(
         analysis,
         timing,
     })
+}
+
+/// The duplication family's completed work: one named output per pass, plus the
+/// passes' timing spans in pass order.
+///
+/// Naming each output rather than returning a flat `Vec<Finding>` is what lets
+/// the passes run concurrently while the reporting in `audit_internal` stays in
+/// its original fixed order — each pass has its own log line, and
+/// `detect_duplicate_groups` produces `duplicate_groups`, a side output the report
+/// carries separately from the findings.
+struct DuplicationUnit {
+    spans: Vec<AuditTimingSpan>,
+    exact: Vec<findings::Finding>,
+    groups: Vec<duplication::DuplicateGroup>,
+    intra_method: Vec<findings::Finding>,
+    near_duplicate: Vec<findings::Finding>,
+    cross_name: Vec<findings::Finding>,
+    skeleton: Vec<findings::Finding>,
+    parallel_implementation: Vec<findings::Finding>,
+}
+
+/// Run the duplication family's seven passes concurrently.
+///
+/// Every pass is a pure function of the same two immutable inputs — the
+/// convention fingerprint corpus and the convention method set — and returns an
+/// owned vector. There is no data dependency between them, not even between
+/// `detect_duplicates` and `detect_duplicate_groups`, which each rebuild their own
+/// grouping. So the family's "hand-sequenced" shape was never a sequencing
+/// requirement, only a reporting one.
+///
+/// Units are started in pass order and joined in pass order, and the spans are
+/// concatenated in that same order, so the timing report is identical to the
+/// serial one span for span. Under
+/// `HOMEBOY_AUDIT_DETECTOR_THREADS=1`, `spawn_or_run` runs each pass inline at its
+/// start point, which reproduces the original serial execution exactly.
+fn run_duplication_family(
+    plan: &AuditExecutionPlan,
+    all_fingerprints: &[&fingerprint::FileFingerprint],
+    convention_methods: &HashSet<String>,
+    audit_config: &AuditConfig,
+) -> DuplicationUnit {
+    let enabled = plan.detector_enabled("duplication");
+
+    std::thread::scope(|scope| {
+        let exact = spawn_or_run(scope, || {
+            time_audit_detector_isolated(
+                "detector.duplication.exact",
+                enabled,
+                || duplication::detect_duplicates(all_fingerprints, convention_methods),
+                Vec::new,
+            )
+        });
+        let groups = spawn_or_run(scope, || {
+            time_audit_detector_isolated(
+                "detector.duplication.groups",
+                enabled,
+                || duplication::detect_duplicate_groups(all_fingerprints),
+                Vec::new,
+            )
+        });
+        let intra_method = spawn_or_run(scope, || {
+            time_audit_detector_isolated(
+                "detector.duplication.intra_method",
+                enabled,
+                || duplication::detect_intra_method_duplicates(all_fingerprints),
+                Vec::new,
+            )
+        });
+        let near_duplicate = spawn_or_run(scope, || {
+            time_audit_detector_isolated(
+                "detector.duplication.near_duplicate",
+                enabled,
+                || duplication::detect_near_duplicates(all_fingerprints),
+                Vec::new,
+            )
+        });
+        let cross_name = spawn_or_run(scope, || {
+            time_audit_detector_isolated(
+                "detector.duplication.cross_name_duplicate",
+                enabled,
+                || duplication::detect_cross_name_duplicates(all_fingerprints),
+                Vec::new,
+            )
+        });
+        let skeleton = spawn_or_run(scope, || {
+            time_audit_detector_isolated(
+                "detector.duplication.skeleton_duplicate",
+                enabled,
+                || duplication::detect_skeleton_duplicates(all_fingerprints),
+                Vec::new,
+            )
+        });
+        let parallel_implementation = spawn_or_run(scope, || {
+            time_audit_detector_isolated(
+                "detector.duplication.parallel_implementation",
+                enabled,
+                || {
+                    duplication::detect_parallel_implementations(
+                        all_fingerprints,
+                        convention_methods,
+                        &audit_config.duplication_detector,
+                    )
+                },
+                Vec::new,
+            )
+        });
+
+        let (exact, exact_spans) = exact.join();
+        let (groups, groups_spans) = groups.join();
+        let (intra_method, intra_method_spans) = intra_method.join();
+        let (near_duplicate, near_duplicate_spans) = near_duplicate.join();
+        let (cross_name, cross_name_spans) = cross_name.join();
+        let (skeleton, skeleton_spans) = skeleton.join();
+        let (parallel_implementation, parallel_implementation_spans) =
+            parallel_implementation.join();
+
+        let mut spans = Vec::new();
+        spans.extend(exact_spans);
+        spans.extend(groups_spans);
+        spans.extend(intra_method_spans);
+        spans.extend(near_duplicate_spans);
+        spans.extend(cross_name_spans);
+        spans.extend(skeleton_spans);
+        spans.extend(parallel_implementation_spans);
+
+        DuplicationUnit {
+            spans,
+            exact,
+            groups,
+            intra_method,
+            near_duplicate,
+            cross_name,
+            skeleton,
+            parallel_implementation,
+        }
+    })
+}
+
+/// `artifact_portability`'s completed work: the scan report it logs statistics
+/// from, plus its timing span.
+struct ArtifactPortabilityUnit {
+    spans: Vec<AuditTimingSpan>,
+    report: artifact_portability::ArtifactPortabilityReport,
+}
+
+/// Run `artifact_portability` into its own timing span so it can execute
+/// concurrently with the other detector families. The scan-statistics logging
+/// stays with the caller, which is what keeps the log lines in their original
+/// order.
+fn run_artifact_portability(
+    plan: &AuditExecutionPlan,
+    component_id: &str,
+    audit_config: &AuditConfig,
+) -> ArtifactPortabilityUnit {
+    let (report, spans) = time_audit_detector_isolated(
+        "detector.artifact_portability",
+        plan.detector_enabled("artifact_portability"),
+        || {
+            if audit_config.artifact_portability.is_empty() {
+                artifact_portability::run_report(component_id)
+            } else {
+                artifact_portability::run_report_with_config(
+                    component_id,
+                    &audit_config.artifact_portability,
+                )
+            }
+        },
+        Default::default,
+    );
+
+    ArtifactPortabilityUnit { spans, report }
 }
 
 /// Build the shared audit source snapshot consumed by whole-tree detectors.
