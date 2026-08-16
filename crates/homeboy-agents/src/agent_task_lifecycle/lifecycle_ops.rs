@@ -311,11 +311,38 @@ pub fn submit_plan(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    submit_plan_with_runtime_admission(plan, requested_run_id, |run_id| {
-        homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(run_id, || {
-            Ok(store::read_record(run_id)?.state.is_terminal())
-        })
-    })
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    submit_plan_in_store(&lifecycle_store, plan, requested_run_id)
+}
+
+/// Submit a plan into an explicitly rooted store.
+///
+/// The admission cancellation check is the reach that has to move with the
+/// submission: it decides whether to abandon a queued admission by reading the
+/// run's own terminal state. Reading that ambiently would let another home's
+/// record of the same identity abandon this store's admission, or leave a
+/// cancellation recorded here unseen while the controller waits on the
+/// admission lock. The controller-runtime store itself stays process-global by
+/// design; only the lifecycle read is rooted here.
+pub(crate) fn submit_plan_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    submit_plan_with_runtime_admission_in_store(
+        lifecycle_store,
+        plan,
+        requested_run_id,
+        execution_runner_id(),
+        None,
+        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        |run_id| {
+            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+                run_id,
+                || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
+            )
+        },
+    )
 }
 
 /// Persist the parent for a locally detached Cook before the detached process
@@ -325,8 +352,25 @@ pub fn submit_plan(
 /// An empty plan is intentional: this record owns only the handoff lifecycle,
 /// while the detached Cook persists the immutable execution plan and attempt.
 pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_detached_cook_handoff_parent_in_store(&lifecycle_store, cook_id)
+}
+
+/// Persist a detached Cook's handoff parent inside an explicitly rooted store.
+///
+/// Both admission guards read the store the parent is written into. The alias
+/// guard consults this store's own Cook index, so an attempt published in
+/// another home can neither reject a fresh parent here nor let one be minted
+/// over an attempt that already exists here. The collision guard is the same
+/// decision for the record: read ambiently, an unrelated run in another home
+/// could veto this parent, or the idempotent re-record of a live handoff could
+/// be misread as a collision.
+pub(crate) fn record_detached_cook_handoff_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
-    let resolved_run_id = resolve_run_id(&cook_id)?;
+    let resolved_run_id = resolve_run_id_in_store(lifecycle_store, &cook_id)?;
     if resolved_run_id != cook_id {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -335,7 +379,7 @@ pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRun
             None,
         ));
     }
-    if let Ok(record) = store::read_record(&cook_id) {
+    if let Ok(record) = lifecycle_store.read_record(&cook_id) {
         if record.metadata["detached_cook_handoff"]["cook_id"] == cook_id {
             return Ok(record);
         }
@@ -348,7 +392,7 @@ pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRun
     }
 
     let plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
-    let mut record = submit_plan(&plan, Some(&cook_id))?;
+    let mut record = submit_plan_in_store(lifecycle_store, &plan, Some(&cook_id))?;
     record.metadata["detached_cook_handoff"] = json!({
         "state": "pending",
         "admission_state": "pre_supervisor",
@@ -358,8 +402,9 @@ pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRun
         "cook_id": cook_id,
         "cancellation_fence": { "state": "open" },
     });
-    store::write_record(&record)?;
-    record_cook_progress(
+    lifecycle_store.write_record(&record)?;
+    record_cook_progress_in_store(
+        lifecycle_store,
         &record.run_id,
         "detached_handoff_pending",
         0,
@@ -374,6 +419,15 @@ pub fn require_detached_cook_handoff_fence_open(cook_id: &str) -> Result<()> {
     require_detached_cook_handoff_fence_open_in_store(&lifecycle_store, cook_id)
 }
 
+/// Read the durable cancellation fence from an explicitly rooted store.
+///
+/// The fence is a field on the handoff parent record, not a separate marker
+/// file, so rooting the record read roots the whole decision. It has to be the
+/// store the child will materialize its attempt into: a fence read from another
+/// home would let a cancelled handoff proceed here, or let an open one be
+/// refused because an unrelated parent elsewhere was cancelled. An absent or
+/// unreadable record is still an open fence — a parent that was never persisted
+/// cannot have been cancelled.
 pub(crate) fn require_detached_cook_handoff_fence_open_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -405,8 +459,26 @@ pub fn record_detached_cook_handoff_child(
     pid: u32,
     start_identity: homeboy_core::process::ProcessStartIdentity,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_detached_cook_handoff_child_in_store(&lifecycle_store, cook_id, pid, start_identity)
+}
+
+/// Attach the spawned child's identity inside an explicitly rooted store.
+///
+/// The cancellation state this write reads — the record's own run state and the
+/// fence it carries forward — is read inside the mutation, from the same store
+/// the mutation lands in. Ambient, another home's parent could decide whether
+/// this child is recorded as pending or already cancelled, and the durable
+/// identity cancellation later signals on could be attached to a record no
+/// cancellation in this store would ever reach.
+pub(crate) fn record_detached_cook_handoff_child_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    pid: u32,
+    start_identity: homeboy_core::process::ProcessStartIdentity,
+) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
-    let record = store::mutate_record(&cook_id, |record| {
+    let record = lifecycle_store.mutate_record(&cook_id, |record| {
         let cancelled = record.state == AgentTaskRunState::Cancelled;
         let state = if cancelled { "cancelled" } else { "pending" };
         let cancellation_fence =
@@ -431,9 +503,26 @@ pub fn record_detached_cook_handoff_child(
 
 /// Persist the daemon job that supervises this locally launched Cook.
 pub fn record_detached_cook_supervisor(cook_id: &str, job_id: &str) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_detached_cook_supervisor_in_store(&lifecycle_store, cook_id, job_id)
+}
+
+/// Persist the supervising daemon job inside an explicitly rooted store.
+///
+/// The ownership guard — that this record really is the named Cook's handoff
+/// parent — sits inside the mutation closure, so it is read from the store the
+/// write lands in. This is also the transition to `supervising`, the admission
+/// state that makes a lease live indefinitely, so a supervisor recorded against
+/// another home's parent would leave this store's admission to expire while a
+/// daemon was in fact supervising it.
+pub(crate) fn record_detached_cook_supervisor_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    job_id: &str,
+) -> Result<()> {
     let cook_id = sanitize_run_id(cook_id);
     let job_id = job_id.to_string();
-    let _ = store::mutate_record(&cook_id, |record| {
+    let _ = lifecycle_store.mutate_record(&cook_id, |record| {
         if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
             return false;
         }
