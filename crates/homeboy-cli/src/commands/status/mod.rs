@@ -847,12 +847,31 @@ fn run_path_status(
 ) -> CmdResult<StatusResult> {
     let path = args.scope.path.as_deref();
     timer.begin("resolve_path_component");
-    let component = component::resolve_effective(args.target.as_deref(), path, None)?;
+    let mut component = component::resolve_effective(args.target.as_deref(), path, None)?;
+    if let Some(path) = path {
+        // An explicit ID gives this report its stable identity; `--path` is the
+        // checkout override and must remain the component's inspected source.
+        component.local_path = path.to_string();
+    }
     timer.finish("resolve_path_component");
 
     if args.full {
+        let component_id = component.id.clone();
+        let component_path = component.local_path.clone();
         let mut report = context::build_report_for_component(args.all, "status", component, path)?;
         report.command = "status".to_string();
+        // The focused component may have been resolved through an explicit ID,
+        // but `--path` remains the context the operator asked to inspect.
+        if let Some(path) = path {
+            report.context.cwd = path.to_string();
+        }
+        if let Some(summary) = report
+            .components
+            .iter_mut()
+            .find(|summary| summary.id == component_id)
+        {
+            summary.path = component_path;
+        }
         return Ok((StatusResult::Full(Box::new(report)), 0));
     }
 
@@ -2229,7 +2248,8 @@ mod tests {
                     assert_eq!(report.components.len(), 1);
                     assert_eq!(report.components[0].id, "wordpress-playground");
                     assert_eq!(
-                        std::path::Path::new(&report.components[0].path)
+                        std::path::Path::new(&report.context.cwd)
+                            .join(&report.components[0].path)
                             .canonicalize()
                             .expect("reported component path"),
                         repo.canonicalize().expect("fixture component path")

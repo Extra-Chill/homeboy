@@ -1704,6 +1704,69 @@ fn cook_defers_provider_lookup_failures_until_durable_admission() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn cook_defers_an_issue_destination_with_an_ensure_only_provider() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("provider tempdir");
+        let ensured = temp.path().join("ensured");
+        let provider = temp.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!("#!/bin/sh\ntouch '{}'\n", ensured.display()),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    ensure: Some(vec![provider.display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "create the issue worktree".to_string(),
+            "--repo".to_string(),
+            "homeboy".to_string(),
+            "--task-url".to_string(),
+            "https://github.com/Extra-Chill/homeboy/issues/12601".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("derive issue destination without provisioning it");
+        let provision = super::super::run::provision_cook_destination(&args)
+            .expect("ensure-only provider is deferred until durable Cook admission");
+
+        assert_eq!(provision["action"], "lookup_pending");
+        assert!(
+            !ensured.exists(),
+            "provider ensure must wait for durable Cook admission"
+        );
+    });
+}
+
 #[test]
 fn from_spec_dispatch_defaults_use_spec_git_checkout() {
     let repo = tempfile::tempdir().expect("repo dir");

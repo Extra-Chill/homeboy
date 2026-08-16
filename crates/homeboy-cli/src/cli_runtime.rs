@@ -1688,8 +1688,19 @@ fn preflight_hot_command(
     output_file: Option<&str>,
     command_identity: &output::CommandIdentity,
 ) -> Option<i32> {
+    preflight_hot_command_with(cli, output_file, command_identity, || {
+        crate::commands::resources::run_preflight()
+    })
+}
+
+fn preflight_hot_command_with(
+    cli: &Cli,
+    output_file: Option<&str>,
+    command_identity: &output::CommandIdentity,
+    preflight: impl FnOnce() -> crate::commands::CmdResult<crate::commands::resources::DoctorOutput>,
+) -> Option<i32> {
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
-        if let Ok((resources, _)) = crate::commands::resources::run_preflight() {
+        if let Ok((resources, _)) = preflight() {
             let mut lab_readiness = if hot_command.lab_offload_supported {
                 crate::runner::lab_runner_readiness().ok()
             } else {
@@ -2352,6 +2363,43 @@ mod tests {
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: true,
             offload_only_when_hot: false,
+        }
+    }
+
+    #[test]
+    fn cook_preview_never_consults_resource_preflight() {
+        for placement in [
+            vec!["--placement", "lab"],
+            vec!["--placement", "auto"],
+            vec!["--runner", "homeboy-lab"],
+        ] {
+            let mut args = vec!["homeboy"];
+            args.extend(placement.iter().copied());
+            args.extend([
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "inspect the task",
+                "--to-worktree",
+                "fixture@preview",
+                "--verify",
+                "true",
+            ]);
+            let cli = Cli::parse_from(args);
+
+            assert_eq!(
+                preflight_hot_command_with(
+                    &cli,
+                    None,
+                    &output::CommandIdentity::with_operation("agent-task", "cook"),
+                    || -> crate::commands::CmdResult<crate::commands::resources::DoctorOutput> {
+                        panic!("Cook preview must not run resource preflight")
+                    },
+                ),
+                None,
+                "{placement:?}"
+            );
         }
     }
 

@@ -733,8 +733,16 @@ fn handoff_listener(command: &mut Command, listener: Option<&TcpListener>) -> Re
 }
 
 fn persist_record(run_id: &str, record: &AgentTaskManagedServiceRecord) -> Result<(), String> {
-    let path = homeboy_core::paths::homeboy_data()
-        .map_err(|error| error.message)?
+    let data_root = homeboy_core::paths::homeboy_data().map_err(|error| error.message)?;
+    persist_record_at(&data_root, run_id, record)
+}
+
+fn persist_record_at(
+    data_root: &Path,
+    run_id: &str,
+    record: &AgentTaskManagedServiceRecord,
+) -> Result<(), String> {
+    let path = data_root
         .join("agent-task-runs")
         .join(run_id)
         .join("services")
@@ -1093,8 +1101,18 @@ pub(crate) fn reconcile_run_services(
     run_id: &str,
     reason: &str,
 ) -> Result<Vec<AgentTaskManagedServiceRecord>, String> {
-    let directory = homeboy_core::paths::homeboy_data()
-        .map_err(|error| error.message)?
+    let data_root = homeboy_core::paths::homeboy_data().map_err(|error| error.message)?;
+    reconcile_run_services_at(&data_root, run_id, reason)
+}
+
+/// Reconcile controller-local service ownership below an explicit lifecycle
+/// data root rather than the calling process's ambient data root.
+pub(crate) fn reconcile_run_services_at(
+    data_root: &Path,
+    run_id: &str,
+    reason: &str,
+) -> Result<Vec<AgentTaskManagedServiceRecord>, String> {
+    let directory = data_root
         .join("agent-task-runs")
         .join(run_id)
         .join("services");
@@ -1120,7 +1138,7 @@ pub(crate) fn reconcile_run_services(
                 record.state = "failed".to_string();
                 record.cleanup_outcome = Some("failed_invalid_cleanup_deadline".to_string());
                 record.cleanup = Some(format!("cleanup_failed_invalid_deadline:{reason}:{error}"));
-                persist_record(run_id, &record)?;
+                persist_record_at(data_root, run_id, &record)?;
                 records.push(record);
                 continue;
             }
@@ -1201,7 +1219,7 @@ pub(crate) fn reconcile_run_services(
             });
         }
         record.cleanup = Some(format!("{outcome}:{reason}"));
-        persist_record(run_id, &record)?;
+        persist_record_at(data_root, run_id, &record)?;
         records.push(record);
     }
     Ok(records)

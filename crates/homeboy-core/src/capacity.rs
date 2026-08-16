@@ -131,6 +131,14 @@ const RESERVATION_TTL: Duration = Duration::from_secs(30 * 60);
 pub struct CapacityReservation {
     ledger: PathBuf,
     id: String,
+    root: PathBuf,
+}
+
+impl CapacityReservation {
+    /// Existing filesystem ancestor used for the reservation's capacity probe.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
 
 impl Drop for CapacityReservation {
@@ -270,6 +278,7 @@ fn reserve_projected_capacity_in(
     Ok(CapacityReservation {
         ledger: input.ledger.to_path_buf(),
         id,
+        root: input.root.to_path_buf(),
     })
 }
 
