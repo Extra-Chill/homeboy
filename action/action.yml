@@ -457,6 +457,20 @@ runs:
       with:
         node-version: ${{ steps.detect-env.outputs.portable-node }}
 
+    # The Rust extension can select `cargo nextest` as its test runner
+    # (`rust_test_runner`), which gives process-per-test isolation instead of
+    # Cargo's shared-process threading. When nextest is absent the extension
+    # falls back to `cargo test` silently, so a component that selected nextest
+    # would keep running serialized here and nothing would say why.
+    #
+    # The sharded Test jobs in this repository's own ci.yml install nextest for
+    # planning and replay. This covers every OTHER caller — release gates and
+    # any unsharded `review test` — so the selection is honored wherever a test
+    # command actually runs.
+    - name: Install cargo-nextest
+      if: inputs.auto-setup == 'true' && steps.resolve-commands.outputs.has-test == 'true' && steps.read-config.outputs.portable-extension == 'rust'
+      uses: taiki-e/install-action@nextest
+
     - name: Auto-setup environment
       if: inputs.auto-setup == 'true'
       shell: bash
