@@ -55,9 +55,9 @@ use super::cook_promotion::{
 };
 use super::cook_recipe::CookRecipeStore;
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
-use super::execution::{
-    run_loaded_plan_with_derived_cook_baseline, run_loaded_plan_with_derived_cook_baseline_in_store,
-};
+#[cfg(test)]
+use super::execution::run_loaded_plan_with_derived_cook_baseline;
+use super::execution::run_loaded_plan_with_derived_cook_baseline_in_store;
 use super::AgentTaskRunResult;
 
 /// Lease window for a cook promotion operation claim. Long enough that a healthy
@@ -3605,6 +3605,19 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
     validate_cook_candidate_group(&options.initial_plan)
 }
 
+fn reserve_cook_materialization_capacity(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    workspace: &std::path::Path,
+) -> Result<homeboy_core::capacity::CapacityReservation> {
+    let demand = homeboy_core::capacity::demand_for_tree(workspace)?;
+    homeboy_core::capacity::reserve_projected_capacity(
+        &lifecycle_store.controller_scratch_root(),
+        "Cook controller scratch and workspace materialization",
+        demand,
+        homeboy_core::capacity::CapacityReserve::configured(),
+    )
+}
+
 pub fn run_cook<E>(
     options: AgentTaskCookServiceOptions,
     executor: E,
@@ -4251,15 +4264,7 @@ where
                 .and_then(|task| task.workspace.root.as_deref())
                 .map(std::path::Path::new)
         })
-        .map(|workspace| {
-            let demand = homeboy_core::capacity::demand_for_tree(workspace)?;
-            homeboy_core::capacity::reserve_projected_capacity(
-                &homeboy_core::paths::controller_scratch_store()?,
-                "Cook controller scratch and workspace materialization",
-                demand,
-                homeboy_core::capacity::CapacityReserve::configured(),
-            )
-        })
+        .map(|workspace| reserve_cook_materialization_capacity(lifecycle_store, workspace))
         .transpose()?;
     agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
     if cook_workspace_lookup_pending(&options.initial_plan) {
@@ -4954,7 +4959,8 @@ where
                                 }
                             }
                         });
-                        let result = run_loaded_plan_with_derived_cook_baseline(
+                        let result = run_loaded_plan_with_derived_cook_baseline_in_store(
+                            lifecycle_store,
                             dispatch_plan,
                             Some(&run_id),
                             executor.clone(),

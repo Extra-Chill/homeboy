@@ -80,6 +80,14 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
         right.cook_index_path(cook_id)
     );
     assert_ne!(left.observation_db_path(), right.observation_db_path());
+    assert_ne!(
+        left.controller_scratch_root(),
+        right.controller_scratch_root()
+    );
+    assert!(left.controller_scratch_root().starts_with(left.data_root()));
+    assert!(right
+        .controller_scratch_root()
+        .starts_with(right.data_root()));
     assert_eq!(
         left.read_controller_plan(run_id).unwrap().plan_id,
         "left-plan"

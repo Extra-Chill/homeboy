@@ -1769,6 +1769,26 @@ fn fresh_cook_review_form_has_bounded_budget_independent_of_code_execution() {
 }
 
 #[test]
+fn cook_materialization_capacity_targets_the_explicit_lifecycle_scratch_root() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("source"), "fixture").unwrap();
+
+    let left = reserve_cook_materialization_capacity(&left_store, workspace.path()).unwrap();
+    let right = reserve_cook_materialization_capacity(&right_store, workspace.path()).unwrap();
+
+    assert_eq!(left.root(), left_store.data_root().canonicalize().unwrap());
+    assert_eq!(
+        right.root(),
+        right_store.data_root().canonicalize().unwrap()
+    );
+    assert_ne!(left.root(), right.root());
+}
+
+#[test]
 fn gate_feedback_child_budget_preserves_declared_retry_and_rotation_capacity() {
     let declared = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 1, 1);
 
