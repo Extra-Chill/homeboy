@@ -73,10 +73,10 @@ const LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_
 /// off again; ambient environment variables cannot bypass supervision.
 fn is_unsupervised_local_cook(cli: &Cli) -> bool {
     matches!(
-        cli.command,
+        &cli.command,
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
-        })
+            command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
+        }) if !cook.preview
     ) && !consume_local_cook_launch_token()
 }
 
@@ -991,13 +991,31 @@ mod tests {
         );
     }
 
-    /// Every unsupervised local Cook is intercepted; non-local and non-Cook
-    /// invocations continue through normal routing untouched.
+    /// Executing local Cooks are intercepted, while read-only previews and
+    /// non-local invocations continue through normal routing untouched.
     /// These cases must not spawn anything.
     #[test]
     fn only_a_local_cook_is_intercepted() {
         let (local, _) = cook_cli(&[]);
         assert!(is_unsupervised_local_cook(&local));
+
+        let preview = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "repo@branch",
+            "--verify",
+            "true",
+            "--preview",
+        ])
+        .expect("parse preview cook invocation");
+        assert!(
+            !is_unsupervised_local_cook(&preview),
+            "preview must bypass detached Cook interception"
+        );
 
         let (auto, normalized) = cook_cli(&["--placement", "auto"]);
         assert!(is_unsupervised_local_cook(&auto));
