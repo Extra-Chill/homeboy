@@ -42,7 +42,7 @@ use super::cook_pre_execution::{
     materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores,
     pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
     record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
-    with_pre_execution_phase,
+    with_pre_execution_phase, CookExecutionPreparation,
 };
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
@@ -4163,14 +4163,12 @@ where
     }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
-    let adopted_model = if moving_base_continuation || verification_pending_continuation {
-        lifecycle_store.read_record(&options.initial_run_id).ok()
-    } else {
-        agent_task_lifecycle::status(&options.initial_run_id).ok()
-    }
-    .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
-    .transpose()?
-    .flatten();
+    let adopted_model = lifecycle_store
+        .read_record(&options.initial_run_id)
+        .ok()
+        .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
+        .transpose()?
+        .flatten();
     let existing_recipe = store.recipe_exists(&options.cook_id);
     // A form-only continuation has already appended and persisted its exact
     // attempt. Re-persisting it as a fresh initial recipe would falsely look
@@ -4296,7 +4294,8 @@ where
                         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
-                    if agent_task_lifecycle::status(&lookup_run_id)
+                    if lookup_lifecycle_store
+                        .read_record(&lookup_run_id)
                         .ok()
                         .is_some_and(|record| {
                             record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -4321,13 +4320,14 @@ where
             });
             let result = homeboy_core::worktree_providers::with_worktree_provider_command_control(
                 lookup_control,
-                || materialize_pending_cook_workspace(&mut options),
+                || materialize_pending_cook_workspace(lifecycle_store, &mut options),
             );
             let _ = lookup_stop.send(());
             result
         });
         if let Err(error) = lookup_result {
-            if agent_task_lifecycle::status(&options.initial_run_id)
+            if lifecycle_store
+                .read_record(&options.initial_run_id)
                 .ok()
                 .is_some_and(|record| {
                     record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -4345,17 +4345,18 @@ where
                 }));
             }
             let error = with_pre_execution_phase(error, "worktree_provider_lookup");
-            record_pre_execution_failure(
-                &options.initial_plan,
+            CookExecutionPreparation::new(store, lifecycle_store).record_pre_execution_failure(
+                &options.cook_id,
                 &options.initial_run_id,
-                &error,
                 "worktree_provider_lookup",
+                &error,
             )?;
             return Ok(pre_execution_failure_report(
                 options.cook_id.clone(),
                 Vec::new(),
                 pre_execution_failure_details(
-                    agent_task_lifecycle::exact_record(&options.initial_run_id)
+                    lifecycle_store
+                        .read_record(&options.initial_run_id)
                         .ok()
                         .as_ref(),
                     &error,
@@ -6398,7 +6399,10 @@ fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
 /// A pending lookup carries no provider path. Resolve the declared exact handle
 /// only after Cook's recipe and first run record exist, then persist that path
 /// before any provider can receive work.
-fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions) -> Result<()> {
+fn materialize_pending_cook_workspace(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &mut AgentTaskCookServiceOptions,
+) -> Result<()> {
     let provider_id = options
         .initial_plan
         .metadata
@@ -6501,7 +6505,11 @@ fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions)
     options.initial_plan.metadata["cook_provision"]["action"] =
         Value::String("existing".to_string());
     options.source_worktree_path = Some(target);
-    agent_task_lifecycle::persist_controller_plan(&options.initial_run_id, &options.initial_plan)
+    agent_task_lifecycle::persist_controller_plan_in_store(
+        lifecycle_store,
+        &options.initial_run_id,
+        &options.initial_plan,
+    )
 }
 
 /// A deferred provider lookup can prove absence only after Cook owns a durable

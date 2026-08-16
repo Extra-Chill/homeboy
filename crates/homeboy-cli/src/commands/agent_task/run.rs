@@ -1683,7 +1683,8 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             && provider.apply_enabled
             && (provider.commands.resolve_identity.is_some()
                 || provider.commands.resolve.is_some()
-                || provider.commands.list.is_some())
+                || provider.commands.list.is_some()
+                || provider.commands.ensure.is_some())
     }) {
         return Ok(serde_json::json!({
             "action": "lookup_pending",

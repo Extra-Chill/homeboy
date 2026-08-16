@@ -227,6 +227,49 @@ fn explicit_local_promotion_defers_target_resolution_to_promotion() {
 
     assert_eq!(route_after_parse(&cli, &normalized, None).unwrap(), None);
 }
+
+#[test]
+fn cook_preview_bypasses_every_placement_route_without_durable_state() {
+    crate::test_support::with_isolated_home(|home| {
+        for placement in [
+            vec!["--placement", "local"],
+            vec!["--placement", "auto"],
+            vec!["--placement", "lab"],
+            vec!["--runner", "homeboy-lab"],
+        ] {
+            let mut args = vec!["homeboy"];
+            args.extend(placement.iter().copied());
+            args.extend([
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "inspect the task",
+                "--to-worktree",
+                "fixture@preview",
+                "--verify",
+                "true",
+            ]);
+            let normalized = args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
+            let cli = Cli::parse_from(&normalized);
+            let before = std::fs::read_dir(home).expect("read isolated home").count();
+
+            assert_eq!(
+                route_after_parse(&cli, &normalized, None).expect("preview bypasses placement"),
+                None,
+                "{placement:?}"
+            );
+            assert_eq!(
+                std::fs::read_dir(home).expect("read isolated home").count(),
+                before,
+                "{placement:?} preview created durable routing state"
+            );
+        }
+    });
+}
 use clap::Parser;
 use std::fs;
 use std::path::Path;
