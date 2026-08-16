@@ -248,6 +248,155 @@ fn cook_progress_recorder_writes_to_the_injected_store_not_an_ambient_root() {
 }
 
 #[test]
+fn cook_write_siblings_persist_into_the_injected_store_and_not_a_second_root() {
+    // The negative half is the proof. Both roots are given the *same* run
+    // identity, and every write below is made through a sibling that was handed
+    // `seeded`. A sibling that ignored its parameter and resolved a root from
+    // the process environment would leave `seeded` empty, or — if the ambient
+    // root ever coincided with `other` — would show up in the second store.
+    // Asserting that `other` still reads its own untouched record is what
+    // distinguishes "wrote where I was told" from "wrote wherever the
+    // environment points" (#7505). No environment is mutated here: both roots
+    // come from `HermeticTestContext::path_roots()`.
+    let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
+    let other_context = homeboy_core::test_support::HermeticTestContext::new();
+    assert_ne!(seeded_context.data_dir(), other_context.data_dir());
+
+    let seeded =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(seeded_context.path_roots());
+    let other =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(other_context.path_roots());
+
+    let run_id = "rooted-cook-write";
+    let cook_id = "rooted-cook-write-cook";
+    let plan_only_run_id = "rooted-cook-write-plan-only";
+    let plan = test_plan();
+    for lifecycle_store in [&seeded, &other] {
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+            .expect("submit the same run identity into both roots");
+    }
+
+    // The terminal notification outcome is a file beside the Cook index rather
+    // than an observation row, so it is checked at the path each store owns.
+    let notification_outcome_path =
+        |lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore| {
+            lifecycle_store
+                .cook_index_path(cook_id)
+                .with_file_name("notification-outcome.json")
+        };
+
+    persist_controller_plan_in_store(&seeded, plan_only_run_id, &plan)
+        .expect("persist a controller plan into the injected store");
+    let progress = record_cook_progress_in_store(&seeded, run_id, "terminal", 1, Some("rooted"))
+        .expect("record Cook progress into the injected store");
+    assert_eq!(progress.metadata["cook_progress"]["phase"], "terminal");
+    let terminal = record_cook_terminal_result_in_store(&seeded, run_id, true, 0)
+        .expect("record the terminal Cook result into the injected store");
+    assert_eq!(terminal.metadata["cook_progress"]["terminal_success"], true);
+    record_cook_controller_failure_in_store(&seeded, run_id, &json!({ "reason": "rooted" }))
+        .expect("record a controller failure into the injected store");
+    record_cook_observer_event_in_store(&seeded, run_id, "terminal", json!({ "code": "rooted" }))
+        .expect("record an observer event into the injected store");
+    record_cook_supervision_in_store(
+        &seeded,
+        run_id,
+        1,
+        Some(json!({ "cpu_seconds": 7 })),
+        vec![json!({ "budget": "wall_clock" })],
+    )
+    .expect("record a supervision tick into the injected store");
+    record_cook_supervision_stop_in_store(&seeded, run_id, 1, json!({ "signalled": true }))
+        .expect("record a supervision stop into the injected store");
+    record_cook_recovery_checkpoint_in_store(
+        &seeded,
+        run_id,
+        "verification_pending",
+        "homeboy agent-task cook-continue",
+    )
+    .expect("record a recovery checkpoint into the injected store");
+    record_cook_force_with_lease_receipt_in_store(
+        &seeded,
+        run_id,
+        json!({ "remote_sha": "abc123" }),
+    )
+    .expect("record a force-with-lease receipt into the injected store");
+    record_cook_terminal_notification_outcome_in_store(
+        &seeded,
+        cook_id,
+        json!({ "state": "delivered" }),
+    )
+    .expect("record a terminal notification outcome into the injected store");
+
+    // The positive: every write is durable in the store that was handed in.
+    let persisted = seeded
+        .read_record(run_id)
+        .expect("read the seeded record back");
+    assert_eq!(persisted.metadata["cook_progress"]["phase"], "terminal");
+    assert_eq!(
+        persisted.metadata["cook_progress"]["terminal_success"],
+        true
+    );
+    assert_eq!(persisted.metadata["cook_progress"]["exit_code"], 0);
+    assert_eq!(
+        persisted.metadata["cook_controller_failure"]["reason"],
+        "rooted"
+    );
+    assert_eq!(
+        persisted.metadata["cook_observer_events"][0]["phase"],
+        "terminal"
+    );
+    assert_eq!(
+        persisted.metadata["cook_resource_timeline"][0]["sample"]["cpu_seconds"],
+        7
+    );
+    let supervision_events = persisted.metadata["cook_supervision_events"]
+        .as_array()
+        .expect("supervision events are an array");
+    assert_eq!(supervision_events.len(), 2);
+    assert_eq!(supervision_events[0]["kind"], "budget_breached");
+    assert_eq!(supervision_events[1]["kind"], "stop_executed");
+    assert_eq!(
+        persisted.metadata["cook_recovery_checkpoint"]["phase"],
+        "verification_pending"
+    );
+    assert_eq!(
+        persisted.metadata["cook_force_with_lease_receipt"]["remote_sha"],
+        "abc123"
+    );
+    assert_eq!(
+        seeded
+            .read_controller_plan(plan_only_run_id)
+            .expect("the injected store owns the persisted plan")
+            .plan_id,
+        plan.plan_id
+    );
+    assert!(notification_outcome_path(&seeded).exists());
+
+    // The negative: the second root holds the same run identity and saw none of
+    // it. Any sibling that ignored the store it was handed fails here.
+    let untouched = other
+        .read_record(run_id)
+        .expect("the second root still has its own record");
+    for key in [
+        "cook_progress",
+        "cook_controller_failure",
+        "cook_observer_events",
+        "cook_resource_timeline",
+        "cook_supervision_events",
+        "cook_recovery_checkpoint",
+        "cook_force_with_lease_receipt",
+    ] {
+        assert!(
+            untouched.metadata.get(key).is_none(),
+            "second root must not observe `{key}` written through the injected store"
+        );
+    }
+    assert!(other.read_controller_plan(plan_only_run_id).is_err());
+    assert!(!notification_outcome_path(&other).exists());
+}
+
+#[test]
 fn a_supervision_stop_survives_an_hour_of_routine_resource_samples() {
     // #7015: the point of the evidence is to answer "why was this stopped?"
     // after the fact. If the decision shared an array with the sample stream, a
