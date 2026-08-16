@@ -72,6 +72,41 @@ homeboy_wordpress_parse_with_adapters() {
     shift || true
     local generic_adapters=()
 
+    if type homeboy_write_test_results >/dev/null 2>&1 \
+        && [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ] \
+        && [ -f "$HOMEBOY_TEST_SHARD_MANIFEST" ] \
+        && [ ! -L "$HOMEBOY_TEST_SHARD_MANIFEST" ]; then
+        local shard_summary
+        shard_summary="$(python3 - "$output_file" "$HOMEBOY_TEST_SHARD_MANIFEST" <<'PY'
+import json
+import re
+import sys
+
+try:
+    text = open(sys.argv[1], encoding="utf-8").read()
+    manifest = json.load(open(sys.argv[2], encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    sys.exit(0)
+
+matches = re.findall(
+    r"^TEST_SHARD_SUMMARY:id=(shard-[1-9][0-9]*) selected=(\d+) routed=(\d+) status=passed$",
+    text,
+    flags=re.MULTILINE,
+)
+if matches:
+    shard_id, selected_raw, routed_raw = matches[-1]
+    selected, routed = int(selected_raw), int(routed_raw)
+    expected = len(manifest.get("tests", [])) if isinstance(manifest.get("tests"), list) else 0
+    if manifest.get("schema") == "homeboy/test-shard-manifest/v1" and manifest.get("id") == shard_id and selected > 0 and selected == routed == expected:
+        print(selected)
+PY
+)"
+        if [ -n "$shard_summary" ]; then
+            homeboy_write_test_results "$shard_summary" "$shard_summary" 0 0 "shard-membership"
+            return 0
+        fi
+    fi
+
     for adapter in "$@"; do
         if [ "$adapter" = "wp-codebox-json" ]; then
             if type homeboy_parse_wp_codebox_test_results >/dev/null 2>&1 && homeboy_parse_wp_codebox_test_results "$output_file"; then

@@ -1047,6 +1047,13 @@
     ]
   },
   "test": {
+    "portable_env": {
+      "keys": [
+        "HOMEBOY_TEST_INVENTORY_ONLY",
+        "HOMEBOY_TEST_INVENTORY_FILE",
+        "HOMEBOY_TEST_SHARD_MANIFEST"
+      ]
+    },
     "result_parse": {
       "extension_script": "scripts/test/parse-test-results.sh",
       "adapters": ["wp-codebox-json", "node-test"]

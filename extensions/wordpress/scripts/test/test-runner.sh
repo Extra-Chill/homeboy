@@ -260,6 +260,10 @@ if [ -z "$COMPONENT_SHAPE" ]; then
 fi
 
 if [ "$COMPONENT_SHAPE" = "core-dev" ]; then
+    if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ]; then
+        echo "ERROR: WordPress core-dev shard replay is unsupported; refusing to ignore HOMEBOY_TEST_SHARD_MANIFEST." >&2
+        exit 2
+    fi
     CORE_WORDPRESS_RUNTIME_RUNNER="$(homeboy_wordpress_core_runtime_runner)" || exit $?
     if [ -n "$TARGET_FILE" ]; then
         HOMEBOY_WORDPRESS_CORE_PHPUNIT_TEST_FILE="$TARGET_FILE" exec bash "$CORE_WORDPRESS_RUNTIME_RUNNER" "${PASSTHROUGH_ARGS[@]}"
@@ -797,6 +801,10 @@ if [ -n "$TARGET_HOST_SMOKE_FILE" ]; then
 fi
 
 if [ -z "$TARGET_FILE" ] && [ "${HOMEBOY_TEST_SCOPE_KIND:-}" = "exclusive_env" ]; then
+    if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ]; then
+        echo "ERROR: HOMEBOY_TEST_SHARD_MANIFEST is mutually exclusive with HOMEBOY_TEST_SCOPE_KIND=exclusive_env." >&2
+        exit 2
+    fi
     if [ "${HOMEBOY_TEST_SCOPE_ENV_NAME:-}" = "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES" ] && [ -n "${HOMEBOY_TEST_SCOPE_ENV_VALUE:-}" ]; then
         standalone_php_smoke_files=""
         wordpress_smoke_files=""
@@ -851,6 +859,125 @@ homeboy_wordpress_is_php_smoke_file() {
     esac
 }
 
+homeboy_wordpress_load_test_shard_manifest() {
+    local manifest_path="${HOMEBOY_TEST_SHARD_MANIFEST:-}"
+    local shard_id shard_tests test_file test_rel selected_count
+    local current_inventory current_runner current_workspace shard_canonical shard_fingerprint
+
+    [ -n "$manifest_path" ] || return 0
+
+    if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ] || [ -n "$TARGET_FILE" ] || [ -n "$TARGET_HOST_SMOKE_FILE" ] || [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
+        echo "ERROR: HOMEBOY_TEST_SHARD_MANIFEST is mutually exclusive with other test selectors and passthrough arguments." >&2
+        return 2
+    fi
+    if [ ! -f "$manifest_path" ] || [ -L "$manifest_path" ]; then
+        echo "ERROR: WordPress test shard manifest must be a readable non-symlink file: ${manifest_path}" >&2
+        return 2
+    fi
+
+    shard_id="$(jq -er '
+        def hex_digest: type == "string" and test("^[0-9a-f]{64}$");
+        def valid_test_path:
+            type == "string"
+            and length > 0
+            and (startswith("/") | not)
+            and (contains("\\") | not)
+            and (split("/") | index("..") | not)
+            and (test("[[:cntrl:]]") | not);
+        if type != "object" then error("manifest must be an object")
+        elif .schema != "homeboy/test-shard-manifest/v1" then error("unsupported schema")
+        elif (.id | type) != "string" or (.id | test("^shard-[1-9][0-9]*$") | not) then error("invalid shard id")
+        elif .runner != "wordpress" then error("runner must be wordpress")
+        elif (.runner_fingerprint | hex_digest | not) then error("invalid runner fingerprint")
+        elif (.workspace_fingerprint | hex_digest | not) then error("invalid workspace fingerprint")
+        elif (.inventory_fingerprint | hex_digest | not) then error("invalid inventory fingerprint")
+        elif (.tests | type) != "array" or (.tests | length) == 0 then error("tests must be a non-empty array")
+        elif (.tests | all(valid_test_path) | not) then error("tests contain an invalid path")
+        elif (.tests | unique | length) != (.tests | length) then error("tests contain duplicate paths")
+        else .id end
+    ' "$manifest_path")" || {
+        echo "ERROR: invalid WordPress test shard manifest: ${manifest_path}" >&2
+        return 2
+    }
+    shard_tests="$(jq -er '.tests[]' "$manifest_path")" || {
+        echo "ERROR: could not read assigned tests from WordPress shard ${shard_id}." >&2
+        return 2
+    }
+
+    current_inventory="$(mktemp)" || return 1
+    if ! python3 "${SCRIPT_DIR}/test-inventory.py" \
+        --project "$PLUGIN_PATH" \
+        --extension-path "$EXTENSION_PATH" \
+        --runner wordpress \
+        --package "${HOMEBOY_COMPONENT_ID:-wordpress}" \
+        --output "$current_inventory" >/dev/null; then
+        rm -f "$current_inventory"
+        echo "ERROR: could not regenerate the current WordPress test inventory for shard validation." >&2
+        return 2
+    fi
+
+    current_runner="$(jq -r '.runner_fingerprint' "$current_inventory")"
+    current_workspace="$(jq -r '.workspace_fingerprint' "$current_inventory")"
+    if [ "$current_runner" != "$(jq -r '.runner_fingerprint' "$manifest_path")" ] \
+        || [ "$current_workspace" != "$(jq -r '.workspace_fingerprint' "$manifest_path")" ]; then
+        rm -f "$current_inventory"
+        echo "ERROR: WordPress shard ${shard_id} is stale for the current runner or workspace." >&2
+        return 2
+    fi
+    if ! jq -e --slurpfile manifest "$manifest_path" '
+        (.tests | map(.id)) as $inventory_ids
+        | all($manifest[0].tests[]; . as $id | $inventory_ids | index($id) != null)
+    ' "$current_inventory" >/dev/null; then
+        rm -f "$current_inventory"
+        echo "ERROR: WordPress shard ${shard_id} contains a test outside the current inventory." >&2
+        return 2
+    fi
+    shard_canonical="$(jq -cS --slurpfile manifest "$manifest_path" '
+        ($manifest[0].tests | reduce .[] as $test_id ({}; .[$test_id] = true)) as $selected
+        | {schema,runner,runner_fingerprint,workspace_fingerprint,tests:(.tests | map(select($selected[.id])) | sort_by(.id))}
+    ' "$current_inventory")"
+    rm -f "$current_inventory"
+    if command -v sha256sum >/dev/null 2>&1; then
+        shard_fingerprint="$(printf '%s' "$shard_canonical" | sha256sum | cut -d ' ' -f 1)"
+    elif command -v shasum >/dev/null 2>&1; then
+        shard_fingerprint="$(printf '%s' "$shard_canonical" | shasum -a 256 | cut -d ' ' -f 1)"
+    else
+        echo "ERROR: WordPress shard validation requires sha256sum or shasum." >&2
+        return 2
+    fi
+    if [ "$shard_fingerprint" != "$(jq -r '.inventory_fingerprint' "$manifest_path")" ]; then
+        echo "ERROR: WordPress shard ${shard_id} inventory fingerprint does not match its assigned tests." >&2
+        return 2
+    fi
+
+    selected_count=0
+    while IFS= read -r test_file; do
+        [ -n "$test_file" ] || continue
+        selected_count=$((selected_count + 1))
+        if ! test_rel="$(homeboy_wordpress_rel_test_file "$test_file")"; then
+            echo "ERROR: WordPress shard ${shard_id} assigned a missing or out-of-component test: ${test_file}" >&2
+            return 2
+        fi
+        if ! homeboy_wordpress_is_js_smoke_file "$test_rel" \
+            && ! homeboy_wordpress_is_shell_smoke_file "$test_rel" \
+            && ! homeboy_wordpress_is_node_test_file "$test_rel" \
+            && ! homeboy_wordpress_is_php_smoke_file "$test_rel" \
+            && ! homeboy_wordpress_is_phpunit_test_file "$test_rel"; then
+            echo "ERROR: WordPress shard ${shard_id} assigned an unroutable test: ${test_rel}" >&2
+            return 2
+        fi
+    done <<< "$shard_tests"
+
+    [ "$selected_count" -gt 0 ] || {
+        echo "ERROR: WordPress shard ${shard_id} selected no tests." >&2
+        return 2
+    }
+
+    export HOMEBOY_WORDPRESS_SHARD_TEST_FILES="$shard_tests"
+    export HOMEBOY_WORDPRESS_SHARD_ID="$shard_id"
+    echo "TEST_SHARD_MANIFEST:id=${shard_id} selected=${selected_count}"
+}
+
 # Dispatch host PHP smokes exactly the way the exclusive_env scope above does:
 # the manifest decides which need a booted WordPress and which are standalone.
 homeboy_wordpress_run_php_smoke_files() {
@@ -878,6 +1005,75 @@ homeboy_wordpress_run_php_smoke_files() {
     fi
     return "$status"
 }
+
+homeboy_wordpress_replay_test_shard() {
+    local test_file test_rel
+    local js_smoke_files=""
+    local shell_smoke_files=""
+    local node_test_files=""
+    local php_smoke_files=""
+    local phpunit_files=""
+    local selected=0
+    local routed=0
+
+    while IFS= read -r test_file; do
+        [ -n "$test_file" ] || continue
+        selected=$((selected + 1))
+        test_rel="$(homeboy_wordpress_rel_test_file "$test_file")" || return 2
+        if homeboy_wordpress_is_js_smoke_file "$test_rel"; then
+            js_smoke_files+="${js_smoke_files:+$'\n'}${test_rel}"
+            echo "TEST_SHARD_ROUTE:${test_rel}:runner=host-js-smoke"
+        elif homeboy_wordpress_is_shell_smoke_file "$test_rel"; then
+            shell_smoke_files+="${shell_smoke_files:+$'\n'}${test_rel}"
+            echo "TEST_SHARD_ROUTE:${test_rel}:runner=host-shell-smoke"
+        elif homeboy_wordpress_is_node_test_file "$test_rel"; then
+            node_test_files+="${node_test_files:+$'\n'}${test_rel}"
+            echo "TEST_SHARD_ROUTE:${test_rel}:runner=node-test"
+        elif homeboy_wordpress_is_php_smoke_file "$test_rel"; then
+            php_smoke_files+="${php_smoke_files:+$'\n'}${test_rel}"
+            echo "TEST_SHARD_ROUTE:${test_rel}:runner=host-php-smoke"
+        elif homeboy_wordpress_is_phpunit_test_file "$test_rel"; then
+            phpunit_files+="${phpunit_files:+$'\n'}${test_rel}"
+            echo "TEST_SHARD_ROUTE:${test_rel}:runner=phpunit"
+        else
+            echo "ERROR: WordPress shard ${HOMEBOY_WORDPRESS_SHARD_ID} could not route ${test_rel}." >&2
+            return 2
+        fi
+        routed=$((routed + 1))
+    done <<< "$HOMEBOY_WORDPRESS_SHARD_TEST_FILES"
+
+    [ -z "$js_smoke_files" ] || homeboy_wordpress_run_js_smoke_files "$js_smoke_files" || return $?
+    [ -z "$shell_smoke_files" ] || homeboy_wordpress_run_shell_smoke_files "$shell_smoke_files" || return $?
+    [ -z "$node_test_files" ] || homeboy_wordpress_run_js_unit_test_files "$node_test_files" || return $?
+    [ -z "$php_smoke_files" ] || homeboy_wordpress_run_php_smoke_files "$php_smoke_files" || return $?
+    if [ -n "$phpunit_files" ]; then
+        export HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES="$phpunit_files"
+        WORDPRESS_RUNTIME_RUNNER="$(homeboy_wordpress_runtime_runner)" || return $?
+        bash "$WORDPRESS_RUNTIME_RUNNER" "${PASSTHROUGH_ARGS[@]}" || return $?
+    fi
+
+    [ "$selected" -eq "$routed" ] || {
+        echo "ERROR: WordPress shard ${HOMEBOY_WORDPRESS_SHARD_ID} routed ${routed} of ${selected} assigned tests." >&2
+        return 2
+    }
+    echo "TEST_SHARD_SUMMARY:id=${HOMEBOY_WORDPRESS_SHARD_ID} selected=${selected} routed=${routed} status=passed"
+    if ! type homeboy_write_test_results >/dev/null 2>&1 && [ -n "${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}" ] && [ -f "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS" ]; then
+        # shellcheck source=/dev/null
+        source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+    fi
+    if type homeboy_write_test_results >/dev/null 2>&1; then
+        homeboy_write_test_results "$selected" "$selected" 0 0 "shard-membership"
+    elif [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ]; then
+        echo "ERROR: WordPress shard result normalization cannot write HOMEBOY_TEST_RESULTS_FILE." >&2
+        return 2
+    fi
+}
+
+if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ]; then
+    homeboy_wordpress_load_test_shard_manifest || exit $?
+    homeboy_wordpress_replay_test_shard || exit $?
+    exit 0
+fi
 
 if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     changed_js_smoke_files=""
