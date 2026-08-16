@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.36.1] - 2026-08-16
+
+### Changed
+- floor the nextest version check instead of pinning it exactly
+
 ## [1.36.0] - 2026-08-16
 
 ### Added
