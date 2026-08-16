@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.14.0] - 2026-08-16
+
+### Added
+- install cargo-nextest when a Rust component runs tests
+
 ## [2.13.0] - 2026-08-16
 
 ### Added
