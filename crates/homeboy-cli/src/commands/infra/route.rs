@@ -47,6 +47,13 @@ pub fn route_after_parse_with_provenance(
     // cannot honor (#10917).
     reject_contradictory_cook_arguments(cli)?;
 
+    // Preview is a controller-local read-only compilation. It must bypass every
+    // placement route before runner selection or split Cook materialization can
+    // create durable state or dispatch a provider.
+    if resource_policy::is_cook_preview(&cli.command) {
+        return Ok(None);
+    }
+
     // A managed runner executes the controller-selected command once. Its argv
     // retains the controller's explicit placement for provenance, but must not
     // recursively route back through a runner-side controller daemon.

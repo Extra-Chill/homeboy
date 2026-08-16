@@ -2314,12 +2314,11 @@ mod tests {
     #[cfg(unix)]
     fn assert_pid_reaped(pid: libc::pid_t) {
         let deadline = Instant::now() + Duration::from_secs(2);
-        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+        while crate::process::pid_is_running(pid as u32) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_ne!(
-            unsafe { libc::kill(pid, 0) },
-            0,
+        assert!(
+            !crate::process::pid_is_running(pid as u32),
             "hermetic cleanup left descendant {pid} alive"
         );
     }

@@ -921,7 +921,19 @@ pub fn admission_status(request_id: &str) -> Result<Value> {
 /// the advisory lock remains the authority while a process is alive.
 pub fn cancel_admission(request_id: &str) -> Result<()> {
     let root = runtime_root()?;
-    let lock_path = root.join(ADMISSION_LOCK_DIR);
+    cancel_admission_at(&root, request_id)
+}
+
+/// Remove a waiting request from an explicitly selected controller-runtime
+/// store. Lifecycle stores use this to keep same-ID isolated roots independent.
+pub fn cancel_admission_at(runtime_root: &Path, request_id: &str) -> Result<()> {
+    fs::create_dir_all(runtime_root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create controller runtime directory".to_string()),
+        )
+    })?;
+    let lock_path = runtime_root.join(ADMISSION_LOCK_DIR);
     update_admission_queue(&lock_path, |queue| {
         queue["requests"] = queue["requests"]
             .as_array()
@@ -3308,6 +3320,30 @@ mod tests {
         assert!(!summary.contains("unavailable"), "{summary}");
         assert!(summary.contains("agent-task-queued"), "{summary}");
         assert!(summary.contains("pid=4294967294"), "{summary}");
+    }
+
+    #[test]
+    fn rooted_admission_cancellation_does_not_remove_the_same_id_from_another_root() {
+        let left = tempfile::tempdir().expect("left runtime root");
+        let right = tempfile::tempdir().expect("right runtime root");
+        let request_id = "same-run-id";
+        for root in [left.path(), right.path()] {
+            enqueue_admission_request(&root.join(ADMISSION_LOCK_DIR), request_id)
+                .expect("enqueue isolated waiter");
+        }
+
+        cancel_admission_at(left.path(), request_id).expect("cancel left waiter");
+
+        assert!(read_admission_queue(&left.path().join(ADMISSION_LOCK_DIR))
+            .expect("read left queue")["requests"]
+            .as_array()
+            .expect("left requests")
+            .is_empty());
+        assert_eq!(
+            read_admission_queue(&right.path().join(ADMISSION_LOCK_DIR)).expect("read right queue")
+                ["requests"][0]["request_id"],
+            request_id
+        );
     }
 
     /// A contended admission failure must carry machine-readable evidence, not

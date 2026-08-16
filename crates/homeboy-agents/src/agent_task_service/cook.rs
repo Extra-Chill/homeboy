@@ -42,7 +42,7 @@ use super::cook_pre_execution::{
     materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores,
     pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
     record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
-    with_pre_execution_phase,
+    with_pre_execution_phase, CookExecutionPreparation,
 };
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
@@ -55,9 +55,9 @@ use super::cook_promotion::{
 };
 use super::cook_recipe::CookRecipeStore;
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
-use super::execution::{
-    run_loaded_plan_with_derived_cook_baseline, run_loaded_plan_with_derived_cook_baseline_in_store,
-};
+#[cfg(test)]
+use super::execution::run_loaded_plan_with_derived_cook_baseline;
+use super::execution::run_loaded_plan_with_derived_cook_baseline_in_store;
 use super::AgentTaskRunResult;
 
 /// Lease window for a cook promotion operation claim. Long enough that a healthy
@@ -3136,7 +3136,7 @@ fn child_execution_budget(
     }
 }
 
-fn validate_cook_follow_up_stores(
+pub(super) fn validate_cook_follow_up_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<()> {
@@ -3603,6 +3603,19 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
         validate_cook_workspace(options)?;
     }
     validate_cook_candidate_group(&options.initial_plan)
+}
+
+fn reserve_cook_materialization_capacity(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    workspace: &std::path::Path,
+) -> Result<homeboy_core::capacity::CapacityReservation> {
+    let demand = homeboy_core::capacity::demand_for_tree(workspace)?;
+    homeboy_core::capacity::reserve_projected_capacity(
+        &lifecycle_store.controller_scratch_root(),
+        "Cook controller scratch and workspace materialization",
+        demand,
+        homeboy_core::capacity::CapacityReserve::configured(),
+    )
 }
 
 pub fn run_cook<E>(
@@ -4093,7 +4106,7 @@ where
 {
     // The local detached launcher persists this fence before spawn. Recheck it
     // at each durable/external boundary so a dead launcher cannot revive work.
-    agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
+    lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
     // Validate new Cooks before provider discovery, workspace staging, recipe
     // persistence, or a detached handoff can spend provider work. Historical
     // immutable recipes retain their persisted behavior and receive actionable
@@ -4150,14 +4163,12 @@ where
     }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
-    let adopted_model = if moving_base_continuation || verification_pending_continuation {
-        lifecycle_store.read_record(&options.initial_run_id).ok()
-    } else {
-        agent_task_lifecycle::status(&options.initial_run_id).ok()
-    }
-    .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
-    .transpose()?
-    .flatten();
+    let adopted_model = lifecycle_store
+        .read_record(&options.initial_run_id)
+        .ok()
+        .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
+        .transpose()?
+        .flatten();
     let existing_recipe = store.recipe_exists(&options.cook_id);
     // A form-only continuation has already appended and persisted its exact
     // attempt. Re-persisting it as a fresh initial recipe would falsely look
@@ -4175,7 +4186,7 @@ where
             store.persist_initial_recipe(&options)?
         }
     } else {
-        agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
+        lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
         store.persist_initial_recipe(&options)?
     };
     // A recipe can survive an interruption before its first lifecycle record.
@@ -4230,7 +4241,7 @@ where
     // requiring one here turns an accepted detached retry into a local failure.
     if cook_attempt_needs_execution_with_store(lifecycle_store, &options.initial_run_id)
         && !cook_workspace_lookup_pending(&options.initial_plan)
-        && options.attempt_dispatcher.is_none()
+        && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
         validate_cook_workspace(&options)?;
     }
@@ -4251,17 +4262,9 @@ where
                 .and_then(|task| task.workspace.root.as_deref())
                 .map(std::path::Path::new)
         })
-        .map(|workspace| {
-            let demand = homeboy_core::capacity::demand_for_tree(workspace)?;
-            homeboy_core::capacity::reserve_projected_capacity(
-                &homeboy_core::paths::controller_scratch_store()?,
-                "Cook controller scratch and workspace materialization",
-                demand,
-                homeboy_core::capacity::CapacityReserve::configured(),
-            )
-        })
+        .map(|workspace| reserve_cook_materialization_capacity(lifecycle_store, workspace))
         .transpose()?;
-    agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
+    lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
     if cook_workspace_lookup_pending(&options.initial_plan) {
         report_cook_progress(
             lifecycle_store,
@@ -4291,7 +4294,8 @@ where
                         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
-                    if agent_task_lifecycle::status(&lookup_run_id)
+                    if lookup_lifecycle_store
+                        .read_record(&lookup_run_id)
                         .ok()
                         .is_some_and(|record| {
                             record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -4316,13 +4320,14 @@ where
             });
             let result = homeboy_core::worktree_providers::with_worktree_provider_command_control(
                 lookup_control,
-                || materialize_pending_cook_workspace(&mut options),
+                || materialize_pending_cook_workspace(lifecycle_store, &mut options),
             );
             let _ = lookup_stop.send(());
             result
         });
         if let Err(error) = lookup_result {
-            if agent_task_lifecycle::status(&options.initial_run_id)
+            if lifecycle_store
+                .read_record(&options.initial_run_id)
                 .ok()
                 .is_some_and(|record| {
                     record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -4340,17 +4345,18 @@ where
                 }));
             }
             let error = with_pre_execution_phase(error, "worktree_provider_lookup");
-            record_pre_execution_failure(
-                &options.initial_plan,
+            CookExecutionPreparation::new(store, lifecycle_store).record_pre_execution_failure(
+                &options.cook_id,
                 &options.initial_run_id,
-                &error,
                 "worktree_provider_lookup",
+                &error,
             )?;
             return Ok(pre_execution_failure_report(
                 options.cook_id.clone(),
                 Vec::new(),
                 pre_execution_failure_details(
-                    agent_task_lifecycle::exact_record(&options.initial_run_id)
+                    lifecycle_store
+                        .read_record(&options.initial_run_id)
                         .ok()
                         .as_ref(),
                     &error,
@@ -4596,7 +4602,7 @@ where
         if needs_execution {
             // The local detached launcher persists this fence before spawn.
             // Recheck immediately before this attempt can publish provider work.
-            agent_task_lifecycle::require_detached_cook_handoff_fence_open(&cook_id)?;
+            lifecycle_store.require_detached_cook_handoff_fence_open(&cook_id)?;
             // `provider_start` is a durable lifecycle transition. Create the
             // record before reporting it so a new Cook run is observable before
             // any preflight or provider work can block.
@@ -4630,7 +4636,7 @@ where
             }
             let mut failed_dispatch_plan = None;
             let execution = (|| {
-                if options.attempt_dispatcher.is_none() {
+                if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
                     validate_cook_workspace(&options)?;
                 }
                 if options.attempt_dispatcher.is_none() {
@@ -4954,7 +4960,8 @@ where
                                 }
                             }
                         });
-                        let result = run_loaded_plan_with_derived_cook_baseline(
+                        let result = run_loaded_plan_with_derived_cook_baseline_in_store(
+                            lifecycle_store,
                             dispatch_plan,
                             Some(&run_id),
                             executor.clone(),
@@ -6392,7 +6399,10 @@ fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
 /// A pending lookup carries no provider path. Resolve the declared exact handle
 /// only after Cook's recipe and first run record exist, then persist that path
 /// before any provider can receive work.
-fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions) -> Result<()> {
+fn materialize_pending_cook_workspace(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &mut AgentTaskCookServiceOptions,
+) -> Result<()> {
     let provider_id = options
         .initial_plan
         .metadata
@@ -6495,7 +6505,11 @@ fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions)
     options.initial_plan.metadata["cook_provision"]["action"] =
         Value::String("existing".to_string());
     options.source_worktree_path = Some(target);
-    agent_task_lifecycle::persist_controller_plan(&options.initial_run_id, &options.initial_plan)
+    agent_task_lifecycle::persist_controller_plan_in_store(
+        lifecycle_store,
+        &options.initial_run_id,
+        &options.initial_plan,
+    )
 }
 
 /// A deferred provider lookup can prove absence only after Cook owns a durable
