@@ -2421,7 +2421,7 @@ fn detached_cook_without_a_lab_runner_does_not_fall_back_to_local_execution() {
 }
 
 #[test]
-fn lab_cook_materializes_derived_provider_destination_and_preserves_it_for_retry() {
+fn lab_cook_defers_provider_destination_and_retry_refuses_unbound_plan() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path());
@@ -2533,10 +2533,10 @@ fn lab_cook_materializes_derived_provider_destination_and_preserves_it_for_retry
         let plan = materialize_agent_task_cook_plan(&cook_cli, None)
             .expect("materialize cook plan")
             .expect("cook plan");
-        let expected_root = provider_workspace.display().to_string();
+        assert_eq!(plan.tasks[0].workspace.root, None);
         assert_eq!(
-            plan.tasks[0].workspace.root.as_deref(),
-            Some(expected_root.as_str())
+            plan.tasks[0].metadata["worktree_provision"]["action"],
+            "lookup_pending"
         );
         assert_eq!(
             plan.tasks[0].metadata["worktree_provision"]["handle"],
@@ -2556,18 +2556,13 @@ fn lab_cook_materializes_derived_provider_destination_and_preserves_it_for_retry
             .map(str::to_string)
             .collect::<Vec<_>>();
         let retry_cli = Cli::parse_from(&retry_args);
-        let handoff = materialize_agent_task_retry_handoff(&retry_cli, &retry_args)
-            .expect("materialize retry handoff")
-            .expect("retry handoff");
-
-        assert_eq!(
-            handoff.primary_workspace,
-            provider_workspace.canonicalize().expect("root")
-        );
-        assert_eq!(
-            handoff.plan.tasks[0].workspace.root.as_deref(),
-            Some(expected_root.as_str())
-        );
+        let error = match materialize_agent_task_retry_handoff(&retry_cli, &retry_args) {
+            Err(error) => error,
+            Ok(_) => {
+                panic!("retry must not substitute the controller cwd for an unresolved workspace")
+            }
+        };
+        assert!(error.message.contains("original persisted plan has none"));
     });
 }
 

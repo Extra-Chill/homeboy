@@ -765,7 +765,9 @@ fn preflight_lab_runner_availability_with(
     connect_authority: Option<&RunnerConnectReport>,
 ) -> Result<(RunnerAvailability, RunnerStatusReport)> {
     let capacity = load(&selection.runner_id)?.settings.concurrency_limit;
-    let loopback_transport = configured_direct_ssh_transport_is_loopback(&selection.runner_id)?;
+    let loopback_transport = loopback_direct_ssh_transport_for_preflight(selection, |runner_id| {
+        configured_direct_ssh_transport_is_loopback(runner_id)
+    })?;
     preflight_lab_runner_availability_from_status_with_transport(
         selection,
         status_fn,
@@ -773,6 +775,17 @@ fn preflight_lab_runner_availability_with(
         connect_authority,
         loopback_transport,
     )
+}
+
+fn loopback_direct_ssh_transport_for_preflight(
+    selection: &LabRunnerSelection,
+    resolve: impl FnOnce(&str) -> Result<bool>,
+) -> Result<bool> {
+    if selection.mode == RunnerTunnelMode::DirectSsh {
+        resolve(&selection.runner_id)
+    } else {
+        Ok(false)
+    }
 }
 
 pub(super) fn preflight_lab_runner_availability_from_status(
@@ -2399,6 +2412,39 @@ mod placement_readiness_tests {
         .expect("preflight");
 
         assert!(availability.accepts_jobs);
+    }
+
+    #[test]
+    fn reverse_preflight_skips_direct_ssh_transport_resolution() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+            mode: RunnerTunnelMode::Reverse,
+        };
+
+        let loopback = loopback_direct_ssh_transport_for_preflight(&selection, |_| {
+            panic!("reverse broker transport must not resolve SSH configuration")
+        })
+        .expect("reverse transport does not need SSH resolution");
+
+        assert!(!loopback);
+    }
+
+    #[test]
+    fn direct_preflight_retains_ssh_transport_resolution() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+            mode: RunnerTunnelMode::DirectSsh,
+        };
+
+        let loopback = loopback_direct_ssh_transport_for_preflight(&selection, |runner_id| {
+            assert_eq!(runner_id, "lab");
+            Ok(true)
+        })
+        .expect("direct SSH transport resolution");
+
+        assert!(loopback);
     }
 
     #[test]

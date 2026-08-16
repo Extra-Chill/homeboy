@@ -3589,9 +3589,12 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
             ],
         );
 
+        let dispatches = Arc::new(AtomicUsize::new(0));
         let mut options = batch_cook_options(
             "removed-managed-continuation",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: dispatches.clone(),
+            }),
         );
         options.to_worktree = "fixture@removed-continuation".to_string();
         options.source_worktree_path = Some(target.clone());
@@ -3599,7 +3602,9 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
         let recipe = super::super::load_recipe(&options.cook_id).expect("load Cook recipe");
         let reconstructed = super::super::reconstruct_options_with_dispatcher(
             &recipe,
-            Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
+            Some(Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: dispatches.clone(),
+            })),
         )
         .expect("reconstruct persisted Cook options");
 
@@ -3644,7 +3649,8 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
         let result = run_cook(reconstructed, UnusedExecutor)
             .expect("durable Cook failure report before provider execution");
         assert_eq!(result.exit_code, 1);
-        assert_eq!(result.value.status, "pre_execution_failure");
+        assert_eq!(result.value.status, "durable_failure");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
     });
 }
 
@@ -5497,8 +5503,22 @@ fn cook_failure_context_counts_preflight_cook_alias_as_zero_execution() {
         let provider_run_id = format!("{cook_id}-attempt-2");
         super::super::record_recipe_attempt(cook_id, 2, &provider_run_id, &options.initial_plan)
             .expect("append provider attempt to recipe");
-        super::super::materialize_cook_attempt(cook_id, &provider_run_id, &options.initial_plan)
-            .expect("materialize provider attempt");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&provider_run_id))
+            .expect("submit provider attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 2, &provider_run_id)
+            .expect("index provider attempt");
+        assert_eq!(
+            agent_task_lifecycle::status(cook_id)
+                .expect("resolve Cook alias to provider attempt")
+                .run_id,
+            provider_run_id
+        );
+        assert_eq!(
+            agent_task_lifecycle::exact_record(cook_id)
+                .expect("retain exact preflight record")
+                .metadata["provider_executions_consumed"],
+            0
+        );
         assert_eq!(
             agent_task_lifecycle::reserve_provider_execution(
                 &provider_run_id,
@@ -6302,7 +6322,7 @@ fn cook_publishes_durable_identity_before_materialization_and_survives_interrupt
 
         // 3. The interruption left a named, recoverable record — not an
         //    anonymous reservation an operator has to hunt for.
-        assert_eq!(result.value.status, "durable_failure");
+        assert_eq!(result.value.status, "pre_execution_failure");
         let record = agent_task_lifecycle::status(run_id).expect("record survives interruption");
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],

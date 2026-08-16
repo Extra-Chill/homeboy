@@ -729,5 +729,11 @@ fn cook_help_does_not_advertise_queue_only() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(!help.contains("\n      --queue-only\n"));
+    assert!(help.contains("--help-full"), "{help}");
+
+    let output = homeboy(&["agent-task", "cook", "--help-full"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(!help.contains("\n      --queue-only\n"));
     assert!(help.contains("--detach-after-handoff"), "{help}");
 }
