@@ -1708,6 +1708,197 @@ fn run_reentry_siblings_re_enter_only_the_injected_store() {
 }
 
 #[test]
+fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root() {
+    // The positive half of this proof is cheap; the negative half is the point.
+    // A read sibling that ignored its store parameter and resolved the ambient
+    // root would still satisfy every assertion below against `seeded`, because
+    // the state really is there. Only a second, differently-rooted store can
+    // distinguish "read the store I was handed" from "read whatever the process
+    // environment points at" (#7505). No environment is mutated here: both
+    // roots come from `HermeticTestContext::path_roots()`.
+    let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
+    let empty_context = homeboy_core::test_support::HermeticTestContext::new();
+    assert_ne!(seeded_context.data_dir(), empty_context.data_dir());
+
+    let seeded =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(seeded_context.path_roots());
+    let empty =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(empty_context.path_roots());
+
+    let cook_id = "rooted-read-cook";
+    let attempt_run_id = "rooted-read-cook-attempt-1-a";
+    let plan = test_plan();
+    seeded
+        .submit_plan_with_runtime_admission(&plan, attempt_run_id, |_| Ok(json!({})))
+        .expect("submit attempt into the seeded store");
+    seeded
+        .write_cook_index_attempt(cook_id, 1, attempt_run_id, now_timestamp(), None)
+        .expect("register the Cook attempt in the seeded store");
+    seeded
+        .write_aggregate(attempt_run_id, &succeeded_aggregate(&plan))
+        .expect("persist the attempt aggregate in the seeded store");
+    let aggregate_path = seeded.aggregate_path(attempt_run_id);
+
+    // Every read answers from the store it was handed.
+    assert_eq!(
+        exact_record_in_store(&seeded, attempt_run_id)
+            .expect("exact record")
+            .run_id,
+        attempt_run_id
+    );
+    assert!(run_record_exists_in_store(&seeded, attempt_run_id).expect("record exists"));
+    assert!(run_record_exists_readonly_in_store(&seeded, attempt_run_id)
+        .expect("record exists read-only"));
+    assert!(run_record_exists_resolved_in_store(&seeded, cook_id).expect("resolved record exists"));
+    assert!(cook_index_exists_in_store(&seeded, cook_id).expect("cook index exists"));
+    assert_eq!(
+        cook_index_in_store(&seeded, cook_id)
+            .expect("cook index")
+            .latest_run_id,
+        attempt_run_id
+    );
+    assert_eq!(
+        resolve_run_id_in_store(&seeded, cook_id).expect("resolve cook alias"),
+        attempt_run_id
+    );
+    assert_eq!(
+        persisted_status_in_store(&seeded, cook_id)
+            .expect("persisted status")
+            .run_id,
+        attempt_run_id
+    );
+    assert_eq!(
+        durable_local_read_in_store(&seeded, cook_id)
+            .expect("durable local read")
+            .record
+            .run_id,
+        attempt_run_id
+    );
+    assert!(exact_durable_local_read_in_store(&seeded, attempt_run_id)
+        .expect("exact durable local read")
+        .aggregate
+        .is_some());
+    assert_eq!(
+        load_plan_in_store(&seeded, cook_id)
+            .expect("load plan")
+            .plan_id,
+        plan.plan_id
+    );
+    assert_eq!(
+        load_controller_plan_in_store(&seeded, cook_id)
+            .expect("load controller plan")
+            .plan_id,
+        plan.plan_id
+    );
+    assert_eq!(
+        artifacts_in_store(&seeded, attempt_run_id)
+            .expect("artifacts")
+            .run_id,
+        attempt_run_id
+    );
+    assert_eq!(
+        read_aggregate_in_store(&seeded, cook_id)
+            .expect("aggregate through the Cook alias")
+            .plan_id,
+        plan.plan_id
+    );
+    assert_eq!(
+        read_attempt_aggregate_in_store(&seeded, attempt_run_id)
+            .expect("attempt aggregate")
+            .plan_id,
+        plan.plan_id
+    );
+    assert_eq!(
+        run_id_for_aggregate_path_in_store(&seeded, &aggregate_path)
+            .expect("aggregate path lookup"),
+        Some(attempt_run_id.to_string())
+    );
+    assert_eq!(
+        running_owner_pid_in_store(&seeded, attempt_run_id).expect("owner pid"),
+        None
+    );
+    assert!(
+        !has_active_provider_execution_in_store(&seeded, attempt_run_id)
+            .expect("provider execution predicate")
+    );
+    assert_eq!(
+        reconcile_scope_run_ids_in_store(&seeded, cook_id).expect("reconcile scope"),
+        vec![attempt_run_id.to_string()]
+    );
+    assert!(
+        find_unbound_cook_retry_successor_in_store(&seeded, attempt_run_id, cook_id, 2, &plan)
+            .expect("retry successor lookup")
+            .is_none()
+    );
+    let (records, _) = read_records_with_health_in_store(&seeded).expect("registry snapshot");
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![attempt_run_id]
+    );
+    let (bounded, _) =
+        read_records_with_health_bounded_in_store(&seeded, 10).expect("bounded registry snapshot");
+    assert_eq!(bounded.len(), 1);
+    let (all_records, _) =
+        read_all_records_with_health_in_store(&seeded).expect("unbounded registry snapshot");
+    assert_eq!(all_records.len(), 1);
+
+    // The negative: an identically-named identity in a second root is absent.
+    // Any sibling that reached for the ambient root would answer these from the
+    // seeded state above and fail here.
+    assert!(!run_record_exists_in_store(&empty, attempt_run_id).expect("no record in second root"));
+    assert!(!run_record_exists_readonly_in_store(&empty, attempt_run_id)
+        .expect("no record in second root"));
+    assert!(!run_record_exists_resolved_in_store(&empty, cook_id)
+        .expect("no resolved record in second root"));
+    assert!(!cook_index_exists_in_store(&empty, cook_id).expect("no cook index in second root"));
+    assert!(cook_index_in_store(&empty, cook_id).is_err());
+    assert!(exact_record_in_store(&empty, attempt_run_id).is_err());
+    assert_eq!(
+        resolve_run_id_in_store(&empty, cook_id).expect("unresolvable alias echoes the id"),
+        cook_id
+    );
+    assert!(persisted_status_in_store(&empty, cook_id).is_err());
+    assert!(durable_local_read_in_store(&empty, cook_id).is_err());
+    assert!(exact_durable_local_read_in_store(&empty, attempt_run_id).is_err());
+    assert!(load_plan_in_store(&empty, cook_id).is_err());
+    assert!(load_controller_plan_in_store(&empty, cook_id).is_err());
+    assert!(artifacts_in_store(&empty, attempt_run_id).is_err());
+    assert!(read_aggregate_in_store(&empty, cook_id).is_err());
+    assert!(read_attempt_aggregate_in_store(&empty, attempt_run_id).is_err());
+    assert!(running_owner_pid_in_store(&empty, attempt_run_id).is_err());
+    assert!(has_active_provider_execution_in_store(&empty, attempt_run_id).is_err());
+    assert_eq!(
+        run_id_for_aggregate_path_in_store(&empty, &aggregate_path)
+            .expect("aggregate path lookup in second root"),
+        None
+    );
+    assert_eq!(
+        reconcile_scope_run_ids_in_store(&empty, cook_id).expect("reconcile scope in second root"),
+        vec![cook_id.to_string()]
+    );
+    assert!(
+        find_unbound_cook_retry_successor_in_store(&empty, attempt_run_id, cook_id, 2, &plan)
+            .expect("retry successor lookup in second root")
+            .is_none()
+    );
+    assert!(read_records_with_health_in_store(&empty)
+        .expect("registry snapshot in second root")
+        .0
+        .is_empty());
+    assert!(read_records_with_health_bounded_in_store(&empty, 10)
+        .expect("bounded registry snapshot in second root")
+        .0
+        .is_empty());
+    assert!(read_all_records_with_health_in_store(&empty)
+        .expect("unbounded registry snapshot in second root")
+        .0
+        .is_empty());
+}
+
+#[test]
 fn a_supervision_stop_survives_an_hour_of_routine_resource_samples() {
     // #7015: the point of the evidence is to answer "why was this stopped?"
     // after the fact. If the decision shared an array with the sample stream, a

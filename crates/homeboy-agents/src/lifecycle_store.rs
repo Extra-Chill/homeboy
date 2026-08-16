@@ -578,6 +578,38 @@ impl AgentTaskLifecycleStore {
             .is_some())
     }
 
+    /// Check this store for one exact durable run identity without creating its
+    /// observation database, running migrations, or triggering startup repair.
+    pub fn record_exists_readonly(&self, run_id: &str) -> Result<bool> {
+        Ok(self.open_observation_readonly()?.get_run(run_id)?.is_some())
+    }
+
+    /// Read this store's bounded durable registry snapshot with the health
+    /// summary of the records that could not be parsed.
+    pub fn read_records_with_health(
+        &self,
+    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+        self.read_records_with_health_bounded(1000)
+    }
+
+    pub fn read_records_with_health_bounded(
+        &self,
+        limit: usize,
+    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+        records_with_health(observation_runs_bounded_in_store(self, limit)?)
+    }
+
+    /// Read every durable registry record in this store without a display bound.
+    pub fn read_all_records_with_health(
+        &self,
+    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+        let store = self.open_observation_readonly()?;
+        records_with_health(store.list_runs_all(RunListFilter {
+            kind: Some("agent-task".to_string()),
+            ..Default::default()
+        })?)
+    }
+
     /// Register a Cook attempt using this store's record, lock, index, and
     /// terminal-projection roots.
     pub fn record_cook_attempt(
@@ -1364,9 +1396,7 @@ pub(super) fn record_exists(run_id: &str) -> Result<bool> {
 /// Check an existing observation store without creating its directory, running
 /// migrations, or triggering startup repair work.
 pub(super) fn record_exists_readonly(run_id: &str) -> Result<bool> {
-    Ok(ObservationStore::open_readonly()?
-        .get_run(run_id)?
-        .is_some())
+    default_store()?.record_exists_readonly(run_id)
 }
 
 pub(super) fn validate_cook_index_attempt(cook_id: &str, attempt: u32, run_id: &str) -> Result<()> {
@@ -1416,7 +1446,7 @@ pub(super) fn record_lacks_typed_metadata(run_id: &str) -> Result<bool> {
 }
 
 pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
-    Ok(read_records_with_health()?.0)
+    default_store()?.read_records()
 }
 
 /// The store-rooted counterpart of [`read_records`], following the same bound
@@ -1468,22 +1498,18 @@ fn read_retry_successors_in_store(
 
 pub(super) fn read_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    read_records_with_health_bounded(1000)
+    default_store()?.read_records_with_health()
 }
 
 pub(super) fn read_records_with_health_bounded(
     limit: usize,
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    records_with_health(observation_runs_bounded(limit)?)
+    default_store()?.read_records_with_health_bounded(limit)
 }
 
 pub(super) fn read_all_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    let store = ObservationStore::open_readonly()?;
-    records_with_health(store.list_runs_all(RunListFilter {
-        kind: Some("agent-task".to_string()),
-        ..Default::default()
-    })?)
+    default_store()?.read_all_records_with_health()
 }
 
 fn records_with_health(
