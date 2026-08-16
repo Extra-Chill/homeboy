@@ -148,22 +148,18 @@ fn component_extension_sync_excludes(path: &Path) -> Vec<String> {
     let Ok(path) = fs::canonicalize(path) else {
         return Vec::new();
     };
-    let Ok(components) = crate::component::inventory() else {
+    // Resolve only the selected checkout. Project attachment configuration wins
+    // for an exact registered path; portable configuration owns other checkouts.
+    let component = crate::component::registered_by_local_path(&path)
+        .ok()
+        .flatten()
+        .or_else(|| crate::component::discover_from_portable(&path));
+    let Some(component) = component else {
         return Vec::new();
     };
 
     let mut excludes = Vec::new();
-    for component in components {
-        let component_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
-        let Ok(component_path) = fs::canonicalize(component_path) else {
-            continue;
-        };
-        if component_path != path {
-            continue;
-        }
-        let Some(extensions) = component.extensions.as_ref() else {
-            continue;
-        };
+    if let Some(extensions) = component.extensions.as_ref() {
         let mut extension_ids = extensions.keys().collect::<Vec<_>>();
         extension_ids.sort();
         for extension_id in extension_ids {
@@ -345,6 +341,141 @@ mod tests {
             gitignore_sync_excludes(tempdir.path()),
             vec!["./dist".to_string(), "dist".to_string()]
         );
+    }
+
+    #[test]
+    fn extension_excludes_resolve_from_the_selected_checkout() {
+        crate::test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("creates checkout");
+            fs::write(
+                checkout.path().join("homeboy.json"),
+                serde_json::json!({
+                    "id": "selected",
+                    "extensions": { "snapshot-fixture": {} }
+                })
+                .to_string(),
+            )
+            .expect("writes portable component");
+            let extension_dir =
+                crate::paths::extension("snapshot-fixture").expect("resolves extension directory");
+            fs::create_dir_all(&extension_dir).expect("creates extension directory");
+            fs::write(
+                extension_dir.join("snapshot-fixture.json"),
+                serde_json::json!({
+                    "name": "Snapshot fixture",
+                    "version": "1.0.0",
+                    "source_snapshot": {
+                        "sync_excludes": ["selected-cache/"]
+                    }
+                })
+                .to_string(),
+            )
+            .expect("writes extension manifest");
+
+            let component = crate::component::discover_from_portable(checkout.path())
+                .expect("discovers selected checkout");
+            assert!(component
+                .extensions
+                .as_ref()
+                .is_some_and(|extensions| extensions.contains_key("snapshot-fixture")));
+            let extension = crate::extension_store::load_extension("snapshot-fixture")
+                .expect("loads extension manifest");
+            assert_eq!(
+                extension
+                    .source_snapshot
+                    .as_ref()
+                    .map(|source| source.sync_excludes.as_slice()),
+                Some(["selected-cache/".to_string()].as_slice())
+            );
+
+            assert_eq!(
+                component_extension_sync_excludes(checkout.path()),
+                vec!["selected-cache/".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn extension_excludes_preserve_exact_project_attachment_configuration() {
+        crate::test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("creates checkout");
+            fs::write(
+                checkout.path().join("homeboy.json"),
+                serde_json::json!({
+                    "id": "selected",
+                    "remote_url": "https://github.com/example/selected.git"
+                })
+                .to_string(),
+            )
+            .expect("writes portable component");
+            let extension_dir =
+                crate::paths::extension("snapshot-fixture").expect("resolves extension directory");
+            fs::create_dir_all(&extension_dir).expect("creates extension directory");
+            fs::write(
+                extension_dir.join("snapshot-fixture.json"),
+                serde_json::json!({
+                    "name": "Snapshot fixture",
+                    "version": "1.0.0",
+                    "source_snapshot": {
+                        "sync_excludes": ["project-cache/"]
+                    }
+                })
+                .to_string(),
+            )
+            .expect("writes extension manifest");
+            crate::project::save(&crate::project::Project {
+                id: "site".to_string(),
+                components: vec![crate::project::ProjectComponentAttachment {
+                    id: "selected".to_string(),
+                    local_path: checkout.path().to_string_lossy().to_string(),
+                    ..Default::default()
+                }],
+                extensions: Some(std::collections::HashMap::from([(
+                    "snapshot-fixture".to_string(),
+                    crate::component::ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            })
+            .expect("saves project attachment");
+
+            assert_eq!(
+                component_extension_sync_excludes(checkout.path()),
+                vec!["project-cache/".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn unregistered_path_does_not_resolve_unrelated_components() {
+        crate::test_support::with_isolated_home(|home| {
+            let source = home.path().join("source-without-manifest");
+            let unrelated = home.path().join("unrelated");
+            fs::create_dir_all(&source).expect("creates source");
+            fs::create_dir_all(&unrelated).expect("creates unrelated checkout");
+            fs::write(
+                unrelated.join("homeboy.json"),
+                serde_json::json!({ "id": "unrelated" }).to_string(),
+            )
+            .expect("writes unrelated component");
+            crate::project::save(&crate::project::Project {
+                id: "site".to_string(),
+                components: vec![crate::project::ProjectComponentAttachment {
+                    id: "unrelated".to_string(),
+                    local_path: unrelated.to_string_lossy().to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .expect("saves unrelated attachment");
+            crate::component::portable::take_discovery_paths_for_test();
+
+            assert!(component_extension_sync_excludes(&source).is_empty());
+            let discovery_paths = crate::component::portable::take_discovery_paths_for_test();
+            assert!(
+                !discovery_paths.iter().any(|path| path == &unrelated),
+                "source lookup inspected the unrelated component: {discovery_paths:?}"
+            );
+        });
     }
 
     #[test]

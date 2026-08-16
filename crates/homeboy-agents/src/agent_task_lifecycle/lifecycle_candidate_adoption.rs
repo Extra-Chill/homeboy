@@ -98,12 +98,33 @@ pub fn start_candidate_adoption_with_policy(
     rerun_completed_gates: bool,
     replace_interrupted: bool,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        run_id,
+        candidate_sha,
+        ai_model,
+        active_gate,
+        rerun_completed_gates,
+        replace_interrupted,
+    )
+}
+
+pub(crate) fn start_candidate_adoption_with_policy_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    candidate_sha: &str,
+    ai_model: &str,
+    active_gate: &str,
+    rerun_completed_gates: bool,
+    replace_interrupted: bool,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let candidate_sha = candidate_sha.to_string();
     let ai_model = ai_model.to_string();
     let active_gate = active_gate.to_string();
     let mut conflict = false;
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let now = now_timestamp();
         let mut replacement = None;
         if let Some(existing) = record.candidate_adoption.as_mut() {
@@ -196,7 +217,7 @@ pub fn start_candidate_adoption_with_policy(
     })?;
     let record = match record {
         Some(record) => record,
-        None => store::read_record(&run_id)?,
+        None => lifecycle_store.read_record(&run_id)?,
     };
     if conflict {
         return Err(Error::validation_invalid_argument(
@@ -228,7 +249,16 @@ pub fn checkpoint_candidate_adoption_remediation(
     run_id: &str,
     remediation_run_id: &str,
 ) -> Result<()> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    checkpoint_candidate_adoption_remediation_in_store(&lifecycle_store, run_id, remediation_run_id)
+}
+
+pub(crate) fn checkpoint_candidate_adoption_remediation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    remediation_run_id: &str,
+) -> Result<()> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     let Some(attempt) = record.candidate_adoption.as_mut() else {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -247,7 +277,7 @@ pub fn checkpoint_candidate_adoption_remediation(
     attempt.remediation_status_command = Some(format!(
         "homeboy agent-task status {remediation_run_id} --full"
     ));
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(())
 }
 
@@ -257,8 +287,25 @@ pub fn start_candidate_adoption_gate(
     process_group: u32,
     timeout_seconds: u64,
 ) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    start_candidate_adoption_gate_in_store(
+        &lifecycle_store,
+        run_id,
+        command,
+        process_group,
+        timeout_seconds,
+    )
+}
+
+pub(crate) fn start_candidate_adoption_gate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    command: &str,
+    process_group: u32,
+    timeout_seconds: u64,
+) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         let Some(attempt) = record.candidate_adoption.as_mut() else {
             return false;
         };
@@ -289,6 +336,23 @@ pub(crate) fn heartbeat_candidate_adoption_gate(
     reveal_policy: crate::agent_task_gate::AgentTaskGateRevealPolicy,
     status: &crate::agent_task_gate::AgentTaskGateLiveStatus,
 ) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    heartbeat_candidate_adoption_gate_in_store(
+        &lifecycle_store,
+        run_id,
+        visibility,
+        reveal_policy,
+        status,
+    )
+}
+
+pub(crate) fn heartbeat_candidate_adoption_gate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    visibility: crate::agent_task_gate::AgentTaskGateVisibility,
+    reveal_policy: crate::agent_task_gate::AgentTaskGateRevealPolicy,
+    status: &crate::agent_task_gate::AgentTaskGateLiveStatus,
+) -> Result<()> {
     let status = match (visibility, reveal_policy) {
         (
             crate::agent_task_gate::AgentTaskGateVisibility::Private,
@@ -311,7 +375,7 @@ pub(crate) fn heartbeat_candidate_adoption_gate(
         _ => status.clone(),
     };
     let run_id = sanitize_run_id(run_id);
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         let Some(attempt) = record.candidate_adoption.as_mut() else {
             return false;
         };
@@ -332,15 +396,34 @@ pub(crate) fn heartbeat_candidate_adoption_gate(
 }
 
 pub fn candidate_adoption_cancel_requested(run_id: &str) -> Result<bool> {
-    Ok(store::read_record(&sanitize_run_id(run_id))?
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    candidate_adoption_cancel_requested_in_store(&lifecycle_store, run_id)
+}
+
+pub(crate) fn candidate_adoption_cancel_requested_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    Ok(lifecycle_store
+        .read_record(&sanitize_run_id(run_id))?
         .candidate_adoption
         .as_ref()
         .is_some_and(|attempt| attempt.state == "cancel_requested" || attempt.state == "cancelled"))
 }
 
 pub fn checkpoint_candidate_adoption(run_id: &str, phase: &str, active_gate: &str) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    checkpoint_candidate_adoption_in_store(&lifecycle_store, run_id, phase, active_gate)
+}
+
+pub(crate) fn checkpoint_candidate_adoption_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    active_gate: &str,
+) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         let Some(attempt) = record.candidate_adoption.as_mut() else {
             return false;
         };
@@ -362,8 +445,17 @@ pub fn finish_candidate_adoption(
     run_id: &str,
     error: Option<String>,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    finish_candidate_adoption_in_store(&lifecycle_store, run_id, error)
+}
+
+pub(crate) fn finish_candidate_adoption_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    error: Option<String>,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let Some(attempt) = record.candidate_adoption.as_mut() else {
             return false;
         };
@@ -385,12 +477,21 @@ pub fn finish_candidate_adoption(
         record.updated_at = Some(now);
         true
     })?;
-    Ok(record.unwrap_or(store::read_record(&run_id)?))
+    Ok(record.unwrap_or(lifecycle_store.read_record(&run_id)?))
 }
 
 pub fn record_candidate_adoption_result(run_id: &str, result: Value) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_candidate_adoption_result_in_store(&lifecycle_store, run_id, result)
+}
+
+pub(crate) fn record_candidate_adoption_result_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    result: Value,
+) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
-    store::mutate_record(&run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         let Some(attempt) = record.candidate_adoption.as_mut() else {
             return false;
         };

@@ -100,6 +100,24 @@ pub fn allocate_attempt(
     )
 }
 
+pub(crate) fn allocate_attempt_at(
+    data_root: &Path,
+    run_id: &str,
+    plan_id: &str,
+    task_id: &str,
+    attempt: u32,
+) -> Result<ControllerScratchAllocation> {
+    let store = data_root.join("controller-scratch");
+    allocate_attempt_at_roots(
+        run_id,
+        plan_id,
+        task_id,
+        attempt,
+        store.join("attempts"),
+        store.join("resources.json"),
+    )
+}
+
 #[cfg(test)]
 pub fn allocate_test_attempt(
     run_id: &str,
@@ -804,6 +822,18 @@ pub(crate) fn finalize_run_at(data_root: &Path, run_id: &str) -> Result<()> {
     finalize_run_at_index(
         data_root.join("controller-scratch/resources.json"),
         paths::artifact_root,
+        run_id,
+    )
+}
+
+pub(crate) fn finalize_run_at_explicit_roots(
+    data_root: &Path,
+    artifact_root: &Path,
+    run_id: &str,
+) -> Result<()> {
+    finalize_run_at_index(
+        data_root.join("controller-scratch/resources.json"),
+        || Ok(artifact_root.to_path_buf()),
         run_id,
     )
 }

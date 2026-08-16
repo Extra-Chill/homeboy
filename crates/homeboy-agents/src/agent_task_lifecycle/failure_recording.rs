@@ -727,7 +727,13 @@ pub(crate) fn record_aggregate_in_store(
     crate::controller_scratch::finalize_run_at(&lifecycle_store.data_root(), &record.run_id)?;
     lifecycle_store.write_aggregate_and_record(record, aggregate)?;
     record_terminal_artifact_projection_in_store(lifecycle_store, record, aggregate)?;
-    update_cook_candidate_after_completion(record, aggregate, None)?;
+    // The Cook index this completion updates belongs to the same store the
+    // aggregate was just committed into. Resolving it ambiently made this
+    // rooted function write its substantive-candidate pointer into whatever
+    // home the environment pointed at, which no positive assertion here can
+    // see: every record and aggregate read back from the injected store is
+    // already correct at that point (#7505).
+    update_cook_candidate_after_completion_in_store(lifecycle_store, record, aggregate, None)?;
     Ok(record.clone())
 }
 
@@ -739,7 +745,7 @@ pub(crate) fn record_terminal_artifact_projection(
     record_terminal_artifact_projection_in_store(&lifecycle_store, record, aggregate)
 }
 
-fn record_terminal_artifact_projection_in_store(
+pub(crate) fn record_terminal_artifact_projection_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
@@ -773,7 +779,8 @@ fn record_terminal_artifact_projection_in_store(
             }
         }
     }
-    match project_terminal_artifacts(record, aggregate) {
+    let observation_store = lifecycle_store.open_observation_initialized()?;
+    match project_terminal_artifacts_in_store(&observation_store, record, aggregate) {
         Ok(()) => {
             record.ensure_metadata_object().insert(
                 "artifact_projection".to_string(),
@@ -1094,6 +1101,14 @@ pub(crate) fn project_terminal_artifacts(
     aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
     let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    project_terminal_artifacts_in_store(&store, record, aggregate)
+}
+
+fn project_terminal_artifacts_in_store(
+    store: &homeboy_core::observation::ObservationStore,
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> Result<()> {
     let status = match record.state {
         AgentTaskRunState::Succeeded => "pass",
         AgentTaskRunState::CandidateRecoverable => "fail",
@@ -1197,12 +1212,12 @@ pub(crate) fn project_terminal_artifacts(
             // direct import. The import remains evidence, while the finalized
             // projection keeps its established derived controller identity.
             let finalized_path = remote_runner
-                .map(|_| controller_finalized_artifact_path(artifact))
+                .map(|_| controller_finalized_artifact_path(store, artifact))
                 .transpose()?
                 .flatten();
             if finalized_path.is_some() {
                 stamp_legacy_artifact_provenance(
-                    &store,
+                    store,
                     &record.run_id,
                     &outcome.task_id,
                     artifact,
@@ -1349,6 +1364,7 @@ pub(crate) fn project_terminal_artifacts(
             } else {
                 let path = artifact.path.as_deref().expect("local path checked above");
                 let path = controller_projected_local_artifact_path(
+                    store,
                     &record.run_id,
                     &outcome.task_id,
                     &artifact.id,
@@ -1377,6 +1393,7 @@ pub(crate) fn project_terminal_artifacts(
 /// projection. The aggregate path remains provenance only and may disappear
 /// when the producer workspace is cleaned up.
 fn controller_projected_local_artifact_path(
+    store: &homeboy_core::observation::ObservationStore,
     run_id: &str,
     task_id: &str,
     artifact_id: &str,
@@ -1400,7 +1417,8 @@ fn controller_projected_local_artifact_path(
             None,
         ));
     }
-    let path = homeboy_core::paths::artifact_root()?
+    let path = store
+        .artifact_root()?
         .join("controller-projected-agent-task-artifacts")
         .join(homeboy_core::paths::sanitize_path_segment(run_id))
         .join(homeboy_core::paths::sanitize_path_segment(task_id))
@@ -1484,7 +1502,7 @@ fn reusable_terminal_artifact(
                 None,
             ));
         }
-        if controller_owned_artifact_path(Path::new(&existing.path)) {
+        if controller_owned_artifact_path(store, Path::new(&existing.path)) {
             // Pre-marker controller projections already have durable storage;
             // retain their record and stamp the current lookup metadata.
             store.update_artifact_metadata(artifact_id, metadata.clone())?;
@@ -1496,6 +1514,7 @@ fn reusable_terminal_artifact(
         // Preserve that record and derive a separate controller-local copy
         // before allowing terminal recovery to use its verified bytes.
         let path = controller_projected_local_artifact_path(
+            store,
             run_id,
             task_id,
             &artifact.id,
@@ -1600,8 +1619,11 @@ fn stamp_legacy_artifact_provenance(
 /// Observation artifacts are controller-owned only when their resolved file is
 /// beneath the controller artifact root. A matching digest alone must not turn
 /// an ephemeral producer path into durable lifecycle input.
-fn controller_owned_artifact_path(path: &Path) -> bool {
-    let Ok(root) = homeboy_core::paths::artifact_root().and_then(|root| {
+fn controller_owned_artifact_path(
+    store: &homeboy_core::observation::ObservationStore,
+    path: &Path,
+) -> bool {
+    let Ok(root) = store.artifact_root().and_then(|root| {
         std::fs::canonicalize(root).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
@@ -1609,6 +1631,13 @@ fn controller_owned_artifact_path(path: &Path) -> bool {
             )
         })
     }) else {
+        return false;
+    };
+    controller_owned_artifact_path_at(path, &root)
+}
+
+fn controller_owned_artifact_path_at(path: &Path, root: &Path) -> bool {
+    let Ok(root) = std::fs::canonicalize(root) else {
         return false;
     };
     let Ok(path) = std::fs::canonicalize(path) else {
@@ -1619,14 +1648,17 @@ fn controller_owned_artifact_path(path: &Path) -> bool {
 
 /// Find finalized bytes already copied into the controller artifact root. Lab
 /// aggregate paths describe runner provenance and are never read after recovery.
-fn controller_finalized_artifact_path(artifact: &AgentTaskArtifact) -> Result<Option<PathBuf>> {
+fn controller_finalized_artifact_path(
+    store: &homeboy_core::observation::ObservationStore,
+    artifact: &AgentTaskArtifact,
+) -> Result<Option<PathBuf>> {
     let Some(expected_sha256) = artifact.sha256.as_deref() else {
         return Ok(None);
     };
     let Some(expected_size) = artifact.size_bytes else {
         return Ok(None);
     };
-    let root = homeboy_core::paths::artifact_root()?.join("executor-finalized");
+    let root = store.artifact_root()?.join("executor-finalized");
     if !root.is_dir() {
         return Ok(None);
     }
@@ -1690,6 +1722,17 @@ pub fn verified_controller_artifact_projection_path(
     task_id: &str,
     artifact: &AgentTaskArtifact,
 ) -> Result<Option<PathBuf>> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    verified_controller_artifact_projection_path_in_store(&store, run_id, task_id, artifact)
+}
+
+pub(crate) fn verified_controller_artifact_projection_path_in_store(
+    store: &homeboy_core::observation::ObservationStore,
+    run_id: &str,
+    task_id: &str,
+    artifact: &AgentTaskArtifact,
+) -> Result<Option<PathBuf>> {
+    let artifact_root = store.artifact_root()?;
     let Some(expected_sha256) = artifact.sha256.as_deref() else {
         return Ok(None);
     };
@@ -1699,7 +1742,6 @@ pub fn verified_controller_artifact_projection_path(
     else {
         return Ok(None);
     };
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let mut candidates: Vec<_> = store
         .list_artifacts(run_id)?
         .into_iter()
@@ -1712,7 +1754,10 @@ pub fn verified_controller_artifact_projection_path(
                         .pointer("/agent_task/projection")
                         .and_then(serde_json::Value::as_str),
                     Some("controller_local" | "controller_finalized" | "runner_mirrored")
-                ) || controller_owned_artifact_path(Path::new(&candidate.path)))
+                ) || controller_owned_artifact_path_at(
+                    Path::new(&candidate.path),
+                    &artifact_root,
+                ))
                 && candidate
                     .metadata_json
                     .pointer("/agent_task/task_id")
@@ -1760,7 +1805,7 @@ pub fn verified_controller_artifact_projection_path(
             None,
         ));
     }
-    if !controller_owned_artifact_path(&path) {
+    if !controller_owned_artifact_path_at(&path, &artifact_root) {
         return Err(Error::validation_invalid_argument(
             "artifact_id",
             format!(
@@ -1796,6 +1841,27 @@ pub fn verified_controller_artifact_projection(
     expected_record_id: Option<&str>,
 ) -> Result<Option<(String, Vec<u8>)>> {
     let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    verified_controller_artifact_projection_in_store(
+        &store,
+        run_id,
+        task_id,
+        logical_artifact_id,
+        kind,
+        expected_sha256,
+        expected_record_id,
+    )
+}
+
+pub(crate) fn verified_controller_artifact_projection_in_store(
+    store: &homeboy_core::observation::ObservationStore,
+    run_id: &str,
+    task_id: &str,
+    logical_artifact_id: &str,
+    kind: &str,
+    expected_sha256: &str,
+    expected_record_id: Option<&str>,
+) -> Result<Option<(String, Vec<u8>)>> {
+    let artifact_root = store.artifact_root()?;
     let candidates: Vec<_> = store
         .list_artifacts(run_id)?
         .into_iter()
@@ -1840,6 +1906,14 @@ pub fn verified_controller_artifact_projection(
         ));
     }
     let path = PathBuf::from(&candidate.path);
+    if !controller_owned_artifact_path_at(&path, &artifact_root) {
+        return Err(Error::validation_invalid_argument(
+            "gate_feedback_candidate_baseline",
+            "controller artifact mirror is outside the owning artifact root",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
     let bytes = std::fs::read(&path).map_err(|error| {
         Error::validation_invalid_argument(
             "gate_feedback_candidate_baseline",
@@ -2097,5 +2171,48 @@ mod tests {
                 .message
                 .contains("conflicts with terminal artifact projection"));
         });
+    }
+
+    #[test]
+    fn controller_local_projection_isolates_identical_ids_across_artifact_roots() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_store = AgentTaskLifecycleStore::new(left_context.path_roots())
+            .open_observation_initialized()
+            .expect("left observation store");
+        let right_store = AgentTaskLifecycleStore::new(right_context.path_roots())
+            .open_observation_initialized()
+            .expect("right observation store");
+        let left_source = left_context.root().join("source.patch");
+        let right_source = right_context.root().join("source.patch");
+        std::fs::write(&left_source, b"left").expect("left source");
+        std::fs::write(&right_source, b"right").expect("right source");
+
+        let left = controller_projected_local_artifact_path(
+            &left_store,
+            "same-run",
+            "same-task",
+            "same-artifact",
+            left_source.to_str().unwrap(),
+            4,
+            &format!("{:x}", sha2::Sha256::digest(b"left")),
+        )
+        .expect("left projection");
+        let right = controller_projected_local_artifact_path(
+            &right_store,
+            "same-run",
+            "same-task",
+            "same-artifact",
+            right_source.to_str().unwrap(),
+            5,
+            &format!("{:x}", sha2::Sha256::digest(b"right")),
+        )
+        .expect("right projection");
+
+        assert!(left.starts_with(left_store.artifact_root().unwrap()));
+        assert!(right.starts_with(right_store.artifact_root().unwrap()));
+        assert_ne!(left, right);
+        assert_eq!(std::fs::read(left).unwrap(), b"left");
+        assert_eq!(std::fs::read(right).unwrap(), b"right");
     }
 }

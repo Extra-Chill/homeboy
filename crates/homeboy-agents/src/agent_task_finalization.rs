@@ -45,28 +45,43 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    finalize_pr_with_backend_mode(options, backend, true)
+    finalize_pr_with_backend_mode(options, backend, true, None)
+}
+
+pub(crate) fn finalize_pr_with_backend_in_store<B: AgentTaskPrFinalizationBackend>(
+    options: AgentTaskPrFinalizationOptions,
+    backend: &mut B,
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+) -> Result<AgentTaskPrFinalizationReport> {
+    finalize_pr_with_backend_mode(options, backend, true, Some(lifecycle_store))
 }
 
 pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    finalize_pr_with_backend_mode(options, backend, false)
+    finalize_pr_with_backend_mode(options, backend, false, None)
 }
 
 fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     mut options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
     publish: bool,
+    lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
 ) -> Result<AgentTaskPrFinalizationReport> {
     let mut durable_changed_files = Vec::new();
     let durable_acceptance;
     if options.manual_finalization {
         durable_acceptance = validate_manual_finalization_policy(&options.run_id)?;
     } else {
-        let lifecycle = backend.hydrate_run(&options.run_id)?;
-        let gate_proof = backend.hydrate_gate_proof(&options.run_id)?;
+        let lifecycle = match lifecycle_store {
+            Some(store) => backend.hydrate_run_in_store(store, &options.run_id)?,
+            None => backend.hydrate_run(&options.run_id)?,
+        };
+        let gate_proof = match lifecycle_store {
+            Some(store) => backend.hydrate_gate_proof_in_store(store, &options.run_id)?,
+            None => backend.hydrate_gate_proof(&options.run_id)?,
+        };
         let review_form_only_follow_up =
             is_review_form_only_follow_up(&gate_proof.promotion, &gate_proof.run_id);
         let authenticated_follow_up = review_form_only_follow_up
@@ -85,7 +100,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             ));
         }
         validate_gate_proof_binding(&gate_proof, &options)?;
-        durable_acceptance = validate_durable_acceptance(&options.run_id, &gate_proof.promotion)?;
+        durable_acceptance =
+            validate_durable_acceptance(&options.run_id, &gate_proof.promotion, lifecycle_store)?;
         let eligibility =
             validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
         durable_changed_files = normalize_changed_files(&gate_proof.promotion.changed_files);
@@ -244,7 +260,10 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     }
 
     if !options.manual_finalization {
-        backend.validate_candidate(&options)?;
+        match lifecycle_store {
+            Some(store) => backend.validate_candidate_in_store(store, &options)?,
+            None => backend.validate_candidate(&options)?,
+        }
     }
     // Validate intent before commit mutation, then bind evidence to immutable HEAD before push.
     let prospective_identity = if commit_required {
@@ -415,8 +434,12 @@ fn validate_manual_finalization_policy(
 fn validate_durable_acceptance(
     run_id: &str,
     promotion: &AgentTaskPromotionReport,
+    lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
 ) -> Result<Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>> {
-    let record = match crate::agent_task_lifecycle::persisted_status(run_id) {
+    let record = match lifecycle_store.map_or_else(
+        || crate::agent_task_lifecycle::persisted_status(run_id),
+        |store| store.read_record(run_id),
+    ) {
         Ok(record) => record,
         // Durable proofs created before acceptance existed have no lifecycle
         // record to carry an acceptance requirement. Preserve that established

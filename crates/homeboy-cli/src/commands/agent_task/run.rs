@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
+use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider;
@@ -126,6 +127,27 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
     }
 }
 
+/// Operator-facing statement that an attached local Cook shares its client's
+/// lifetime.
+///
+/// `--detach-after-handoff` already documents the safe shape — with local
+/// placement the Cook is re-executed in its own session, so it survives a client
+/// that is interrupted or times out — but nothing said the default was the other
+/// one. An attached local Cook runs its whole provider stack inside the calling
+/// client's process tree, so a client that goes away takes the provider with it
+/// and leaves the durable run reporting `queued` with zero attempts and nothing
+/// executing it (#12570). This is diagnostics only: the default is unchanged and
+/// is still frequently the right one, so state the consequence rather than
+/// choosing differently.
+pub(crate) fn cook_attached_local_placement_disclosure(
+    provider_placement: Option<&str>,
+    detach_after_handoff: bool,
+) -> Option<String> {
+    (provider_placement == Some("local") && !detach_after_handoff).then(|| {
+        "cook: attached local placement — the provider runs in this client's process tree and will not survive it; pass --detach-after-handoff to re-execute the Cook in its own session".to_string()
+    })
+}
+
 fn cook_resolved_policy_disclosure(max_attempts: u32, plan: &AgentTaskPlan) -> String {
     let budget = &plan.options.execution_budget;
     format!(
@@ -133,6 +155,32 @@ fn cook_resolved_policy_disclosure(max_attempts: u32, plan: &AgentTaskPlan) -> S
         budget.max_same_provider_retries,
         budget.max_provider_rotations,
         budget.max_provider_executions.max(max_attempts),
+    )
+}
+
+/// Operator-facing statement of the wall-clock budget one provider execution
+/// gets before it is cancelled at its deadline.
+///
+/// The budget was invisible: `--timeout-ms` documented only that it defaulted to
+/// "Homeboy's provider timeout", so the only way to learn the number was to
+/// spend a run discovering it — the deadline is named for the first time in a
+/// `failure_classification: "timeout"` report, long after the sizing decision
+/// that needed it (#12568). State it beside the retry budget, where the rest of
+/// the execution budget is already disclosed.
+fn cook_provider_timeout_disclosure(plan: &AgentTaskPlan) -> String {
+    let limits = plan.tasks.first().map(|task| &task.limits);
+    // Mirror the resolution the provider runner performs, including the
+    // task-level value `AgentTaskPlan::canonicalize` would otherwise copy down
+    // from plan options later.
+    let timeout_ms = effective_provider_timeout_ms(
+        limits
+            .and_then(|limits| limits.timeout_ms)
+            .or(plan.options.timeout_ms),
+        limits.and_then(|limits| limits.max_runtime_ms),
+    );
+    format!(
+        "cook: provider timeout: {}s per provider execution (override with --timeout-ms)",
+        timeout_ms / 1_000
     )
 }
 
@@ -450,6 +498,7 @@ fn preview_placement_policy() -> Value {
 }
 
 fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
+    let argv = crate::command_capability::homeboy_owned_args(argv);
     let placement = argv
         .iter()
         .enumerate()
@@ -789,8 +838,12 @@ mod preview_tests {
             "--placement=lab-or-local".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
+            "--".to_string(),
+            "--placement=local".to_string(),
+            "--runner=forwarded".to_string(),
         ]);
         assert_eq!(policy["requested"], "lab-or-local");
+        assert_eq!(policy["runner"], Value::Null);
         assert_eq!(policy["route_executed"], false);
     }
 
@@ -1630,7 +1683,8 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             && provider.apply_enabled
             && (provider.commands.resolve_identity.is_some()
                 || provider.commands.resolve.is_some()
-                || provider.commands.list.is_some())
+                || provider.commands.list.is_some()
+                || provider.commands.ensure.is_some())
     }) {
         return Ok(serde_json::json!({
             "action": "lookup_pending",
@@ -2619,6 +2673,7 @@ where
             cook_resolved_policy_disclosure(args.max_attempts, &initial_plan)
         );
         eprintln!("{}", cook_rotation_disclosure(&initial_plan));
+        eprintln!("{}", cook_provider_timeout_disclosure(&initial_plan));
     }
     if let Some(provenance) = provenance {
         record_cook_argument_provenance(&mut initial_plan, provenance);
@@ -3846,8 +3901,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        cook_continuation_status, cook_report_with_continuation, cook_resolved_policy_disclosure,
-        durable_cook_identity_lines, preflight_continue_cook,
+        cook_attached_local_placement_disclosure, cook_continuation_status,
+        cook_provider_timeout_disclosure, cook_report_with_continuation,
+        cook_resolved_policy_disclosure, durable_cook_identity_lines, preflight_continue_cook,
     };
     use crate::commands::agent_task::args::CookContinueArgs;
 
@@ -3885,6 +3941,54 @@ mod tests {
             cook_resolved_policy_disclosure(2, &plan),
             "cook: retry policy: 1 initial execution, 1 same-provider remediation retry(ies), 2 rotation(s), 4 provider execution(s) maximum"
         );
+    }
+
+    /// A budget nobody states is a budget an operator can only discover by
+    /// losing a run to it (#12568), so the preamble reports the resolved value —
+    /// the inherited default included.
+    #[test]
+    fn provider_timeout_disclosure_reports_the_resolved_budget() {
+        let mut plan = homeboy::agents::agent_task_scheduler::AgentTaskPlan::new("plan", vec![]);
+
+        assert_eq!(
+            cook_provider_timeout_disclosure(&plan),
+            format!(
+                "cook: provider timeout: {}s per provider execution (override with --timeout-ms)",
+                homeboy::agents::agent_task_timeout::DEFAULT_PROVIDER_TIMEOUT_MS / 1_000
+            ),
+            "the inherited default must be named, not left implicit"
+        );
+
+        plan.options.timeout_ms = Some(2_700_000);
+        assert_eq!(
+            cook_provider_timeout_disclosure(&plan),
+            "cook: provider timeout: 2700s per provider execution (override with --timeout-ms)"
+        );
+    }
+
+    /// The unsafe shape is the default one, so the submission preamble is the
+    /// only place an operator learns that this Cook dies with its client.
+    #[test]
+    fn attached_local_placement_is_disclosed_at_submission() {
+        assert_eq!(
+            cook_attached_local_placement_disclosure(Some("local"), false).as_deref(),
+            Some("cook: attached local placement — the provider runs in this client's process tree and will not survive it; pass --detach-after-handoff to re-execute the Cook in its own session")
+        );
+    }
+
+    /// A detached local Cook already survives its client, and a Lab-placed
+    /// provider never ran inside it. Warning there would be noise.
+    #[test]
+    fn a_detached_or_lab_placed_cook_is_not_warned_about_its_client() {
+        assert_eq!(
+            cook_attached_local_placement_disclosure(Some("local"), true),
+            None
+        );
+        assert_eq!(
+            cook_attached_local_placement_disclosure(Some("lab"), false),
+            None
+        );
+        assert_eq!(cook_attached_local_placement_disclosure(None, false), None);
     }
 
     #[test]

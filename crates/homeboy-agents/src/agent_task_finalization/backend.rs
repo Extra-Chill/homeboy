@@ -37,8 +37,50 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         })
     }
 
+    fn hydrate_run_in_store(
+        &mut self,
+        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<RunLifecycleRecord> {
+        Ok(lifecycle_store.read_record(run_id)?.lifecycle)
+    }
+
+    fn hydrate_gate_proof_in_store(
+        &mut self,
+        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<AgentTaskPrDurableGateProof> {
+        let record = lifecycle_store.read_record(run_id)?;
+        let promotion = record.metadata.get("latest_promotion").cloned().ok_or_else(|| Error::validation_invalid_argument("run_id", "normal finalization requires the run's persisted applied promotion; run agent-task promote first or use --manual-finalization", None, None))?;
+        let promotion: AgentTaskPromotionReport =
+            serde_json::from_value(promotion).map_err(|_| {
+                Error::validation_invalid_argument(
+                    "run_id",
+                    "durable latest promotion record is invalid",
+                    None,
+                    None,
+                )
+            })?;
+        Ok(AgentTaskPrDurableGateProof {
+            run_id: record.run_id,
+            promotion,
+        })
+    }
+
     fn validate_candidate(&mut self, options: &AgentTaskPrFinalizationOptions) -> Result<()> {
         validate_real_candidate_fingerprint(options)?;
+        homeboy_core::repository_integrity::verify_tracked_symlink_portability(
+            std::path::Path::new(&options.path),
+            "HEAD",
+        )
+    }
+
+    fn validate_candidate_in_store(
+        &mut self,
+        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        options: &AgentTaskPrFinalizationOptions,
+    ) -> Result<()> {
+        validate_real_candidate_fingerprint_in_store(lifecycle_store, options)?;
         homeboy_core::repository_integrity::verify_tracked_symlink_portability(
             std::path::Path::new(&options.path),
             "HEAD",
@@ -629,6 +671,21 @@ pub(super) fn validate_real_candidate_fingerprint(
     options: &AgentTaskPrFinalizationOptions,
 ) -> Result<()> {
     let record = crate::agent_task_lifecycle::status(&options.run_id)?;
+    validate_real_candidate_fingerprint_from_record(options, &record)
+}
+
+pub(super) fn validate_real_candidate_fingerprint_in_store(
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    options: &AgentTaskPrFinalizationOptions,
+) -> Result<()> {
+    let record = lifecycle_store.read_record(&options.run_id)?;
+    validate_real_candidate_fingerprint_from_record(options, &record)
+}
+
+fn validate_real_candidate_fingerprint_from_record(
+    options: &AgentTaskPrFinalizationOptions,
+    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<()> {
     let promotion: AgentTaskPromotionReport = deserialize_persisted_value(
         record.metadata.get("latest_promotion").cloned(),
         "normal finalization requires persisted latest_promotion",

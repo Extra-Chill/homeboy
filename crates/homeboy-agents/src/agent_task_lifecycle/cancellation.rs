@@ -64,6 +64,246 @@ pub fn cancel_exact_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskR
     cancel_resolved_run(&sanitize_run_id(run_id), reason)
 }
 
+/// Cancel one literal run through an explicitly selected lifecycle store.
+///
+/// Reserved handoff reconciliation needs exact-record semantics, but must not
+/// cross into another root merely because two test or controller roots use the
+/// same run ID.
+pub(super) fn cancel_exact_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    reason: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let committed = lifecycle_store.with_config_lock(|| {
+        let record = lifecycle_store.read_record(&run_id)?;
+        ensure_rooted_exact_cancellation_supported(&record)?;
+        if successful_provider_execution_is_pending_import(&record) {
+            let mut blocker = None;
+            return lifecycle_store
+                .mutate_record_locked_without_terminal_projection(&run_id, |record| {
+                    if record.state.is_terminal() {
+                        return false;
+                    }
+                    if let Err(error) = ensure_rooted_exact_cancellation_supported(record) {
+                        blocker = Some(error);
+                        return false;
+                    }
+                    defer_cancellation_for_terminal_provider(record, reason)
+                })
+                .and_then(|record| match blocker {
+                    Some(error) => Err(error),
+                    None => Ok(record),
+                });
+        }
+        let service_cleanup = if record.metadata.get("managed_service_supervisor").is_some() {
+            let services = crate::agent_task_scheduler::managed_services::reconcile_run_services_at(
+                &lifecycle_store.data_root(),
+                &record.run_id,
+                reason.unwrap_or("cancelled"),
+            )
+            .map_err(Error::internal_unexpected)?;
+            Some(json!({ "transport": "local", "services": services }))
+        } else {
+            None
+        };
+        let cancellation = if record.state == AgentTaskRunState::Running
+            || (record.state == AgentTaskRunState::Queued
+                && record.runner_id().is_some()
+                && record.runner_job_id().is_some())
+        {
+            classify_live_cancellation(&record)?
+        } else {
+            LiveCancellationOutcome::NotRunning
+        };
+        if let LiveCancellationOutcome::RunnerJobCancelled { job, .. } = &cancellation {
+            if job.status.is_terminal() && job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
+                return Err(Error::validation_invalid_argument(
+                    "run_id",
+                    "runner completed before rooted cancellation could be projected; refusing to overwrite its terminal result",
+                    Some(record.run_id),
+                    None,
+                ));
+            }
+        }
+        let mut blocker = None;
+        lifecycle_store.mutate_record_locked_without_terminal_projection(&run_id, |record| {
+            if record.state.is_terminal() {
+                return false;
+            }
+            if let Err(error) = ensure_rooted_exact_cancellation_supported(record) {
+                blocker = Some(error);
+                return false;
+            }
+            if successful_provider_execution_is_pending_import(record) {
+                return defer_cancellation_for_terminal_provider(record, reason);
+            }
+            let cancelled_at = now_timestamp();
+            record.updated_at = Some(cancelled_at.clone());
+            set_run_state(record, AgentTaskRunState::Cancelled);
+            for task in &mut record.tasks {
+                if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+                    task.state = AgentTaskState::Cancelled;
+                }
+            }
+            let runner_id = record.runner_id().map(str::to_string);
+            let runner_job_id = record.runner_job_id().map(str::to_string);
+            let metadata = record.ensure_metadata_object();
+            terminalize_running_provider_executions(metadata, &cancelled_at);
+            metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
+            metadata.insert("cancelled_by_pid".to_string(), json!(std::process::id()));
+            metadata.insert(
+                "cancel_reason".to_string(),
+                json!(reason.unwrap_or("cancel requested")),
+            );
+            if let Some(service_cleanup) = service_cleanup.clone() {
+                metadata.insert("managed_service_cleanup".to_string(), service_cleanup);
+            }
+            match &cancellation {
+                LiveCancellationOutcome::Terminated(termination) => {
+                    metadata.insert(
+                        "live_cancellation".to_string(),
+                        json!({
+                            "owner_pid": termination.owner_pid,
+                            "descendant_pids": termination.descendant_pids,
+                            "signalled_pids": termination.signalled_pids,
+                            "signal": termination.signal,
+                            "killed_pids": termination.killed_pids,
+                            "surviving_pids": termination.surviving_pids,
+                            "recovery_commands": termination.recovery_commands,
+                        }),
+                    );
+                }
+                LiveCancellationOutcome::RunnerJobCancelled { job, events } => {
+                    metadata.insert(
+                        "live_cancellation".to_string(),
+                        json!({
+                            "runner_id": runner_id,
+                            "runner_job_id": runner_job_id,
+                            "runner_job_status": job.status,
+                            "runner_job_events": events,
+                            "cancellation": "runner_job_cancel",
+                        }),
+                    );
+                }
+                LiveCancellationOutcome::Unsupported(unsupported) => {
+                    metadata.insert(
+                        "live_cancellation_unsupported".to_string(),
+                        json!({
+                            "reason": unsupported.reason,
+                            "owner_pid": unsupported.owner_pid,
+                            "runner_id": unsupported.runner_id,
+                            "runner_job_id": unsupported.runner_job_id,
+                            "recovery_commands": unsupported.recovery_commands,
+                        }),
+                    );
+                }
+                LiveCancellationOutcome::NotRunning => {}
+            }
+            true
+        })
+        .and_then(|record| match blocker {
+            Some(error) => Err(error),
+            None => Ok(record),
+        })
+    })?;
+    if let Some(record) = committed.as_ref() {
+        lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
+    }
+    let record = committed.unwrap_or(lifecycle_store.read_record(&run_id)?);
+    if record.state == AgentTaskRunState::Cancelled {
+        crate::controller_scratch::finalize_run_at_explicit_roots(
+            &lifecycle_store.data_root(),
+            &lifecycle_store.artifact_root(),
+            &run_id,
+        )?;
+        homeboy_core::controller_runtime::cancel_admission_at(
+            &lifecycle_store.data_root().join("controller-runtimes"),
+            &run_id,
+        )?;
+    }
+    Ok(record)
+}
+
+fn ensure_rooted_exact_cancellation_supported(record: &AgentTaskRunRecord) -> Result<()> {
+    if record.state.is_terminal() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "agent-task run '{}' is already terminal with state {:?}",
+                record.run_id, record.state
+            ),
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
+    // These paths bind or project durable lifecycle records through ambient
+    // stores today. Refuse before any lifecycle mutation rather than splitting
+    // ownership across roots.
+    if record.candidate_adoption.as_ref().is_some_and(|attempt| {
+        attempt.is_active()
+            || attempt.state == "cancel_requested"
+            || attempt.phase == "gate_orphaned"
+    }) || record
+        .metadata
+        .get("lab_staging_controller_job_id")
+        .is_some()
+        || record
+            .metadata
+            .pointer("/runner_submission_intent/state")
+            .and_then(Value::as_str)
+            == Some("pending")
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "rooted exact cancellation cannot reconcile controller-owned or pending runner work without an explicit lifecycle-store transport",
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
+    if record
+        .metadata
+        .get("managed_service_supervisor")
+        .and_then(Value::as_object)
+        .and_then(|owner| owner.get("runner_id"))
+        .is_some()
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "rooted exact cancellation cannot reconcile runner-owned managed services without an explicit lifecycle-store transport",
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn defer_cancellation_for_terminal_provider(
+    record: &mut AgentTaskRunRecord,
+    reason: Option<&str>,
+) -> bool {
+    record.ensure_metadata_object().insert(
+        "cancellation_deferred_for_terminal_provider".to_string(),
+        json!({
+            "requested_at": now_timestamp(),
+            "reason": reason.unwrap_or("cancel requested"),
+        }),
+    );
+    true
+}
+
+fn successful_provider_execution_is_pending_import(record: &AgentTaskRunRecord) -> bool {
+    record.state == AgentTaskRunState::Running
+        && !record.is_runner_backed()
+        && record.metadata["provider_executions"]
+            .as_array()
+            .is_some_and(|executions| {
+                executions
+                    .iter()
+                    .any(|execution| execution["state"] == json!("succeeded"))
+            })
+}
+
 fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
     // Cook IDs are stable aliases. Match status and logs by following an
     // materialized attempt once one exists; before then the handoff parent is
@@ -207,11 +447,12 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
     // its key before cancellation so the original job is cancelled rather than
     // left running on the runner. Preparing intents have no replay request and
     // deliberately do not reach this lookup.
-    if record.state == AgentTaskRunState::Queued
-        && super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted(
-            &record.run_id,
-        )?
-    {
+    if matches!(
+        record.state,
+        AgentTaskRunState::Queued | AgentTaskRunState::Running
+    ) && super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted(
+        &record.run_id,
+    )? {
         record = store::read_record(&record.run_id)?;
     }
     if record.state == AgentTaskRunState::Cancelled {
@@ -924,6 +1165,73 @@ mod tests {
                 "an unattached child must observe the durable fence before it can materialize"
             );
         });
+    }
+
+    #[test]
+    fn rooted_exact_cancellation_terminalizes_a_running_reserved_child() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left = AgentTaskLifecycleStore::new(left_context.path_roots());
+        let right = AgentTaskLifecycleStore::new(right_context.path_roots());
+        let run_id = "same-running-reserved-child";
+
+        for store in [&left, &right] {
+            store
+                .submit_plan_with_runtime_admission(
+                    &AgentTaskPlan::new("running-reserved-child", Vec::new()),
+                    run_id,
+                    |_| Ok(json!({})),
+                )
+                .expect("submit isolated child");
+            store
+                .mutate_record(run_id, |record| {
+                    set_run_state(record, AgentTaskRunState::Running);
+                    true
+                })
+                .expect("mark isolated child running");
+        }
+
+        cancel_exact_run_in_store(&left, run_id, Some("parent cancelled"))
+            .expect("cancel running child in selected root");
+
+        assert_eq!(
+            left.read_record(run_id).expect("read left child").state,
+            AgentTaskRunState::Cancelled
+        );
+        assert_eq!(
+            right.read_record(run_id).expect("read right child").state,
+            AgentTaskRunState::Running
+        );
+    }
+
+    #[test]
+    fn rooted_exact_cancellation_preserves_success_pending_aggregate_import() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = AgentTaskLifecycleStore::new(context.path_roots());
+        let run_id = "rooted-success-pending-import";
+        store
+            .submit_plan_with_runtime_admission(
+                &AgentTaskPlan::new("success-pending-import", Vec::new()),
+                run_id,
+                |_| Ok(json!({})),
+            )
+            .unwrap();
+        store
+            .mutate_record(run_id, |record| {
+                set_run_state(record, AgentTaskRunState::Running);
+                record.metadata["provider_executions"] = json!([{ "state": "succeeded" }]);
+                true
+            })
+            .unwrap();
+
+        let record = cancel_exact_run_in_store(&store, run_id, Some("parent cancelled"))
+            .expect("defer cancellation for successful provider");
+
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(
+            record.metadata["cancellation_deferred_for_terminal_provider"]["reason"],
+            "parent cancelled"
+        );
     }
 }
 

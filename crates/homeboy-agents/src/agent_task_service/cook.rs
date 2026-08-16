@@ -27,9 +27,11 @@ use homeboy_core::{Error, Result};
 use homeboy_engine_primitives::shell::quote_arg;
 
 use super::cook_activity::{CookActivityProbe, CookProviderActivity};
+#[cfg(test)]
+use super::cook_baseline::materialize_follow_up_baseline;
 use super::cook_baseline::{
     compare_gate_failures_to_verified_base, cook_attempt_harvest_context,
-    materialize_follow_up_baseline, materialize_initial_candidate_baseline,
+    materialize_follow_up_baseline_in_root, materialize_initial_candidate_baseline,
     re_materialize_follow_up_baseline, CookFollowUpBaseline, DerivedCookBaselineCapability,
 };
 use super::cook_budget::{
@@ -37,22 +39,25 @@ use super::cook_budget::{
     validate_effective_cook_budget, ExecutionBudgetUsage,
 };
 use super::cook_pre_execution::{
-    materialize_cook_attempt_with_store, materialize_initial_cook_attempt_with_store,
+    materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores,
     pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
     record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
-    with_pre_execution_phase,
+    with_pre_execution_phase, CookExecutionPreparation,
 };
 use super::cook_promotion::{
-    attempt_needs_execution, cook_report, finalize_or_load_cook_pr,
-    finalize_or_load_cook_pr_with_store, is_moving_base_finalization_error,
-    moving_base_recovery_for_run_with_store, moving_base_recovery_from_promotion,
+    attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
+    finalize_or_load_cook_pr_with_stores, is_moving_base_finalization_error,
+    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
     moving_base_recovery_report, next_moving_base_recovery, persisted_promotion_for_attempt,
-    promote_or_load_attempt, recover_moving_base_cook_candidate, refreshed_moving_base_recovery,
-    retryable_provider_discovery_failure, CookReportInput, MovingBaseCookRecovery,
+    promote_or_load_attempt_in_store, recover_moving_base_cook_candidate_in_store,
+    refreshed_moving_base_recovery, retryable_provider_discovery_failure,
+    retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
 };
 use super::cook_recipe::CookRecipeStore;
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
+#[cfg(test)]
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
+use super::execution::run_loaded_plan_with_derived_cook_baseline_in_store;
 use super::AgentTaskRunResult;
 
 /// Lease window for a cook promotion operation claim. Long enough that a healthy
@@ -267,25 +272,6 @@ fn claim_pre_artifact_interruption_retry(
     )
 }
 
-fn claim_pre_artifact_interruption_retry_with_store(
-    recipe_store: &CookRecipeStore,
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-    plan: &AgentTaskPlan,
-    replace_semantic_attempt: bool,
-) -> Result<Option<(u32, String)>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    claim_pre_artifact_interruption_retry_with_stores(
-        (recipe_store, &lifecycle_store),
-        cook_id,
-        attempt,
-        run_id,
-        plan,
-        replace_semantic_attempt,
-    )
-}
-
 fn claim_pre_artifact_interruption_retry_with_stores(
     stores: (&CookRecipeStore, &AgentTaskLifecycleStore),
     cook_id: &str,
@@ -424,6 +410,7 @@ impl CookProgressEvent<'_> {
 pub type CookProgressObserver<'a> = dyn Fn(&CookProgressEvent<'_>) -> Result<()> + Send + Sync + 'a;
 
 fn report_cook_progress(
+    lifecycle_store: &AgentTaskLifecycleStore,
     observer: Option<&CookProgressObserver<'_>>,
     cook_id: &str,
     run_id: &str,
@@ -431,10 +418,20 @@ fn report_cook_progress(
     attempt: u32,
     detail: Option<&str>,
 ) -> Result<()> {
-    report_cook_progress_with_activity(observer, cook_id, run_id, phase, attempt, detail, None)
+    report_cook_progress_with_activity(
+        lifecycle_store,
+        observer,
+        cook_id,
+        run_id,
+        phase,
+        attempt,
+        detail,
+        None,
+    )
 }
 
 fn report_cook_progress_with_activity(
+    lifecycle_store: &AgentTaskLifecycleStore,
     observer: Option<&CookProgressObserver<'_>>,
     cook_id: &str,
     run_id: &str,
@@ -443,7 +440,7 @@ fn report_cook_progress_with_activity(
     detail: Option<&str>,
     activity: Option<&CookProviderActivity>,
 ) -> Result<()> {
-    agent_task_lifecycle::record_cook_progress_with_activity(
+    lifecycle_store.record_cook_progress_with_activity(
         run_id,
         phase,
         attempt,
@@ -463,7 +460,8 @@ fn report_cook_progress_with_activity(
             // The observer is the submitting client's output channel. Once the
             // progress record exists, a broken client pipe is evidence about
             // observation, never authority to stop promotion or finalization.
-            let _ = agent_task_lifecycle::record_cook_observer_event(
+            let _ = agent_task_lifecycle::record_cook_observer_event_in_store(
+                lifecycle_store,
                 run_id,
                 phase,
                 bounded_error_diagnostic(&error),
@@ -503,12 +501,23 @@ fn finalize_with_operation_claim(
         &AgentTaskPromotionReport,
     ) -> Result<Value>,
 ) -> Result<Value> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    finalize_with_operation_claim_in_store(&lifecycle_store, options, run_id, promotion, finalize)
+}
+
+fn finalize_with_operation_claim_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    finalize: &mut dyn FnMut(
+        &AgentTaskCookServiceOptions,
+        &str,
+        &AgentTaskPromotionReport,
+    ) -> Result<Value>,
+) -> Result<Value> {
     let operation_key = finalization_operation_key(run_id, promotion);
-    match agent_task_lifecycle::claim_cook_operation(
-        run_id,
-        &operation_key,
-        FINALIZATION_CLAIM_LEASE,
-    )? {
+    match lifecycle_store.claim_cook_operation(run_id, &operation_key, FINALIZATION_CLAIM_LEASE)? {
         // A completed claim only proves an earlier publication. Re-run the
         // idempotent finalizer so a later force-push or PR-head mutation cannot
         // be returned as a still-valid publication.
@@ -525,7 +534,7 @@ fn finalize_with_operation_claim(
             let finalization = match finalize(options, run_id, promotion) {
                 Ok(finalization) => finalization,
                 Err(error) => {
-                    agent_task_lifecycle::fail_cook_operation(
+                    lifecycle_store.fail_cook_operation(
                         run_id,
                         &operation_key,
                         bounded_error_diagnostic(&error),
@@ -533,7 +542,7 @@ fn finalize_with_operation_claim(
                     return Err(error);
                 }
             };
-            agent_task_lifecycle::complete_cook_operation(
+            lifecycle_store.complete_cook_operation(
                 run_id,
                 &operation_key,
                 finalization.clone(),
@@ -555,20 +564,28 @@ fn promote_with_operation_claim(
     options: &AgentTaskCookServiceOptions,
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    promote_with_operation_claim_in_store(&lifecycle_store, options, run_id)
+}
+
+fn promote_with_operation_claim_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+) -> Result<AgentTaskPromotionReport> {
     let operation_key = promotion_operation_key(run_id);
-    match agent_task_lifecycle::claim_cook_operation(run_id, &operation_key, PROMOTION_CLAIM_LEASE)?
-    {
+    match lifecycle_store.claim_cook_operation(run_id, &operation_key, PROMOTION_CLAIM_LEASE)? {
         // A prior pass already promoted and recorded the result. Load the durable
         // promotion rather than repeating the external effect.
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_) => {
-            promote_or_load_attempt(options, run_id)
+            promote_or_load_attempt_in_store(lifecycle_store, options, run_id)
         }
         // Another pass holds a still-fresh lease. The persisted-promotion read in
         // `promote_or_load_attempt` still resolves an already-produced promotion;
         // if none exists yet, promotion proceeds (content-addressed and idempotent
         // on disk). Do not mark the claim completed from here — its owner does.
         agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
-            let claim = agent_task_lifecycle::operation_claim(run_id, &operation_key)?;
+            let claim = lifecycle_store.operation_claim(run_id, &operation_key)?;
             let mut error = Error::validation_invalid_argument(
                 "promotion_operation",
                 "operation_in_progress",
@@ -581,10 +598,11 @@ fn promote_with_operation_claim(
         // This pass owns the operation. Promote, then record the result as the
         // claim's immutable completion.
         agent_task_lifecycle::ClaimOutcome::Acquired => {
-            let promotion = match promote_or_load_attempt(options, run_id) {
+            let promotion = match promote_or_load_attempt_in_store(lifecycle_store, options, run_id)
+            {
                 Ok(promotion) => promotion,
                 Err(error) => {
-                    agent_task_lifecycle::fail_cook_operation(
+                    lifecycle_store.fail_cook_operation(
                         run_id,
                         &operation_key,
                         bounded_error_diagnostic(&error),
@@ -592,7 +610,7 @@ fn promote_with_operation_claim(
                     return Err(error);
                 }
             };
-            agent_task_lifecycle::complete_cook_operation(
+            lifecycle_store.complete_cook_operation(
                 run_id,
                 &operation_key,
                 serde_json::to_value(&promotion)
@@ -707,6 +725,7 @@ pub(crate) trait CookSideEffectService {
     /// promotion when this attempt was interrupted after promoting.
     fn promote(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport>;
@@ -714,6 +733,7 @@ pub(crate) trait CookSideEffectService {
     /// Rebase and re-verify a candidate whose base moved under it.
     fn recover_moving_base(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         recovery: &MovingBaseCookRecovery,
     ) -> Result<AgentTaskPromotionReport>;
@@ -723,6 +743,7 @@ pub(crate) trait CookSideEffectService {
     /// finalizing.
     fn finalize(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
         promotion: &AgentTaskPromotionReport,
@@ -738,7 +759,12 @@ pub(crate) struct DefaultCookSideEffects<F> {
 
 impl<F> DefaultCookSideEffects<F>
 where
-    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+    F: FnMut(
+        &AgentTaskLifecycleStore,
+        &AgentTaskCookServiceOptions,
+        &str,
+        &AgentTaskPromotionReport,
+    ) -> Result<Value>,
 {
     pub(crate) fn new(finalize: F) -> Self {
         Self { finalize }
@@ -747,31 +773,47 @@ where
 
 impl<F> CookSideEffectService for DefaultCookSideEffects<F>
 where
-    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+    F: FnMut(
+        &AgentTaskLifecycleStore,
+        &AgentTaskCookServiceOptions,
+        &str,
+        &AgentTaskPromotionReport,
+    ) -> Result<Value>,
 {
     fn promote(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport> {
-        promote_with_operation_claim(options, run_id)
+        promote_with_operation_claim_in_store(lifecycle_store, options, run_id)
     }
 
     fn recover_moving_base(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         recovery: &MovingBaseCookRecovery,
     ) -> Result<AgentTaskPromotionReport> {
-        recover_moving_base_cook_candidate(options, recovery)
+        recover_moving_base_cook_candidate_in_store(lifecycle_store, options, recovery)
     }
 
     fn finalize(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
         promotion: &AgentTaskPromotionReport,
     ) -> Result<Value> {
-        finalize_with_operation_claim(options, run_id, promotion, &mut self.finalize)
+        finalize_with_operation_claim_in_store(
+            lifecycle_store,
+            options,
+            run_id,
+            promotion,
+            &mut |options, run_id, promotion| {
+                (self.finalize)(lifecycle_store, options, run_id, promotion)
+            },
+        )
     }
 }
 
@@ -811,14 +853,16 @@ where
 {
     fn promote(
         &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport> {
-        promote_or_load_attempt(options, run_id)
+        promote_or_load_attempt_in_store(lifecycle_store, options, run_id)
     }
 
     fn recover_moving_base(
         &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         recovery: &MovingBaseCookRecovery,
     ) -> Result<AgentTaskPromotionReport> {
@@ -827,6 +871,7 @@ where
 
     fn finalize(
         &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
         promotion: &AgentTaskPromotionReport,
@@ -3092,6 +3137,25 @@ fn child_execution_budget(
     }
 }
 
+pub(super) fn validate_cook_follow_up_stores(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<()> {
+    if recipe_store.data_root() != lifecycle_store.data_root() {
+        return Err(Error::validation_invalid_argument(
+            "stores",
+            "Cook follow-up recipe and lifecycle stores must share one data root",
+            Some(format!(
+                "recipe={}, lifecycle={}",
+                recipe_store.data_root().display(),
+                lifecycle_store.data_root().display()
+            )),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// Append and dispatch one remediation attempt from an authenticated promoted
 /// candidate. Both ordinary Cook feedback and external candidate adoption use
 /// this boundary so their budget, provenance, and baseline authority match.
@@ -3100,7 +3164,7 @@ fn child_execution_budget(
     reason = "Cook follow-up retains explicit durable recipe and dispatch identity fields"
 )]
 pub(crate) fn dispatch_cook_follow_up<E>(
-    store: &CookRecipeStore,
+    stores: (&CookRecipeStore, &AgentTaskLifecycleStore),
     options: &AgentTaskCookServiceOptions,
     executor: E,
     cook_id: &str,
@@ -3119,10 +3183,12 @@ pub(crate) fn dispatch_cook_follow_up<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    let (recipe_store, lifecycle_store) = stores;
+    validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
     if let Some(reason) = remediation_tool_policy_error(&follow_up_request) {
         return Ok(CookFollowUpDispatch::PolicyFailure { reason });
     }
-    let recipe = store.load_recipe(cook_id)?;
+    let recipe = recipe_store.load_recipe(cook_id)?;
     let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
         recipe_attempt.plan.tasks.len() == 1
             && recipe_attempt.plan.tasks[0].inputs["cook_loop"]["artifact_provenance"]
@@ -3136,7 +3202,10 @@ where
         .filter(|recipe_attempt| recipe_attempt.attempt > attempt)
         .filter(|recipe_attempt| {
             recipe_attempt.plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true
-                && retryable_provider_discovery_failure(&recipe_attempt.run_id)
+                && retryable_provider_discovery_failure_with_store(
+                    lifecycle_store,
+                    &recipe_attempt.run_id,
+                )
         })
         .cloned();
     let persisted_budget_authority = plan
@@ -3180,7 +3249,7 @@ where
                     .as_str()
                     == Some(source_run_id))
     }) {
-        if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recipe_attempt.run_id) {
+        if let Ok(aggregate) = lifecycle_store.read_aggregate(&recipe_attempt.run_id) {
             durable_budget_used.add(execution_budget_usage(&aggregate));
         }
     }
@@ -3204,7 +3273,8 @@ where
         || follow_up_request.inputs["cook_loop"]["review_form_required"] == true)
         .then_some(true)
         .or_else(|| {
-            let durable_provider_executions = agent_task_lifecycle::status(source_run_id)
+            let durable_provider_executions = lifecycle_store
+                .read_record(source_run_id)
                 .ok()
                 .and_then(|record| record.metadata.get("provider_executions").cloned())
                 .filter(|executions| {
@@ -3290,13 +3360,14 @@ where
     let review_form_only =
         follow_up_plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true;
     if let Some(replaced_run_id) = replaced_run_id {
-        store.record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
+        recipe_store.record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
     } else {
-        store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
+        recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
     }
-    if attempt_needs_execution(&next_run_id) {
-        let baseline = materialize_follow_up_baseline(
+    if attempt_needs_execution_with_store(lifecycle_store, &next_run_id) {
+        let baseline = materialize_follow_up_baseline_in_root(
             promotion,
+            &lifecycle_store.artifact_root(),
             source_run_id,
             &follow_up_plan.tasks[0].task_id,
         )?;
@@ -3307,13 +3378,11 @@ where
         // Refresh the durable execution attestation before this plan can be
         // persisted or handed to a local or detached provider.
         bind_dispatch_workspace_attestations(&mut follow_up_plan)?;
-        agent_task_lifecycle::submit_plan(&follow_up_plan, Some(&next_run_id))?;
-        agent_task_lifecycle::record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
+        lifecycle_store.submit_plan_with_current_runtime(&follow_up_plan, &next_run_id)?;
+        lifecycle_store.record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
         if budget_scope == CookFollowUpBudgetScope::CandidateAdoptionReview {
-            agent_task_lifecycle::checkpoint_candidate_adoption_remediation(
-                source_run_id,
-                &next_run_id,
-            )?;
+            lifecycle_store
+                .checkpoint_candidate_adoption_remediation(source_run_id, &next_run_id)?;
         }
         if let Some(dispatcher) = &options.attempt_dispatcher {
             // A detached dispatcher may return before any executor-side
@@ -3327,7 +3396,7 @@ where
             // this baseline-bound workspace contract, and so the run record the
             // claim is written onto exists.
             let operation_key = retry_dispatch_operation_key(&next_run_id);
-            match agent_task_lifecycle::claim_cook_operation(
+            match lifecycle_store.claim_cook_operation(
                 &next_run_id,
                 &operation_key,
                 RETRY_DISPATCH_CLAIM_LEASE,
@@ -3338,7 +3407,7 @@ where
                         &next_run_id,
                         Some(baseline.capability()),
                     )?;
-                    agent_task_lifecycle::complete_cook_operation(
+                    lifecycle_store.complete_cook_operation(
                         &next_run_id,
                         &operation_key,
                         serde_json::json!({ "dispatched_run_id": next_run_id }),
@@ -3352,7 +3421,8 @@ where
                 | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {}
             }
         } else {
-            run_loaded_plan_with_derived_cook_baseline(
+            run_loaded_plan_with_derived_cook_baseline_in_store(
+                lifecycle_store,
                 follow_up_plan,
                 Some(&next_run_id),
                 executor,
@@ -3364,8 +3434,8 @@ where
     // The generated ID is random by design. Link the execution only after its
     // materialized plan is durable, so a resumed controller selects this exact
     // run without replacing its baseline-bound workspace contract.
-    if !attempt_needs_execution(&next_run_id) {
-        agent_task_lifecycle::record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
+    if !attempt_needs_execution_with_store(lifecycle_store, &next_run_id) {
+        lifecycle_store.record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
     }
     if review_form_only {
         // A form-only retry deliberately makes no code changes. Carry the
@@ -3377,7 +3447,7 @@ where
             "kind": "review_form_only",
             "source_run_id": source_run_id,
         });
-        agent_task_lifecycle::record_promotion(
+        lifecycle_store.record_promotion(
             &next_run_id,
             serde_json::to_value(carried_promotion)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?,
@@ -3536,6 +3606,19 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
     validate_cook_candidate_group(&options.initial_plan)
 }
 
+fn reserve_cook_materialization_capacity(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    workspace: &std::path::Path,
+) -> Result<homeboy_core::capacity::CapacityReservation> {
+    let demand = homeboy_core::capacity::demand_for_tree(workspace)?;
+    homeboy_core::capacity::reserve_projected_capacity(
+        &lifecycle_store.controller_scratch_root(),
+        "Cook controller scratch and workspace materialization",
+        demand,
+        homeboy_core::capacity::CapacityReserve::configured(),
+    )
+}
+
 pub fn run_cook<E>(
     options: AgentTaskCookServiceOptions,
     executor: E,
@@ -3557,9 +3640,10 @@ pub fn run_cook_with_store<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    let side_effects = DefaultCookSideEffects::new(|options, run_id, promotion| {
-        finalize_or_load_cook_pr_with_store(store, options, run_id, promotion)
-    });
+    let side_effects =
+        DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
+            finalize_or_load_cook_pr_with_stores(store, lifecycle_store, options, run_id, promotion)
+        });
     run_cook_with_boundaries_with_store(store, options, executor, side_effects)
 }
 
@@ -3571,7 +3655,16 @@ where
     E: AgentTaskExecutorAdapter + Clone,
 {
     let store = CookRecipeStore::from_current_data_root()?;
-    let side_effects = DefaultCookSideEffects::new(finalize_or_load_cook_pr);
+    let side_effects =
+        DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
+            finalize_or_load_cook_pr_with_stores(
+                &store,
+                lifecycle_store,
+                options,
+                run_id,
+                promotion,
+            )
+        });
     run_cook_with_boundaries_observed_policy_with_store(
         &store,
         options,
@@ -3593,8 +3686,24 @@ pub fn run_cook_with_durable_observer<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    let side_effects = DefaultCookSideEffects::new(finalize_or_load_cook_pr);
-    run_cook_with_boundaries_observed(options, executor, side_effects, Some(observer))
+    let store = CookRecipeStore::from_current_data_root()?;
+    let side_effects =
+        DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
+            finalize_or_load_cook_pr_with_stores(
+                &store,
+                lifecycle_store,
+                options,
+                run_id,
+                promotion,
+            )
+        });
+    run_cook_with_boundaries_observed_with_store(
+        &store,
+        options,
+        executor,
+        side_effects,
+        Some(observer),
+    )
 }
 
 pub(crate) fn run_cook_with_finalizer<E, F>(
@@ -3614,13 +3723,15 @@ pub(crate) fn run_cook_with_finalizer_with_store<E, F>(
     store: &CookRecipeStore,
     options: AgentTaskCookServiceOptions,
     executor: E,
-    finalize: F,
+    mut finalize: F,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
     E: AgentTaskExecutorAdapter + Clone,
     F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
-    let side_effects = DefaultCookSideEffects::new(finalize);
+    let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
+        finalize(options, run_id, promotion)
+    });
     run_cook_with_boundaries_with_store(store, options, executor, side_effects)
 }
 
@@ -3803,9 +3914,42 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
-    let failure_options = options.clone();
-    let result = match run_cook_with_boundaries_observed_inner_with_store(
+    // The spine used to resolve this store itself. Resolve it here instead and
+    // keep the failure routed exactly where the spine's own resolution error
+    // used to land, so an unresolvable environment still returns the durable
+    // report for an already-created Cook rather than a bare error.
+    let lifecycle_store = match AgentTaskLifecycleStore::from_current_environment() {
+        Ok(lifecycle_store) => lifecycle_store,
+        Err(error) => return durable_cook_error_report_with_store(store, &options, error),
+    };
+    run_cook_with_boundaries_reported_with_stores(
         store,
+        &lifecycle_store,
+        options,
+        executor,
+        side_effects,
+        durable_observer,
+        allow_historical_terminal,
+    )
+}
+
+fn run_cook_with_boundaries_reported_with_stores<E, S>(
+    store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    side_effects: S,
+    durable_observer: Option<&CookProgressObserver<'_>>,
+    allow_historical_terminal: bool,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    S: CookSideEffectService,
+{
+    let failure_options = options.clone();
+    let result = match run_cook_with_boundaries_observed_inner_with_stores(
+        store,
+        lifecycle_store,
         options,
         executor,
         side_effects,
@@ -3824,6 +3968,7 @@ where
             .unwrap_or(1);
         let phase = result.value.disposition.phase();
         if let Err(error) = report_cook_progress(
+            lifecycle_store,
             durable_observer,
             &result.value.cook_id,
             run_id,
@@ -3834,7 +3979,8 @@ where
             return durable_cook_error_report_with_store(store, &failure_options, error);
         }
         if phase == "terminal" {
-            if let Err(error) = agent_task_lifecycle::record_cook_terminal_result(
+            if let Err(error) = agent_task_lifecycle::record_cook_terminal_result_in_store(
+                lifecycle_store,
                 run_id,
                 result.exit_code == 0,
                 result.exit_code,
@@ -3928,9 +4074,13 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
+    // Env-resolving entry point. Both stores are resolved here, once, so the
+    // spine below only ever sees explicit roots.
     let store = CookRecipeStore::from_current_data_root()?;
-    run_cook_with_boundaries_observed_inner_with_store(
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    run_cook_with_boundaries_observed_inner_with_stores(
         &store,
+        &lifecycle_store,
         options,
         executor,
         side_effects,
@@ -3939,8 +4089,13 @@ where
     )
 }
 
-fn run_cook_with_boundaries_observed_inner_with_store<E, S>(
+/// The Cook spine, bound to explicit recipe and lifecycle roots. Every durable
+/// write on this path resolves through the two passed stores, so a caller can
+/// place a Cook's recipe and its lifecycle records wherever it owns them
+/// instead of wherever the process environment happens to point (#7505).
+fn run_cook_with_boundaries_observed_inner_with_stores<E, S>(
     store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
     mut options: AgentTaskCookServiceOptions,
     executor: E,
     mut side_effects: S,
@@ -3953,7 +4108,7 @@ where
 {
     // The local detached launcher persists this fence before spawn. Recheck it
     // at each durable/external boundary so a dead launcher cannot revive work.
-    agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
+    lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
     // Validate new Cooks before provider discovery, workspace staging, recipe
     // persistence, or a detached handoff can spend provider work. Historical
     // immutable recipes retain their persisted behavior and receive actionable
@@ -3970,11 +4125,13 @@ where
     // caller-owned overrides and retain their existing behavior. A typed
     // moving-base continuation has already completed provider work and must
     // not require a provider merely to rebase and reverify its candidate.
-    let moving_base_continuation = agent_task_lifecycle::status(&options.initial_run_id)
+    let moving_base_continuation = lifecycle_store
+        .read_record(&options.initial_run_id)
         .ok()
         .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
         .is_some();
-    let verification_pending_continuation = agent_task_lifecycle::status(&options.initial_run_id)
+    let verification_pending_continuation = lifecycle_store
+        .read_record(&options.initial_run_id)
         .ok()
         .is_some_and(|record| {
             record
@@ -4008,7 +4165,8 @@ where
     }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
-    let adopted_model = agent_task_lifecycle::status(&options.initial_run_id)
+    let adopted_model = lifecycle_store
+        .read_record(&options.initial_run_id)
         .ok()
         .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
         .transpose()?
@@ -4030,7 +4188,7 @@ where
             store.persist_initial_recipe(&options)?
         }
     } else {
-        agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
+        lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
         store.persist_initial_recipe(&options)?
     };
     // A recipe can survive an interruption before its first lifecycle record.
@@ -4053,12 +4211,12 @@ where
         {
             reconstructed.initial_run_id = attempt.run_id.clone();
             reconstructed.initial_plan = attempt.plan.clone();
-            if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
+            if lifecycle_store.record_exists(&attempt.run_id)? {
                 // The recipe freezes the task-worktree handle, while the
                 // durable run plan freezes the baseline-bound continuation.
                 // Resolve the former back to its active path: the baseline is
                 // execution evidence, not a task-worktree identity.
-                let continuation_plan = agent_task_lifecycle::load_plan(&attempt.run_id)?;
+                let continuation_plan = lifecycle_store.read_controller_plan(&attempt.run_id)?;
                 rebind_baseline_continuation_workspace(&mut reconstructed, &continuation_plan)?;
                 reconstructed.initial_plan = continuation_plan;
             }
@@ -4076,16 +4234,16 @@ where
     // Recipe persistence and lifecycle materialization are a recoverable saga.
     // Complete it before any capacity, workspace, or provider-facing work so a
     // controller interruption leaves a status-addressable, resumable attempt.
-    materialize_initial_cook_attempt_with_store(store, &options)?;
+    materialize_initial_cook_attempt_with_stores(store, lifecycle_store, &options)?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
     // A detached transport may own workspace materialization on the runner.
     // Its initial handoff has no controller-local source path to validate yet;
     // requiring one here turns an accepted detached retry into a local failure.
-    if cook_attempt_needs_execution(&options.initial_run_id)
+    if cook_attempt_needs_execution_with_store(lifecycle_store, &options.initial_run_id)
         && !cook_workspace_lookup_pending(&options.initial_plan)
-        && options.attempt_dispatcher.is_none()
+        && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
         validate_cook_workspace(&options)?;
     }
@@ -4106,19 +4264,12 @@ where
                 .and_then(|task| task.workspace.root.as_deref())
                 .map(std::path::Path::new)
         })
-        .map(|workspace| {
-            let demand = homeboy_core::capacity::demand_for_tree(workspace)?;
-            homeboy_core::capacity::reserve_projected_capacity(
-                &homeboy_core::paths::controller_scratch_store()?,
-                "Cook controller scratch and workspace materialization",
-                demand,
-                homeboy_core::capacity::CapacityReserve::configured(),
-            )
-        })
+        .map(|workspace| reserve_cook_materialization_capacity(lifecycle_store, workspace))
         .transpose()?;
-    agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
+    lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
     if cook_workspace_lookup_pending(&options.initial_plan) {
         report_cook_progress(
+            lifecycle_store,
             durable_observer,
             &options.cook_id,
             &options.initial_run_id,
@@ -4134,6 +4285,9 @@ where
         let lookup_control =
             homeboy_core::worktree_providers::WorktreeProviderCommandControl::default();
         let heartbeat_control = lookup_control.clone();
+        // Bound before the `move` closure: naming the store inside it would
+        // capture the store itself by value rather than this borrow.
+        let lookup_lifecycle_store = &lifecycle_store;
         let lookup_result = std::thread::scope(|scope| {
             scope.spawn(move || {
                 let mut next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
@@ -4142,7 +4296,8 @@ where
                         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
-                    if agent_task_lifecycle::status(&lookup_run_id)
+                    if lookup_lifecycle_store
+                        .read_record(&lookup_run_id)
                         .ok()
                         .is_some_and(|record| {
                             record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -4154,6 +4309,7 @@ where
                     if Instant::now() >= next_heartbeat {
                         next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
                         let _ = report_cook_progress(
+                            lookup_lifecycle_store,
                             durable_observer,
                             &lookup_cook_id,
                             &lookup_run_id,
@@ -4166,13 +4322,14 @@ where
             });
             let result = homeboy_core::worktree_providers::with_worktree_provider_command_control(
                 lookup_control,
-                || materialize_pending_cook_workspace(&mut options),
+                || materialize_pending_cook_workspace(lifecycle_store, &mut options),
             );
             let _ = lookup_stop.send(());
             result
         });
         if let Err(error) = lookup_result {
-            if agent_task_lifecycle::status(&options.initial_run_id)
+            if lifecycle_store
+                .read_record(&options.initial_run_id)
                 .ok()
                 .is_some_and(|record| {
                     record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -4190,17 +4347,18 @@ where
                 }));
             }
             let error = with_pre_execution_phase(error, "worktree_provider_lookup");
-            record_pre_execution_failure(
-                &options.initial_plan,
+            CookExecutionPreparation::new(store, lifecycle_store).record_pre_execution_failure(
+                &options.cook_id,
                 &options.initial_run_id,
-                &error,
                 "worktree_provider_lookup",
+                &error,
             )?;
             return Ok(pre_execution_failure_report(
                 options.cook_id.clone(),
                 Vec::new(),
                 pre_execution_failure_details(
-                    agent_task_lifecycle::exact_record(&options.initial_run_id)
+                    lifecycle_store
+                        .read_record(&options.initial_run_id)
                         .ok()
                         .as_ref(),
                     &error,
@@ -4219,6 +4377,7 @@ where
     // to be the first identity-bearing observer event, which put the operator
     // handle behind work that can outlive a client timeout (#10419, #9163).
     report_cook_progress(
+        lifecycle_store,
         durable_observer,
         &options.cook_id,
         &options.initial_run_id,
@@ -4253,6 +4412,7 @@ where
         {
             let error = with_pre_execution_phase(error, "gate_declaration_preflight");
             record_pre_execution_failure(
+                lifecycle_store,
                 &options.initial_plan,
                 &options.initial_run_id,
                 &error,
@@ -4299,6 +4459,7 @@ where
     if let Err(error) = preflight {
         let error = with_pre_execution_phase(error, "gate_toolchain_preflight");
         record_pre_execution_failure(
+            lifecycle_store,
             &options.initial_plan,
             &options.initial_run_id,
             &error,
@@ -4318,8 +4479,9 @@ where
         ));
     }
     if let Some(latest_attempt) = recipe.attempts.last() {
-        materialize_cook_attempt_with_store(
+        materialize_cook_attempt_with_stores(
             store,
+            lifecycle_store,
             &recipe.cook_id,
             &latest_attempt.run_id,
             &latest_attempt.plan,
@@ -4328,13 +4490,14 @@ where
     // The recipe alone is resumable input, not a status-addressable run. Publish
     // the run identity only after initial materialization and a lifecycle read
     // prove status/log recovery resolves for this exact attempt.
-    let materialized_run = agent_task_lifecycle::status(&options.initial_run_id)?;
+    let materialized_run = lifecycle_store.read_record(&options.initial_run_id)?;
     if materialized_run.run_id != options.initial_run_id {
         return Err(Error::internal_unexpected(
             "materialized Cook lifecycle record does not match its initial run id",
         ));
     }
     report_cook_progress(
+        lifecycle_store,
         durable_observer,
         &options.cook_id,
         &options.initial_run_id,
@@ -4348,7 +4511,7 @@ where
     if !verification_pending_continuation {
         if let Some(dispatcher) = &options.attempt_dispatcher {
             if let Err(error) = dispatcher.prepare_for_cook() {
-                agent_task_lifecycle::record_pre_execution_failure(
+                lifecycle_store.record_pre_execution_failure(
                     &options.initial_run_id,
                     &options.initial_plan,
                     dispatcher.pre_execution_failure_phase(),
@@ -4373,7 +4536,8 @@ where
         .find(|attempt| attempt.run_id == options.initial_run_id)
         .map(|attempt| attempt.attempt)
         .unwrap_or(1);
-    let resumed_run_id = resumable_cook_run_id(
+    let resumed_run_id = resumable_cook_run_id_in_store(
+        lifecycle_store,
         &recipe,
         &options.cook_id,
         &options.initial_run_id,
@@ -4436,20 +4600,21 @@ where
         }
         let plan = match next_plan.take() {
             Some(plan) => plan,
-            None => agent_task_lifecycle::load_plan(&run_id)?,
+            None => lifecycle_store.read_controller_plan(&run_id)?,
         };
-        let needs_execution = cook_attempt_needs_execution(&run_id);
+        let needs_execution = cook_attempt_needs_execution_with_store(lifecycle_store, &run_id);
         if needs_execution {
             // The local detached launcher persists this fence before spawn.
             // Recheck immediately before this attempt can publish provider work.
-            agent_task_lifecycle::require_detached_cook_handoff_fence_open(&cook_id)?;
+            lifecycle_store.require_detached_cook_handoff_fence_open(&cook_id)?;
             // `provider_start` is a durable lifecycle transition. Create the
             // record before reporting it so a new Cook run is observable before
             // any preflight or provider work can block.
-            if !agent_task_lifecycle::run_record_exists(&run_id)? {
-                agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+            if !lifecycle_store.record_exists(&run_id)? {
+                lifecycle_store.submit_plan_with_current_runtime(&plan, &run_id)?;
             }
             report_cook_progress(
+                lifecycle_store,
                 durable_observer,
                 &cook_id,
                 &run_id,
@@ -4475,7 +4640,7 @@ where
             }
             let mut failed_dispatch_plan = None;
             let execution = (|| {
-                if options.attempt_dispatcher.is_none() {
+                if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
                     validate_cook_workspace(&options)?;
                 }
                 if options.attempt_dispatcher.is_none() {
@@ -4639,6 +4804,10 @@ where
                     // thread-local, and the heartbeat runs on a thread of its
                     // own that would otherwise start unbudgeted.
                     let heartbeat_deadline = capture_cook_deadline();
+                    // Bound before the `move` closure: naming the store inside
+                    // it would capture the store itself by value rather than
+                    // this borrow.
+                    let heartbeat_lifecycle_store = &lifecycle_store;
                     std::thread::scope(|scope| {
                         scope.spawn(move || {
                             let mut supervisor =
@@ -4679,6 +4848,7 @@ where
                                 let tick = supervisor.observe(&activity);
                                 let detail = tick.detail_line();
                                 let _ = report_cook_progress_with_activity(
+                                    heartbeat_lifecycle_store,
                                     durable_observer,
                                     &heartbeat_cook_id,
                                     &heartbeat_run_id,
@@ -4696,7 +4866,8 @@ where
                                 // how "was this run expensive?" stops being a
                                 // question only answerable by having watched it.
                                 if !tick.is_empty() {
-                                    let _ = agent_task_lifecycle::record_cook_supervision(
+                                    let _ = agent_task_lifecycle::record_cook_supervision_in_store(
+                                        heartbeat_lifecycle_store,
                                         &heartbeat_run_id,
                                         attempt,
                                         (!tick.sample.is_empty())
@@ -4736,11 +4907,13 @@ where
                                                 ),
                                         }),
                                     };
-                                    let _ = agent_task_lifecycle::record_cook_supervision_stop(
+                                    let _ =
+                                        agent_task_lifecycle::record_cook_supervision_stop_in_store(
+                                            heartbeat_lifecycle_store,
                                         &heartbeat_run_id,
                                         attempt,
                                         outcome,
-                                    );
+                                        );
                                 }
                                 // A deadline that only fired at attempt and
                                 // gate boundaries would not bound a single
@@ -4786,15 +4959,18 @@ where
                                                 ),
                                         }),
                                     };
-                                    let _ = agent_task_lifecycle::record_cook_supervision_stop(
-                                        &heartbeat_run_id,
-                                        attempt,
-                                        outcome,
-                                    );
+                                    let _ =
+                                        agent_task_lifecycle::record_cook_supervision_stop_in_store(
+                                            heartbeat_lifecycle_store,
+                                            &heartbeat_run_id,
+                                            attempt,
+                                            outcome,
+                                        );
                                 }
                             }
                         });
-                        let result = run_loaded_plan_with_derived_cook_baseline(
+                        let result = run_loaded_plan_with_derived_cook_baseline_in_store(
+                            lifecycle_store,
                             dispatch_plan,
                             Some(&run_id),
                             executor.clone(),
@@ -4812,7 +4988,11 @@ where
                     // Baseline cleanup runs when the dispatch scope exits. Restore
                     // the exact continuation contract only after that cleanup so
                     // retry never loses its controller-owned plan.
-                    agent_task_lifecycle::persist_controller_plan(&run_id, dispatch_plan)?;
+                    agent_task_lifecycle::persist_controller_plan_in_store(
+                        lifecycle_store,
+                        &run_id,
+                        dispatch_plan,
+                    )?;
                 }
                 let record = match agent_task_lifecycle::status(&run_id) {
                     Ok(record)
@@ -4822,7 +5002,13 @@ where
                             &error,
                             options.attempt_dispatcher.as_deref(),
                         );
-                        record_pre_execution_failure(&plan, &run_id, &error, phase)?;
+                        record_pre_execution_failure(
+                            lifecycle_store,
+                            &plan,
+                            &run_id,
+                            &error,
+                            phase,
+                        )?;
                         agent_task_lifecycle::status(&run_id).ok()
                     }
                     Ok(record) => Some(record),
@@ -4831,12 +5017,18 @@ where
                             &error,
                             options.attempt_dispatcher.as_deref(),
                         );
-                        record_pre_execution_failure(&plan, &run_id, &error, phase)?;
+                        record_pre_execution_failure(
+                            lifecycle_store,
+                            &plan,
+                            &run_id,
+                            &error,
+                            phase,
+                        )?;
                         agent_task_lifecycle::status(&run_id).ok()
                     }
                 };
                 let pre_execution_failure = pre_execution_failure_details(record.as_ref(), &error);
-                agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
+                lifecycle_store.record_cook_attempt(&cook_id, attempt, &run_id)?;
                 attempts.push(AgentTaskCookAttemptReport {
                     attempt,
                     run_id: run_id.clone(),
@@ -4877,14 +5069,26 @@ where
                 }
                 let next_run_id = format!("{run_id}-transport-retry");
                 store.record_recipe_attempt_replacement(&cook_id, &run_id, &next_run_id)?;
-                materialize_cook_attempt_with_store(store, &cook_id, &next_run_id, &plan)?;
+                materialize_cook_attempt_with_stores(
+                    store,
+                    lifecycle_store,
+                    &cook_id,
+                    &next_run_id,
+                    &plan,
+                )?;
                 run_id = next_run_id;
                 next_plan = Some(plan);
                 continue;
             }
         }
-        agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
-        let mut record = agent_task_lifecycle::status(&run_id)?;
+        lifecycle_store.record_cook_attempt(&cook_id, attempt, &run_id)?;
+        let rooted_promotion_continuation =
+            moving_base_continuation || verification_pending_continuation;
+        let mut record = if rooted_promotion_continuation {
+            lifecycle_store.read_record(&run_id)?
+        } else {
+            agent_task_lifecycle::status(&run_id)?
+        };
         // A local controller can disappear after the provider ledger records a
         // terminal result but before the run projection is terminalized. Repair
         // only this Cook attempt, never the active fleet, before deciding whether
@@ -4894,7 +5098,11 @@ where
             && record.aggregate_path.is_none()
         {
             super::reconcile_run(&run_id, false)?;
-            record = agent_task_lifecycle::status(&run_id)?;
+            record = if rooted_promotion_continuation {
+                lifecycle_store.read_record(&run_id)?
+            } else {
+                agent_task_lifecycle::status(&run_id)?
+            };
         }
         let controller_owned_staging = record
             .metadata
@@ -4929,9 +5137,9 @@ where
                 invocation_latest_run_id: Some(&run_id),
             }));
         }
-        let plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
+        let plan = lifecycle_store.read_controller_plan_for_execution(&run_id)?;
         budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
-        let aggregate = match agent_task_lifecycle::read_aggregate(&run_id) {
+        let aggregate = match lifecycle_store.read_aggregate(&run_id) {
             Ok(aggregate) => aggregate,
             // An aggregate path is authoritative evidence that an aggregate was
             // committed. Its read failure must surface for repair rather than be
@@ -4996,8 +5204,8 @@ where
                         1,
                     ));
                 }
-                match claim_pre_artifact_interruption_retry_with_store(
-                    store,
+                match claim_pre_artifact_interruption_retry_with_stores(
+                    (store, lifecycle_store),
                     &cook_id,
                     attempt,
                     &run_id,
@@ -5153,6 +5361,7 @@ where
             ));
         }
         report_cook_progress(
+            lifecycle_store,
             durable_observer,
             &cook_id,
             &run_id,
@@ -5160,7 +5369,7 @@ where
             attempt,
             None,
         )?;
-        let mut promotion = match side_effects.promote(&options, &run_id) {
+        let mut promotion = match side_effects.promote(lifecycle_store, &options, &run_id) {
             Ok(report) => report,
             Err(error) => {
                 attempts.push(AgentTaskCookAttemptReport {
@@ -5182,7 +5391,8 @@ where
                 } else {
                     "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string()
                 };
-                agent_task_lifecycle::record_cook_controller_failure(
+                agent_task_lifecycle::record_cook_controller_failure_in_store(
+                    lifecycle_store,
                     &run_id,
                     &bounded_error_diagnostic(&error),
                 )?;
@@ -5230,7 +5440,7 @@ where
                 options.gates.gate_timeout(),
                 |_compared, _total| Ok(()),
             )?;
-            agent_task_lifecycle::record_promotion(
+            lifecycle_store.record_promotion(
                 &run_id,
                 serde_json::to_value(&promotion)
                     .map_err(|error| Error::internal_json(error.to_string(), None))?,
@@ -5337,48 +5547,103 @@ where
                     }));
                 }
                 let mut active_moving_base_recovery = None;
-                let promotion = match moving_base_recovery_for_run_with_store(store, &run_id)? {
-                    Some(recovery) => match side_effects.recover_moving_base(&options, &recovery) {
-                        Ok(promotion) => {
-                            agent_task_lifecycle::record_promotion(
-                                &run_id,
-                                serde_json::to_value(&promotion).map_err(|error| {
-                                    Error::internal_json(error.to_string(), None)
-                                })?,
-                            )?;
-                            let recovery = refreshed_moving_base_recovery(recovery, &promotion);
-                            agent_task_lifecycle::record_cook_moving_base_recovery(
-                                &run_id,
-                                serde_json::to_value(&recovery).map_err(|error| {
-                                    Error::internal_json(error.to_string(), None)
-                                })?,
-                            )?;
-                            if promotion.status != AgentTaskPromotionStatus::Applied {
-                                let mut recovery = recovery;
-                                recovery.blocker = format!(
-                                    "rebased candidate did not pass the declared deterministic gates ({:?}); finalization was not attempted",
-                                    promotion.status
-                                );
-                                agent_task_lifecycle::record_cook_moving_base_recovery(
+                let promotion = match moving_base_recovery_for_run_with_stores(
+                    store,
+                    lifecycle_store,
+                    &run_id,
+                )? {
+                    Some(recovery) => {
+                        match side_effects.recover_moving_base(lifecycle_store, &options, &recovery)
+                        {
+                            Ok(promotion) => {
+                                lifecycle_store.record_promotion(
+                                    &run_id,
+                                    serde_json::to_value(&promotion).map_err(|error| {
+                                        Error::internal_json(error.to_string(), None)
+                                    })?,
+                                )?;
+                                let recovery = refreshed_moving_base_recovery(recovery, &promotion);
+                                lifecycle_store.record_cook_moving_base_recovery(
                                     &run_id,
                                     serde_json::to_value(&recovery).map_err(|error| {
                                         Error::internal_json(error.to_string(), None)
                                     })?,
                                 )?;
+                                if promotion.status != AgentTaskPromotionStatus::Applied {
+                                    let mut recovery = recovery;
+                                    recovery.blocker = format!(
+                                    "rebased candidate did not pass the declared deterministic gates ({:?}); finalization was not attempted",
+                                    promotion.status
+                                );
+                                    lifecycle_store.record_cook_moving_base_recovery(
+                                        &run_id,
+                                        serde_json::to_value(&recovery).map_err(|error| {
+                                            Error::internal_json(error.to_string(), None)
+                                        })?,
+                                    )?;
+                                    return Ok(moving_base_recovery_report(
+                                        cook_id,
+                                        attempts,
+                                        recovery,
+                                        false,
+                                        Some(&run_id),
+                                    ));
+                                }
+                                active_moving_base_recovery = Some(recovery);
+                                promotion
+                            }
+                            Err(error) => {
+                                let recovery =
+                                    next_moving_base_recovery(recovery, error.to_string());
+                                lifecycle_store.record_cook_moving_base_recovery(
+                                    &run_id,
+                                    serde_json::to_value(&recovery).map_err(|error| {
+                                        Error::internal_json(error.to_string(), None)
+                                    })?,
+                                )?;
+                                if recovery.base_movements < 3 {
+                                    store.enqueue_terminal_continuation(&cook_id, &run_id)?;
+                                }
+                                let continuation_queued = recovery.base_movements < 3;
                                 return Ok(moving_base_recovery_report(
                                     cook_id,
                                     attempts,
                                     recovery,
-                                    false,
+                                    continuation_queued,
                                     Some(&run_id),
                                 ));
                             }
-                            active_moving_base_recovery = Some(recovery);
-                            promotion
                         }
-                        Err(error) => {
-                            let recovery = next_moving_base_recovery(recovery, error.to_string());
-                            agent_task_lifecycle::record_cook_moving_base_recovery(
+                    }
+                    None => promotion,
+                };
+                report_cook_progress(
+                    lifecycle_store,
+                    durable_observer,
+                    &cook_id,
+                    &run_id,
+                    "finalization",
+                    attempt,
+                    None,
+                )?;
+                let finalization =
+                    match side_effects.finalize(lifecycle_store, &options, &run_id, &promotion) {
+                        Ok(finalization) => {
+                            if active_moving_base_recovery.is_some() {
+                                lifecycle_store.clear_cook_moving_base_recovery(&run_id)?;
+                            }
+                            finalization
+                        }
+                        Err(error) if is_moving_base_finalization_error(&error) => {
+                            let recovery = next_moving_base_recovery(
+                                active_moving_base_recovery.unwrap_or_else(|| {
+                                    moving_base_recovery_from_promotion(
+                                        &cook_id, &run_id, promotion,
+                                    )
+                                }),
+                                error.to_string(),
+                            );
+                            lifecycle_store.record_cook_moving_base_recovery(
                                 &run_id,
                                 serde_json::to_value(&recovery).map_err(|error| {
                                     Error::internal_json(error.to_string(), None)
@@ -5396,50 +5661,8 @@ where
                                 Some(&run_id),
                             ));
                         }
-                    },
-                    None => promotion,
-                };
-                report_cook_progress(
-                    durable_observer,
-                    &cook_id,
-                    &run_id,
-                    "finalization",
-                    attempt,
-                    None,
-                )?;
-                let finalization = match side_effects.finalize(&options, &run_id, &promotion) {
-                    Ok(finalization) => {
-                        if active_moving_base_recovery.is_some() {
-                            agent_task_lifecycle::clear_cook_moving_base_recovery(&run_id)?;
-                        }
-                        finalization
-                    }
-                    Err(error) if is_moving_base_finalization_error(&error) => {
-                        let recovery = next_moving_base_recovery(
-                            active_moving_base_recovery.unwrap_or_else(|| {
-                                moving_base_recovery_from_promotion(&cook_id, &run_id, promotion)
-                            }),
-                            error.to_string(),
-                        );
-                        agent_task_lifecycle::record_cook_moving_base_recovery(
-                            &run_id,
-                            serde_json::to_value(&recovery)
-                                .map_err(|error| Error::internal_json(error.to_string(), None))?,
-                        )?;
-                        if recovery.base_movements < 3 {
-                            store.enqueue_terminal_continuation(&cook_id, &run_id)?;
-                        }
-                        let continuation_queued = recovery.base_movements < 3;
-                        return Ok(moving_base_recovery_report(
-                            cook_id,
-                            attempts,
-                            recovery,
-                            continuation_queued,
-                            Some(&run_id),
-                        ));
-                    }
-                    Err(error) if error.message.contains("awaiting_acceptance") => {
-                        return Ok(cook_report(CookReportInput {
+                        Err(error) if error.message.contains("awaiting_acceptance") => {
+                            return Ok(cook_report(CookReportInput {
                             cook_id,
                             status: "awaiting_acceptance",
                             disposition: CookDisposition::Terminal,
@@ -5460,9 +5683,9 @@ where
                             exit_code: 1,
                             invocation_latest_run_id: Some(&run_id),
                         }));
-                    }
-                    Err(error) => return Err(error),
-                };
+                        }
+                        Err(error) => return Err(error),
+                    };
                 let final_status = finalization["status"]
                     .as_str()
                     .unwrap_or("unknown")
@@ -5491,6 +5714,7 @@ where
                 if options.gates.accept_inherited_failures && promotion.finalization_eligible(true)
                 {
                     report_cook_progress(
+                        lifecycle_store,
                         durable_observer,
                         &cook_id,
                         &run_id,
@@ -5498,7 +5722,8 @@ where
                         attempt,
                         Some("accepted inherited baseline-red gate"),
                     )?;
-                    let finalization = side_effects.finalize(&options, &run_id, &promotion)?;
+                    let finalization =
+                        side_effects.finalize(lifecycle_store, &options, &run_id, &promotion)?;
                     let final_status = finalization["status"]
                         .as_str()
                         .unwrap_or("unknown")
@@ -5604,7 +5829,7 @@ where
                 let review_form_only =
                     follow_up_request.inputs["cook_loop"]["review_form_required"] == true;
                 match dispatch_cook_follow_up(
-                    store,
+                    (store, lifecycle_store),
                     &options,
                     executor.clone(),
                     &cook_id,
@@ -5694,8 +5919,27 @@ fn resumable_cook_run_id(
     requested_attempt: u32,
     verification_pending_continuation: bool,
 ) -> Option<String> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().ok()?;
+    resumable_cook_run_id_in_store(
+        &lifecycle_store,
+        recipe,
+        cook_id,
+        initial_run_id,
+        requested_attempt,
+        verification_pending_continuation,
+    )
+}
+
+fn resumable_cook_run_id_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    recipe: &super::AgentTaskCookRecipe,
+    cook_id: &str,
+    initial_run_id: &str,
+    requested_attempt: u32,
+    verification_pending_continuation: bool,
+) -> Option<String> {
     (!verification_pending_continuation)
-        .then(|| agent_task_lifecycle::select_cook_candidate(cook_id).ok())
+        .then(|| lifecycle_store.select_cook_candidate(cook_id).ok())
         .flatten()
         .map(|selection| selection.run_id)
         .filter(|run_id| run_id != initial_run_id)
@@ -5768,21 +6012,39 @@ fn bind_dispatch_workspace_attestations(plan: &mut AgentTaskPlan) -> Result<()> 
 
 fn cook_attempt_needs_execution(run_id: &str) -> bool {
     agent_task_lifecycle::status(run_id)
-        .map(|record| {
-            (!matches!(
-                record.state,
-                agent_task_lifecycle::AgentTaskRunState::Succeeded
-                    | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-                    | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-                    | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-                    | agent_task_lifecycle::AgentTaskRunState::Failed
-                    | agent_task_lifecycle::AgentTaskRunState::Cancelled
-            ) || retryable_pre_execution_failure(&record))
-                && !record.lab_handoff.as_ref().is_some_and(|handoff| {
-                    handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-                })
-        })
+        .map(|record| cook_run_record_needs_execution(&record))
         .unwrap_or(true)
+}
+
+fn cook_attempt_needs_execution_with_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> bool {
+    if lifecycle_store
+        .matches_current_environment()
+        .unwrap_or(false)
+    {
+        return cook_attempt_needs_execution(run_id);
+    }
+    lifecycle_store
+        .read_record(run_id)
+        .map(|record| cook_run_record_needs_execution(&record))
+        .unwrap_or(true)
+}
+
+fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    (!matches!(
+        record.state,
+        agent_task_lifecycle::AgentTaskRunState::Succeeded
+            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+            | agent_task_lifecycle::AgentTaskRunState::Failed
+            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+    ) || retryable_pre_execution_failure(record))
+        && !record.lab_handoff.as_ref().is_some_and(|handoff| {
+            handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+        })
 }
 
 /// Validate the Cook target before a provider can run. An explicit source path
@@ -6163,7 +6425,10 @@ fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
 /// A pending lookup carries no provider path. Resolve the declared exact handle
 /// only after Cook's recipe and first run record exist, then persist that path
 /// before any provider can receive work.
-fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions) -> Result<()> {
+fn materialize_pending_cook_workspace(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &mut AgentTaskCookServiceOptions,
+) -> Result<()> {
     let provider_id = options
         .initial_plan
         .metadata
@@ -6266,7 +6531,11 @@ fn materialize_pending_cook_workspace(options: &mut AgentTaskCookServiceOptions)
     options.initial_plan.metadata["cook_provision"]["action"] =
         Value::String("existing".to_string());
     options.source_worktree_path = Some(target);
-    agent_task_lifecycle::persist_controller_plan(&options.initial_run_id, &options.initial_plan)
+    agent_task_lifecycle::persist_controller_plan_in_store(
+        lifecycle_store,
+        &options.initial_run_id,
+        &options.initial_plan,
+    )
 }
 
 /// A deferred provider lookup can prove absence only after Cook owns a durable

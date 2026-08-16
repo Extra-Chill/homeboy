@@ -24,7 +24,8 @@ use crate::agent_task_finalization::{
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::resolve_candidate_revision;
 use crate::agent_task_promotion::{
-    promote_with_checkpoint, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+    promote_with_checkpoint_in_observation_store, AgentTaskPromotionOptions,
+    AgentTaskPromotionReport,
 };
 use crate::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy_core::cook_status::CookDisposition;
@@ -36,8 +37,8 @@ use super::cook::{
     CookFollowUpBudgetScope, CookFollowUpDispatch,
 };
 use super::cook_promotion::{
-    cook_report, finalize_or_load_cook_pr_with_backend_with_store, persisted_promotion_for_attempt,
-    promotion_source, CookReportInput,
+    cook_report, finalize_or_load_cook_pr_with_backend_with_stores,
+    persisted_promotion_for_attempt_in_store, promotion_source_in_store, CookReportInput,
 };
 use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
@@ -48,8 +49,12 @@ struct CandidateAdoptionTerminalResult {
     stop_reason: Option<String>,
 }
 
-fn persist_adoption_terminal_result(run_id: &str, report: &AgentTaskCookReport) -> Result<()> {
-    agent_task_lifecycle::record_candidate_adoption_result(
+fn persist_adoption_terminal_result(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    report: &AgentTaskCookReport,
+) -> Result<()> {
+    lifecycle_store.record_candidate_adoption_result(
         run_id,
         serde_json::to_value(CandidateAdoptionTerminalResult {
             status: report.status.clone(),
@@ -80,10 +85,11 @@ fn legacy_adoption_budget_failure(
 /// the original agent emitted is recorded on its aggregate. Absent/invalid here
 /// re-triggers the review-form gate exactly as it would for a fresh cook.
 fn adopted_review_form(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
     allow_missing_aggregate: bool,
 ) -> Result<Option<crate::agent_task_review_dossier::AiFilledReviewForm>> {
-    let aggregate = match agent_task_lifecycle::read_aggregate(run_id) {
+    let aggregate = match lifecycle_store.read_aggregate(run_id) {
         Ok(aggregate) => aggregate,
         Err(_) if allow_missing_aggregate => return Ok(None),
         Err(error) => return Err(error),
@@ -238,8 +244,45 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     executor: E,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let store = CookRecipeStore::from_current_data_root()?;
-    let (record, recipe) = resolve_adoption_target_with_attempt(cook_or_run_id, attempt)?;
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_stores(
+        &recipe_store,
+        &lifecycle_store,
+        cook_or_run_id,
+        attempt,
+        candidate_ref,
+        adoption,
+        reconstruct_dispatcher,
+        executor,
+        backend,
+    )
+}
+
+pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_stores<
+    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
+    B: AgentTaskPrFinalizationBackend,
+>(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_or_run_id: &str,
+    attempt: Option<u32>,
+    candidate_ref: &str,
+    adoption: AgentTaskCandidateAdoptionOptions,
+    reconstruct_dispatcher: impl FnOnce(
+        &Value,
+    ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    executor: E,
+    backend: &mut B,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    super::cook::validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
+    let (record, recipe) = resolve_adoption_target_with_attempt_in_stores(
+        recipe_store,
+        lifecycle_store,
+        cook_or_run_id,
+        attempt,
+    )?;
     let cook_id = &recipe.cook_id;
     let mut options = super::reconstruct_adoption_options(&recipe)?;
     // Adoption is a separate explicit authorization. The durable recipe keeps
@@ -247,7 +290,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     // immutable-baseline matches produced below.
     options.gates.accept_inherited_failures = adoption.accept_inherited_failures;
     let run_id = record.run_id.clone();
-    let plan = agent_task_lifecycle::load_plan(&run_id)?;
+    let plan = lifecycle_store.read_controller_plan(&run_id)?;
     let recipe_attempt = recipe
         .attempts
         .iter()
@@ -279,7 +322,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             None,
         ));
     }
-    let (source, source_path, recovery) = candidate_adoption_source(&record, &source_request)?;
+    let (source, source_path, recovery) =
+        candidate_adoption_source_in_store(lifecycle_store, &record, &source_request)?;
     let (adoption_ai_model, ai_model_source) = match adoption.ai_model {
         Some(model) => (concrete_adoption_ai_model(&model)?, "candidate_input"),
         None => (
@@ -317,7 +361,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         // failed attempt is archived when the new adoption starts.
         && !legacy_adoption_budget_failure(&recipe, &run_id, persisted_adoption_result)
     {
-        let persisted_promotion = persisted_promotion_for_attempt(&record.run_id)?;
+        let persisted_promotion =
+            persisted_promotion_for_attempt_in_store(lifecycle_store, &record.run_id)?;
         let inherited_failure_requires_authorization =
             persisted_promotion.as_ref().is_some_and(|promotion| {
                 promotion.deterministic_gates.iter().any(|gate| {
@@ -385,14 +430,15 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 invocation_latest_run_id: Some(record.run_id.as_str()),
             }));
         }
-        let promotion = persisted_promotion_for_attempt(&record.run_id)?.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "candidate_ref",
-                "completed candidate adoption is missing its persisted promotion result",
-                Some(candidate_sha.clone()),
-                None,
-            )
-        })?;
+        let promotion = persisted_promotion_for_attempt_in_store(lifecycle_store, &record.run_id)?
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "candidate_ref",
+                    "completed candidate adoption is missing its persisted promotion result",
+                    Some(candidate_sha.clone()),
+                    None,
+                )
+            })?;
         if inherited_failure_requires_authorization && !adoption.accept_inherited_failures {
             return Ok(cook_report(CookReportInput {
                 cook_id: cook_id.to_string(),
@@ -423,7 +469,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             source_run_id: Some(record.run_id.clone()),
             current_diff: String::new(),
             require_review_form: true,
-            review_form: adopted_review_form(&record.run_id, recovery.is_some())?,
+            review_form: adopted_review_form(lifecycle_store, &record.run_id, recovery.is_some())?,
             metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
         });
         let finalization = record.metadata.get("cook_finalization").cloned();
@@ -464,7 +510,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     let attempt_dispatcher =
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
     options.attempt_dispatcher = attempt_dispatcher;
-    agent_task_lifecycle::start_candidate_adoption_with_policy(
+    lifecycle_store.start_candidate_adoption_with_policy(
         &record.run_id,
         &candidate_sha,
         &adoption_ai_model,
@@ -473,88 +519,97 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         adoption.replace_interrupted,
     )?;
     let gate_run_id = record.run_id.clone();
-    let promotion = match reusable_applied_adoption_promotion(&record, &candidate_sha) {
-        Some(promotion) => promotion,
-        None => crate::agent_task_promotion::with_gate_supervision(
-            crate::agent_task_gate::GateSupervision {
-                timeout: options.gates.gate_timeout(),
-                no_progress_timeout: options.gates.gate_no_progress_timeout(),
-                heartbeat_interval: options.gates.gate_heartbeat_interval(),
-                on_spawn: Arc::new({
-                    let run_id = gate_run_id.clone();
-                    move |pid, command| {
-                        agent_task_lifecycle::start_candidate_adoption_gate(
-                            &run_id,
-                            command,
-                            pid,
-                            options.gates.gate_timeout_seconds,
-                        )
-                    }
-                }),
-                on_heartbeat: Arc::new({
-                    let run_id = gate_run_id.clone();
-                    move |status| {
-                        agent_task_lifecycle::heartbeat_candidate_adoption_gate(
-                            &run_id,
-                            status.visibility,
-                            status.reveal_policy,
-                            status,
-                        )
-                    }
-                }),
-                is_cancelled: Arc::new(move || {
-                    agent_task_lifecycle::candidate_adoption_cancel_requested(&gate_run_id)
-                        .unwrap_or(false)
-                }),
-            },
-            || {
-                promote_with_checkpoint(
-                    AgentTaskPromotionOptions {
-                        source,
-                        source_run_id: Some(record.run_id.clone()),
-                        source_path,
-                        source_worktree_path: options.source_worktree_path.clone(),
-                        base_ref: Some(options.base.clone()),
-                        task_base_sha: options.task_base_sha.clone(),
-                        candidate_ref: Some(candidate_sha.clone()),
-                        to_worktree: options.to_worktree.clone(),
-                        task_id: None,
-                        artifact_id: None,
-                        dry_run: false,
-                        gates: options.gates.clone(),
-                        provider_command: options.provider_command.clone(),
-                        provider_invocation: options.provider_invocation.clone(),
-                    },
-                    |checkpoint| {
-                        let checkpoint = serde_json::to_value(checkpoint).map_err(|error| {
-                            Error::internal_json(
-                                error.to_string(),
-                                Some("serialize adopted candidate checkpoint".to_string()),
+    let gate_lifecycle_store = lifecycle_store.clone();
+    let promotion =
+        match reusable_applied_adoption_promotion(lifecycle_store, &record, &candidate_sha) {
+            Some(promotion) => promotion,
+            None => crate::agent_task_promotion::with_gate_supervision(
+                crate::agent_task_gate::GateSupervision {
+                    timeout: options.gates.gate_timeout(),
+                    no_progress_timeout: options.gates.gate_no_progress_timeout(),
+                    heartbeat_interval: options.gates.gate_heartbeat_interval(),
+                    on_spawn: Arc::new({
+                        let run_id = gate_run_id.clone();
+                        let lifecycle_store = gate_lifecycle_store.clone();
+                        move |pid, command| {
+                            lifecycle_store.start_candidate_adoption_gate(
+                                &run_id,
+                                command,
+                                pid,
+                                options.gates.gate_timeout_seconds,
                             )
-                        })?;
-                        agent_task_lifecycle::checkpoint_candidate_adoption(
-                            &record.run_id,
-                            "post_apply_verification",
-                            &gate_identity,
-                        )?;
-                        agent_task_lifecycle::record_promotion(&record.run_id, checkpoint)
-                            .map(|_| ())
-                    },
-                )
-            },
-        ),
-    };
+                        }
+                    }),
+                    on_heartbeat: Arc::new({
+                        let run_id = gate_run_id.clone();
+                        let lifecycle_store = gate_lifecycle_store.clone();
+                        move |status| {
+                            lifecycle_store.heartbeat_candidate_adoption_gate(
+                                &run_id,
+                                status.visibility,
+                                status.reveal_policy,
+                                status,
+                            )
+                        }
+                    }),
+                    is_cancelled: Arc::new({
+                        let lifecycle_store = gate_lifecycle_store.clone();
+                        move || {
+                            lifecycle_store
+                                .candidate_adoption_cancel_requested(&gate_run_id)
+                                .unwrap_or(false)
+                        }
+                    }),
+                },
+                || {
+                    let observation_store = lifecycle_store.open_observation_initialized()?;
+                    promote_with_checkpoint_in_observation_store(
+                        AgentTaskPromotionOptions {
+                            source,
+                            source_run_id: Some(record.run_id.clone()),
+                            source_path,
+                            source_worktree_path: options.source_worktree_path.clone(),
+                            base_ref: Some(options.base.clone()),
+                            task_base_sha: options.task_base_sha.clone(),
+                            candidate_ref: Some(candidate_sha.clone()),
+                            to_worktree: options.to_worktree.clone(),
+                            task_id: None,
+                            artifact_id: None,
+                            dry_run: false,
+                            gates: options.gates.clone(),
+                            provider_command: options.provider_command.clone(),
+                            provider_invocation: options.provider_invocation.clone(),
+                        },
+                        &observation_store,
+                        |checkpoint| {
+                            let checkpoint = serde_json::to_value(checkpoint).map_err(|error| {
+                                Error::internal_json(
+                                    error.to_string(),
+                                    Some("serialize adopted candidate checkpoint".to_string()),
+                                )
+                            })?;
+                            lifecycle_store.checkpoint_candidate_adoption(
+                                &record.run_id,
+                                "post_apply_verification",
+                                &gate_identity,
+                            )?;
+                            lifecycle_store
+                                .record_promotion(&record.run_id, checkpoint)
+                                .map(|_| ())
+                        },
+                    )
+                },
+            ),
+        };
     let mut promotion = match promotion {
         Ok(promotion) => promotion,
         Err(error) => {
-            agent_task_lifecycle::finish_candidate_adoption(
-                &record.run_id,
-                Some(error.message.clone()),
-            )?;
+            lifecycle_store
+                .finish_candidate_adoption(&record.run_id, Some(error.message.clone()))?;
             return Err(error);
         }
     };
-    if agent_task_lifecycle::candidate_adoption_cancel_requested(&record.run_id)? {
+    if lifecycle_store.candidate_adoption_cancel_requested(&record.run_id)? {
         return Err(Error::validation_invalid_argument(
             "run_id",
             "candidate adoption was cancelled before baseline verification",
@@ -579,14 +634,14 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         &candidate_base_sha,
         options.gates.gate_timeout(),
         |compared, total| {
-            agent_task_lifecycle::checkpoint_candidate_adoption(
+            lifecycle_store.checkpoint_candidate_adoption(
                 &record.run_id,
                 "baseline_verification",
                 &format!("baseline gate {compared}/{total}"),
             )
         },
     )?;
-    if agent_task_lifecycle::candidate_adoption_cancel_requested(&record.run_id)? {
+    if lifecycle_store.candidate_adoption_cancel_requested(&record.run_id)? {
         return Err(Error::validation_invalid_argument(
             "run_id",
             "candidate adoption was cancelled before promotion could finalize",
@@ -610,7 +665,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     });
     let promotion_value = serde_json::to_value(&promotion)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    agent_task_lifecycle::record_promotion(&record.run_id, promotion_value)?;
+    lifecycle_store.record_promotion(&record.run_id, promotion_value)?;
     let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
         source_request,
         promotion_report: promotion.clone(),
@@ -619,7 +674,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         source_run_id: Some(record.run_id.clone()),
         current_diff: gate_feedback_current_diff(&promotion),
         require_review_form: true,
-        review_form: adopted_review_form(&record.run_id, recovery.is_some())?,
+        review_form: adopted_review_form(lifecycle_store, &record.run_id, recovery.is_some())?,
         metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
     });
     let attempt = AgentTaskCookAttemptReport {
@@ -632,7 +687,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     };
     if feedback.status == AgentTaskCookLoopStatus::RetryRequested {
         let Some(mut follow_up_request) = feedback.follow_up_request.clone() else {
-            agent_task_lifecycle::finish_candidate_adoption(
+            lifecycle_store.finish_candidate_adoption(
                 &record.run_id,
                 Some(
                     "candidate adoption feedback requested retry without a follow-up request"
@@ -652,7 +707,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 exit_code: 1,
                 invocation_latest_run_id: Some(record.run_id.as_str()),
             });
-            persist_adoption_terminal_result(&record.run_id, &report.value)?;
+            persist_adoption_terminal_result(lifecycle_store, &record.run_id, &report.value)?;
             return Ok(report);
         };
         // An authenticated pre-provider recovery has no aggregate executor
@@ -662,7 +717,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         follow_up_request.executor.model = Some(adoption_ai_model.clone());
         let budget = plan.options.execution_budget.clone();
         let mut remediation_usage = Default::default();
-        let aggregate = match agent_task_lifecycle::read_aggregate(&record.run_id) {
+        let aggregate = match lifecycle_store.read_aggregate(&record.run_id) {
             Ok(aggregate) => aggregate,
             Err(_) if recovery.is_some() => crate::agent_task_scheduler::AgentTaskAggregate {
                 schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
@@ -681,8 +736,18 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             },
             Err(error) => return Err(error),
         };
+        if !lifecycle_store.matches_current_environment()? {
+            let message = "candidate adoption remediation requires the explicit lifecycle store to match the current Cook runtime root";
+            lifecycle_store.finish_candidate_adoption(&record.run_id, Some(message.to_string()))?;
+            return Err(Error::validation_invalid_argument(
+                "stores",
+                message,
+                Some(lifecycle_store.data_root().display().to_string()),
+                None,
+            ));
+        }
         let dispatch = dispatch_cook_follow_up(
-            &store,
+            (recipe_store, lifecycle_store),
             &options,
             executor.clone(),
             cook_id,
@@ -700,8 +765,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         )?;
         return match dispatch {
             CookFollowUpDispatch::Dispatched { run_id } => {
-                agent_task_lifecycle::finish_candidate_adoption(&record.run_id, None)?;
-                options.initial_plan = store.load_recipe(cook_id)?
+                lifecycle_store.finish_candidate_adoption(&record.run_id, None)?;
+                options.initial_plan = recipe_store.load_recipe(cook_id)?
                     .attempts
                     .into_iter()
                     .find(|attempt| attempt.run_id == run_id)
@@ -716,12 +781,17 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                     })?;
                 options.initial_run_id = run_id;
                 let mut result = super::cook::run_cook_with_finalizer_with_store(
-                    &store,
+                    recipe_store,
                     options,
                     executor,
                     |options, run_id, promotion| {
-                        finalize_or_load_cook_pr_with_backend_with_store(
-                            &store, options, run_id, promotion, backend,
+                        finalize_or_load_cook_pr_with_backend_with_stores(
+                            recipe_store,
+                            lifecycle_store,
+                            options,
+                            run_id,
+                            promotion,
+                            backend,
                         )
                     },
                 )?;
@@ -744,8 +814,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                     exit_code: 1,
                     invocation_latest_run_id: Some(record.run_id.as_str()),
                 });
-                persist_adoption_terminal_result(&record.run_id, &report.value)?;
-                agent_task_lifecycle::finish_candidate_adoption(
+                persist_adoption_terminal_result(lifecycle_store, &record.run_id, &report.value)?;
+                lifecycle_store.finish_candidate_adoption(
                     &record.run_id,
                     Some("candidate remediation budget exhausted".to_string()),
                 )?;
@@ -762,8 +832,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                     exit_code: 1,
                     invocation_latest_run_id: Some(record.run_id.as_str()),
                 });
-                persist_adoption_terminal_result(&record.run_id, &report.value)?;
-                agent_task_lifecycle::finish_candidate_adoption(&record.run_id, Some(reason))?;
+                persist_adoption_terminal_result(lifecycle_store, &record.run_id, &report.value)?;
+                lifecycle_store.finish_candidate_adoption(&record.run_id, Some(reason))?;
                 Ok(report)
             }
         };
@@ -774,10 +844,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             // durable baseline proof and must not spend another provider attempt.
         } else {
             let reason = "candidate and immutable baseline failed the same required gate; repair the inherited infrastructure or gate environment before retrying adoption";
-            agent_task_lifecycle::finish_candidate_adoption(
-                &record.run_id,
-                Some(reason.to_string()),
-            )?;
+            lifecycle_store.finish_candidate_adoption(&record.run_id, Some(reason.to_string()))?;
             return Ok(cook_report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status: "baseline_red",
@@ -795,7 +862,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             && options.gates.accept_inherited_failures
             && promotion.finalization_eligible(true))
     {
-        agent_task_lifecycle::finish_candidate_adoption(
+        lifecycle_store.finish_candidate_adoption(
             &record.run_id,
             Some("adopted candidate did not pass the original deterministic gates".to_string()),
         )?;
@@ -813,7 +880,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         }));
     }
     if options.no_finalize {
-        agent_task_lifecycle::finish_candidate_adoption(&record.run_id, None)?;
+        lifecycle_store.finish_candidate_adoption(&record.run_id, None)?;
         return Ok(cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "green_no_finalize",
@@ -828,13 +895,14 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             invocation_latest_run_id: Some(record.run_id.as_str()),
         }));
     }
-    agent_task_lifecycle::checkpoint_candidate_adoption(
+    lifecycle_store.checkpoint_candidate_adoption(
         &record.run_id,
         "finalization",
         "finalize pull request",
     )?;
-    let mut finalization = match finalize_or_load_cook_pr_with_backend_with_store(
-        &store,
+    let mut finalization = match finalize_or_load_cook_pr_with_backend_with_stores(
+        recipe_store,
+        lifecycle_store,
         &options,
         &record.run_id,
         &promotion,
@@ -842,15 +910,13 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     ) {
         Ok(finalization) => finalization,
         Err(error) => {
-            agent_task_lifecycle::finish_candidate_adoption(
-                &record.run_id,
-                Some(error.message.clone()),
-            )?;
+            lifecycle_store
+                .finish_candidate_adoption(&record.run_id, Some(error.message.clone()))?;
             return Err(error);
         }
     };
     project_execution_placement(&mut finalization, &record.metadata);
-    agent_task_lifecycle::finish_candidate_adoption(&record.run_id, None)?;
+    lifecycle_store.finish_candidate_adoption(&record.run_id, None)?;
     let status = finalization["status"]
         .as_str()
         .unwrap_or("unknown")
@@ -884,10 +950,12 @@ fn project_execution_placement(finalization: &mut Value, metadata: &Value) {
 }
 
 fn reusable_applied_adoption_promotion(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     candidate_sha: &str,
 ) -> Option<Result<AgentTaskPromotionReport>> {
-    let promotion = match persisted_promotion_for_attempt(&record.run_id) {
+    let promotion = match persisted_promotion_for_attempt_in_store(lifecycle_store, &record.run_id)
+    {
         Ok(Some(promotion))
             if promotion.status
                 == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied =>
@@ -958,6 +1026,16 @@ pub(crate) fn candidate_adoption_source(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     source_request: &AgentTaskRequest,
 ) -> Result<(String, Option<PathBuf>, Option<Value>)> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    candidate_adoption_source_in_store(&lifecycle_store, record, source_request)
+}
+
+fn candidate_adoption_source_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    source_request: &AgentTaskRequest,
+) -> Result<(String, Option<PathBuf>, Option<Value>)> {
     // The authenticated recovery marker is authoritative over a canonical
     // pre-execution aggregate, which exists only to record the transport error.
     if let Some(outcome) =
@@ -975,10 +1053,10 @@ pub(crate) fn candidate_adoption_source(
             Some(recovery),
         ));
     }
-    if let Ok((source, path)) = agent_task_lifecycle::aggregate_source(&record.run_id) {
+    if let Ok((source, path)) = lifecycle_store.aggregate_source_exact(&record.run_id) {
         return Ok((source, Some(path), None));
     }
-    let (source, path) = promotion_source(&record.run_id)?;
+    let (source, path) = promotion_source_in_store(lifecycle_store, &record.run_id)?;
     Ok((source, path, None))
 }
 
@@ -1028,13 +1106,33 @@ pub(crate) fn resolve_adoption_target_with_attempt(
     agent_task_lifecycle::AgentTaskRunRecord,
     super::AgentTaskCookRecipe,
 )> {
-    let declared_attempt_recipe = super::load_recipe_for_attempt(cook_or_run_id)?;
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    resolve_adoption_target_with_attempt_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        cook_or_run_id,
+        selected_attempt,
+    )
+}
+
+fn resolve_adoption_target_with_attempt_in_stores(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_or_run_id: &str,
+    selected_attempt: Option<u32>,
+) -> Result<(
+    agent_task_lifecycle::AgentTaskRunRecord,
+    super::AgentTaskCookRecipe,
+)> {
+    let declared_attempt_recipe = recipe_store.load_recipe_for_attempt(cook_or_run_id)?;
     // A durable Cook id names its immutable recipe, not whichever attempt the
     // mutable Cook index most recently observed. Resolve recipes before run
     // records so a later failed attempt cannot steal adoption ownership from
     // the original equivalent source attempt.
-    if super::recipe_exists(cook_or_run_id)? {
-        let recipe = super::load_recipe(cook_or_run_id)?;
+    if recipe_store.recipe_exists(cook_or_run_id) {
+        let recipe = recipe_store.load_recipe(cook_or_run_id)?;
         if let Some(attempt_recipe) = &declared_attempt_recipe {
             if attempt_recipe.cook_id != recipe.cook_id {
                 return Err(Error::validation_invalid_argument(
@@ -1069,13 +1167,18 @@ pub(crate) fn resolve_adoption_target_with_attempt(
                         None,
                     )
                 })?,
-            None => resolve_cook_adoption_attempt(&recipe)?,
+            None => resolve_cook_adoption_attempt_in_store(lifecycle_store, &recipe)?,
         };
-        if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
-            return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
+        if lifecycle_store.record_exists(&attempt.run_id)? {
+            return Ok((lifecycle_store.read_record(&attempt.run_id)?, recipe));
         }
         let run_id = attempt.run_id.clone();
-        return materialize_adoption_attempt(recipe, run_id);
+        return materialize_adoption_attempt_in_stores(
+            recipe_store,
+            lifecycle_store,
+            recipe,
+            run_id,
+        );
     }
 
     // Runner-side lifecycle projection can omit the controller's `cook_id`
@@ -1110,11 +1213,16 @@ pub(crate) fn resolve_adoption_target_with_attempt(
                 .find(|attempt| attempt.run_id == cook_or_run_id)
                 .expect("attempt lookup returns a recipe that declares the run id"),
         };
-        if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
-            return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
+        if lifecycle_store.record_exists(&attempt.run_id)? {
+            return Ok((lifecycle_store.read_record(&attempt.run_id)?, recipe));
         }
         let run_id = attempt.run_id.clone();
-        return materialize_adoption_attempt(recipe, run_id);
+        return materialize_adoption_attempt_in_stores(
+            recipe_store,
+            lifecycle_store,
+            recipe,
+            run_id,
+        );
     }
 
     if selected_attempt.is_some() {
@@ -1126,15 +1234,15 @@ pub(crate) fn resolve_adoption_target_with_attempt(
         ));
     }
 
-    if agent_task_lifecycle::run_record_exists(cook_or_run_id)? {
-        let record = agent_task_lifecycle::status(cook_or_run_id)?;
+    if lifecycle_store.record_exists(cook_or_run_id)? {
+        let record = lifecycle_store.read_record(cook_or_run_id)?;
         let cook_id = record
             .metadata
             .get("cook_id")
             .and_then(Value::as_str)
             .unwrap_or(cook_or_run_id)
             .to_string();
-        return Ok((record, super::load_recipe(&cook_id)?));
+        return Ok((record, recipe_store.load_recipe(&cook_id)?));
     }
 
     Err(Error::validation_invalid_argument(
@@ -1152,13 +1260,41 @@ fn materialize_adoption_attempt(
     agent_task_lifecycle::AgentTaskRunRecord,
     super::AgentTaskCookRecipe,
 )> {
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    materialize_adoption_attempt_in_stores(&recipe_store, &lifecycle_store, recipe, run_id)
+}
+
+fn materialize_adoption_attempt_in_stores(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    recipe: super::AgentTaskCookRecipe,
+    run_id: String,
+) -> Result<(
+    agent_task_lifecycle::AgentTaskRunRecord,
+    super::AgentTaskCookRecipe,
+)> {
     let attempt = recipe
         .attempts
         .iter()
         .find(|attempt| attempt.run_id == run_id)
         .expect("selected adoption attempt remains in its recipe");
     let record =
-        super::cook_pre_execution::recover_adoption_attempt(&recipe.cook_id, &attempt.run_id)?;
+        super::cook_pre_execution::CookExecutionPreparation::new(recipe_store, lifecycle_store)
+            .recover_for_adoption_with_runtime(
+                &recipe.cook_id,
+                &attempt.run_id,
+                Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+                agent_task_lifecycle::execution_runner_id(),
+                super::cook_pre_execution::production_runtime_admission(lifecycle_store),
+                |cook_id| {
+                    super::cook_pre_execution::reconcile_reserved_cancellation_in_store(
+                        lifecycle_store,
+                        cook_id,
+                    )
+                },
+            )?;
     Ok((record, recipe))
 }
 
@@ -1168,7 +1304,16 @@ fn materialize_adoption_attempt(
 fn resolve_cook_adoption_attempt(
     recipe: &super::AgentTaskCookRecipe,
 ) -> Result<&super::AgentTaskCookRecipeAttempt> {
-    if let Ok(selection) = agent_task_lifecycle::select_cook_candidate(&recipe.cook_id) {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    resolve_cook_adoption_attempt_in_store(&lifecycle_store, recipe)
+}
+
+fn resolve_cook_adoption_attempt_in_store<'a>(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    recipe: &'a super::AgentTaskCookRecipe,
+) -> Result<&'a super::AgentTaskCookRecipeAttempt> {
+    if let Ok(selection) = lifecycle_store.select_cook_candidate(&recipe.cook_id) {
         if selection.reason
             != "no_substantive_candidate_evidence_preserve_latest_attempt_compatibility"
         {

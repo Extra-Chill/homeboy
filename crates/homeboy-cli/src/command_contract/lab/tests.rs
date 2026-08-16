@@ -41,6 +41,9 @@ fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
     assert!(!compact.contains("--max-provider-rotations"), "{compact}");
     assert!(full.contains("--max-provider-rotations"), "{full}");
     assert!(full.contains("--provider-command"), "{full}");
+    assert!(full.contains("--backend <BACKEND>"), "{full}");
+    assert!(full.contains("--selector <PROVIDER_ID>"), "{full}");
+    assert!(full.contains("--dispatch-provider-id"), "{full}");
     for advanced in [
         "--placement",
         "--private-verify",

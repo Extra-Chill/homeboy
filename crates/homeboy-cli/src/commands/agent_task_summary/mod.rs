@@ -116,12 +116,19 @@ fn render_status_summary(payload: &Value) -> Option<String> {
             metrics.candidate_scan_degraded,
         )
     });
+    let completion = cook_completion_summary(payload);
+    let headline = match completion.as_ref() {
+        Some(completion) if completion.is_unfinalized_success(state) => {
+            PROVIDER_SUCCEEDED_FINALIZATION_INCOMPLETE
+        }
+        _ => state,
+    };
     let artifact_count = array_len(payload, &["artifact_refs"]).unwrap_or(0);
     let aggregate_path = string_value(payload, &["aggregate_path"]);
 
     let mut lines = vec![
         "Agent task status".to_string(),
-        format!("Status: {state}"),
+        format!("Status: {headline}"),
         format!("Run: {run_id}"),
         format!("Tasks planned: {tasks_planned}"),
         format!("Tasks attempted: {tasks_attempted}"),
@@ -131,6 +138,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         production_lines[1] = format!("Candidate state: {candidate}");
     }
     lines.extend(production_lines);
+    if let Some(completion) = completion.as_ref() {
+        lines.extend(completion.lines(state));
+    }
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
@@ -160,6 +170,84 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Next: homeboy agent-task logs {run_id}"));
     }
     Some(finish(lines))
+}
+
+/// Headline for a Cook whose provider task succeeded while the pull request it
+/// asked for was never finalized. Presentation only, exactly like
+/// `no_patch_produced`: no lifecycle record ever carries this value (#12571).
+const PROVIDER_SUCCEEDED_FINALIZATION_INCOMPLETE: &str =
+    "provider_succeeded_finalization_incomplete";
+
+/// The Cook-level publication facts, projected from the `cook_completion`
+/// record `agent-task diagnose` already reads. The record is attached only to
+/// Cook attempts, so non-Cook agent-task runs render exactly as before (#12571).
+struct CookCompletionSummary<'a> {
+    state: &'a str,
+    finalization_requested: bool,
+    pr_finalized: bool,
+    pr_url: Option<&'a str>,
+}
+
+impl CookCompletionSummary<'_> {
+    /// A succeeded provider task is not a completed Cook. When this Cook asked
+    /// for a pull request and no durable receipt names one, the headline must
+    /// not read as a plain success.
+    fn is_unfinalized_success(&self, state: &str) -> bool {
+        state == "succeeded" && self.finalization_requested && !self.pr_finalized
+    }
+
+    fn lines(&self, state: &str) -> Vec<String> {
+        let completion = if self.is_unfinalized_success(state) {
+            format!(
+                "Cook completion: {} (provider task succeeded, cook finalization did not complete)",
+                self.state
+            )
+        } else {
+            format!("Cook completion: {}", self.state)
+        };
+        let mut lines = vec![
+            completion,
+            format!(
+                "PR finalized: {}",
+                if self.pr_finalized { "yes" } else { "no" }
+            ),
+        ];
+        if let Some(pr_url) = self.pr_url {
+            lines.push(format!("Pull request: {pr_url}"));
+        }
+        lines
+    }
+}
+
+fn cook_completion_summary(payload: &Value) -> Option<CookCompletionSummary<'_>> {
+    let completion = value_at(payload, &["cook_completion"])?;
+    Some(CookCompletionSummary {
+        state: string_value(completion, &["state"]).unwrap_or("unknown"),
+        finalization_requested: value_at(completion, &["finalization_requested"])
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        pr_finalized: value_at(completion, &["pr_finalized"])
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        pr_url: cook_pr_url(payload),
+    })
+}
+
+/// The pull request this Cook published, read from the projected `pr_url` the
+/// status payload carries and, failing that, from the same durable finalization
+/// receipts that make a candidate `finalized`.
+fn cook_pr_url(payload: &Value) -> Option<&str> {
+    let url = string_value(payload, &["pr_url"])
+        .or_else(|| receipt_pr_url(payload, &["cook_finalization"]))
+        .or_else(|| receipt_pr_url(payload, &["metadata", "cook_finalization"]))
+        .or_else(|| receipt_pr_url(payload, &["finalization"]))?
+        .trim();
+    (!url.is_empty()).then_some(url)
+}
+
+fn receipt_pr_url<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let receipt = value_at(payload, path)?;
+    string_value(receipt, &["pr_url"]).or_else(|| string_value(receipt, &["pull_request_url"]))
 }
 
 fn is_transport_proxy(payload: &Value) -> bool {
@@ -1390,7 +1478,124 @@ mod tests {
             if state == "queued" {
                 assert!(summary.contains("Next: homeboy agent-task run homeboy-4345\n"));
             }
+            // A run with no Cook completion record is not a Cook, so the
+            // publication lines never appear for it (#12571).
+            assert!(!summary.contains("Cook completion:"), "{summary}");
+            assert!(!summary.contains("PR finalized:"), "{summary}");
         }
+    }
+
+    #[test]
+    fn status_summary_never_reports_a_cook_without_a_pull_request_as_succeeded() {
+        // #12571: the provider task succeeded and the candidate was promoted,
+        // but the Cook finalized nothing. The headline must not read as a win.
+        let payload = json!({
+            "run_id": "agent-task-04ad6499",
+            "state": "succeeded",
+            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
+            "artifact_refs": [{ "task_id": "cook", "kind": "patch", "uri": "artifact://cook/patch.diff", "size_bytes": 32318 }],
+            "execution_states": { "candidate": { "state": "promoted" } },
+            "cook_completion": {
+                "schema": "homeboy/agent-task-cook-completion/v1",
+                "candidate_produced": true,
+                "finalization_requested": true,
+                "pr_finalized": false,
+                "state": "candidate_awaiting_finalization"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(
+            summary.starts_with(
+                "Agent task status\nStatus: provider_succeeded_finalization_incomplete\nRun: agent-task-04ad6499"
+            ),
+            "{summary}"
+        );
+        assert!(!summary.contains("Status: succeeded"), "{summary}");
+        assert!(summary.contains("Candidate state: promoted\n"));
+        assert!(summary.contains(
+            "Cook completion: candidate_awaiting_finalization (provider task succeeded, cook finalization did not complete)\n"
+        ));
+        assert!(summary.contains("PR finalized: no\n"));
+        assert!(!summary.contains("Pull request:"), "{summary}");
+    }
+
+    #[test]
+    fn status_summary_surfaces_the_finalized_pull_request() {
+        let payload = json!({
+            "run_id": "agent-task-finalized",
+            "state": "succeeded",
+            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
+            "artifact_refs": [{ "task_id": "cook", "kind": "patch", "uri": "artifact://cook/patch.diff", "size_bytes": 32318 }],
+            "cook_completion": {
+                "schema": "homeboy/agent-task-cook-completion/v1",
+                "candidate_produced": true,
+                "finalization_requested": true,
+                "pr_finalized": true,
+                "state": "pr_finalized"
+            },
+            "pr_url": "https://example.test/pull/1"
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains("Status: succeeded\n"), "{summary}");
+        assert!(summary.contains("Cook completion: pr_finalized\n"));
+        assert!(summary.contains("PR finalized: yes\n"));
+        assert!(summary.contains("Pull request: https://example.test/pull/1\n"));
+        assert!(!summary.contains("provider_succeeded_finalization_incomplete"));
+    }
+
+    #[test]
+    fn status_summary_reads_the_pull_request_from_the_durable_finalization_receipt() {
+        let payload = json!({
+            "run_id": "agent-task-receipt",
+            "state": "succeeded",
+            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
+            "artifact_refs": [],
+            "cook_completion": {
+                "schema": "homeboy/agent-task-cook-completion/v1",
+                "candidate_produced": true,
+                "finalization_requested": true,
+                "pr_finalized": true,
+                "state": "pr_finalized"
+            },
+            "metadata": {
+                "cook_finalization": { "status": "review_ready", "pr_url": "https://example.test/pull/2" }
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains("PR finalized: yes\n"));
+        assert!(summary.contains("Pull request: https://example.test/pull/2\n"));
+    }
+
+    #[test]
+    fn status_summary_keeps_a_no_finalize_cook_reported_as_succeeded() {
+        // `--no-finalize` never asked for a pull request, so provider success is
+        // the whole outcome and the headline stays untouched (#12571).
+        let payload = json!({
+            "run_id": "agent-task-no-finalize",
+            "state": "succeeded",
+            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
+            "artifact_refs": [{ "task_id": "cook", "kind": "patch", "uri": "artifact://cook/patch.diff", "size_bytes": 32318 }],
+            "cook_completion": {
+                "schema": "homeboy/agent-task-cook-completion/v1",
+                "candidate_produced": true,
+                "finalization_requested": false,
+                "pr_finalized": false,
+                "state": "candidate_produced"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains("Status: succeeded\n"), "{summary}");
+        assert!(summary.contains("Cook completion: candidate_produced\n"));
+        assert!(summary.contains("PR finalized: no\n"));
+        assert!(!summary.contains("provider_succeeded_finalization_incomplete"));
     }
 
     #[test]

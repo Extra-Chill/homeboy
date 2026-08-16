@@ -1,7 +1,7 @@
 # Required CI Gates
 
-Two different things can be true or false here, and conflating them is what
-caused #11084:
+Three different things can be true or false here, and conflating them is what
+caused #11084 and #12573:
 
 - **Declaration** — every context named by
   [`../../.github/required-gates-ruleset.json`](../../.github/required-gates-ruleset.json)
@@ -11,12 +11,21 @@ caused #11084:
 - **Enforcement** — GitHub actually requires those contexts before `main` can be
   updated. This is repository *state*. A pull request cannot change it, and it
   can be false while the declaration is perfect.
+- **Execution** — the declared gates actually ran and passed in a given run.
+  This is *run* state. It can be false while the declaration is perfect and the
+  enforcement is installed, because a skipped or cancelled gate reports nothing
+  at all.
 
 `homeboy / Required Gates Declaration` runs
 `bash .github/validate-required-gates.sh --report`. It **fails closed on the
 declaration** — a renamed, removed, duplicate, or path-filtered required job
 turns the check red — and it **reports, but never enforces, the live
 enforcement outcome**. Nothing in this check can newly block a pull request.
+
+`homeboy / Required Gates Executed` runs
+`bash .github/ci-required-gates-executed.sh` after every gate, under
+`if: always()`. It **fails closed on execution**, and it is the only check whose
+green tick means work was actually done.
 
 ## What The Check Reports
 
@@ -52,6 +61,46 @@ no required-status-check rule at all.
 This is a reporting fix on purpose. The repository merges fast by design and a
 post-merge guard was removed by design; the defect was the false assurance, not
 the absence of a block.
+
+## Execution: What A Green Run Has To Mean
+
+Every gate in `ci.yml` is conditional on `homeboy / PR State`, and a `skipped`
+needs-dependency does not fail a GitHub Actions run. On 2026-08-15 PR #12567
+merged on exactly that: run `31906427396` was cancelled with all seven gates
+mid-flight, and the `pull_request.closed` run that cancelled it — `31906482704` —
+skipped every gate and concluded **success**. Net verification for the merge was
+`PR State` and `CI Capacity Evidence`. Nothing compiled, nothing was tested, and
+`gh pr checks` simultaneously showed the superseded run's `cancelled` jobs as
+`fail`, so the pull request read red and green at once (#12573).
+
+`homeboy / Required Gates Executed` is the terminal gate for that. It measures
+two independent things and fails unless both hold:
+
+| direction | claim |
+| --- | --- |
+| dependency results | every gate job `ci.yml` names in its `needs` concluded `success`; `skipped` and `cancelled` are failures here, not silence |
+| observed execution | every declared context appears in this run's job list with conclusion `success`, read back from `actions/runs/<id>/jobs` |
+
+| outcome | meaning |
+| --- | --- |
+| `executed` | every declared context ran and passed — the only outcome that exits 0 |
+| `skipped` | at least one required gate did not execute at all |
+| `failed` | the gates executed and at least one did not pass |
+| `unverified` | this run's job list could not be read; an unmeasured run is not a verified one |
+
+Capacity admission and the closure run's cancellation are deliberately
+unchanged. Skipping stays possible; it stops being invisible. **A
+`pull_request.closed` run is red here on purpose**: it is the last run on the
+pull request and it is the run that read green in #12573, so exempting it would
+leave the reported hole exactly where it was found. Read the job summary, not the
+colour, to tell "this run cancelled an in-flight run and verified nothing" from
+"a gate failed".
+
+The wiring half of this is declaration, not execution, so
+`validate-required-gates.sh` fails closed when `required-gates-executed` is
+missing, is not `if: ${{ always() }}`, does not invoke the assertion, or omits
+any PR-state-conditional gate job from its `needs`. Adding a gate to `ci.yml`
+without wiring it into the terminal job turns `Required Gates Declaration` red.
 
 ## Apply And Verify
 

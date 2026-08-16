@@ -229,7 +229,7 @@ jobs:
     name: homeboy
     needs: [pr-state, ci-capacity-admission]
     if: ${{ needs.pr-state.outputs.active == 'true' }}
-    # v2.11.26, DEREFERENCED to its commit. These tags are annotated, so the tag
+    # Pinned to a commit. Release tags are annotated, so the tag
     # ref's own object SHA is a tag object, which `uses:` cannot resolve — pinning
     # one fails the whole workflow at startup with zero jobs scheduled (#12153).
     # Always pin `git rev-parse v<tag>^{commit}`.
@@ -240,9 +240,11 @@ jobs:
     # no-enforcement green), #378 (test binaries built once into a nextest
     # archive instead of recompiled in every shard), and #379 (a passing
     # candidate no longer reruns its baseline), #380 (the differential audit is
-    # changed-scoped instead of scanning the whole repository) and #381 (shard
-    # partitioning coverage). Refs #10997 and #11751 W1-2, W1-7, W1-10.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@3b20c22160bceb5c324fb2643ab7215e7cf73a53
+    # changed-scoped instead of scanning the whole repository), #381 (shard
+    # partitioning coverage), #402 (immutable extension revisions), and #405
+    # (downloaded Test archives stay out of consumer Git state). Refs
+    # #10997 and #11751 W1-2, W1-7, W1-10.
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@ae5161e2ce2d5818c41a4b09ae811d1521bb4f95
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
@@ -257,13 +259,14 @@ jobs:
       args: --skip-lint
       expected-commands: review audit,review lint,review test
       component: homeboy
+      extension-ref: 691d0527d7a4b3917649043a7f91a81913a139ab
       source: .
       scope: auto
       differential-gating: 'true'
       baseline-commands: none
       test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}
-      execution-timeout-seconds: '1800'
-      test-timeout-seconds: '1500'
+      execution-timeout-seconds: '2100'
+      test-timeout-seconds: '1800'
       comment-section-key: test
       comment-section-title: Test
     secrets: inherit
@@ -287,3 +290,39 @@ jobs:
           name: homeboy-ci-capacity-evidence-${{ github.run_attempt }}
           path: ci-capacity-evidence.json
           if-no-files-found: warn
+
+  # Terminal gate. A run's conclusion has to mean something (#12573).
+  #
+  # PR #12567 merged with ZERO gates executed. Its first run was cancelled with
+  # every gate mid-flight; the `pull_request.closed` run that cancelled it
+  # reported `pr-state` inactive, skipped every gate, and concluded SUCCESS. A
+  # `skipped` needs-dependency does not fail a run, so "nothing ran" and
+  # "everything passed" were the same green tick — and `gh pr checks`, which
+  # renders `cancelled` as `fail`, showed the superseded run's red at the same
+  # time. Neither reading was true.
+  #
+  # This job depends on every gate above, runs under `always()` so skipping
+  # cannot skip it too, and fails unless each dependency concluded `success` AND
+  # every context in `.github/required-gates-ruleset.json` appears in this run's
+  # job list having actually executed and passed. Two directions, because a
+  # declared context can be emitted by a job that never ran.
+  #
+  # Capacity admission and closure cancellation are untouched: skipping stays
+  # possible, it just stops being invisible. `homeboy / Required Gates
+  # Declaration` remains the required context for the DECLARATION claim; this is
+  # the EXECUTION claim, named for what it checks.
+  required-gates-executed:
+    name: homeboy / Required Gates Executed
+    needs: [pr-state, ci-capacity-admission, required-gates-declaration, workspace-tests-compile, warning-clean, windows-compile, rustfmt, homeboy-fast, homeboy]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert every required gate executed and passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_GATE_RESULTS: ${{ toJSON(needs) }}
+          CI_RUN_ACTIVE: ${{ needs.pr-state.outputs.active }}
+        run: bash .github/ci-required-gates-executed.sh

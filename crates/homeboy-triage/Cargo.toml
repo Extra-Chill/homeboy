@@ -22,3 +22,4 @@ chrono = "0.4"
 # Shared hermetic test fixtures (with_isolated_home) live in homeboy-core behind
 # the test-support feature; the whole workspace shares one isolation contract.
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
+homeboy-rig = { version = "0.1.0", path = "../homeboy-rig" }

@@ -488,6 +488,92 @@ fn targeted_lookup_rejects_traversal_component_id() {
 }
 
 #[test]
+fn load_resolves_the_selected_registration_without_requiring_global_inventory() {
+    let dir = temp_home_dir();
+    let target_repo = dir.path().join("target-repo");
+    let unrelated_repo = dir.path().join("unrelated-repo");
+    fs::create_dir_all(&target_repo).unwrap();
+    fs::create_dir_all(&unrelated_repo).unwrap();
+    fs::write(
+        target_repo.join("homeboy.json"),
+        serde_json::json!({
+            "id": "target",
+            "remote_url": "https://github.com/example/target.git"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // Resolving this unrelated attachment would invoke Git remote enrichment.
+    write_portable_id(&unrelated_repo, "different-id");
+    let _home = with_home_override(dir.path());
+    crate::project::save(&Project {
+        id: "site".to_string(),
+        components: vec![
+            ProjectComponentAttachment {
+                id: "target".to_string(),
+                local_path: target_repo.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            ProjectComponentAttachment {
+                id: "unrelated".to_string(),
+                local_path: unrelated_repo.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    })
+    .unwrap();
+    crate::component::portable::take_discovery_paths_for_test();
+
+    let component = load("target").expect("selected component");
+    let missing = load("missing").expect_err("missing component");
+    let discovery_paths = crate::component::portable::take_discovery_paths_for_test();
+
+    assert_eq!(component.id, "target");
+    assert_eq!(component.local_path, target_repo.to_string_lossy());
+    assert_eq!(missing.code, crate::error::ErrorCode::ComponentNotFound);
+    assert!(
+        !discovery_paths.iter().any(|path| path == &unrelated_repo),
+        "targeted load inspected the unrelated component: {discovery_paths:?}"
+    );
+}
+
+#[test]
+fn targeted_path_lookup_does_not_substitute_a_same_id_project_checkout() {
+    let dir = temp_home_dir();
+    let standalone_repo = dir.path().join("standalone-repo");
+    let project_repo = dir.path().join("project-repo");
+    fs::create_dir_all(&standalone_repo).unwrap();
+    fs::create_dir_all(&project_repo).unwrap();
+    write_portable_id(&standalone_repo, "shared");
+    write_portable_id(&project_repo, "shared");
+    let _home = with_home_override(dir.path());
+    let components = crate::paths::components().unwrap();
+    fs::create_dir_all(&components).unwrap();
+    fs::write(
+        components.join("shared.json"),
+        serde_json::json!({ "local_path": standalone_repo }).to_string(),
+    )
+    .unwrap();
+    crate::project::save(&Project {
+        id: "site".to_string(),
+        components: vec![ProjectComponentAttachment {
+            id: "shared".to_string(),
+            local_path: project_repo.to_string_lossy().to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+
+    let component = registered_by_local_path(&standalone_repo)
+        .unwrap()
+        .expect("standalone path match");
+
+    assert_eq!(component.local_path, standalone_repo.to_string_lossy());
+}
+
+#[test]
 fn load_standalone_skips_missing_local_path() {
     let dir = temp_home_dir();
 

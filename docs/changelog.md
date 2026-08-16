@@ -4,6 +4,121 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.9] - 2026-08-16
+
+### Changed
+- root Cook lifecycle write callers
+- give the run re-entry family explicit stores
+- catch rooted siblings that reach ambient store state
+- give run-outcome recording explicit stores
+
+### Fixed
+- trust durable review verification
+- preserve attached local execution
+
+## [0.350.8] - 2026-08-16
+
+### Changed
+- give the detached-handoff cluster explicit stores
+- align rooted recipe failure status
+- align baseline fixtures
+- bound archived test replay
+- pin one-time archive replay
+- pin repaired test tooling
+- root Cook handoff fence reads
+- give the run-claim family explicit stores
+- root Cook scratch capacity
+
+### Fixed
+- isolate baseline fixtures
+- repair runner lifecycle baseline
+- align process lifecycle baseline
+- validate reconstructed Cook workspace
+- repair bounded archive replay failures
+- bind deferred provisioning to lifecycle store
+- preserve durable Cook entry contracts
+
+## [0.350.7] - 2026-08-16
+
+### Changed
+- give the Cook write family explicit stores
+
+## [0.350.6] - 2026-08-16
+
+### Changed
+- root reserved handoff cancellation
+
+## [0.350.5] - 2026-08-16
+
+### Changed
+- root candidate adoption lifecycle stores
+- root adoption finalization and shrink the allowlist
+- close the mixed-store class and pin it shut
+- root Cook promotion in paired stores
+- seed the duplication family from the changed scope
+- run detectors concurrently and report where the time went
+
+### Fixed
+- stop shadowing the injected lifecycle store in the reported wrapper
+- bind daemon authority before execution
+
+## [0.350.4] - 2026-08-15
+
+### Changed
+- let the Cook spine take its lifecycle store
+- fail a run that skipped its required gates
+- wire Cook progress to the rooted recorder
+- root the Cook progress recorder
+
+### Fixed
+- make cancel report honestly and bound its wait
+- stop reporting a cook with no PR as succeeded
+- warn when an attached local cook owns its provider tree
+- sweep every declared backend when no --backend is given
+- name and echo the provider timeout budget
+
+## [0.350.3] - 2026-08-15
+
+### Changed
+- migrate Cook onto paired stores
+- pair Cook pre-execution stores
+- root batch and fanout stores
+- root Cook mutation validation stores
+- root Cook finalization stores
+
+### Fixed
+- keep targeted component resolution bounded
+- preserve pending runner authority
+- repair action pin fixture
+- bound preview placement argv
+- restore parallel hermetic shards
+- enforce admitted timeout literals
+- align test timeouts with capacity SLO
+- direct Cook provider help to full reference
+
+## [0.350.2] - 2026-08-15
+
+### Changed
+- root Cook promotion stores
+
+### Fixed
+- clear stale planned handoffs
+
+## [0.350.1] - 2026-08-15
+
+### Changed
+- root local Cook execution
+- root Cook follow-up stores
+- align dry-run reference contracts
+- isolate CI admission cases
+- root Cook interruption claims
+
+### Fixed
+- preserve planned runner handoffs
+- preserve pending runner ownership
+- bound fanout dry-run planning
+- refresh stale admission inventory
+
 ## [0.350.0] - 2026-08-15
 
 ### Fixed

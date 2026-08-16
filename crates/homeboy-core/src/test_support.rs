@@ -2314,12 +2314,11 @@ mod tests {
     #[cfg(unix)]
     fn assert_pid_reaped(pid: libc::pid_t) {
         let deadline = Instant::now() + Duration::from_secs(2);
-        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+        while crate::process::pid_is_running(pid as u32) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_ne!(
-            unsafe { libc::kill(pid, 0) },
-            0,
+        assert!(
+            !crate::process::pid_is_running(pid as u32),
             "hermetic cleanup left descendant {pid} alive"
         );
     }
@@ -2478,6 +2477,36 @@ mod tests {
             !Path::new(&tmpdir).exists(),
             "the per-invocation temp root must be removed when the test exits, \
              or it accumulates: {tmpdir}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermetic_runner_does_not_nest_under_an_outer_invocation_tmpdir() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let runner = workspace.join("scripts/nextest-hermetic-test-environment.sh");
+        let outer = tempfile::tempdir().expect("outer invocation tmpdir");
+        let output = Command::new("sh")
+            .arg(runner)
+            .args(["sh", "-c", "printf '%s' \"$TMPDIR\""])
+            .env("TMPDIR", outer.path())
+            .output()
+            .expect("run hermetic test runner");
+
+        assert!(output.status.success());
+        let selected = PathBuf::from(String::from_utf8(output.stdout).expect("UTF-8 tmpdir"));
+        assert!(
+            !selected.starts_with(outer.path()),
+            "test temp state must not be owned by the outer Homeboy invocation: {}",
+            selected.display()
+        );
+        assert!(
+            !selected.exists(),
+            "the per-test temp root must be removed after execution: {}",
+            selected.display()
         );
     }
 

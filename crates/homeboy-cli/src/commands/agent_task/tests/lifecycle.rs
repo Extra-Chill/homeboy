@@ -3378,12 +3378,61 @@ fn cancel_command_marks_queued_run_cancelled() {
             reason: Some("not selected".to_string()),
         })
         .expect("cancelled");
+        // The reported outcome must describe the durable effect, not merely that
+        // the request was accepted (#12572).
+        assert_eq!(value["cancellation"]["outcome"], "cancelled");
+        assert_eq!(value["cancellation"]["terminal"], true);
+        assert_eq!(value["cancellation"]["run_id"], "run-cli-cancel");
         let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
 
         assert_eq!(exit_code, 0);
         assert_eq!(record.state, AgentTaskRunState::Cancelled);
         assert_eq!(record.tasks[0].state, AgentTaskState::Cancelled);
         assert_eq!(record.metadata["cancel_reason"], json!("not selected"));
+    });
+}
+
+/// A provider that reserved a terminal result keeps the run joinable, so
+/// cancellation is deliberately not applied. That must be reported as the
+/// deferral it is — never as a completed cancellation — and it must not spend
+/// the bounded convergence wait on a record cancellation never touched (#12572).
+#[test]
+fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_cancelled() {
+    with_temp_home(|| {
+        let run_id = "run-cli-cancel-deferred";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = AgentTaskRunState::Running;
+            record.metadata["provider_executions"] = json!([{ "state": "succeeded" }]);
+        })
+        .expect("persist a terminal provider reservation");
+
+        let started = std::time::Instant::now();
+        let (value, exit_code) = cancel(CancelArgs {
+            run_id: run_id.to_string(),
+            reason: None,
+        })
+        .expect("cancellation request accepted");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["cancellation"]["outcome"],
+            "deferred_for_terminal_provider"
+        );
+        assert_eq!(value["cancellation"]["terminal"], false);
+        assert_eq!(value["state"], "running");
+        assert!(
+            value["summary"]
+                .as_str()
+                .expect("summary")
+                .contains("deliberately not applied"),
+            "unexpected summary: {}",
+            value["summary"]
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a deliberate deferral must not consume the convergence wait"
+        );
     });
 }
 

@@ -84,6 +84,18 @@ impl AgentTaskLifecycleStore {
         self.roots.data().to_path_buf()
     }
 
+    pub(crate) fn artifact_root(&self) -> PathBuf {
+        self.roots.artifacts().to_path_buf()
+    }
+
+    pub(crate) fn controller_scratch_root(&self) -> PathBuf {
+        self.data_root().join("controller-scratch")
+    }
+
+    pub(crate) fn matches_current_environment(&self) -> Result<bool> {
+        Ok(self.roots == paths::PathRoots::from_environment()?)
+    }
+
     pub(crate) fn workspace_claim_store(
         &self,
     ) -> homeboy_core::workspace_claim::WorkspaceClaimStore {
@@ -129,8 +141,31 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub(crate) fn submit_plan_with_current_runtime(
+        &self,
+        plan: &AgentTaskPlan,
+        run_id: &str,
+    ) -> Result<AgentTaskRunRecord> {
+        self.submit_plan_with_runtime_admission_status(
+            plan,
+            run_id,
+            super::lifecycle_ops::execution_runner_id(),
+            &|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok(),
+            |run_id| {
+                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+                    run_id,
+                    || Ok(self.read_record(run_id)?.state.is_terminal()),
+                )
+                .map(|admission| admission.runtime)
+            },
+        )
+    }
+
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
-        ObservationStore::open_initialized_for_lifecycle_at(self.observation_db_path())
+        ObservationStore::open_initialized_for_lifecycle_at_roots(
+            self.observation_db_path(),
+            self.artifact_root(),
+        )
     }
 
     pub fn open_observation_readonly(&self) -> Result<ObservationStore> {
@@ -153,6 +188,43 @@ impl AgentTaskLifecycleStore {
         error: &Error,
     ) -> Result<AgentTaskRunRecord> {
         super::record_pre_execution_failure_in_store(self, run_id, plan, phase, error)
+    }
+
+    pub(crate) fn mark_running(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::mark_running_in_store(self, run_id)
+    }
+
+    pub(crate) fn reserve_provider_execution(
+        &self,
+        run_id: &str,
+        task: &crate::agent_task::AgentTaskRequest,
+        attempt: u32,
+    ) -> Result<super::ProviderExecutionReservation> {
+        super::lifecycle_ops::reserve_provider_execution_in_store(self, run_id, task, attempt)
+    }
+
+    pub(crate) fn record_provider_execution_terminal(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        state: &str,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_execution_terminal_in_store(
+            self, run_id, task_id, attempt, state,
+        )
+    }
+
+    pub(crate) fn record_provider_execution_cleanup_elapsed(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        elapsed_ms: u64,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_execution_cleanup_elapsed_in_store(
+            self, run_id, task_id, attempt, elapsed_ms,
+        )
     }
 
     pub fn claim_cook_operation(
@@ -178,12 +250,182 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub fn fail_cook_operation(
+        &self,
+        run_id: &str,
+        operation_key: &str,
+        result: Value,
+    ) -> Result<()> {
+        super::operation_claims::fail_cook_operation_in_store(self, run_id, operation_key, result)
+    }
+
+    pub(crate) fn aggregate_source_exact(&self, run_id: &str) -> Result<(String, PathBuf)> {
+        let record = self.read_record(run_id)?;
+        record.aggregate_path.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!(
+                    "agent-task run '{}' has no aggregate artifact yet",
+                    record.run_id
+                ),
+                Some(record.run_id.clone()),
+                None,
+            )
+        })?;
+        let aggregate = self.read_aggregate(&record.run_id)?;
+        let raw = serde_json::to_string_pretty(&aggregate).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("serialize agent-task aggregate {}", record.run_id)),
+            )
+        })?;
+        Ok((raw, self.aggregate_path(&record.run_id)))
+    }
+
     pub fn operation_claim(
         &self,
         run_id: &str,
         operation_key: &str,
     ) -> Result<Option<super::OperationClaim>> {
         super::operation_claims::operation_claim_in_store(self, run_id, operation_key)
+    }
+
+    pub fn checkpoint_candidate_adoption_remediation(
+        &self,
+        run_id: &str,
+        remediation_run_id: &str,
+    ) -> Result<()> {
+        super::lifecycle_candidate_adoption::checkpoint_candidate_adoption_remediation_in_store(
+            self,
+            run_id,
+            remediation_run_id,
+        )
+    }
+
+    pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled(
+        &self,
+        cook_id: &str,
+    ) -> Result<bool> {
+        super::lifecycle_ops::cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
+            self, cook_id,
+        )
+    }
+
+    pub fn require_detached_cook_handoff_fence_open(&self, cook_id: &str) -> Result<()> {
+        super::lifecycle_ops::require_detached_cook_handoff_fence_open_in_store(self, cook_id)
+    }
+
+    pub fn start_candidate_adoption_with_policy(
+        &self,
+        run_id: &str,
+        candidate_sha: &str,
+        ai_model: &str,
+        active_gate: &str,
+        rerun_completed_gates: bool,
+        replace_interrupted: bool,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_candidate_adoption::start_candidate_adoption_with_policy_in_store(
+            self,
+            run_id,
+            candidate_sha,
+            ai_model,
+            active_gate,
+            rerun_completed_gates,
+            replace_interrupted,
+        )
+    }
+
+    pub fn start_candidate_adoption_gate(
+        &self,
+        run_id: &str,
+        command: &str,
+        process_group: u32,
+        timeout_seconds: u64,
+    ) -> Result<()> {
+        super::lifecycle_candidate_adoption::start_candidate_adoption_gate_in_store(
+            self,
+            run_id,
+            command,
+            process_group,
+            timeout_seconds,
+        )
+    }
+
+    pub(crate) fn heartbeat_candidate_adoption_gate(
+        &self,
+        run_id: &str,
+        visibility: crate::agent_task_gate::AgentTaskGateVisibility,
+        reveal_policy: crate::agent_task_gate::AgentTaskGateRevealPolicy,
+        status: &crate::agent_task_gate::AgentTaskGateLiveStatus,
+    ) -> Result<()> {
+        super::lifecycle_candidate_adoption::heartbeat_candidate_adoption_gate_in_store(
+            self,
+            run_id,
+            visibility,
+            reveal_policy,
+            status,
+        )
+    }
+
+    pub fn candidate_adoption_cancel_requested(&self, run_id: &str) -> Result<bool> {
+        super::lifecycle_candidate_adoption::candidate_adoption_cancel_requested_in_store(
+            self, run_id,
+        )
+    }
+
+    pub fn checkpoint_candidate_adoption(
+        &self,
+        run_id: &str,
+        phase: &str,
+        active_gate: &str,
+    ) -> Result<()> {
+        super::lifecycle_candidate_adoption::checkpoint_candidate_adoption_in_store(
+            self,
+            run_id,
+            phase,
+            active_gate,
+        )
+    }
+
+    pub fn finish_candidate_adoption(
+        &self,
+        run_id: &str,
+        error: Option<String>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_candidate_adoption::finish_candidate_adoption_in_store(self, run_id, error)
+    }
+
+    pub fn record_candidate_adoption_result(&self, run_id: &str, result: Value) -> Result<()> {
+        super::lifecycle_candidate_adoption::record_candidate_adoption_result_in_store(
+            self, run_id, result,
+        )
+    }
+
+    pub fn record_promotion(&self, run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_promotion_in_store(self, run_id, promotion)
+    }
+
+    pub(crate) fn record_cook_finalization(
+        &self,
+        run_id: &str,
+        finalization: Value,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_cook_finalization_in_store(self, run_id, finalization)
+    }
+
+    pub(crate) fn record_cook_moving_base_recovery(
+        &self,
+        run_id: &str,
+        recovery: Value,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_cook_moving_base_recovery_in_store(self, run_id, recovery)
+    }
+
+    pub(crate) fn clear_cook_moving_base_recovery(
+        &self,
+        run_id: &str,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::clear_cook_moving_base_recovery_in_store(self, run_id)
     }
 
     pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {
@@ -248,12 +490,74 @@ impl AgentTaskLifecycleStore {
         read_cook_index_in_store(self, cook_id)
     }
 
+    pub(crate) fn select_cook_candidate(
+        &self,
+        cook_id: &str,
+    ) -> Result<super::AgentTaskCookCandidateSelection> {
+        super::lifecycle_ops::select_cook_candidate_in_store(self, cook_id)
+    }
+
+    pub(crate) fn update_cook_index(
+        &self,
+        cook_id: &str,
+        mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,
+    ) -> Result<Option<AgentTaskCookIndex>> {
+        let path = self.cook_index_path(cook_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let mut index = read_json(&path)?;
+        if mutate(&mut index) {
+            write_json(&path, &index)?;
+        }
+        Ok(Some(index))
+    }
+
     pub fn cook_index_exists(&self, cook_id: &str) -> bool {
         self.cook_index_path(cook_id).exists()
     }
 
+    /// Persist the latest bounded, secret-safe terminal notification outcome
+    /// beside this store's own Cook index rather than the ambient one.
+    pub fn write_cook_notification_outcome(&self, cook_id: &str, outcome: &Value) -> Result<()> {
+        write_cook_notification_outcome_in_store(self, cook_id, outcome)
+    }
+
+    /// Claim the one terminal notification this store's Cook may deliver.
+    ///
+    /// The `O_EXCL` marker is created beside this store's own Cook index, so
+    /// two stores hold two independent claims rather than contending for the
+    /// ambient one.
+    pub fn claim_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<bool> {
+        claim_cook_notification_in_store(self, cook_id, marker)
+    }
+
+    /// Commit a confirmed terminal delivery beside this store's own Cook index.
+    pub fn confirm_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<()> {
+        confirm_cook_notification_in_store(self, cook_id, marker)
+    }
+
     pub fn read_record(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         read_record_in_store(self, run_id)
+    }
+
+    /// List every durable agent-task record from this store's own observation
+    /// database.
+    ///
+    /// Queue scanning is a read of the observation DB, not of the record files,
+    /// so a scan that resolved it ambiently would inspect one queue while the
+    /// claim it produced mutated another (#7505).
+    pub fn read_records(&self) -> Result<Vec<AgentTaskRunRecord>> {
+        read_records_in_store(self)
+    }
+
+    /// Read every retry successor of `source_run_id` from this store's own
+    /// observation database.
+    pub(crate) fn read_retry_successors(
+        &self,
+        source_run_id: &str,
+    ) -> Result<Vec<AgentTaskRunRecord>> {
+        read_retry_successors_in_store(self, source_run_id)
     }
 
     pub(crate) fn record_run_aggregate(
@@ -283,6 +587,21 @@ impl AgentTaskLifecycleStore {
         run_id: &str,
     ) -> Result<AgentTaskCookIndex> {
         super::lifecycle_ops::record_cook_attempt_in_store(self, cook_id, attempt, run_id)
+    }
+
+    /// Persist Cook phase and an optional provider activity sample using this
+    /// store's durable lifecycle roots.
+    pub fn record_cook_progress_with_activity(
+        &self,
+        run_id: &str,
+        phase: &str,
+        attempt: u32,
+        detail: Option<&str>,
+        activity: Option<Value>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_cook_progress_with_activity_in_store(
+            self, run_id, phase, attempt, detail, activity,
+        )
     }
 
     pub fn read_record_bounded(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -903,8 +1222,21 @@ pub(super) fn cook_index_exists(cook_id: &str) -> Result<bool> {
 /// because it is keyed on a `runs` row and a Cook id is an alias with no row
 /// of its own.
 pub(super) fn claim_cook_notification(cook_id: &str, marker: &Value) -> Result<bool> {
-    let delivered_path =
-        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification.json");
+    claim_cook_notification_in_store(&default_store()?, cook_id, marker)
+}
+
+/// Claim within one explicitly rooted store. `cook_index_path` as a free
+/// function is `default_store()?`, so the store's own method is used here: the
+/// claim marker is a bare filesystem create with no record read in front of it,
+/// and an ambient reach would land the marker in another home without failing.
+fn claim_cook_notification_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    marker: &Value,
+) -> Result<bool> {
+    let delivered_path = store
+        .cook_index_path(&sanitize_run_id(cook_id))
+        .with_file_name("notification.json");
     if delivered_path.exists() {
         return Ok(false);
     }
@@ -962,8 +1294,17 @@ pub(super) fn claim_cook_notification(cook_id: &str, marker: &Value) -> Result<b
 /// Commit a successful notification claim. Only a confirmed transport delivery
 /// becomes the durable exactly-once marker.
 pub(super) fn confirm_cook_notification(cook_id: &str, marker: &Value) -> Result<()> {
-    let delivered_path =
-        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification.json");
+    confirm_cook_notification_in_store(&default_store()?, cook_id, marker)
+}
+
+fn confirm_cook_notification_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    marker: &Value,
+) -> Result<()> {
+    let delivered_path = store
+        .cook_index_path(&sanitize_run_id(cook_id))
+        .with_file_name("notification.json");
     write_private_json(&delivered_path, marker)
 }
 
@@ -984,8 +1325,17 @@ pub(super) fn release_cook_notification_claim(cook_id: &str) -> Result<()> {
 
 /// Persist the latest bounded, secret-safe terminal notification outcome.
 pub(super) fn write_cook_notification_outcome(cook_id: &str, outcome: &Value) -> Result<()> {
-    let path =
-        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification-outcome.json");
+    write_cook_notification_outcome_in_store(&default_store()?, cook_id, outcome)
+}
+
+fn write_cook_notification_outcome_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    outcome: &Value,
+) -> Result<()> {
+    let path = store
+        .cook_index_path(&sanitize_run_id(cook_id))
+        .with_file_name("notification-outcome.json");
     write_private_json(&path, outcome)
 }
 
@@ -1002,17 +1352,7 @@ pub(super) fn update_cook_index(
     cook_id: &str,
     mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,
 ) -> Result<Option<AgentTaskCookIndex>> {
-    let path = cook_index_path(&sanitize_run_id(cook_id))?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let mut index = read_json(&path)?;
-    if mutate(&mut index) {
-        // `write_json` is atomic; this makes the pointer update one durable
-        // index transaction without nesting the configuration lock it owns.
-        write_json(&path, &index)?;
-    }
-    Ok(Some(index))
+    default_store()?.update_cook_index(cook_id, mutate)
 }
 
 pub(super) fn record_exists(run_id: &str) -> Result<bool> {
@@ -1079,6 +1419,15 @@ pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
     Ok(read_records_with_health()?.0)
 }
 
+/// The store-rooted counterpart of [`read_records`], following the same bound
+/// and the same health projection but reading this store's own observation
+/// database instead of `paths::observation_db()`.
+fn read_records_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<Vec<AgentTaskRunRecord>> {
+    Ok(records_with_health(observation_runs_bounded_in_store(lifecycle_store, 1000)?)?.0)
+}
+
 /// Bound on a single source run's retry lineage. Deliberately far above any
 /// plausible retry count: an exceeded lineage is reported as an error, and this
 /// is the threshold at which "this is a runaway, not a lineage" becomes true.
@@ -1091,11 +1440,23 @@ const RETRY_SUCCESSOR_SCAN_LIMIT: usize = 256;
 /// retry. The page is therefore read with an explicit truncation signal and a
 /// truncated lineage fails loudly rather than answering wrongly (#11177).
 pub(super) fn read_retry_successors(source_run_id: &str) -> Result<Vec<AgentTaskRunRecord>> {
-    let page = ObservationStore::open_initialized_for_lifecycle()?.list_runs_by_retry_of_page(
-        "agent-task",
-        source_run_id,
-        RETRY_SUCCESSOR_SCAN_LIMIT,
-    )?;
+    read_retry_successors_in_store(&default_store()?, source_run_id)
+}
+
+/// The store-rooted counterpart of [`read_retry_successors`], reading this
+/// store's own observation database instead of the ambient one.
+///
+/// The truncation contract is the reason this matters more than a plain read:
+/// callers treat "no successor" as authority to create one, so a lineage scanned
+/// in the wrong home answers "none" for a source whose successor is durable here
+/// and double-books the reservation.
+fn read_retry_successors_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    source_run_id: &str,
+) -> Result<Vec<AgentTaskRunRecord>> {
+    let page = lifecycle_store
+        .open_observation_initialized()?
+        .list_runs_by_retry_of_page("agent-task", source_run_id, RETRY_SUCCESSOR_SCAN_LIMIT)?;
     if page.truncated {
         return Err(Error::internal_unexpected(format!(
             "retry lineage for {source_run_id} exceeded {RETRY_SUCCESSOR_SCAN_LIMIT} successors; \
@@ -1148,12 +1509,24 @@ pub(super) fn observation_runs() -> Result<Vec<RunRecord>> {
 
 fn observation_runs_bounded(limit: usize) -> Result<Vec<RunRecord>> {
     let store = ObservationStore::open_readonly()?;
-    let filter = RunListFilter {
+    store.list_runs(bounded_agent_task_filter(limit))
+}
+
+fn observation_runs_bounded_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    limit: usize,
+) -> Result<Vec<RunRecord>> {
+    lifecycle_store
+        .open_observation_readonly()?
+        .list_runs(bounded_agent_task_filter(limit))
+}
+
+fn bounded_agent_task_filter(limit: usize) -> RunListFilter {
+    RunListFilter {
         kind: Some("agent-task".to_string()),
         limit: Some(i64::try_from(limit.clamp(1, 1000)).expect("bounded record limit")),
         ..Default::default()
-    };
-    store.list_runs(filter)
+    }
 }
 
 fn observation_metadata(

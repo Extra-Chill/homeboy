@@ -113,6 +113,55 @@ pub fn registered_by_id(id: &str) -> Result<Option<Component>> {
     load_standalone_component(id)
 }
 
+/// Resolve one persisted component whose configured checkout is `path` without
+/// materializing unrelated component configurations.
+pub fn registered_by_local_path(path: &Path) -> Result<Option<Component>> {
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return Ok(None);
+    };
+    let projects = project::list().unwrap_or_default();
+    let standalone_snapshot = project::StandaloneComponentConfigSnapshot::load();
+    for project in &projects {
+        for attachment in &project.components {
+            let attachment_path =
+                PathBuf::from(shellexpand::tilde(&attachment.local_path).into_owned());
+            if std::fs::canonicalize(attachment_path).ok().as_ref() != Some(&path) {
+                continue;
+            }
+            if let Ok(component) = project::resolve_project_component_with_standalone_snapshot(
+                project,
+                &attachment.id,
+                Some(&standalone_snapshot),
+            ) {
+                return Ok(Some(component));
+            }
+        }
+    }
+
+    let dir = crate::paths::components()?;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(None);
+    };
+    for entry in entries.flatten() {
+        let registration = entry.path();
+        if registration.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = registration.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(info) = read_standalone_file(id) else {
+            continue;
+        };
+        let registered_path = PathBuf::from(shellexpand::tilde(&info.local_path).into_owned());
+        if std::fs::canonicalize(registered_path).ok().as_ref() == Some(&path) {
+            return load_standalone_component(id);
+        }
+    }
+
+    Ok(None)
+}
+
 /// Load standalone component registrations from `~/.config/homeboy/components/`.
 ///
 /// Each `<id>.json` file in the components directory is a registered component
@@ -394,11 +443,26 @@ pub fn list_ids() -> Result<Vec<String>> {
 }
 
 pub fn load(id: &str) -> Result<Component> {
-    if let Some(component) = inventory()?
-        .into_iter()
-        .find(|component| component.id == id)
-    {
+    if let Some(component) = registered_by_id(id)? {
         return Ok(component);
+    }
+
+    // Portable discovery is a command-local fallback after persisted ownership,
+    // matching inventory precedence without resolving unrelated registrations.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(component) = discover_from_portable(&cwd) {
+            if component.id == id {
+                return Ok(component);
+            }
+        } else if let Some(git_root) = crate::component::resolution::detect_git_root(&cwd) {
+            if git_root != cwd {
+                if let Some(component) = discover_from_portable(&git_root) {
+                    if component.id == id {
+                        return Ok(component);
+                    }
+                }
+            }
+        }
     }
 
     // Component not in full inventory. Check if a standalone registration
@@ -414,8 +478,39 @@ pub fn load(id: &str) -> Result<Component> {
         ));
     }
 
-    let suggestions = list_ids().unwrap_or_default();
+    let suggestions = registered_id_candidates();
     Err(Error::component_not_found(id.to_string(), suggestions))
+}
+
+fn registered_id_candidates() -> Vec<String> {
+    // Suggestions describe configured candidates without resolving their
+    // repositories. Resolution failures remain the selected command's concern.
+    let mut ids = HashSet::new();
+    for project in project::list().unwrap_or_default() {
+        ids.extend(
+            project
+                .components
+                .into_iter()
+                .map(|attachment| attachment.id),
+        );
+    }
+    if let Ok(entries) = crate::paths::components().and_then(|dir| {
+        std::fs::read_dir(&dir).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", dir.display())))
+        })
+    }) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+                if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    let mut ids = ids.into_iter().collect::<Vec<_>>();
+    ids.sort();
+    ids
 }
 
 pub fn exists(id: &str) -> bool {

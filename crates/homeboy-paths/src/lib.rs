@@ -853,9 +853,17 @@ mod formatter_visibility {
         let at = line.find("#[path")?;
         let after = &line[at..];
         let eq = after.find('=')?;
-        let open = after[eq..].find('"')? + eq + 1;
+        let open = after[eq..].find('"')? + eq;
         let close = after[open + 1..].find('"')? + open + 1;
         Some(after[open + 1..close].to_string())
+    }
+
+    #[test]
+    fn path_attr_value_preserves_the_first_path_character() {
+        assert_eq!(
+            path_attr_value(r#"#[path = "deps_provider.rs"]"#).as_deref(),
+            Some("deps_provider.rs")
+        );
     }
 
     /// The literal in `include!("...")`. `include!(concat!(env!("OUT_DIR"), ..))`
@@ -1114,7 +1122,8 @@ mod formatter_visibility {
             .into_iter()
             .filter(|path| {
                 let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
-                !rel.replace('\\', "/").starts_with(FIXTURE_PREFIX)
+                let rel = rel.replace('\\', "/");
+                !rel.starts_with(FIXTURE_PREFIX) && !rel.contains(&format!("/{FIXTURE_PREFIX}"))
             })
             .collect()
     }

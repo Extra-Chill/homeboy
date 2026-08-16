@@ -215,7 +215,8 @@ fn runner_selection_context(
 }
 
 pub fn hot_command(command: &Commands) -> Option<HotCommand> {
-    if is_plan_only_command(command)
+    if is_cook_preview(command)
+        || is_plan_only_command(command)
         || is_controller_owned_fanout_coordination(command)
         || is_bounded_agent_task_metadata_read(command)
         || is_local_registry_management(command)
@@ -294,6 +295,15 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             Some(HotCommand::local_only(contract.hot_label, Some(reason)))
         }
     }
+}
+
+pub(crate) fn is_cook_preview(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Cook(cook),
+        }) if cook.preview
+    )
 }
 
 pub fn evaluate(command: HotCommand, resources: &DoctorOutput) -> Option<ResourcePolicyWarning> {
@@ -1169,6 +1179,8 @@ mod tests {
 
     #[test]
     fn automatic_cook_refusal_names_when_no_runner_is_eligible() {
+        let _lock = env_lock();
+        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
         let command = lab_supported_hot("agent-task cook/run-plan/retry --run");
         let unavailable = LabRunnerReadiness {
             state: crate::runner::runners::LabRunnerReadinessState::ConnectedIneligible,
@@ -1586,6 +1598,7 @@ mod tests {
     fn hot_lab_or_local_requires_admission_before_local_fallback() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
         let placement = crate::cli_surface::Placement::LabOrLocal;
         let disconnected = LabRunnerReadiness {
             state: crate::runner::runners::LabRunnerReadinessState::Disconnected,
