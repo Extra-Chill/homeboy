@@ -3282,6 +3282,75 @@ impl JobHandle {
             .ok_or_else(|| Error::internal_unexpected("local child reservation is missing"))
     }
 
+    pub(crate) fn accepted_local_child_execution_context(
+        &self,
+        reservation_id: &str,
+        runner_id: &str,
+        durable_run_id: &str,
+        context_id: &str,
+    ) -> Result<Value> {
+        let inner = self.store.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&self.job_id)
+            .ok_or_else(|| job_not_found(self.job_id))?;
+        let local_runner = stored.local_runner.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner_execution_context",
+                "daemon job has no local runner authority",
+                Some(self.job_id.to_string()),
+                None,
+            )
+        })?;
+        let local_child = stored.local_child.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner_execution_context",
+                "daemon job has no local child reservation",
+                Some(self.job_id.to_string()),
+                None,
+            )
+        })?;
+        if stored.job.status != JobStatus::Running
+            || local_child.process.is_none()
+            || local_child.reservation_id != reservation_id
+            || local_runner.runner_id != runner_id
+            || stored_job_durable_run_id(stored).as_deref() != Some(durable_run_id)
+        {
+            return Err(Error::validation_invalid_argument(
+                "runner_execution_context",
+                "daemon job does not match the running local child authority",
+                Some(self.job_id.to_string()),
+                None,
+            ));
+        }
+        stored
+            .events
+            .iter()
+            .rev()
+            .filter_map(|event| event.data.as_ref())
+            .filter(|data| {
+                data.get("phase").and_then(Value::as_str)
+                    == Some("runner_job_execution_context_verified")
+            })
+            .filter_map(|data| data.get("execution_context"))
+            .find(|evidence| {
+                evidence
+                    .get("context")
+                    .and_then(|context| context.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(context_id)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "runner_execution_context",
+                    "daemon job has no matching verified execution context",
+                    Some(context_id.to_string()),
+                    None,
+                )
+            })
+    }
+
     pub(crate) fn start_with_reserved_child_identity(
         &self,
         pid: u32,

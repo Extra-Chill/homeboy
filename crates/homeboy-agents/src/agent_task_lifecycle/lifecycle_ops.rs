@@ -1296,6 +1296,14 @@ where
     }
     if let Some(runner_id) = execution_runner_id.as_deref() {
         metadata["runner_id"] = json!(runner_id);
+        if let Some(execution_context) =
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::from_direct_daemon_child_environment(
+                &run_id,
+                runner_id,
+            )?
+        {
+            project_runner_execution_context(&mut metadata, &execution_context)?;
+        }
     }
     // The plan is the immutable cross-process carrier. Project the identical
     // decision onto the run record so status, finalization, and PR evidence do
@@ -1498,6 +1506,16 @@ where
         }
     }
     Ok(record)
+}
+
+pub(crate) fn project_runner_execution_context(
+    metadata: &mut Value,
+    execution_context: &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
+) -> Result<()> {
+    execution_context.verify_integrity()?;
+    metadata["runner_job_id"] = json!(execution_context.runner_job_id());
+    metadata["runner_execution_context"] = execution_context.evidence_record()?;
+    Ok(())
 }
 
 pub(crate) fn persist_controller_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<()> {
