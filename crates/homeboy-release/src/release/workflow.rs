@@ -1140,6 +1140,7 @@ mod tests {
         let gate = &mut readiness.gate_results[0];
         gate.status = "passed".to_string();
         gate.reason = None;
+        gate.evidence_refs = vec!["evidence://lint".to_string()];
         gate.provenance = Some(super::super::types::ReleaseReadinessProvenance {
             dependencies: std::collections::BTreeMap::from([(
                 "dependency".to_string(),
@@ -1213,8 +1214,8 @@ mod tests {
             .find(|record| record.source_sha == source)
             .expect("readiness record is retained");
             let owner = record.owner_run_ref.clone();
-            assert!(error.hints.iter().any(|hint| hint.message
-                == format!("Inspect readiness evidence: homeboy release readiness show {owner}")));
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert!(error.message.contains("invalid selected gate evidence"));
             assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
             assert_eq!(record.finalization_status, "completed");
             assert_eq!(

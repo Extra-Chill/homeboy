@@ -1262,6 +1262,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "homeboy-core",
+ "homeboy-rig",
  "serde",
  "serde_json",
 ]

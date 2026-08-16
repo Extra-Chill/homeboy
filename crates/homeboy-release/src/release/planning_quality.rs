@@ -1251,11 +1251,13 @@ mod tests {
             };
 
             let error = validate_lint_quality(&component, "fixture").expect_failed();
-            // The bootstrap failure now surfaces as the extension resolution
-            // failure that actually occurred, rather than the generic
-            // "Lint runner error" this previously asserted.
+            // Missing extension manifests now surface through the typed
+            // capability diagnostic rather than a generic runner error.
             assert!(
-                error.to_string().contains("Extension not found"),
+                error
+                    .to_string()
+                    .contains("no linked extensions that provide lint support")
+                    && error.to_string().contains("missing-lint-extension"),
                 "a component declaring an uninstallable lint extension must block \
                  release on the resolution failure; got: {error}"
             );
@@ -1529,11 +1531,13 @@ exit 0
             );
             assert_eq!(
                 producer_error.details["lint_workflow"]["baseline_new_count"].as_u64(),
-                Some(0)
+                None,
+                "producer errors make the baseline comparison ineligible"
             );
             assert_eq!(
                 producer_error.details["lint_workflow"]["baseline_known_count"].as_u64(),
-                Some(1)
+                None,
+                "producer errors make the baseline comparison ineligible"
             );
         });
     }
