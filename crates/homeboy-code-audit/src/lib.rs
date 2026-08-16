@@ -43,6 +43,7 @@ mod idiomatic;
 pub(crate) mod impact;
 pub(crate) mod import_matching;
 pub mod naming;
+pub(crate) mod parallel;
 pub mod recorded_artifacts;
 pub mod report;
 mod requirements;
@@ -97,7 +98,7 @@ pub use entry::{
 pub(crate) use entry::{
     audit_path_scoped_with_plan_and_analysis, audit_path_with_id_with_plan_and_analysis,
 };
-pub(crate) use types::{time_audit_detector, AuditAnalysisContext, AuditWithAnalysis};
+pub(crate) use types::{time_audit_detector_isolated, AuditAnalysisContext, AuditWithAnalysis};
 pub use types::{
     AuditSummary, AuditTiming, AuditTimingSpan, CodeAuditResult, ConventionReport,
     DirectoryConvention, DirectoryOutlier,
