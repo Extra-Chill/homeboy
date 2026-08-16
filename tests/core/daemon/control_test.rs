@@ -3,6 +3,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 #[cfg(unix)]
 use std::{os::unix::process::CommandExt, process::Command};
 
