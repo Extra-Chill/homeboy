@@ -609,15 +609,16 @@ pub(crate) fn pre_execution_failure_report(
 /// Pre-execution failures happen before a provider can receive work. Persist a
 /// normal terminal run so the Cook alias can expose its complete retry history.
 pub(crate) fn record_pre_execution_failure(
+    lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
     run_id: &str,
     error: &Error,
     phase: &str,
 ) -> Result<()> {
-    if !agent_task_lifecycle::run_record_exists(run_id)? {
-        agent_task_lifecycle::submit_plan(plan, Some(run_id))?;
+    if !lifecycle_store.record_exists(run_id)? {
+        lifecycle_store.submit_plan_with_current_runtime(plan, run_id)?;
     }
-    agent_task_lifecycle::record_pre_execution_failure(run_id, plan, phase, error)?;
+    lifecycle_store.record_pre_execution_failure(run_id, plan, phase, error)?;
     Ok(())
 }
 

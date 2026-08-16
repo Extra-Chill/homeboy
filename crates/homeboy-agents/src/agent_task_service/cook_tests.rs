@@ -12051,6 +12051,56 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
 }
 
 #[test]
+fn cook_observer_failures_write_only_to_the_explicit_lifecycle_store() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    assert_ne!(left_context.data_dir(), right_context.data_dir());
+
+    let left = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let run_id = "same-cook-observer-run";
+    let plan = AgentTaskPlan::new("observer-root-proof", Vec::new());
+
+    for store in [&left, &right] {
+        store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(serde_json::json!({})))
+            .expect("seed the same run id in each lifecycle root");
+    }
+    let right_before = right.read_record(run_id).expect("right record before");
+    let observer = |_: &CookProgressEvent<'_>| {
+        Err(Error::internal_io(
+            "Broken pipe (os error 32)",
+            Some("write submitting client stdout".to_string()),
+        ))
+    };
+
+    report_cook_progress_with_activity(
+        &left,
+        Some(&observer),
+        "same-cook-observer",
+        run_id,
+        "promotion",
+        1,
+        None,
+        None,
+    )
+    .expect("observer failure remains non-authoritative");
+
+    let left_record = left.read_record(run_id).expect("left record after");
+    assert_eq!(
+        left_record.metadata["cook_observer_events"][0]["kind"],
+        "delivery_failed"
+    );
+    assert_eq!(
+        left_record.metadata["cook_observer_events"][0]["phase"],
+        "promotion"
+    );
+    let right_after = right.read_record(run_id).expect("right record after");
+    assert_eq!(right_after.metadata, right_before.metadata);
+    assert_eq!(right_after.updated_at, right_before.updated_at);
+}
+
+#[test]
 fn cook_promotion_finalizes_into_the_injected_stores_across_split_recipe_and_lifecycle_roots() {
     let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
