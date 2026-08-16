@@ -558,15 +558,32 @@ pub fn fail_detached_cook_handoff_parent(
     cook_id: &str,
     reason: &str,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    fail_detached_cook_handoff_parent_in_store(&lifecycle_store, cook_id, reason)
+}
+
+/// Terminalize a still-pending handoff parent inside an explicitly rooted
+/// store.
+///
+/// The two protections that make a parent authoritative — a published Cook
+/// index, and a materializing attempt whose record already exists — are read
+/// from the same store the mutation lands in. Reading them ambiently would let
+/// another home's index or attempt record veto, or fail to veto, a terminal
+/// transition in this one.
+pub(crate) fn fail_detached_cook_handoff_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
-    let record = store::mutate_record(&cook_id, |record| {
+    let record = lifecycle_store.mutate_record(&cook_id, |record| {
         if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
             || record.state.is_terminal()
             || record.metadata["detached_cook_handoff"]["state"] != "pending"
-            || store::read_cook_index(&cook_id).is_ok()
+            || lifecycle_store.read_cook_index(&cook_id).is_ok()
             || record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"]
                 .as_str()
-                .is_some_and(|run_id| store::read_record(run_id).is_ok())
+                .is_some_and(|run_id| lifecycle_store.read_record(run_id).is_ok())
         {
             return false;
         }
@@ -588,7 +605,7 @@ pub fn fail_detached_cook_handoff_parent(
     })?;
     // A protected parent is a successful no-op: it is the authoritative result
     // of materialization or a prior terminal transition, not a missing parent.
-    Ok(record.unwrap_or(store::read_record(&cook_id)?))
+    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
 }
 
 fn complete_detached_cook_handoff_parent_in_store(
@@ -661,11 +678,26 @@ pub fn has_expired_detached_cook_admission(
 }
 
 pub fn expire_detached_cook_admission(cook_id: &str) -> Result<bool> {
-    let record = store::read_record(cook_id)?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    expire_detached_cook_admission_in_store(&lifecycle_store, cook_id)
+}
+
+/// Expire a detached Cook's admission lease inside an explicitly rooted store.
+///
+/// The liveness read and the terminal handoff write share one store, so an
+/// expiry decided from one queue's evidence can never terminalize a parent
+/// admission in another. Liveness itself is computed from the record and the
+/// process table, both of which are already root-free.
+pub fn expire_detached_cook_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<bool> {
+    let record = lifecycle_store.read_record(cook_id)?;
     if !has_expired_detached_cook_admission(&record, chrono::Utc::now()) {
         return Ok(false);
     }
-    let terminal = fail_detached_cook_handoff_parent(
+    let terminal = fail_detached_cook_handoff_parent_in_store(
+        lifecycle_store,
         cook_id,
         "detached Cook admission lease expired before child or supervisor ownership attached",
     )?;
@@ -1623,7 +1655,30 @@ pub fn claim_cook_terminal_notification(cook_id: &str, delivered_by: &str) -> Re
     if cook_id.trim().is_empty() {
         return Ok(false);
     }
-    store::claim_cook_notification(
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    claim_cook_terminal_notification_in_store(&lifecycle_store, cook_id, delivered_by)
+}
+
+/// Claim a Cook's single terminal notification within an explicitly rooted
+/// store. The `O_EXCL` marker is created beside that store's own Cook index, so
+/// two stores are two independent claims and neither consumes the other's
+/// exactly-once eligibility.
+///
+/// The empty-id guard is repeated here rather than delegated to the ambient
+/// entry point. A blank Cook id is not an identity: `sanitize_run_id` turns
+/// `""` into a freshly minted `agent-task-<uuid>` and `"   "` into `___`,
+/// either of which would win a durable claim keyed to a Cook nobody can name.
+/// The ambient shim keeps its own copy so a broken environment still answers
+/// `Ok(false)` without constructing a store, exactly as it does today.
+pub fn claim_cook_terminal_notification_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    delivered_by: &str,
+) -> Result<bool> {
+    if cook_id.trim().is_empty() {
+        return Ok(false);
+    }
+    lifecycle_store.claim_cook_notification(
         cook_id,
         &json!({
             "at": now_timestamp(),
@@ -1635,7 +1690,23 @@ pub fn claim_cook_terminal_notification(cook_id: &str, delivered_by: &str) -> Re
 /// Persist a confirmed terminal delivery, which is the point at which its
 /// exactly-once eligibility is consumed.
 pub fn confirm_cook_terminal_notification(cook_id: &str, delivered_by: &str) -> Result<()> {
-    store::confirm_cook_notification(
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    confirm_cook_terminal_notification_in_store(&lifecycle_store, cook_id, delivered_by)
+}
+
+/// Persist a confirmed terminal delivery beside the injected store's own Cook
+/// index. Like the claim it commits, this is a bare filesystem write with no
+/// record read in front of it, so an ambient reach here would consume the wrong
+/// root's eligibility without ever failing.
+///
+/// No empty-id guard is added: the ambient function has never had one, and a
+/// sibling that refused an id its pair accepts would not be the same operation.
+pub fn confirm_cook_terminal_notification_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    delivered_by: &str,
+) -> Result<()> {
+    lifecycle_store.confirm_cook_notification(
         cook_id,
         &json!({
             "at": now_timestamp(),
@@ -1696,6 +1767,17 @@ pub fn load_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
     store::read_controller_plan(&run_id)
 }
 
+/// Load the controller-owned plan from an explicitly rooted store. Both halves
+/// follow the injected root: the Cook alias is resolved against that store's
+/// own index, and the plan is read from that store's own run directory.
+pub(crate) fn load_controller_plan_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskPlan> {
+    let run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
+    lifecycle_store.read_controller_plan(&run_id)
+}
+
 /// Load a durable plan for a scheduler or provider execution. This is the only
 /// read path allowed to upgrade a legacy execution-budget envelope.
 pub fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
@@ -1705,8 +1787,24 @@ pub fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
 
 /// Validate a queued lifecycle's pinned controller without scheduling provider work.
 pub fn validate_controller_runtime(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    migrate_record_controller_runtime(&mut record)?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    validate_controller_runtime_in_store(&lifecycle_store, run_id)
+}
+
+/// Validate a queued lifecycle's pinned controller against an explicitly rooted
+/// store.
+///
+/// The record read and the legacy-pin migration write both follow
+/// `lifecycle_store`. The immutable controller-runtime pin store that
+/// `controller_runtime::validate` consults is deliberately left process-global:
+/// it is a content-addressed executable cache shared across homes, not durable
+/// lifecycle state, so it is not one of this store's roots.
+pub(crate) fn validate_controller_runtime_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
+    migrate_record_controller_runtime_in_store(lifecycle_store, &mut record)?;
     homeboy_core::controller_runtime::validate(
         record
             .metadata
@@ -2757,12 +2855,32 @@ pub fn claim_next_eligible_queued_run() -> Result<AgentTaskQueuedRunClaim> {
     claim_next_eligible_queued_run_with_preflight(|_, _| Ok(()))
 }
 
+/// Claim the oldest executable queued record from an explicitly rooted store.
+pub fn claim_next_eligible_queued_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<AgentTaskQueuedRunClaim> {
+    claim_next_eligible_queued_run_with_preflight_in_store(lifecycle_store, |_, _| Ok(()))
+}
+
 /// Claim the oldest executable queued record after caller-supplied admission
 /// checks have validated its durable plan, but before the atomic Running claim.
 pub fn claim_next_eligible_queued_run_with_preflight(
     preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskQueuedRunClaim> {
     claim_next_eligible_queued_run_with_preflight_and_filter(|_| true, preflight)
+}
+
+/// Preflighted admission against an explicitly rooted store. The preflight
+/// closure is the caller's own, so it is passed through untouched.
+pub fn claim_next_eligible_queued_run_with_preflight_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+) -> Result<AgentTaskQueuedRunClaim> {
+    claim_next_eligible_queued_run_with_preflight_and_filter_in_store(
+        lifecycle_store,
+        |_| true,
+        preflight,
+    )
 }
 
 /// Claim the oldest eligible queued record that matches a caller-owned scope.
@@ -2779,6 +2897,21 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter(
     )
 }
 
+/// Scoped, preflighted admission against an explicitly rooted store, using the
+/// same default admission budget as the ambient pair.
+pub fn claim_next_eligible_queued_run_with_preflight_and_filter_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    include: impl Fn(&AgentTaskRunRecord) -> bool,
+    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+) -> Result<AgentTaskQueuedRunClaim> {
+    claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_store(
+        lifecycle_store,
+        include,
+        MAX_QUEUE_ADMISSION_RECORDS,
+        preflight,
+    )
+}
+
 /// Scoped queued admission with an explicit remaining budget shared with other
 /// admission phases in the same dispatch invocation.
 pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
@@ -2786,7 +2919,39 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
     limit: usize,
     preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskQueuedRunClaim> {
-    let mut queued: Vec<AgentTaskRunRecord> = store::read_records()?
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_store(
+        &lifecycle_store,
+        include,
+        limit,
+        preflight,
+    )
+}
+
+/// The whole claim, taken through one explicitly injected store.
+///
+/// This is the single body of the claim chain; every other `claim_next_*`
+/// entry point narrows its arguments and delegates here. Each step is rooted in
+/// `lifecycle_store` rather than the process environment:
+///
+/// * the queue scan reads that store's own observation database, so a claim
+///   never inspects one queue and then wins a run in another,
+/// * the controller-runtime and durable-plan preflight read that store's own
+///   record and run directory,
+/// * quarantine of invalid provenance mutates that store's own record, and
+/// * the atomic Running transition takes that store's own config lock through
+///   [`mark_running_in_store`].
+///
+/// The `include` and `preflight` closures belong to the caller and are passed
+/// through unchanged; neither is given a store it did not already have.
+pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    include: impl Fn(&AgentTaskRunRecord) -> bool,
+    limit: usize,
+    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+) -> Result<AgentTaskQueuedRunClaim> {
+    let mut queued: Vec<AgentTaskRunRecord> = lifecycle_store
+        .read_records()?
         .into_iter()
         .filter(|record| {
             record.state == AgentTaskRunState::Queued
@@ -2813,22 +2978,22 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
             });
         }
         inspected += 1;
-        let plan = match validate_controller_runtime(&record.run_id)
-            .and_then(|_| load_controller_plan(&record.run_id))
+        let plan = match validate_controller_runtime_in_store(lifecycle_store, &record.run_id)
+            .and_then(|_| load_controller_plan_in_store(lifecycle_store, &record.run_id))
         {
             Ok(plan) => plan,
             Err(error) => {
-                quarantine_queued_run(&record, None, &error)?;
+                quarantine_queued_run_in_store(lifecycle_store, &record, None, &error)?;
                 skipped.push(queue_skip(&record, None, &error));
                 continue;
             }
         };
         if let Err(error) = preflight(&record, &plan) {
-            quarantine_queued_run(&record, Some(&plan), &error)?;
+            quarantine_queued_run_in_store(lifecycle_store, &record, Some(&plan), &error)?;
             skipped.push(queue_skip(&record, Some(&plan), &error));
             continue;
         }
-        match mark_running(&record.run_id) {
+        match mark_running_in_store(lifecycle_store, &record.run_id) {
             Ok(claimed) => {
                 return Ok(AgentTaskQueuedRunClaim {
                     record: Some(claimed),
@@ -2838,7 +3003,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
                 })
             }
             Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
-                quarantine_queued_run(&record, Some(&plan), &error)?;
+                quarantine_queued_run_in_store(lifecycle_store, &record, Some(&plan), &error)?;
                 skipped.push(queue_skip(&record, Some(&plan), &error));
             }
             Err(error) => return Err(error),
@@ -2855,6 +3020,14 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
 
 pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
     Ok(claim_next_eligible_queued_run()?.record)
+}
+
+/// Claim the oldest executable queued record from an explicitly rooted store,
+/// discarding the skip diagnostics exactly as the ambient pair does.
+pub fn claim_next_queued_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<Option<AgentTaskRunRecord>> {
+    Ok(claim_next_eligible_queued_run_in_store(lifecycle_store)?.record)
 }
 
 fn queue_skip(
@@ -2900,8 +3073,21 @@ fn quarantine_queued_run(
     plan: Option<&AgentTaskPlan>,
     error: &Error,
 ) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    quarantine_queued_run_in_store(&lifecycle_store, record, plan, error)
+}
+
+/// Retain the redacted admission diagnostic on the record inside the store the
+/// claim is scanning. A quarantine written into another root would leave the
+/// scanned queue permanently re-inspecting the same bad record.
+fn quarantine_queued_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
+    error: &Error,
+) -> Result<()> {
     let diagnostic = redacted_queue_diagnostic(plan, error);
-    let _ = store::mutate_record(&record.run_id, |quarantined| {
+    let _ = lifecycle_store.mutate_record(&record.run_id, |quarantined| {
         if quarantined.state != AgentTaskRunState::Queued
             || quarantined.metadata.get("queue_quarantine").is_some()
         {
@@ -4991,6 +5177,24 @@ pub fn reconcile_scope_run_ids(run_id: &str) -> Result<Vec<String>> {
 pub(crate) fn resolve_run_id(run_id: &str) -> Result<String> {
     let run_id = sanitize_run_id(run_id);
     match store::read_cook_index(&run_id) {
+        Ok(index) => Ok(index.latest_run_id),
+        Err(_) => Ok(run_id),
+    }
+}
+
+/// The store-rooted counterpart of [`resolve_run_id`], consulting the injected
+/// store's own Cook index.
+///
+/// This is deliberately a sibling rather than a delegation target for the
+/// ambient function. [`resolve_run_id`] swallows every index read failure and
+/// therefore cannot fail; routing it through a store constructor would let an
+/// unresolvable environment turn a total function into a fallible one.
+pub(crate) fn resolve_run_id_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<String> {
+    let run_id = sanitize_run_id(run_id);
+    match lifecycle_store.read_cook_index(&run_id) {
         Ok(index) => Ok(index.latest_run_id),
         Err(_) => Ok(run_id),
     }
