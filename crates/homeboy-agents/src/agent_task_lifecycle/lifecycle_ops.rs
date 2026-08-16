@@ -516,8 +516,16 @@ pub(crate) fn reserve_detached_cook_handoff_materialization_in_store(
 /// cancelled before the Cook index could be published. The reservation is the
 /// durable link that keeps this otherwise-unindexed record reachable.
 pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id: &str) -> Result<bool> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(&lifecycle_store, cook_id)
+}
+
+pub(crate) fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<bool> {
     let cook_id = sanitize_run_id(cook_id);
-    let Ok(parent) = store::read_record(&cook_id) else {
+    let Ok(parent) = lifecycle_store.read_record(&cook_id) else {
         return Ok(false);
     };
     let handoff = &parent.metadata["detached_cook_handoff"];
@@ -527,7 +535,7 @@ pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id: &str)
     if handoff["cook_id"] != cook_id || parent.state != AgentTaskRunState::Cancelled {
         return Ok(false);
     }
-    let Ok(child) = store::read_record(attempt_run_id) else {
+    let Ok(child) = lifecycle_store.read_record(attempt_run_id) else {
         return Ok(false);
     };
     // The reservation makes an unindexed child reachable, but it does not give
@@ -535,7 +543,11 @@ pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id: &str)
     if child.state.is_terminal() {
         return Ok(false);
     }
-    cancel_exact_run(attempt_run_id, Some("detached Cook handoff cancelled"))?;
+    super::cancellation::cancel_exact_run_in_store(
+        lifecycle_store,
+        attempt_run_id,
+        Some("detached Cook handoff cancelled"),
+    )?;
     Ok(true)
 }
 

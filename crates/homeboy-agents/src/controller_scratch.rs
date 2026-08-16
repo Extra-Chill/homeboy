@@ -826,6 +826,18 @@ pub(crate) fn finalize_run_at(data_root: &Path, run_id: &str) -> Result<()> {
     )
 }
 
+pub(crate) fn finalize_run_at_explicit_roots(
+    data_root: &Path,
+    artifact_root: &Path,
+    run_id: &str,
+) -> Result<()> {
+    finalize_run_at_index(
+        data_root.join("controller-scratch/resources.json"),
+        || Ok(artifact_root.to_path_buf()),
+        run_id,
+    )
+}
+
 #[cfg(test)]
 fn finalize_run_at_roots(index_path: PathBuf, artifact_root: PathBuf, run_id: &str) -> Result<()> {
     finalize_run_at_index(index_path, || Ok(artifact_root.clone()), run_id)
