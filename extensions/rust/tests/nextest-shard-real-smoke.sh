@@ -8,8 +8,36 @@ WORK_DIR="$(mktemp -d -t homeboy-nextest-real.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 cd "$FIXTURE_DIR"
 
-if ! cargo nextest --version | grep -q '^cargo-nextest 0\.9\.140'; then
-    printf 'Expected cargo-nextest exactly 0.9.140; install with cargo install cargo-nextest --version 0.9.140 --locked\n' >&2
+# Minimum, not equality. This test drives the real shard-replay path, which
+# needs `--message-format libtest-json-plus --message-format-version 0.1` under
+# `NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1`. The floor is the oldest release this
+# repository has validated that projection against, not a version the code
+# requires exactly.
+#
+# Raise it only when a newer nextest feature is actually depended on. An
+# equality check here made every newer toolchain fail on the *version guard*
+# rather than on anything this test measures — and in a repository with no PR
+# CI, a stale guard and a real shard-replay regression produce the same output.
+NEXTEST_MIN_VERSION='0.9.140'
+
+NEXTEST_VERSION_LINE="$(cargo nextest --version 2>/dev/null || true)"
+if [ -z "$NEXTEST_VERSION_LINE" ]; then
+    printf 'cargo-nextest is not installed. Install at least %s with: cargo install cargo-nextest --version %s --locked\n' \
+        "$NEXTEST_MIN_VERSION" "$NEXTEST_MIN_VERSION" >&2
+    exit 1
+fi
+
+NEXTEST_VERSION="$(printf '%s\n' "$NEXTEST_VERSION_LINE" | sed -n 's/^cargo-nextest \([0-9][0-9.]*\).*$/\1/p')"
+if [ -z "$NEXTEST_VERSION" ]; then
+    printf 'Could not parse a cargo-nextest version from: %s\n' "$NEXTEST_VERSION_LINE" >&2
+    exit 1
+fi
+
+# `sort -V` orders version strings; the minimum sorts first unless it is the
+# only value, so an equal version passes and an older one is rejected.
+if [ "$(printf '%s\n%s\n' "$NEXTEST_MIN_VERSION" "$NEXTEST_VERSION" | sort -V | head -1)" != "$NEXTEST_MIN_VERSION" ]; then
+    printf 'cargo-nextest %s is older than the %s minimum this shard-replay test validates against. Install with: cargo install cargo-nextest --version %s --locked\n' \
+        "$NEXTEST_VERSION" "$NEXTEST_MIN_VERSION" "$NEXTEST_MIN_VERSION" >&2
     exit 1
 fi
 
