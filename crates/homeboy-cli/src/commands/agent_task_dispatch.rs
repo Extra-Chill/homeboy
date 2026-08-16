@@ -68,7 +68,10 @@ pub struct DispatchCoreArgs {
     #[arg(long)]
     pub queue_only: bool,
 
-    /// Provider wall-clock timeout in milliseconds. Defaults to Homeboy's provider timeout.
+    /// Provider wall-clock timeout in milliseconds for each provider execution
+    /// (default 1200000 = 20 min). Cook reports the resolved value in its
+    /// preamble; a plan's `options.timeout_ms` carries the same budget into
+    /// `agent-task run-plan`.
     #[arg(long = "timeout-ms", value_name = "MS")]
     pub timeout_ms: Option<u64>,
 

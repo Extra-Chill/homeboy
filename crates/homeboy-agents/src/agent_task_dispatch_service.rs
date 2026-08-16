@@ -583,6 +583,11 @@ fn config_default_backend() -> Option<String> {
 /// Enumeration is *declaration*, not readiness — a listed backend can still fail
 /// its runner/config preflight at dispatch — so the message points at
 /// `agent-task providers --validate-readiness` rather than promising usability.
+///
+/// That hint deliberately omits `--backend`: the unscoped form validates every
+/// declared backend and reports each verdict, so the operator is sent to one
+/// command that answers "which backend is usable here?" instead of guessing a
+/// backend per invocation (#12569).
 fn missing_default_backend_error(available_backends: &[String]) -> Error {
     const PROBLEM: &str =
         "agent-task cook requires --backend because no default backend policy is configured";
@@ -599,7 +604,7 @@ fn missing_default_backend_error(available_backends: &[String]) -> Error {
         PROBLEM.to_string()
     } else {
         tried.push(
-            "Listed backends are declared, not verified: run `homeboy agent-task providers --backend <backend> --validate-readiness` to confirm one is usable."
+            "Listed backends are declared, not verified: run `homeboy agent-task providers --validate-readiness` to see every listed backend's readiness and pick one that is usable."
                 .to_string(),
         );
         format!(

@@ -260,7 +260,10 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     }
 
     if !options.manual_finalization {
-        backend.validate_candidate(&options)?;
+        match lifecycle_store {
+            Some(store) => backend.validate_candidate_in_store(store, &options)?,
+            None => backend.validate_candidate(&options)?,
+        }
     }
     // Validate intent before commit mutation, then bind evidence to immutable HEAD before push.
     let prospective_identity = if commit_required {

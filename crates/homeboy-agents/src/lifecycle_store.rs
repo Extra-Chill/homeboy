@@ -447,6 +447,21 @@ impl AgentTaskLifecycleStore {
         super::lifecycle_ops::record_cook_attempt_in_store(self, cook_id, attempt, run_id)
     }
 
+    /// Persist Cook phase and an optional provider activity sample using this
+    /// store's durable lifecycle roots.
+    pub fn record_cook_progress_with_activity(
+        &self,
+        run_id: &str,
+        phase: &str,
+        attempt: u32,
+        detail: Option<&str>,
+        activity: Option<Value>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_cook_progress_with_activity_in_store(
+            self, run_id, phase, attempt, detail, activity,
+        )
+    }
+
     pub fn read_record_bounded(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         read_record_bounded_in_store(self, run_id)
     }

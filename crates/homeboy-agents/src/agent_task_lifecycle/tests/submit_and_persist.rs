@@ -18,6 +18,34 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn accepted_daemon_context_keeps_a_pidless_runner_submission_live() {
+    with_isolated_home(|_| {
+        let run_id = "accepted-daemon-runner-submission";
+        let context =
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+                Some(run_id),
+                "runner-1",
+                "00000000-0000-4000-8000-000000000001",
+                "homeboy",
+                "reservation-1",
+            )
+            .expect("accepted context");
+        let mut record = submit_plan(&test_plan(), Some(run_id)).expect("submit run");
+        set_run_state(&mut record, AgentTaskRunState::Running);
+        record.updated_at = Some(now_timestamp());
+        project_runner_execution_context(&mut record.metadata, &context)
+            .expect("project accepted authority");
+        store::write_record(&record).expect("persist runner-local record");
+
+        let status = status(run_id).expect("runner-local status");
+        assert_eq!(status.runner_job_id(), Some(context.runner_job_id()));
+        assert!(status.metadata.get("runner_execution_context").is_some());
+        assert!(status.metadata.get("stale_running").is_none());
+        assert!(status.metadata.get("stale_running_reason").is_none());
+    });
+}
+
+#[test]
 fn retry_first_visible_record_always_has_indexed_predecessor_identity() {
     with_isolated_home(|_| {
         let source_id = "retry-atomic-source";
@@ -195,6 +223,28 @@ fn cook_progress_carries_provider_activity_and_survives_a_failed_probe() {
             "a retained sample keeps the time it was actually observed"
         );
     });
+}
+
+#[test]
+fn cook_progress_recorder_writes_to_the_injected_store_not_an_ambient_root() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "cook-progress-rooted";
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submit run into injected store");
+    record_cook_progress_with_activity_in_store(
+        &lifecycle_store,
+        run_id,
+        "provider_start",
+        1,
+        Some("rooted progress"),
+        None,
+    )
+    .expect("record progress into injected store");
+    let record = lifecycle_store.read_record(run_id).expect("read run");
+    assert_eq!(record.metadata["cook_progress"]["phase"], "provider_start");
 }
 
 #[test]
