@@ -370,8 +370,16 @@ pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRun
 /// Reject detached Cook work after the pre-spawn parent has been cancelled.
 /// The child reads this durable fence independently of launcher liveness.
 pub fn require_detached_cook_handoff_fence_open(cook_id: &str) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    require_detached_cook_handoff_fence_open_in_store(&lifecycle_store, cook_id)
+}
+
+pub(crate) fn require_detached_cook_handoff_fence_open_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<()> {
     let cook_id = sanitize_run_id(cook_id);
-    let Ok(record) = store::read_record(&cook_id) else {
+    let Ok(record) = lifecycle_store.read_record(&cook_id) else {
         return Ok(());
     };
     if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
