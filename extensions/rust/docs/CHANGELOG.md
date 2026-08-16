@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.36.0] - 2026-08-16
+
+### Added
+- measure unsharded nextest runs from libtest-json-plus
+
 ## [1.35.1] - 2026-08-15
 
 ### Fixed
