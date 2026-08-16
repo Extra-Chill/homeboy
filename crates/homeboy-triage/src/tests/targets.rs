@@ -224,6 +224,7 @@ fn component_target_threads_registered_triage_remote_override() {
 #[test]
 fn rig_target_threads_rig_component_triage_remote_override() {
     homeboy_core::test_support::with_isolated_home(|home| {
+        homeboy_rig::provider::register();
         let rig_dir = home.path().join(".config/homeboy/rigs");
         std::fs::create_dir_all(&rig_dir).unwrap();
         std::fs::write(

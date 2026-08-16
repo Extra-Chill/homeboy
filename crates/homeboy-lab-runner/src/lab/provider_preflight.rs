@@ -1113,7 +1113,7 @@ mod tests {
         selection.selector = Some("missing".to_string());
         assert!(runner_provider_unavailable_reason(&providers, &selection)
             .expect("missing selector reason")
-            .contains("does not match any"));
+            .contains("does not match backend"));
 
         let mut ambiguous = providers.clone();
         let mut second = ambiguous[0].clone();
@@ -1122,12 +1122,12 @@ mod tests {
         selection.selector = None;
         assert!(runner_provider_unavailable_reason(&ambiguous, &selection)
             .expect("ambiguous alias reason")
-            .contains("matches extension alias"));
+            .contains("is ambiguous"));
 
         selection.backend = "unknown".to_string();
         assert!(runner_provider_unavailable_reason(&ambiguous, &selection)
             .expect("unknown backend reason")
-            .contains("none declare backend"));
+            .contains("no provider for backend"));
     }
 
     #[test]

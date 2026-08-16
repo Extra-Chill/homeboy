@@ -2229,7 +2229,8 @@ mod tests {
                     assert_eq!(report.components.len(), 1);
                     assert_eq!(report.components[0].id, "wordpress-playground");
                     assert_eq!(
-                        std::path::Path::new(&report.components[0].path)
+                        std::path::Path::new(&report.context.cwd)
+                            .join(&report.components[0].path)
                             .canonicalize()
                             .expect("reported component path"),
                         repo.canonicalize().expect("fixture component path")
