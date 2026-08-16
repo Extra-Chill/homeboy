@@ -298,6 +298,92 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub fn start_candidate_adoption_with_policy(
+        &self,
+        run_id: &str,
+        candidate_sha: &str,
+        ai_model: &str,
+        active_gate: &str,
+        rerun_completed_gates: bool,
+        replace_interrupted: bool,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_candidate_adoption::start_candidate_adoption_with_policy_in_store(
+            self,
+            run_id,
+            candidate_sha,
+            ai_model,
+            active_gate,
+            rerun_completed_gates,
+            replace_interrupted,
+        )
+    }
+
+    pub fn start_candidate_adoption_gate(
+        &self,
+        run_id: &str,
+        command: &str,
+        process_group: u32,
+        timeout_seconds: u64,
+    ) -> Result<()> {
+        super::lifecycle_candidate_adoption::start_candidate_adoption_gate_in_store(
+            self,
+            run_id,
+            command,
+            process_group,
+            timeout_seconds,
+        )
+    }
+
+    pub(crate) fn heartbeat_candidate_adoption_gate(
+        &self,
+        run_id: &str,
+        visibility: crate::agent_task_gate::AgentTaskGateVisibility,
+        reveal_policy: crate::agent_task_gate::AgentTaskGateRevealPolicy,
+        status: &crate::agent_task_gate::AgentTaskGateLiveStatus,
+    ) -> Result<()> {
+        super::lifecycle_candidate_adoption::heartbeat_candidate_adoption_gate_in_store(
+            self,
+            run_id,
+            visibility,
+            reveal_policy,
+            status,
+        )
+    }
+
+    pub fn candidate_adoption_cancel_requested(&self, run_id: &str) -> Result<bool> {
+        super::lifecycle_candidate_adoption::candidate_adoption_cancel_requested_in_store(
+            self, run_id,
+        )
+    }
+
+    pub fn checkpoint_candidate_adoption(
+        &self,
+        run_id: &str,
+        phase: &str,
+        active_gate: &str,
+    ) -> Result<()> {
+        super::lifecycle_candidate_adoption::checkpoint_candidate_adoption_in_store(
+            self,
+            run_id,
+            phase,
+            active_gate,
+        )
+    }
+
+    pub fn finish_candidate_adoption(
+        &self,
+        run_id: &str,
+        error: Option<String>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_candidate_adoption::finish_candidate_adoption_in_store(self, run_id, error)
+    }
+
+    pub fn record_candidate_adoption_result(&self, run_id: &str, result: Value) -> Result<()> {
+        super::lifecycle_candidate_adoption::record_candidate_adoption_result_in_store(
+            self, run_id, result,
+        )
+    }
+
     pub fn record_promotion(&self, run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
         super::lifecycle_ops::record_promotion_in_store(self, run_id, promotion)
     }
