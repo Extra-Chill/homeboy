@@ -49,12 +49,12 @@ esac
 
 paths=("$@")
 if [ "${#paths[@]}" -eq 0 ]; then
-  paths=(.homeboy-action homeboy-test-inventory.json homeboy-test-shard-plan.json homeboy-test-shard.json)
+  paths=(.homeboy-action homeboy-test-archive homeboy-test-inventory.json homeboy-test-shard-plan.json homeboy-test-shard.json)
 fi
 
 for path in "${paths[@]}"; do
   case "${path}" in
-    .homeboy-action|homeboy-test-inventory.json|homeboy-test-shard-plan.json|homeboy-test-shard.json) ;;
+    .homeboy-action|homeboy-test-archive|homeboy-test-inventory.json|homeboy-test-shard-plan.json|homeboy-test-shard.json) ;;
     *)
       echo "::error::Unsupported action-owned exclusion path: ${path}" >&2
       exit 1
@@ -98,7 +98,7 @@ fi
 # This prevents a preexisting broad exclusion from hiding a real consumer change.
 for path in "${paths[@]}"; do
   case "${path}" in
-    .homeboy-action) printf '/%s/\n' "${path}" ;;
+    .homeboy-action|homeboy-test-archive) printf '/%s/\n' "${path}" ;;
     *) printf '/%s\n' "${path}" ;;
   esac
 done > "${exclude_file}"
