@@ -52,8 +52,12 @@ if [ "${*: -1}" = "--help" ]; then
   if [ "${HOMEBOY_FAKE_GENERATION}" = "global" ] && [ "$#" -eq 1 ]; then
     printf '  --placement <auto|local|lab>\n'
   fi
-  if [ "${HOMEBOY_FAKE_GENERATION}" = "scoped" ] && [ "$*" = "review audit --help" ]; then
-    printf '  --placement <auto|local|lab>\n'
+  if [ "${HOMEBOY_FAKE_GENERATION}" = "scoped" ]; then
+    case "$*" in
+      'review audit --help'|'review lint --help'|'review test --help'|'review --help')
+        printf '  --placement <auto|local|lab>\n'
+        ;;
+    esac
   fi
   exit 0
 fi
@@ -82,7 +86,7 @@ export HOMEBOY_CALL_LOG="${TMPDIR}/calls.log"
 source "${ROOT}/scripts/core/lib.sh"
 
 test_generation() {
-  local generation="$1" run_command="$2" bench_command="$3" refactor_command="$4" report_command="$5" help_calls="$6"
+  local generation="$1" run_command="$2" test_command="$3" build_command="$4" bench_command="$5" refactor_command="$6" report_command="$7" help_calls="$8"
   : > "${HOMEBOY_HELP_LOG}"
   : > "${HOMEBOY_CALL_LOG}"
   export HOMEBOY_FAKE_GENERATION="${generation}"
@@ -95,15 +99,17 @@ test_generation() {
   export HOMEBOY_ACTION_PLACEMENT_MODE
 
   assert_equals "${run_command}" "$(build_run_command 'review lint' component /tmp/workspace /tmp/out.json)" "${generation} review builder preserves output ordering"
+  assert_equals "${test_command}" "$(build_run_command 'review test' component /tmp/workspace /tmp/out.json)" "${generation} review test respects placement support"
+  assert_equals "${build_command}" "$(build_run_command 'review build' component /tmp/workspace /tmp/out.json)" "${generation} review build respects placement support"
   assert_equals "${bench_command}" "$(build_run_command bench component /tmp/workspace /tmp/out.json)" "${generation} bench builder"
   assert_equals "${refactor_command}" "$(build_run_command 'refactor --all' component /tmp/workspace)" "${generation} refactor builder"
   assert_equals "${report_command}" "$(build_review_report_command component /tmp/workspace)" "${generation} report builder"
   assert_equals "${help_calls}" "$(wc -l < "${HOMEBOY_HELP_LOG}" | xargs)" "${generation} capability probes"
 }
 
-test_generation scoped 'homeboy --output /tmp/out.json review lint --placement local component --path /tmp/workspace' 'homeboy --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy refactor component --all --path /tmp/workspace' 'homeboy review --placement local component --path /tmp/workspace --report=pr-comment' 2
-test_generation global 'homeboy --placement local --output /tmp/out.json review lint component --path /tmp/workspace' 'homeboy --placement local --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy --placement local refactor component --all --path /tmp/workspace' 'homeboy --placement local review component --path /tmp/workspace --report=pr-comment' 1
-test_generation legacy 'homeboy --force-hot --allow-local-hot --output /tmp/out.json review lint component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot refactor component --all --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot review component --path /tmp/workspace --report=pr-comment' 2
+test_generation scoped 'homeboy --output /tmp/out.json review lint --placement local component --path /tmp/workspace' 'homeboy --output /tmp/out.json review test --placement local component --path /tmp/workspace' 'homeboy --output /tmp/out.json review build component --path /tmp/workspace' 'homeboy --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy refactor component --all --path /tmp/workspace' 'homeboy review --placement local component --path /tmp/workspace --report=pr-comment' 6
+test_generation global 'homeboy --placement local --output /tmp/out.json review lint component --path /tmp/workspace' 'homeboy --placement local --output /tmp/out.json review test component --path /tmp/workspace' 'homeboy --placement local --output /tmp/out.json review build component --path /tmp/workspace' 'homeboy --placement local --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy --placement local refactor component --all --path /tmp/workspace' 'homeboy --placement local review component --path /tmp/workspace --report=pr-comment' 1
+test_generation legacy 'homeboy --force-hot --allow-local-hot --output /tmp/out.json review lint component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot --output /tmp/out.json review test component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot --output /tmp/out.json review build component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot refactor component --all --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot review component --path /tmp/workspace --report=pr-comment' 2
 
 # Exercise the action execution script with a scoped-placement binary.
 : > "${HOMEBOY_HELP_LOG}"
@@ -122,6 +128,6 @@ export HOMEBOY_ACTION_PLACEMENT_MODE
 bash "${ROOT}/scripts/core/run-homeboy-commands.sh"
 assert_contains "$(< "${HOMEBOY_CALL_LOG}")" 'review audit --placement local component' 'scoped binary runs through action command execution with local placement'
 assert_not_contains "$(< "${HOMEBOY_CALL_LOG}")" '--force-hot' 'scoped binary does not receive removed hot flags'
-assert_equals 2 "$(wc -l < "${HOMEBOY_HELP_LOG}" | xargs)" 'scoped execution probes global and owning command help'
+assert_equals 3 "$(wc -l < "${HOMEBOY_HELP_LOG}" | xargs)" 'scoped execution probes global, mode, and exact command help'
 
 printf 'All placement compatibility checks passed.\n'
