@@ -35,3 +35,22 @@ jobs:
 
       - name: Run action shell tests
         run: bash scripts/run-tests.sh
+
+  # The strict containment backend the action uses off Linux has no Linux kernel
+  # primitives to fall back on, so it cannot be proven by the Linux job selecting
+  # it explicitly. Extra-Chill/homeboy#12584 was exactly this gap: `review build`
+  # refused to run on macOS runners and no test in this repo could have caught it.
+  #
+  # Only the portable suite runs here. `run-tests.sh` needs GNU `timeout` and
+  # Bash 4 `mapfile`, and the wrapper's advisory (non-strict) path uses `BASHPID`,
+  # none of which exist in the Bash 3.2 macOS ships. The portable suite is written
+  # to the older dialect on purpose.
+  portable-containment:
+    name: Portable containment (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run portable containment tests
+        run: bash scripts/core/test-portable-containment.sh

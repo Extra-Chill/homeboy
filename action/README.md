@@ -709,6 +709,57 @@ When multiple jobs invoke Homeboy Action on the same PR, they **merge into one s
 4. **Runs Commands** — Executes each command with `--path` pointing at your workspace
 5. **Release** — If `commands` includes `release`, checks for releasable commits, bumps version, generates changelog, tags, pushes, and creates a GitHub Release
 
+## Process Containment
+
+Every command runs under a supervisor that bounds it with `execution-timeout-seconds`
+and refuses to report a pass for a command whose descendants outlived it. The
+kernel primitives that make containment provable are not portable, so the
+supervisor selects a backend from the runner platform and names it in the job log.
+
+**Linux runners** get `subreaper-reparented pidfd containment`. `PR_SET_CHILD_SUBREAPER`
+reparents every orphaned descendant onto the supervisor, so the process tree
+always leads back to it, and pidfds signal that tree with no PID-reuse window.
+This is the strongest guarantee available and remains the default everywhere it
+can be established.
+
+**macOS and other POSIX runners** get `session-scoped termination with
+inherited-descriptor containment proof`. Darwin has neither a subreaper nor
+pidfds, so termination and proof are separated:
+
+- **Termination** works through the command's own session and process group, plus
+  its parent chain. That covers every descendant which did not deliberately
+  detach — including a double-fork reparented to `launchd`, because it keeps the
+  inherited process group.
+- **Proof** works through an inherited pipe. The command is spawned holding the
+  write end of a pipe the supervisor keeps the read end of, and every descendant
+  inherits that descriptor across `fork` and `exec`. EOF is positive evidence that
+  nothing is left holding it, including a descendant that detached far enough that
+  no scan of the process table could name it.
+
+A command whose descendant escapes the session and keeps the descriptor open past
+`cleanup-timeout-seconds` **fails with exit 125** and a `could not prove descendant
+containment` error. That is deliberate: the supervisor cannot signal a descendant
+it cannot name, so it refuses to certify the command rather than laundering the
+escape into a pass. Ordinary builds — including Xcode builds driven through
+`HOMEBOY_NODE_BUILD_COMMAND` — release the descriptor when they exit and are
+unaffected.
+
+macOS-native gates therefore work the same way as Linux ones:
+
+```yaml
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Extra-Chill/homeboy-action@v2
+        with:
+          commands: review build
+          component: my-app
+        env:
+          HOMEBOY_NODE_BUILD_COMMAND: xcodebuild -scheme MyApp build
+```
+
 ## Requirements
 
 - Homeboy must have published releases with binary artifacts (uses `cargo-dist`)
