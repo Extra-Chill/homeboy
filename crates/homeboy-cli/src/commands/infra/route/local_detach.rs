@@ -73,10 +73,10 @@ const LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_
 fn is_unsupervised_local_cook(cli: &Cli) -> bool {
     cli.detach_after_handoff
         && matches!(
-            cli.command,
+            &cli.command,
             Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-                command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
-            })
+                command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
+            }) if !cook.preview
         )
         && !consume_local_cook_launch_token()
 }
@@ -1031,6 +1031,24 @@ mod tests {
             );
         });
 
+        let preview = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "repo@branch",
+            "--verify",
+            "true",
+            "--preview",
+        ])
+        .expect("parse preview cook invocation");
+        assert!(
+            !is_unsupervised_local_cook(&preview),
+            "preview must bypass detached Cook interception"
+        );
+
         let (auto, normalized) = cook_cli(&["--placement", "auto"]);
         assert!(!is_unsupervised_local_cook(&auto));
         assert_eq!(
@@ -1083,7 +1101,7 @@ mod tests {
 
     #[test]
     fn ambient_launch_token_values_do_not_bypass_supervision() {
-        let (cli, _) = cook_cli(&["--placement", "local"]);
+        let (cli, _) = cook_cli(&["--placement", "local", "--detach-after-handoff"]);
 
         assert!(is_unsupervised_local_cook(&cli));
         assert!(!consume_local_cook_launch_token_at(

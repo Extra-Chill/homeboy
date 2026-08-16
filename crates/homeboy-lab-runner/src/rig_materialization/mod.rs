@@ -75,7 +75,7 @@ fn materialize_lab_stack_from_repository(
     for pr in &stack.prs {
         script.push_str(&format!("; {}", verify(&pr.head)));
         script.push_str(&format!(
-            "; parents=$(git -C {destination} rev-list --parents -n 1 {sha} | wc -w | tr -d ' '); if test \"$parents\" -gt 2; then test -n {mainline}; git -C {destination} cherry-pick --quiet -m {mainline} {sha} >/dev/null; else git -C {destination} cherry-pick --quiet {sha} >/dev/null; fi",
+            "; parents=$(git -C {destination} rev-list --parents -n 1 {sha} | wc -w | tr -d ' '); if test \"$parents\" -gt 2; then test -n {mainline}; env GIT_COMMITTER_NAME='Homeboy Lab Runner' GIT_COMMITTER_EMAIL='homeboy-lab-runner@localhost' git -C {destination} cherry-pick --quiet -m {mainline} {sha} >/dev/null; else env GIT_COMMITTER_NAME='Homeboy Lab Runner' GIT_COMMITTER_EMAIL='homeboy-lab-runner@localhost' git -C {destination} cherry-pick --quiet {sha} >/dev/null; fi",
             destination = q(destination),
             sha = q(&pr.head.sha),
             mainline = q(&pr.merge_mainline.map(|value| value.to_string()).unwrap_or_default()),
@@ -1370,6 +1370,10 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(destination.join("stack.txt")).unwrap(),
             "stack\n"
+        );
+        assert_eq!(
+            git(&destination, &["log", "-1", "--format=%cn <%ce>"]),
+            "Homeboy Lab Runner <homeboy-lab-runner@localhost>"
         );
 
         std::fs::remove_dir_all(&destination).expect("remove successful fixture checkout");

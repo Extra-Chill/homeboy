@@ -3096,13 +3096,12 @@ mod tests {
     }
 
     #[test]
-    fn inner_rejects_connected_but_stale_daemon_with_recovery_command() {
+    fn inner_rejects_connected_but_stale_daemon_without_unverified_recovery() {
         // #8811: a runner can be `connected: true` while its daemon is
         // version-stale. The old bare-boolean gate passed such a runner and
         // dispatch then failed opaquely downstream. The unified availability
         // gate must reject it up front with the structured `stale_daemon`
-        // reason and the exact `refresh-homeboy` recovery command that status
-        // already computed, instead of the generic "not connected" message.
+        // reason without promoting legacy command text to executable recovery.
         let mut status = runner_status(true);
         status.stale_daemon = Some(RunnerStaleDaemonWarning {
             severity: "warning",
@@ -3145,8 +3144,8 @@ mod tests {
             "error must preserve the stale_daemon reason: {details}"
         );
         assert!(
-            details.contains("refresh-homeboy"),
-            "error must surface the exact refresh-homeboy recovery command: {details}"
+            !details.contains("refresh-homeboy"),
+            "error must not surface unverified recovery command text: {details}"
         );
     }
 

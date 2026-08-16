@@ -38,7 +38,7 @@ else
 fi
 
 CANDIDATE="${ASSET%.tar.xz}/homeboy"
-MEMBERS="$(tar -tJf "$TMP_DIR/$ASSET" 2>/dev/null || tar -tf "$TMP_DIR/$ASSET")" || {
+MEMBERS="$(env -u TAR_OPTIONS tar -tJf "$TMP_DIR/$ASSET" 2>/dev/null || env -u TAR_OPTIONS tar -tf "$TMP_DIR/$ASSET")" || {
   echo "Unable to list release archive" >&2
   exit 1
 }
@@ -69,7 +69,7 @@ if [ "$CANDIDATE_COUNT" -ne 1 ]; then
   exit 1
 fi
 
-CANDIDATE_DETAILS="$(tar -tvJf "$TMP_DIR/$ASSET" "$CANDIDATE" 2>/dev/null || tar -tvf "$TMP_DIR/$ASSET" "$CANDIDATE")" || {
+CANDIDATE_DETAILS="$(env -u TAR_OPTIONS tar -tvJf "$TMP_DIR/$ASSET" "$CANDIDATE" 2>/dev/null || env -u TAR_OPTIONS tar -tvf "$TMP_DIR/$ASSET" "$CANDIDATE")" || {
   echo "Unable to inspect release candidate" >&2
   exit 1
 }
@@ -82,7 +82,7 @@ case "$CANDIDATE_DETAILS" in
 esac
 
 EXTRACTED_BIN="$TMP_DIR/homeboy"
-(tar -xJOf "$TMP_DIR/$ASSET" "$CANDIDATE" 2>/dev/null || tar -xOf "$TMP_DIR/$ASSET" "$CANDIDATE") > "$EXTRACTED_BIN" || {
+(env -u TAR_OPTIONS tar -xJOf "$TMP_DIR/$ASSET" "$CANDIDATE" 2>/dev/null || env -u TAR_OPTIONS tar -xOf "$TMP_DIR/$ASSET" "$CANDIDATE") > "$EXTRACTED_BIN" || {
   echo "Unable to extract release candidate" >&2
   exit 1
 }

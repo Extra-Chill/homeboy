@@ -1649,6 +1649,7 @@ mod tests {
                 .expect("observe original exit"),
             "the pidfd must observe its bound process exiting"
         );
+        original.wait().expect("reap original process");
         let mut replacement = Command::new("sh")
             .args(["-c", "while :; do sleep 1; done"])
             .spawn()
@@ -1666,7 +1667,6 @@ mod tests {
         );
         assert!(pid_is_running(replacement.id()));
 
-        original.wait().expect("reap original process");
         replacement.kill().expect("cleanup replacement process");
         replacement.wait().expect("reap replacement process");
     }

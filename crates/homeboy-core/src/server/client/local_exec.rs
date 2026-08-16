@@ -24,6 +24,8 @@ use super::delegated::{
 use super::resource_monitor::ChildResourceMonitor;
 use super::CommandOutput;
 
+const PIPED_STDIN_FINISH_GRACE: Duration = Duration::from_millis(100);
+
 pub fn execute_local_command(command: &str) -> CommandOutput {
     execute_local_command_in_dir(command, None, None)
 }
@@ -303,13 +305,20 @@ pub(crate) enum StdinSource {
 pub(crate) struct StdinPump {
     cancelled: Arc<AtomicBool>,
     cancellable: bool,
+    completed: std::sync::mpsc::Receiver<()>,
     handle: thread::JoinHandle<std::io::Result<()>>,
 }
 
 impl StdinPump {
     pub(crate) fn finish_after_child(self) -> Option<std::io::Result<()>> {
         if self.cancellable {
-            self.cancelled.store(true, Ordering::Release);
+            if self
+                .completed
+                .recv_timeout(PIPED_STDIN_FINISH_GRACE)
+                .is_err()
+            {
+                self.cancelled.store(true, Ordering::Release);
+            }
         }
         self.handle.join().ok()
     }
@@ -324,13 +333,19 @@ pub(crate) fn spawn_stdin_pump(pipe: ChildStdin, source: StdinSource) -> StdinPu
         .metadata()
         .map(|metadata| metadata.file_type().is_file())
         .unwrap_or(false));
-    let handle = thread::spawn(move || match source {
-        StdinSource::Reader(mut reader) => copy_stdin_to_child(reader.as_mut(), pipe),
-        StdinSource::Piped(reader) => copy_piped_stdin_to_child(reader, pipe, pump_cancelled),
+    let (completed_tx, completed) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        let result = match source {
+            StdinSource::Reader(mut reader) => copy_stdin_to_child(reader.as_mut(), pipe),
+            StdinSource::Piped(reader) => copy_piped_stdin_to_child(reader, pipe, pump_cancelled),
+        };
+        let _ = completed_tx.send(());
+        result
     });
     StdinPump {
         cancelled,
         cancellable,
+        completed,
         handle,
     }
 }
@@ -994,6 +1009,28 @@ fn bounded_redacted_tail(output: &str, redaction_values: &[String]) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn assert_pid_reaped(pid: libc::pid_t) {
+        assert!(
+            !crate::process::pid_is_running(pid as u32),
+            "process {pid} was not reaped"
+        );
+    }
+
+    #[cfg(unix)]
+    fn pipe_files() -> (std::fs::File, std::fs::File) {
+        use std::os::fd::FromRawFd;
+
+        let mut descriptors = [0; 2];
+        assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0, "pipe");
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(descriptors[0]),
+                std::fs::File::from_raw_fd(descriptors[1]),
+            )
+        }
+    }
+
     fn supervision_output(run_dir: &tempfile::TempDir) -> serde_json::Value {
         let payload = std::fs::read_to_string(
             run_dir
@@ -1032,12 +1069,55 @@ mod tests {
         #[cfg(unix)]
         {
             let pid = supervision["child_pid"].as_i64().expect("child pid") as libc::pid_t;
-            assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child was reaped");
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH)
-            );
+            assert_pid_reaped(pid);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finite_piped_stdin_drains_before_child_completion_is_collected() {
+        let output = tempfile::NamedTempFile::new().expect("output file");
+        let output_path = output.path().to_string_lossy().to_string();
+        let (reader, mut writer) = pipe_files();
+        writer
+            .write_all(b"finite piped stdin")
+            .expect("write input");
+        drop(writer);
+
+        let result = execute_local_command_in_dir_impl(
+            &format!("cat > {}", crate::engine::shell::quote_arg(&output_path)),
+            None,
+            None,
+            None,
+            Some(StdinSource::Piped(reader)),
+        );
+
+        assert!(result.success, "{}", result.stderr);
+        assert_eq!(
+            std::fs::read(output.path()).expect("read output"),
+            b"finite piped stdin"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_piped_stdin_is_cancelled_after_child_completion() {
+        let (reader, _writer) = pipe_files();
+        let started = Instant::now();
+
+        let result = execute_local_command_in_dir_impl(
+            "exit 0",
+            None,
+            None,
+            None,
+            Some(StdinSource::Piped(reader)),
+        );
+
+        assert!(result.success, "{}", result.stderr);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "idle stdin forwarding must remain bounded"
+        );
     }
 
     #[test]
@@ -1122,11 +1202,7 @@ mod tests {
         assert_eq!(supervision["status"], "interrupted");
         assert_eq!(supervision["cancellation_reason"], "signal:15");
         let pid = supervision["child_pid"].as_i64().expect("child pid") as libc::pid_t;
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child was reaped");
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
+        assert_pid_reaped(pid);
     }
 
     #[cfg(unix)]
@@ -1141,10 +1217,6 @@ mod tests {
             .stdout
             .parse::<libc::pid_t>()
             .expect("descendant pid");
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "descendant was reaped");
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
+        assert_pid_reaped(pid);
     }
 }

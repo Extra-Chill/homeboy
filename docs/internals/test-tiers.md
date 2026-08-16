@@ -38,9 +38,11 @@ Use the slow tier when changing audit detector orchestration, audit fixability p
 
 ## Process-Global Environment and Test Threads
 
-`homeboy.json` caps Cargo with `rust_cargo_test_threads = 1`. Local and release
-tests use that measured fallback. The reusable PR workflow selects nextest only
-for its inventory-bound shard jobs.
+`homeboy.json` selects nextest with `rust_test_runner = "nextest"`, so local and
+release runs get process-per-test isolation and `num-cpus` parallelism. It also
+keeps `rust_cargo_test_threads = 1`, which now applies only to the Cargo
+fallback taken when nextest is not installed. The reusable PR workflow selects
+nextest for its inventory-bound shard jobs.
 
 This is not a performance choice, it is a correctness one. `HomeGuard`
 (`homeboy_core::test_support`) isolates a test by mutating *process-global*
@@ -56,11 +58,20 @@ is no thread-local escape hatch. (Rust made `std::env::set_var` `unsafe` in the
 One thread per test binary closes that window on the Cargo fallback. Nextest
 closes it more directly by running each test in its own process.
 
-The Cargo cap is a fallback workaround, not the primary CI strategy. Sharded
+The Cargo cap is a fallback workaround, not the primary strategy. Sharded
 nextest replay sets `rust_nextest_shard_threads = 0`, selecting nextest's
 process-per-test `num-cpus` parallelism without exposing Cargo's shared-process
-environment mutation. The
-structural fix remains injectable config and path roots so tests never touch
+environment mutation.
+
+Unsharded nextest runs were previously unmeasurable — they emit no
+`test result:` lines, so the cargo-test adapter matched nothing and produced no
+Homeboy test result at all. That is why local and release stayed on serialized
+Cargo even after the underlying race was fixed. `homeboy-extensions` rust
+v1.36.0 derives counts from `libtest-json-plus` instead, which is what made
+selecting nextest here possible. Note that the nextest branch replaces the
+command binary outright, so `rust_cargo_test_threads` is not applied to it.
+
+The structural fix remains injectable config and path roots so tests never touch
 process-global environment at all (#7505), across roughly 2,072
 `with_isolated_home` call sites.
 

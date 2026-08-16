@@ -1133,7 +1133,12 @@ impl DefaultLabRunnerCandidate {
                 .push("daemon_freshness_unavailable".to_string());
             availability.accepts_jobs = false;
         }
-        if !self.active_jobs_available {
+        if !self.active_jobs_available
+            && !availability
+                .reasons
+                .iter()
+                .any(|reason| reason == "active_jobs_unavailable")
+        {
             availability
                 .reasons
                 .push("active_jobs_unavailable".to_string());

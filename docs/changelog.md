@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.7] - 2026-08-16
+
+### Changed
+- give the Cook write family explicit stores
+
+## [0.350.6] - 2026-08-16
+
+### Changed
+- root reserved handoff cancellation
+
+## [0.350.5] - 2026-08-16
+
+### Changed
+- root candidate adoption lifecycle stores
+- root adoption finalization and shrink the allowlist
+- close the mixed-store class and pin it shut
+- root Cook promotion in paired stores
+- seed the duplication family from the changed scope
+- run detectors concurrently and report where the time went
+
+### Fixed
+- stop shadowing the injected lifecycle store in the reported wrapper
+- bind daemon authority before execution
+
 ## [0.350.4] - 2026-08-15
 
 ### Changed

@@ -141,7 +141,7 @@ impl<'a> CookExecutionPreparation<'a> {
         )
     }
 
-    fn recover_for_adoption_with_runtime(
+    pub(crate) fn recover_for_adoption_with_runtime(
         &self,
         cook_id: &str,
         run_id: &str,
@@ -267,7 +267,7 @@ fn materialize_initial_cook_attempt_with_store_and_lifecycle(
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
-        reconcile_reserved_cancellation,
+        |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
     )
 }
 
@@ -303,7 +303,7 @@ pub(crate) fn materialize_cook_attempt_with_stores(
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
-        reconcile_reserved_cancellation,
+        |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
     )
 }
 
@@ -349,12 +349,21 @@ fn materialize_cook_attempt_with_stores_and_runtime(
     Ok(())
 }
 
-fn reconcile_reserved_cancellation(cook_id: &str) -> Result<()> {
-    agent_task_lifecycle::cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)
+pub(crate) fn reconcile_reserved_cancellation(cook_id: &str) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    reconcile_reserved_cancellation_in_store(&lifecycle_store, cook_id)
+}
+
+pub(crate) fn reconcile_reserved_cancellation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<()> {
+    lifecycle_store
+        .cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)
         .map(|_| ())
 }
 
-fn production_runtime_admission(
+pub(crate) fn production_runtime_admission(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> impl FnOnce(&str) -> Result<Value> + '_ {
     move |run_id| {
@@ -482,7 +491,7 @@ pub(crate) fn recover_recipe_attempt_with_stores(
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
-        reconcile_reserved_cancellation,
+        |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
     )
 }
 
@@ -510,7 +519,7 @@ pub(crate) fn recover_adoption_attempt_with_stores(
         Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
-        reconcile_reserved_cancellation,
+        |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
     )
 }
 
@@ -982,6 +991,71 @@ mod tests {
                 .plan_id,
             "right-recovery-plan"
         );
+    }
+
+    #[test]
+    fn reserved_cancellation_reconciliation_mutates_only_the_explicit_lifecycle_root() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+        let right_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+        let cook_id = "same-reserved-cancellation-cook";
+        let run_id = "same-reserved-cancellation-run";
+
+        for (store, root) in [(&left_store, "left"), (&right_store, "right")] {
+            store
+                .submit_plan_with_runtime_admission(
+                    &AgentTaskPlan::new(format!("{root}-parent"), Vec::new()),
+                    cook_id,
+                    |_| Ok(serde_json::json!({ "root": root })),
+                )
+                .unwrap();
+            store
+                .mutate_record(cook_id, |record| {
+                    record.metadata["detached_cook_handoff"] = serde_json::json!({
+                        "state": "pending",
+                        "cook_id": cook_id,
+                        "cancellation_fence": { "state": "open" },
+                    });
+                    true
+                })
+                .unwrap();
+            agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+                store, cook_id, run_id,
+            )
+            .unwrap();
+            store
+                .mutate_record(cook_id, |record| {
+                    record.state = agent_task_lifecycle::AgentTaskRunState::Cancelled;
+                    record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
+                        serde_json::json!("cancelled");
+                    true
+                })
+                .unwrap();
+            store
+                .submit_plan_with_runtime_admission(
+                    &plan(&format!("{root}-child"), root),
+                    run_id,
+                    |_| Ok(serde_json::json!({ "root": root })),
+                )
+                .unwrap();
+            store.record_cook_attempt(cook_id, 1, run_id).unwrap();
+        }
+
+        reconcile_reserved_cancellation_in_store(&left_store, cook_id).unwrap();
+
+        let left = left_store.read_record(run_id).unwrap();
+        let right = right_store.read_record(run_id).unwrap();
+        assert_eq!(
+            left.state,
+            agent_task_lifecycle::AgentTaskRunState::Cancelled
+        );
+        assert_eq!(
+            left.metadata["cancel_reason"],
+            "detached Cook handoff cancelled"
+        );
+        assert_eq!(right.state, agent_task_lifecycle::AgentTaskRunState::Queued);
+        assert!(right.metadata.get("cancelled_at").is_none());
     }
 
     #[test]

@@ -229,7 +229,7 @@ jobs:
     name: homeboy
     needs: [pr-state, ci-capacity-admission]
     if: ${{ needs.pr-state.outputs.active == 'true' }}
-    # v2.11.26, DEREFERENCED to its commit. These tags are annotated, so the tag
+    # Pinned to a commit. Release tags are annotated, so the tag
     # ref's own object SHA is a tag object, which `uses:` cannot resolve — pinning
     # one fails the whole workflow at startup with zero jobs scheduled (#12153).
     # Always pin `git rev-parse v<tag>^{commit}`.
@@ -240,9 +240,11 @@ jobs:
     # no-enforcement green), #378 (test binaries built once into a nextest
     # archive instead of recompiled in every shard), and #379 (a passing
     # candidate no longer reruns its baseline), #380 (the differential audit is
-    # changed-scoped instead of scanning the whole repository) and #381 (shard
-    # partitioning coverage). Refs #10997 and #11751 W1-2, W1-7, W1-10.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@3b20c22160bceb5c324fb2643ab7215e7cf73a53
+    # changed-scoped instead of scanning the whole repository), #381 (shard
+    # partitioning coverage), #402 (immutable extension revisions), and #405
+    # (downloaded Test archives stay out of consumer Git state). Refs
+    # #10997 and #11751 W1-2, W1-7, W1-10.
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@ae5161e2ce2d5818c41a4b09ae811d1521bb4f95
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
@@ -257,6 +259,7 @@ jobs:
       args: --skip-lint
       expected-commands: review audit,review lint,review test
       component: homeboy
+      extension-ref: 691d0527d7a4b3917649043a7f91a81913a139ab
       source: .
       scope: auto
       differential-gating: 'true'

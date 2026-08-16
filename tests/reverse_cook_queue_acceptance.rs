@@ -241,7 +241,7 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     let ssh = context.root().join("ssh");
     std::fs::write(
         &ssh,
-        "#!/bin/sh\nfor argument do command=$argument; done\ncase \"$command\" in\n  *'self identity'*) identity=\"${HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY:?}\"; version=\"${identity#homeboy }\"; version=\"${version%%+*}\"; printf '{\"version\":\"%s\",\"display\":\"%s\"}\\n' \"$version\" \"$identity\" ;;\n  *'daemon status'*) printf '%s\\n' '{\"success\":true,\"data\":{\"running\":false,\"fresh\":true,\"reachable\":true,\"active_jobs\":0}}' ;;\n  *'df -Pk'*) printf '%s\\n' 'fixture-device 5242880 1048576' ;;\n  *) exec /bin/sh -c \"$command\" ;;\nesac\n",
+        "#!/bin/sh\nif [ \"${1:-}\" = -G ]; then\n  printf '%s\\n' 'hostname reverse-fixture.invalid' 'port 22' 'proxycommand fixture-proxy'\n  exit 0\nfi\nfor argument do command=$argument; done\ncase \"$command\" in\n  *'self identity'*) identity=\"${HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY:?}\"; version=\"${identity#homeboy }\"; version=\"${version%%+*}\"; printf '{\"version\":\"%s\",\"display\":\"%s\"}\\n' \"$version\" \"$identity\" ;;\n  *'daemon status'*) printf '%s\\n' '{\"success\":true,\"data\":{\"running\":false,\"fresh\":true,\"reachable\":true,\"active_jobs\":0}}' ;;\n  *'df -Pk'*) printf '%s\\n' 'fixture-device 5242880 1048576' ;;\n  *) exec /bin/sh -c \"$command\" ;;\nesac\n",
     )
     .expect("write capability probe SSH shim");
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
