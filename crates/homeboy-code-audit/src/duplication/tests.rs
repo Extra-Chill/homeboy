@@ -238,6 +238,246 @@ fn group_three_way_has_two_removals() {
 }
 
 // ========================================================================
+// Scope-seeded (two-phase) duplication tests — Extra-Chill/homeboy#12583
+// ========================================================================
+
+mod scope_seeded {
+    use super::*;
+
+    fn no_conventions() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
+    /// Comparable projection of a finding — `Finding` is not `PartialEq`.
+    fn signature(finding: &Finding) -> String {
+        format!(
+            "{:?}|{:?}|{}|{}|{}",
+            finding.severity, finding.kind, finding.file, finding.description, finding.suggestion
+        )
+    }
+
+    fn signatures(findings: &[Finding]) -> Vec<String> {
+        findings.iter().map(signature).collect()
+    }
+
+    /// The engine's Phase 4p scope filter: only findings whose file is inside
+    /// the touched scope are reportable. Duplication findings for out-of-scope
+    /// files are discarded on both the scoped and unscoped paths, so this is the
+    /// projection the two paths must agree on.
+    fn reportable(findings: &[Finding], scope: &[&str]) -> Vec<String> {
+        findings
+            .iter()
+            .filter(|finding| scope.contains(&finding.file.as_str()))
+            .map(signature)
+            .collect()
+    }
+
+    fn group_signatures(groups: &[DuplicateGroup]) -> Vec<String> {
+        groups
+            .iter()
+            .map(|group| {
+                format!(
+                    "{}|{}|{}",
+                    group.function_name,
+                    group.canonical_file,
+                    group.remove_from.join(",")
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn seeding_from_the_full_corpus_is_a_no_op_filter() {
+        // This is what lets the unscoped entry points delegate to the scoped
+        // ones: with the whole corpus as the seed, every key is a candidate, so
+        // the seeded expansion reproduces `build_groups` exactly — same keys,
+        // same locations, same location order.
+        let fp1 = make_fingerprint(
+            "src/a.rs",
+            &["shared", "unique_a"],
+            &[("shared", "same"), ("unique_a", "hash_a")],
+        );
+        let fp2 = make_fingerprint(
+            "src/b.rs",
+            &["shared", "unique_b"],
+            &[("shared", "same"), ("unique_b", "hash_b")],
+        );
+        let fp3 = make_fingerprint("src/c.rs", &["shared"], &[("shared", "same")]);
+        let all = [&fp1, &fp2, &fp3];
+
+        assert_eq!(build_groups_seeded(&all, &all), build_groups(&all));
+    }
+
+    #[test]
+    fn duplicate_pair_entirely_in_scope_matches_unscoped() {
+        let fp1 = make_fingerprint("src/a.rs", &["helper"], &[("helper", "h1")]);
+        let fp2 = make_fingerprint("src/b.rs", &["helper"], &[("helper", "h1")]);
+        let all = [&fp1, &fp2];
+
+        let unscoped = detect_duplicates(&all, &no_conventions());
+        let scoped = detect_duplicates_scoped(&all, &all, &no_conventions());
+
+        assert_eq!(scoped.len(), 2, "both locations flagged");
+        assert_eq!(signatures(&scoped), signatures(&unscoped));
+        assert_eq!(
+            group_signatures(&detect_duplicate_groups_scoped(&all, &all)),
+            group_signatures(&detect_duplicate_groups(&all))
+        );
+    }
+
+    #[test]
+    fn duplicate_pair_with_one_member_out_of_scope_keeps_counterpart_evidence() {
+        let in_scope = make_fingerprint("src/changed.rs", &["helper"], &[("helper", "h1")]);
+        let out_of_scope = make_fingerprint("src/untouched.rs", &["helper"], &[("helper", "h1")]);
+        let all = [&in_scope, &out_of_scope];
+        let scoped_subset = [&in_scope];
+        let scope = ["src/changed.rs"];
+
+        let unscoped = detect_duplicates(&all, &no_conventions());
+        let scoped = detect_duplicates_scoped(&scoped_subset, &all, &no_conventions());
+
+        // The out-of-scope counterpart was pulled in by the expansion phase, so
+        // the whole group — and therefore every finding — is identical.
+        assert_eq!(signatures(&scoped), signatures(&unscoped));
+        assert_eq!(
+            reportable(&scoped, &scope),
+            reportable(&unscoped, &scope),
+            "the in-scope finding is the same on both paths"
+        );
+        assert_eq!(reportable(&scoped, &scope).len(), 1);
+        assert!(
+            scoped.iter().any(|finding| finding.file == "src/changed.rs"
+                && finding.description.contains("also in src/untouched.rs")
+                && finding.suggestion.contains("2 files")),
+            "in-scope finding still names its out-of-scope counterpart: {:?}",
+            signatures(&scoped)
+        );
+    }
+
+    #[test]
+    fn duplicate_group_with_one_member_out_of_scope_keeps_canonical_choice() {
+        // The canonical file is the OUT-OF-SCOPE one (`utils/` wins the
+        // heuristic), which is only reachable when expansion sees the full
+        // corpus. Seeding alone would have picked the in-scope file.
+        let in_scope =
+            make_fingerprint("src/core/deep/nested/helper.rs", &["foo"], &[("foo", "h1")]);
+        let out_of_scope = make_fingerprint("src/utils/shared.rs", &["foo"], &[("foo", "h1")]);
+        let all = [&in_scope, &out_of_scope];
+
+        let scoped = detect_duplicate_groups_scoped(&[&in_scope], &all);
+
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].canonical_file, "src/utils/shared.rs");
+        assert_eq!(
+            scoped[0].remove_from,
+            vec!["src/core/deep/nested/helper.rs"]
+        );
+        assert_eq!(
+            group_signatures(&scoped),
+            group_signatures(&detect_duplicate_groups(&all))
+        );
+    }
+
+    #[test]
+    fn duplicate_pair_entirely_out_of_scope_has_no_reportable_finding() {
+        let changed = make_fingerprint("src/changed.rs", &["only_here"], &[("only_here", "h9")]);
+        let far_a = make_fingerprint("src/far_a.rs", &["helper"], &[("helper", "h1")]);
+        let far_b = make_fingerprint("src/far_b.rs", &["helper"], &[("helper", "h1")]);
+        let all = [&changed, &far_a, &far_b];
+        let scope = ["src/changed.rs"];
+
+        let unscoped = detect_duplicates(&all, &no_conventions());
+        let scoped = detect_duplicates_scoped(&[&changed], &all, &no_conventions());
+
+        // Unscoped finds the far pair, but both findings are filtered out by
+        // scope. The scoped path never builds the group in the first place.
+        assert_eq!(unscoped.len(), 2);
+        assert!(reportable(&unscoped, &scope).is_empty());
+        assert!(scoped.is_empty());
+        assert_eq!(reportable(&scoped, &scope), reportable(&unscoped, &scope));
+
+        // Same for the fixer's grouped output.
+        assert_eq!(detect_duplicate_groups(&all).len(), 1);
+        assert!(detect_duplicate_groups_scoped(&[&changed], &all).is_empty());
+    }
+
+    #[test]
+    fn seed_key_is_name_and_body_hash_not_name_alone() {
+        // An in-scope `helper` with a DIFFERENT body must not seed the
+        // out-of-scope `helper` group — the candidate key is (name, body_hash).
+        let in_scope = make_fingerprint("src/changed.rs", &["helper"], &[("helper", "h2")]);
+        let far_a = make_fingerprint("src/far_a.rs", &["helper"], &[("helper", "h1")]);
+        let far_b = make_fingerprint("src/far_b.rs", &["helper"], &[("helper", "h1")]);
+        let all = [&in_scope, &far_a, &far_b];
+        let scope = ["src/changed.rs"];
+
+        let unscoped = detect_duplicates(&all, &no_conventions());
+        let scoped = detect_duplicates_scoped(&[&in_scope], &all, &no_conventions());
+
+        assert!(
+            scoped.is_empty(),
+            "different body hash is a different group: {:?}",
+            signatures(&scoped)
+        );
+        assert_eq!(unscoped.len(), 2, "the far pair is still a duplicate");
+        assert_eq!(reportable(&scoped, &scope), reportable(&unscoped, &scope));
+    }
+
+    #[test]
+    fn out_of_scope_counterpart_still_decides_severity() {
+        // `make_fp` sits in the inline `#[cfg(test)]` block of two production
+        // files, only one of which is in scope. Severity is Info only when
+        // EVERY member is recognized as test scaffolding, so the expansion
+        // phase has to scan the out-of-scope member's content too.
+        let mut in_scope = make_fingerprint("src/a.rs", &["make_fp"], &[("make_fp", "h1")]);
+        in_scope.content =
+            "fn prod() {}\n\n#[cfg(test)]\nmod tests {\n    fn make_fp() -> Fp { Fp::default() }\n}\n"
+                .to_string();
+        let mut out_of_scope = make_fingerprint("src/b.rs", &["make_fp"], &[("make_fp", "h1")]);
+        out_of_scope.content =
+            "fn other() {}\n\n#[cfg(test)]\nmod tests {\n    fn make_fp() -> Fp { Fp::default() }\n}\n"
+                .to_string();
+        let all = [&in_scope, &out_of_scope];
+
+        let unscoped = detect_duplicates(&all, &no_conventions());
+        let scoped = detect_duplicates_scoped(&[&in_scope], &all, &no_conventions());
+
+        assert_eq!(signatures(&scoped), signatures(&unscoped));
+        assert!(
+            scoped
+                .iter()
+                .all(|finding| finding.severity == Severity::Info),
+            "inline cfg(test) duplication stays Info on the scoped path: {:?}",
+            signatures(&scoped)
+        );
+    }
+
+    #[test]
+    fn convention_methods_are_skipped_on_the_scoped_path() {
+        let in_scope = make_fingerprint("src/a.rs", &["__construct"], &[("__construct", "h1")]);
+        let out_of_scope = make_fingerprint("src/b.rs", &["__construct"], &[("__construct", "h1")]);
+        let all = [&in_scope, &out_of_scope];
+        let mut conventions = std::collections::HashSet::new();
+        conventions.insert("__construct".to_string());
+
+        assert!(detect_duplicates(&all, &conventions).is_empty());
+        assert!(detect_duplicates_scoped(&[&in_scope], &all, &conventions).is_empty());
+    }
+
+    #[test]
+    fn empty_scope_seeds_nothing() {
+        let fp1 = make_fingerprint("src/a.rs", &["helper"], &[("helper", "h1")]);
+        let fp2 = make_fingerprint("src/b.rs", &["helper"], &[("helper", "h1")]);
+        let all = [&fp1, &fp2];
+        let empty: [&FileFingerprint; 0] = [];
+
+        assert!(detect_duplicates_scoped(&empty, &all, &no_conventions()).is_empty());
+        assert!(detect_duplicate_groups_scoped(&empty, &all).is_empty());
+        assert_eq!(detect_duplicates(&all, &no_conventions()).len(), 2);
+    }
+}
+
+// ========================================================================
 // Near-duplicate detection tests
 // ========================================================================
 

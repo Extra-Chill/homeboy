@@ -96,6 +96,126 @@ impl AuditTiming {
                 .map(AuditTimingSpan::from),
         );
     }
+
+    /// Emit the recorded detector spans to stderr, slowest first.
+    ///
+    /// These spans were already collected and already serialized — the audit
+    /// result carries them as `timing.spans[]` (see
+    /// [`AuditCommandOutput`](crate::report::AuditCommandOutput)) and the CLI
+    /// copies them into observation metadata as `timing.spans`. Both are
+    /// post-mortem artifacts: when the detector phase overruns its CI budget the
+    /// run is cancelled and neither is ever written, which is how a 507-second
+    /// audit managed to report nothing at all about where the 507 seconds went
+    /// (#12583). This prints as soon as the phase ends, on the stream an operator
+    /// is already watching.
+    ///
+    /// Deliberately `eprintln!` rather than `log_status!`: that macro is gated on
+    /// stderr being a terminal (see `audit_log.rs`), and CI — the one place this
+    /// measurement is needed — is never a terminal. The `[audit] ` prefix and
+    /// phrasing match `log_status!("audit", ...)` so the lines read identically
+    /// alongside the rest of the audit's progress output, and it matches how
+    /// [`time_audit_detector`] already emits its per-detector lines.
+    ///
+    /// Only `detector.*` spans are ranked. The coarse phases
+    /// (`discovery_fingerprinting`, `detectors`, `report`) are aggregates that
+    /// contain the detector spans, so mixing them into one ranking would
+    /// double-count. The `detectors` aggregate is reported separately as the
+    /// phase's wall time, which is what the CI budget is spent against.
+    pub(crate) fn log_detector_summary(&self) {
+        let mut ranked: Vec<(&str, f64)> = self
+            .spans
+            .iter()
+            .filter(|span| span.id.starts_with(DETECTOR_SPAN_PREFIX))
+            .filter_map(|span| span.duration_ms.map(|ms| (span.id.as_str(), ms)))
+            .collect();
+        if ranked.is_empty() {
+            return;
+        }
+
+        let skipped = self
+            .spans
+            .iter()
+            .filter(|span| span.id.starts_with(DETECTOR_SPAN_PREFIX) && span.status == "skipped")
+            .count();
+        // Duration descending, then id ascending. The id tiebreak is what keeps
+        // the ranking stable when several detectors report the same duration —
+        // without it, equal-cost spans would order by whichever thread happened
+        // to record first.
+        ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+
+        let summed: f64 = ranked.iter().map(|(_, ms)| *ms).sum();
+        let wall = self
+            .spans
+            .iter()
+            .rev()
+            .find(|span| span.id == DETECTOR_PHASE_SPAN_ID)
+            .and_then(|span| span.duration_ms);
+
+        match wall {
+            // `summed` exceeding `wall` is the expected shape once detectors run
+            // concurrently, and the gap between the two IS the parallel speedup.
+            Some(wall) => eprintln!(
+                "[audit] Detector timing: {} wall, {} summed across {} span(s) ({} skipped)",
+                format_millis(wall),
+                format_millis(summed),
+                ranked.len(),
+                skipped
+            ),
+            None => eprintln!(
+                "[audit] Detector timing: {} summed across {} span(s) ({} skipped)",
+                format_millis(summed),
+                ranked.len(),
+                skipped
+            ),
+        }
+
+        for (rank, (id, ms)) in ranked.iter().take(DETECTOR_SUMMARY_TOP_N).enumerate() {
+            eprintln!(
+                "[audit] Detector timing:   {}. {} {}",
+                rank + 1,
+                id,
+                format_millis(*ms)
+            );
+        }
+
+        let remaining = ranked.len().saturating_sub(DETECTOR_SUMMARY_TOP_N);
+        if remaining > 0 {
+            let tail: f64 = ranked
+                .iter()
+                .skip(DETECTOR_SUMMARY_TOP_N)
+                .map(|(_, ms)| *ms)
+                .sum();
+            eprintln!(
+                "[audit] Detector timing:   + {remaining} more span(s), {} total",
+                format_millis(tail)
+            );
+        }
+    }
+}
+
+/// Timing-id prefix every per-detector span shares.
+const DETECTOR_SPAN_PREFIX: &str = "detector.";
+
+/// Timing id of the aggregate span covering the whole detector phase.
+const DETECTOR_PHASE_SPAN_ID: &str = "detectors";
+
+/// How many detector spans [`AuditTiming::log_detector_summary`] names
+/// individually. The full audit records 40+ detector spans; one line each would
+/// bury the hotspot the summary exists to expose, so the slowest few are named
+/// and the rest are totalled on one line. Every span is still in the result JSON.
+const DETECTOR_SUMMARY_TOP_N: usize = 8;
+
+/// Render a fractional-millisecond duration at a scale an operator can read:
+/// seconds once a span is expensive enough to matter to a phase budget, and a
+/// decimal below 10ms so a sub-millisecond detector does not read as `0ms`.
+fn format_millis(millis: f64) -> String {
+    if millis >= 1000.0 {
+        format!("{:.1}s", millis / 1000.0)
+    } else if millis >= 10.0 {
+        format!("{millis:.0}ms")
+    } else {
+        format!("{millis:.1}ms")
+    }
 }
 
 #[derive(Debug)]
@@ -155,6 +275,26 @@ pub(crate) fn time_audit_detector<T>(
         timing.push_skipped(id);
         skipped()
     }
+}
+
+/// [`time_audit_detector`] against a private timing report, returning the
+/// detector's value together with the spans recorded for it.
+///
+/// This is what lets a detector run on a worker thread. `&mut AuditTiming` is a
+/// single mutable borrow and cannot be shared across threads; a `Mutex` around it
+/// would compile but would make span ORDER depend on completion order, which is
+/// exactly the nondeterminism the parallel detector phase must not introduce.
+/// Handing each detector its own report and concatenating the spans afterwards in
+/// a fixed order keeps the timing report byte-identical to the serial one.
+pub(crate) fn time_audit_detector_isolated<T>(
+    id: &'static str,
+    enabled: bool,
+    run: impl FnOnce() -> T,
+    skipped: impl FnOnce() -> T,
+) -> (T, Vec<AuditTimingSpan>) {
+    let mut timing = AuditTiming::default();
+    let value = time_audit_detector(&mut timing, id, enabled, run, skipped);
+    (value, timing.spans)
 }
 
 // ============================================================================

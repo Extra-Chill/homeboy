@@ -188,6 +188,14 @@ Cook states the effective rotation on submission, e.g.
 `cook: rotation: 2 fallback provider(s), up to 3 provider execution(s)` or
 `cook: rotation: disabled (1 provider execution(s))`.
 
+The same submission also states the resolved wall-clock budget of one provider
+execution, e.g.
+`cook: provider timeout: 1200s per provider execution (override with --timeout-ms)`.
+It defaults to 1200000 ms (20 min) and is overridden per run with `--timeout-ms`.
+A provider still running at that deadline is cancelled and the attempt is
+classified `timeout`, so a task has to be sized against this number rather than
+discovered to exceed it.
+
 ### Command Policy
 
 An execution budget bounds *how long* a provider may run. A command policy
@@ -1030,6 +1038,18 @@ on the selected runner before `agent-task cook` dispatches work internally, so a
 missing provider executable/config blocks the run before a multi-cell task wave
 is queued.
 
+Run `homeboy agent-task providers --validate-readiness` with **no** `--backend`
+to discover which backend to pass. Without `--backend` the command validates
+every declared backend and reports each verdict in
+`readiness_validation.backends[]` — one entry per backend, carrying the same
+fields as the single-backend `readiness_validation` object plus the `backend` it
+describes, with a failed backend's detail in its `reason`. The usable values are
+listed directly in `readiness_validation.ready_backends`. A backend that fails
+readiness is reported, not propagated, so this sweep answers `agent-task cook`'s
+missing-`--backend` error instead of failing with the same precondition (#12569).
+A supplied `--backend` still fails fast: that query names one backend and has no
+fuller picture to report.
+
 ## Repo-Local Gate Tasks
 
 Use `execution_kind: repo_local_gate` for deterministic, repo-local gate
@@ -1228,6 +1248,23 @@ homeboy agent-task cancel "$run_id" --reason "not selected by controller"
 `cancel` marks queued runs and stale-running records as `cancelled` in the
 durable lifecycle store. It refuses to claim live provider cancellation for an
 active runner process until a provider-owned cancellation channel is available.
+
+Cancellation is only partly synchronous, so `cancel` reports what actually
+happened under `cancellation` rather than an unqualified success word. When the
+teardown is owned elsewhere — a controller-owned staging job, or a provider tree
+that is not reachable from this host — the command waits a bounded 15s for the
+durable record to converge and then reports one of:
+
+| `cancellation.outcome` | Meaning | Exit |
+| --- | --- | --- |
+| `cancelled` | The run is durably cancelled. | `0` |
+| `terminal_without_cancellation` | The run reached another terminal state first; that result is authoritative. | `0` |
+| `deferred_for_terminal_provider` | A provider had already reserved a terminal result, so cancellation was deliberately not applied and the run stays joinable for that import. | `0` |
+| `cancellation_requested` | Cancellation is durably accepted, but the run had not reached a terminal state when the bound expired. | `124` |
+
+`cancellation_requested` carries the run id, the wait accounting, and a
+`status_command` to check convergence. The bound means `cancel` always returns:
+it never prints a terminal-sounding word and then blocks.
 
 ## Component Contracts
 

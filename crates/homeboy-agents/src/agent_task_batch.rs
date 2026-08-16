@@ -699,7 +699,16 @@ pub fn fanout_dependency_graph_with_finalization_statuses(
     batch_id: &str,
     statuses: &BTreeMap<String, String>,
 ) -> Result<Option<Value>> {
-    let mut batch = read_batch(batch_id)?;
+    AgentTaskBatchStore::from_current_data_root()?
+        .fanout_dependency_graph_with_finalization_statuses(batch_id, statuses)
+}
+
+fn fanout_dependency_graph_with_finalization_statuses_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+    statuses: &BTreeMap<String, String>,
+) -> Result<Option<Value>> {
+    let mut batch = store.read_batch(batch_id)?;
     refresh_dependency_graph_with_finalization_statuses(
         &mut batch,
         Some(statuses),
@@ -848,7 +857,14 @@ where
 /// Read the graph-projected executable frontier. Resume callers use this to
 /// avoid finalizing a dependent before its upstream candidate is accepted.
 pub fn fanout_ready_child_run_ids(batch_id: &str) -> Result<Option<HashSet<String>>> {
-    let report = status(batch_id)?;
+    AgentTaskBatchStore::from_current_data_root()?.fanout_ready_child_run_ids(batch_id)
+}
+
+fn fanout_ready_child_run_ids_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+) -> Result<Option<HashSet<String>>> {
+    let report = store.status(batch_id)?;
     let Some(graph) = report.dependency_graph else {
         return Ok(None);
     };
@@ -873,8 +889,15 @@ pub fn fanout_ready_child_run_ids(batch_id: &str) -> Result<Option<HashSet<Strin
 /// only an index: each listed run must independently prove its persisted plan
 /// was created for this batch before it can be dispatched.
 pub fn owned_child_run_ids(batch_id: &str) -> Result<HashSet<String>> {
+    AgentTaskBatchStore::from_current_data_root()?.owned_child_run_ids(batch_id)
+}
+
+fn owned_child_run_ids_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+) -> Result<HashSet<String>> {
     owned_child_run_ids_for(
-        read_batch(batch_id)?,
+        store.read_batch(batch_id)?,
         agent_task_lifecycle::load_controller_plan,
     )
 }
@@ -928,7 +951,14 @@ fn terminal_preflight_or_admission_failure(metadata: &Value, run_id: &str) -> bo
 }
 
 pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
-    let report = status(batch_id)?;
+    AgentTaskBatchStore::from_current_data_root()?.artifacts(batch_id)
+}
+
+fn artifacts_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+) -> Result<AgentTaskBatchArtifactsReport> {
+    let report = store.status(batch_id)?;
     let mut unavailable_child_runs = report.unavailable_child_runs.clone();
     let child_runs = report
         .batch
@@ -1166,23 +1196,35 @@ fn now_timestamp() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Durable agent-task batch storage bound to an explicit filesystem root.
 #[derive(Clone, Debug)]
-struct AgentTaskBatchStore {
+pub struct AgentTaskBatchStore {
     root: PathBuf,
 }
 
 impl AgentTaskBatchStore {
-    fn from_data_root(data_root: PathBuf) -> Self {
+    pub fn new(roots: paths::PathRoots) -> Self {
+        Self::from_data_root(roots.data().to_path_buf())
+    }
+
+    pub fn from_environment() -> Result<Self> {
+        Ok(Self::new(paths::PathRoots::from_environment()?))
+    }
+
+    /// Bind batch's data-only storage without requiring unrelated config or
+    /// artifact roots. Legacy batch entry points use this to preserve their
+    /// historical `HOMEBOY_DATA_DIR`-only contract.
+    pub fn from_data_root(data_root: PathBuf) -> Self {
         Self {
             root: data_root.join("agent-task-batches"),
         }
     }
 
-    fn from_current_data_root() -> Result<Self> {
+    pub fn from_current_data_root() -> Result<Self> {
         Ok(Self::from_data_root(paths::homeboy_data()?))
     }
 
-    fn submit_plan_batch_with<F, E>(
+    pub fn submit_plan_batch_with<F, E>(
         &self,
         plan: &AgentTaskPlan,
         requested_batch_id: Option<&str>,
@@ -1202,7 +1244,7 @@ impl AgentTaskBatchStore {
         )
     }
 
-    fn persist_fanout_run_batch(
+    pub fn persist_fanout_run_batch(
         &self,
         fanout_id: &str,
         plan_id: &str,
@@ -1212,15 +1254,15 @@ impl AgentTaskBatchStore {
         persist_fanout_run_batch_in_store(self, fanout_id, plan_id, children, metadata)
     }
 
-    fn claim_fanout_run_batch(&self, batch_id: &str) -> Result<Option<String>> {
+    pub fn claim_fanout_run_batch(&self, batch_id: &str) -> Result<Option<String>> {
         claim_fanout_run_batch_in_store(self, batch_id)
     }
 
-    fn heartbeat_fanout_run_batch(&self, batch_id: &str, claim_id: &str) -> Result<()> {
+    pub fn heartbeat_fanout_run_batch(&self, batch_id: &str, claim_id: &str) -> Result<()> {
         heartbeat_fanout_run_batch_in_store(self, batch_id, claim_id)
     }
 
-    fn record_fanout_run_batch_failure(
+    pub fn record_fanout_run_batch_failure(
         &self,
         batch_id: &str,
         claim_id: &str,
@@ -1230,7 +1272,7 @@ impl AgentTaskBatchStore {
         record_fanout_run_batch_failure_in_store(self, batch_id, claim_id, stage, failure)
     }
 
-    fn record_fanout_run_batch_failed_admissions<'a>(
+    pub fn record_fanout_run_batch_failed_admissions<'a>(
         &self,
         batch_id: &str,
         failed_run_ids: impl IntoIterator<Item = &'a str>,
@@ -1238,7 +1280,7 @@ impl AgentTaskBatchStore {
         record_fanout_run_batch_failed_admissions_in_store(self, batch_id, failed_run_ids)
     }
 
-    fn status(&self, batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
+    pub fn status(&self, batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
         self.status_with(
             batch_id,
             agent_task_lifecycle::persisted_status,
@@ -1246,11 +1288,11 @@ impl AgentTaskBatchStore {
         )
     }
 
-    fn expire_stalled_fanout_admission(&self, batch_id: &str) -> Result<bool> {
+    pub fn expire_stalled_fanout_admission(&self, batch_id: &str) -> Result<bool> {
         expire_stalled_fanout_admission_in_store(self, batch_id)
     }
 
-    fn status_with<S, P>(
+    pub fn status_with<S, P>(
         &self,
         batch_id: &str,
         child_status: S,
@@ -1263,7 +1305,7 @@ impl AgentTaskBatchStore {
         status_in_store(self, batch_id, child_status, projection_readiness)
     }
 
-    fn record_child_finalization(
+    pub fn record_child_finalization(
         &self,
         batch_id: &str,
         child_run_id: &str,
@@ -1272,11 +1314,63 @@ impl AgentTaskBatchStore {
         record_child_finalization_in_store(self, batch_id, child_run_id, finalization)
     }
 
-    fn batch_path(&self, batch_id: &str) -> PathBuf {
+    /// Read the persisted durable batch record.
+    pub fn read_batch_record(&self, batch_id: &str) -> Result<AgentTaskBatchRecord> {
+        read_batch_record_in_store(self, batch_id)
+    }
+
+    /// Record that this batch's coordinator was cancelled by its durable owner.
+    pub fn record_coordinator_cancellation(&self, batch_id: &str, reason: &str) -> Result<()> {
+        record_coordinator_cancellation_in_store(self, batch_id, reason)
+    }
+
+    /// Whether this batch's coordinator has been cancelled by its durable owner.
+    pub fn coordinator_is_cancelled(&self, batch_id: &str) -> bool {
+        coordinator_is_cancelled_in_store(self, batch_id)
+    }
+
+    pub fn dependency_action_receipt(&self, batch_id: &str, key: &str) -> Result<Option<Value>> {
+        dependency_action_receipt_in_store(self, batch_id, key)
+    }
+
+    pub fn record_dependency_action_receipt(
+        &self,
+        batch_id: &str,
+        key: &str,
+        receipt: Value,
+    ) -> Result<()> {
+        record_dependency_action_receipt_in_store(self, batch_id, key, receipt)
+    }
+
+    /// Read the graph-projected executable frontier.
+    pub fn fanout_ready_child_run_ids(&self, batch_id: &str) -> Result<Option<HashSet<String>>> {
+        fanout_ready_child_run_ids_in_store(self, batch_id)
+    }
+
+    /// Resolve the durable child runs owned by a fanout.
+    pub fn owned_child_run_ids(&self, batch_id: &str) -> Result<HashSet<String>> {
+        owned_child_run_ids_in_store(self, batch_id)
+    }
+
+    pub fn artifacts(&self, batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
+        artifacts_in_store(self, batch_id)
+    }
+
+    /// Return the same dependency projection used by resume without persisting
+    /// a read-side PR observation into either the lifecycle or batch record.
+    pub fn fanout_dependency_graph_with_finalization_statuses(
+        &self,
+        batch_id: &str,
+        statuses: &BTreeMap<String, String>,
+    ) -> Result<Option<Value>> {
+        fanout_dependency_graph_with_finalization_statuses_in_store(self, batch_id, statuses)
+    }
+
+    pub fn batch_path(&self, batch_id: &str) -> PathBuf {
         self.root.join(format!("{}.json", sanitize_id(batch_id)))
     }
 
-    fn write_batch(&self, record: &AgentTaskBatchRecord) -> Result<()> {
+    pub fn write_batch(&self, record: &AgentTaskBatchRecord) -> Result<()> {
         let path = self.batch_path(&record.batch_id);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -1298,7 +1392,7 @@ impl AgentTaskBatchStore {
         })
     }
 
-    fn with_batch_lock<T>(
+    pub fn with_batch_lock<T>(
         &self,
         batch_id: &str,
         operation: impl FnOnce() -> Result<T>,
@@ -1325,7 +1419,7 @@ impl AgentTaskBatchStore {
         result
     }
 
-    fn mutate_batch<T>(
+    pub fn mutate_batch<T>(
         &self,
         batch_id: &str,
         operation: impl FnOnce(&mut AgentTaskBatchRecord) -> Result<T>,
@@ -1338,7 +1432,7 @@ impl AgentTaskBatchStore {
         })
     }
 
-    fn read_batch(&self, batch_id: &str) -> Result<AgentTaskBatchRecord> {
+    pub fn read_batch(&self, batch_id: &str) -> Result<AgentTaskBatchRecord> {
         let path = self.batch_path(batch_id);
         let raw = fs::read_to_string(&path).map_err(|error| {
             Error::internal_io(error.to_string(), Some(path.display().to_string()))
@@ -1352,25 +1446,17 @@ impl AgentTaskBatchStore {
     }
 }
 
-fn write_batch(record: &AgentTaskBatchRecord) -> Result<()> {
-    AgentTaskBatchStore::from_current_data_root()?.write_batch(record)
-}
-
-fn mutate_batch<T>(
-    batch_id: &str,
-    operation: impl FnOnce(&mut AgentTaskBatchRecord) -> Result<T>,
-) -> Result<T> {
-    AgentTaskBatchStore::from_current_data_root()?.mutate_batch(batch_id, operation)
-}
-
-fn read_batch(batch_id: &str) -> Result<AgentTaskBatchRecord> {
-    AgentTaskBatchStore::from_current_data_root()?.read_batch(batch_id)
-}
-
 /// Read the persisted durable batch record. Used by the batch resume path to
 /// reconstruct each child cook after the original coordinator exited (#9525).
 pub fn read_batch_record(batch_id: &str) -> Result<AgentTaskBatchRecord> {
-    read_batch(batch_id)
+    AgentTaskBatchStore::from_current_data_root()?.read_batch_record(batch_id)
+}
+
+fn read_batch_record_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+) -> Result<AgentTaskBatchRecord> {
+    store.read_batch(batch_id)
 }
 
 /// Persist a child's resume-time finalization outcome into the durable batch
@@ -1435,7 +1521,15 @@ fn record_child_finalization_in_store(
 /// `state`, because [`status`] recomputes `state` from live child observation
 /// on every read and would erase a marker written there.
 pub fn record_coordinator_cancellation(batch_id: &str, reason: &str) -> Result<()> {
-    mutate_batch(batch_id, |batch| {
+    AgentTaskBatchStore::from_current_data_root()?.record_coordinator_cancellation(batch_id, reason)
+}
+
+fn record_coordinator_cancellation_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+    reason: &str,
+) -> Result<()> {
+    store.mutate_batch(batch_id, |batch| {
         if !batch.metadata.is_object() {
             batch.metadata = json!({});
         }
@@ -1463,7 +1557,14 @@ pub fn record_coordinator_cancellation(batch_id: &str, reason: &str) -> Result<(
 /// than as an error: this is consulted from the coordinator's claim loop, where
 /// a transient read failure must not be allowed to abandon a live batch.
 pub fn coordinator_is_cancelled(batch_id: &str) -> bool {
-    read_batch(batch_id)
+    AgentTaskBatchStore::from_current_data_root()
+        .map(|store| store.coordinator_is_cancelled(batch_id))
+        .unwrap_or(false)
+}
+
+fn coordinator_is_cancelled_in_store(store: &AgentTaskBatchStore, batch_id: &str) -> bool {
+    store
+        .read_batch(batch_id)
         .ok()
         .and_then(|batch| batch.metadata.get(COORDINATOR_CANCELLATION_KEY).cloned())
         .is_some_and(|value| value.is_object())
@@ -1472,14 +1573,32 @@ pub fn coordinator_is_cancelled(batch_id: &str) -> bool {
 const COORDINATOR_CANCELLATION_KEY: &str = "coordinator_cancellation";
 
 pub fn dependency_action_receipt(batch_id: &str, key: &str) -> Result<Option<Value>> {
-    let batch = read_batch(batch_id)?;
+    AgentTaskBatchStore::from_current_data_root()?.dependency_action_receipt(batch_id, key)
+}
+
+fn dependency_action_receipt_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+    key: &str,
+) -> Result<Option<Value>> {
+    let batch = store.read_batch(batch_id)?;
     Ok(batch.metadata["dependency_action_receipts"][key]
         .as_object()
         .map(|_| batch.metadata["dependency_action_receipts"][key].clone()))
 }
 
 pub fn record_dependency_action_receipt(batch_id: &str, key: &str, receipt: Value) -> Result<()> {
-    mutate_batch(batch_id, |batch| {
+    AgentTaskBatchStore::from_current_data_root()?
+        .record_dependency_action_receipt(batch_id, key, receipt)
+}
+
+fn record_dependency_action_receipt_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+    key: &str,
+    receipt: Value,
+) -> Result<()> {
+    store.mutate_batch(batch_id, |batch| {
         if !batch.metadata.is_object() {
             batch.metadata = json!({});
         }
@@ -2822,6 +2941,96 @@ mod tests {
             .as_object()
             .expect("finalizations");
         assert_eq!(finalizations.len(), 2);
+    }
+
+    #[test]
+    fn injected_batch_stores_isolate_identical_ids_in_parallel() {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_store = AgentTaskBatchStore::new(left_context.path_roots());
+        let right_store = AgentTaskBatchStore::new(right_context.path_roots());
+        let left_children = vec![FanoutRunBatchChild {
+            task_id: "left-task".to_string(),
+            run_id: "left-run".to_string(),
+        }];
+        let right_children = vec![FanoutRunBatchChild {
+            task_id: "right-task".to_string(),
+            run_id: "right-run".to_string(),
+        }];
+
+        let left = std::thread::spawn(move || {
+            left_store
+                .persist_fanout_run_batch(
+                    "shared-fanout",
+                    "shared-plan",
+                    &left_children,
+                    json!({ "owner": "left" }),
+                )
+                .expect("left persist");
+            left_store
+                .claim_fanout_run_batch("shared-fanout")
+                .expect("left claim")
+                .expect("left claim id");
+            left_store
+        });
+        let right = std::thread::spawn(move || {
+            right_store
+                .persist_fanout_run_batch(
+                    "shared-fanout",
+                    "shared-plan",
+                    &right_children,
+                    json!({ "owner": "right" }),
+                )
+                .expect("right persist");
+            right_store
+                .claim_fanout_run_batch("shared-fanout")
+                .expect("right claim")
+                .expect("right claim id");
+            right_store
+        });
+
+        let left_store = left.join().expect("left thread");
+        let right_store = right.join().expect("right thread");
+
+        let left_record = left_store
+            .read_batch_record("shared-fanout")
+            .expect("left record");
+        let right_record = right_store
+            .read_batch_record("shared-fanout")
+            .expect("right record");
+        assert_eq!(left_record.child_runs[0].run_id, "left-run");
+        assert_eq!(right_record.child_runs[0].run_id, "right-run");
+        assert_eq!(left_record.metadata["owner"], "left");
+        assert_eq!(right_record.metadata["owner"], "right");
+        assert_eq!(left_record.state, AgentTaskBatchState::Admitting);
+        assert_eq!(right_record.state, AgentTaskBatchState::Admitting);
+        assert_ne!(
+            left_store.batch_path("shared-fanout"),
+            right_store.batch_path("shared-fanout")
+        );
+
+        left_store
+            .persist_fanout_run_batch(
+                "exclusive-left",
+                "left-plan",
+                &[FanoutRunBatchChild {
+                    task_id: "left-task".to_string(),
+                    run_id: "left-run".to_string(),
+                }],
+                json!({}),
+            )
+            .expect("persist exclusive left batch");
+        assert_eq!(
+            left_store
+                .read_batch("exclusive-left")
+                .expect("left exclusive record")
+                .plan_id,
+            "left-plan"
+        );
+        assert!(right_store.read_batch("exclusive-left").is_err());
+        assert!(right_store
+            .claim_fanout_run_batch("exclusive-left")
+            .is_err());
     }
 
     fn request(task_id: &str) -> AgentTaskRequest {

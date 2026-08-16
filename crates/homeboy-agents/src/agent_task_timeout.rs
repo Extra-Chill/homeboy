@@ -7,6 +7,10 @@ const MIN_TIMEOUT_GRACE_MS: u64 = 100;
 /// Default provider wall-clock timeout for agent-task execution when neither the
 /// task nor the plan sets an explicit timeout. Twenty minutes is generous for
 /// real agent work while still preventing silent unbounded provider hangs.
+///
+/// The `--timeout-ms` help text names this value literally so an operator can
+/// size a task against the budget without spending a run to discover it
+/// (#12568). Changing it here means changing that help text too.
 pub const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 1_200_000;
 
 pub(crate) fn now_unix_ms() -> u64 {
