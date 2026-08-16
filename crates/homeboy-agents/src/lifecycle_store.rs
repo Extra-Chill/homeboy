@@ -551,6 +551,15 @@ impl AgentTaskLifecycleStore {
         read_records_in_store(self)
     }
 
+    /// Read every retry successor of `source_run_id` from this store's own
+    /// observation database.
+    pub(crate) fn read_retry_successors(
+        &self,
+        source_run_id: &str,
+    ) -> Result<Vec<AgentTaskRunRecord>> {
+        read_retry_successors_in_store(self, source_run_id)
+    }
+
     pub(crate) fn record_run_aggregate(
         &self,
         run_id: &str,
@@ -1431,11 +1440,23 @@ const RETRY_SUCCESSOR_SCAN_LIMIT: usize = 256;
 /// retry. The page is therefore read with an explicit truncation signal and a
 /// truncated lineage fails loudly rather than answering wrongly (#11177).
 pub(super) fn read_retry_successors(source_run_id: &str) -> Result<Vec<AgentTaskRunRecord>> {
-    let page = ObservationStore::open_initialized_for_lifecycle()?.list_runs_by_retry_of_page(
-        "agent-task",
-        source_run_id,
-        RETRY_SUCCESSOR_SCAN_LIMIT,
-    )?;
+    read_retry_successors_in_store(&default_store()?, source_run_id)
+}
+
+/// The store-rooted counterpart of [`read_retry_successors`], reading this
+/// store's own observation database instead of the ambient one.
+///
+/// The truncation contract is the reason this matters more than a plain read:
+/// callers treat "no successor" as authority to create one, so a lineage scanned
+/// in the wrong home answers "none" for a source whose successor is durable here
+/// and double-books the reservation.
+fn read_retry_successors_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    source_run_id: &str,
+) -> Result<Vec<AgentTaskRunRecord>> {
+    let page = lifecycle_store
+        .open_observation_initialized()?
+        .list_runs_by_retry_of_page("agent-task", source_run_id, RETRY_SUCCESSOR_SCAN_LIMIT)?;
     if page.truncated {
         return Err(Error::internal_unexpected(format!(
             "retry lineage for {source_run_id} exceeded {RETRY_SUCCESSOR_SCAN_LIMIT} successors; \

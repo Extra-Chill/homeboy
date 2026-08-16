@@ -1379,28 +1379,10 @@ where
     )
 }
 
-fn submit_plan_with_runtime_admission_on_runner_with_metadata<F, A>(
-    plan: &AgentTaskPlan,
-    requested_run_id: Option<&str>,
-    execution_runner_id: Option<String>,
-    submission_metadata: Option<serde_json::Map<String, Value>>,
-    admit_runtime: F,
-) -> Result<AgentTaskRunRecord>
-where
-    F: FnOnce(&str) -> Result<A>,
-    A: RuntimeAdmissionEvidence,
-{
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    submit_plan_with_runtime_admission_in_store(
-        &lifecycle_store,
-        plan,
-        requested_run_id,
-        execution_runner_id,
-        submission_metadata,
-        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
-        admit_runtime,
-    )
-}
+// `submit_plan_with_runtime_admission_on_runner_with_metadata` lived here. Its
+// only caller was the retry admission, which now calls
+// `submit_plan_with_runtime_admission_in_store` with the store it was handed
+// rather than resolving a second one from the environment (#7505).
 
 pub(crate) fn submit_plan_with_runtime_admission_in_store<F, A>(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -2128,7 +2110,32 @@ pub fn recover_controller_runtime(
     artifact: Option<&std::path::Path>,
     source: Option<&std::path::Path>,
 ) -> Result<Value> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    recover_controller_runtime_in_store(&lifecycle_store, run_id, artifact, source)
+}
+
+/// Repair a run's pinned controller executable against an explicitly rooted
+/// store.
+///
+/// This is the re-entry repair step: a run whose pin no longer resolves cannot
+/// be resumed or retried until the provenance it names is restored. Both
+/// lifecycle halves follow the injected root — the record the provenance is read
+/// from and the record the recovered pin is written back to — because recovering
+/// against one home's provenance and persisting into another leaves the run this
+/// operator is trying to re-enter still holding the broken pin.
+///
+/// The immutable controller-runtime store that `recover_pin_and_persist`
+/// republishes into is deliberately left process-global, for the same reason
+/// `validate_controller_runtime_in_store` leaves it alone: it is a
+/// content-addressed executable cache shared across homes, not durable lifecycle
+/// state, so it is not one of this store's roots.
+pub(crate) fn recover_controller_runtime_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    artifact: Option<&std::path::Path>,
+    source: Option<&std::path::Path>,
+) -> Result<Value> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     let runtime = record
         .metadata
         .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
@@ -2148,7 +2155,7 @@ pub fn recover_controller_runtime(
         |recovered| {
             record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                 recovered.clone();
-            store::write_record(&record)
+            lifecycle_store.write_record(&record)
         },
     )?;
     Ok(recovered)
@@ -3394,62 +3401,99 @@ fn trusted_plan_environment_variables(plan: &AgentTaskPlan) -> Vec<String> {
 
 /// Re-arm a quarantined record by exact durable run ID after its provenance is repaired.
 pub fn rearm_quarantined_run(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    rearm_quarantined_run_in_store(&lifecycle_store, run_id)
+}
+
+/// Re-arm a quarantined record inside an explicitly rooted store.
+///
+/// This is the clearing half of the quarantine pair, and it has to read and
+/// write the same root the quarantine marker was written into. The eligibility
+/// guard — queued, and carrying a `queue_quarantine` marker — is evaluated
+/// inside the mutation closure, so an ambient read decides re-armability from
+/// another home's copy of the identity: a run quarantined here would be reported
+/// as "not quarantined" and refuse to re-arm, while a run quarantined only in
+/// the ambient home would report success and leave this store's queue still
+/// skipping the record on every claim.
+pub(crate) fn rearm_quarantined_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
     let run_id = require_literal_run_id(run_id)?;
-    store::mutate_record(&run_id, |record| {
-        if record.state != AgentTaskRunState::Queued
-            || record.metadata.get("queue_quarantine").is_none()
-        {
-            return false;
-        }
-        record.ensure_metadata_object().remove("queue_quarantine");
-        record.updated_at = Some(now_timestamp());
-        true
-    })?
-    .ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            "only an exact queued quarantined run can be re-armed",
-            Some(run_id),
-            None,
-        )
-    })
+    lifecycle_store
+        .mutate_record(&run_id, |record| {
+            if record.state != AgentTaskRunState::Queued
+                || record.metadata.get("queue_quarantine").is_none()
+            {
+                return false;
+            }
+            record.ensure_metadata_object().remove("queue_quarantine");
+            record.updated_at = Some(now_timestamp());
+            true
+        })?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                "only an exact queued quarantined run can be re-armed",
+                Some(run_id),
+                None,
+            )
+        })
 }
 
 /// Quarantine one exact queued run without changing its lifecycle state or
 /// removing any evidence. It can only return through `rearm_quarantined_run`.
 pub fn quarantine_queued_run_exact(run_id: &str, reason: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    quarantine_queued_run_exact_in_store(&lifecycle_store, run_id, reason)
+}
+
+/// Quarantine one exact queued run inside an explicitly rooted store.
+///
+/// The operator quarantine and the automatic one that `quarantine_queued_run_in_store`
+/// writes during a claim are the same durable marker, and a claim scanning this
+/// store must see it. Written ambiently, the operator would be told the run is
+/// quarantined while this store's queue kept handing it out, and
+/// `rearm_quarantined_run_in_store` would then find nothing to clear.
+pub(crate) fn quarantine_queued_run_exact_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
     let run_id = require_literal_run_id(run_id)?;
     let operator_reason = normalized_operator_quarantine_reason(reason);
-    store::mutate_record(&run_id, |record| {
-        if record.state != AgentTaskRunState::Queued
-            || record.metadata.get("queue_quarantine").is_some()
-        {
-            return false;
-        }
-        let quarantined_at = now_timestamp();
-        let remediation = "repair provenance, then re-arm with: homeboy agent-task rearm <run-id>";
-        record.updated_at = Some(quarantined_at.clone());
-        record.ensure_metadata_object().insert(
-            "queue_quarantine".to_string(),
-            json!({
-                "category": "operator_quarantine",
-                "error_code": "operator_quarantine",
-                "summary": "operator quarantined this queued run",
-                "operator_reason": operator_reason,
-                "quarantined_at": quarantined_at,
-                "remediation": remediation,
-            }),
-        );
-        true
-    })?
-    .ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            "only an exact queued non-quarantined run can be quarantined",
-            Some(run_id),
-            None,
-        )
-    })
+    lifecycle_store
+        .mutate_record(&run_id, |record| {
+            if record.state != AgentTaskRunState::Queued
+                || record.metadata.get("queue_quarantine").is_some()
+            {
+                return false;
+            }
+            let quarantined_at = now_timestamp();
+            let remediation =
+                "repair provenance, then re-arm with: homeboy agent-task rearm <run-id>";
+            record.updated_at = Some(quarantined_at.clone());
+            record.ensure_metadata_object().insert(
+                "queue_quarantine".to_string(),
+                json!({
+                    "category": "operator_quarantine",
+                    "error_code": "operator_quarantine",
+                    "summary": "operator quarantined this queued run",
+                    "operator_reason": operator_reason,
+                    "quarantined_at": quarantined_at,
+                    "remediation": remediation,
+                }),
+            );
+            true
+        })?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                "only an exact queued non-quarantined run can be quarantined",
+                Some(run_id),
+                None,
+            )
+        })
 }
 
 fn normalized_operator_quarantine_reason(reason: &str) -> String {
@@ -4206,7 +4250,31 @@ pub fn run_record_exists_resolved(run_id: &str) -> Result<bool> {
 }
 
 pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    mark_resuming_in_store(&lifecycle_store, run_id)
+}
+
+/// Stamp the resume request and re-enter Running inside an explicitly rooted
+/// store.
+///
+/// Every part of this follows the injected root, and each for its own reason.
+/// The terminal guard is decided from this store's own record: read ambiently,
+/// another home's copy of the same identity could refuse a resumable run, or
+/// admit a resume into a lifecycle that already finished here. The resume stamp
+/// then has to land on the same record the guard just read, or the evidence that
+/// a resume was requested ends up in a home that never resumed anything.
+///
+/// The transition itself goes through `mark_running_in_store` rather than the
+/// ambient `mark_running`, and that is the half that matters most: `mark_running`
+/// carries the quarantine, live-owner and terminal guards. Evaluated ambiently,
+/// a run this store has quarantined would be re-armed to Running anyway — the
+/// exact inverse of the quarantine/re-arm pair below — while the state it wrote
+/// landed somewhere the resuming controller never reads.
+pub(crate) fn mark_resuming_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if matches!(
         record.state,
         AgentTaskRunState::Succeeded
@@ -4228,12 +4296,24 @@ pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
 
     let metadata = record.ensure_metadata_object();
     metadata.insert("resume_requested_at".to_string(), json!(now_timestamp()));
-    store::write_record(&record)?;
-    mark_running(run_id)
+    lifecycle_store.write_record(&record)?;
+    mark_running_in_store(lifecycle_store, run_id)
 }
 
 pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRunRecord> {
-    retry_with_force_inner(run_id, requested_run_id, false, false)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    retry_in_store(&lifecycle_store, run_id, requested_run_id)
+}
+
+/// Retry a run inside an explicitly rooted store, without the lineage
+/// reservation. See [`retry_with_runtime_admission_in_store`] for what follows
+/// the injected root.
+pub(crate) fn retry_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    requested_run_id: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    retry_with_force_inner_in_store(lifecycle_store, run_id, requested_run_id, false, false)
 }
 
 /// Whether a persisted plan contains enough source identity to offer a retry
@@ -4297,16 +4377,81 @@ pub fn retry_with_force(
     requested_run_id: Option<&str>,
     force: bool,
 ) -> Result<AgentTaskRunRecord> {
-    retry_with_force_inner(run_id, requested_run_id, force, true)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    retry_with_force_in_store(&lifecycle_store, run_id, requested_run_id, force)
 }
 
-fn retry_with_force_inner(
+/// Reserve one successor for the complete retry lineage inside an explicitly
+/// rooted store. The advisory lock is taken beside that store's own run
+/// directory, so two roots reserve independently instead of contending for the
+/// ambient lineage.
+pub(crate) fn retry_with_force_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    requested_run_id: Option<&str>,
+    force: bool,
+) -> Result<AgentTaskRunRecord> {
+    retry_with_force_inner_in_store(lifecycle_store, run_id, requested_run_id, force, true)
+}
+
+fn retry_with_force_inner_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     requested_run_id: Option<&str>,
     force: bool,
     enforce_lineage_reservation: bool,
 ) -> Result<AgentTaskRunRecord> {
-    let source = store::read_record(&resolve_run_id(run_id)?)?;
+    retry_with_runtime_admission_in_store(
+        lifecycle_store,
+        run_id,
+        requested_run_id,
+        force,
+        enforce_lineage_reservation,
+        Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
+        |run_id| {
+            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+                run_id,
+                || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
+            )
+        },
+    )
+}
+
+/// Admit one retry successor into an explicitly rooted store.
+///
+/// This is the whole re-entry decision, and every input to it follows the
+/// injected root. The source record and the Cook alias that resolves it come
+/// from this store, so a Cook id cannot resolve against another home's index and
+/// mint a successor over a live Cook here. The lineage walk that finds the root
+/// of the `retry_of` chain reads this store's records, the lineage reservation
+/// lock is taken beside this store's own run directory, and the successor scan
+/// that decides "is a retry already active?" reads this store's observation
+/// database — a scan that answered ambiently would refuse a legitimate retry
+/// because another home holds an active successor, or, far worse, admit a second
+/// live successor because the active one it should have seen was recorded here.
+/// The plan, the acceptance-repair lineage write, and the retry lineage stamped
+/// back onto the source and root records all follow the same store.
+///
+/// The controller-runtime admission and its queue projection are deliberately
+/// left as parameters, exactly as `submit_plan_with_runtime_admission_in_store`
+/// leaves them. Admission itself is machine-global by design — it writes under
+/// `paths::controller_runtimes_store()` and takes a cross-process lock — but the
+/// cancellation check inside it reads *lifecycle* state, and that read is rooted
+/// by the caller that owns the store.
+pub(crate) fn retry_with_runtime_admission_in_store<F, A>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    requested_run_id: Option<&str>,
+    force: bool,
+    enforce_lineage_reservation: bool,
+    admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
+    admit_runtime: F,
+) -> Result<AgentTaskRunRecord>
+where
+    F: FnOnce(&str) -> Result<A>,
+    A: RuntimeAdmissionEvidence,
+{
+    let source = lifecycle_store.read_record(&resolve_run_id_in_store(lifecycle_store, run_id)?)?;
     if source.acceptance.as_ref().is_some_and(|acceptance| {
         acceptance.repair_attempts > 1
             || (acceptance.repair_attempts > 0
@@ -4319,17 +4464,22 @@ fn retry_with_force_inner(
             None,
         ));
     }
-    let root_run_id = retry_root_run_id(&source)?;
+    let root_run_id = retry_root_run_id_in_store(lifecycle_store, &source)?;
     let _reservation = enforce_lineage_reservation
-        .then(|| RetryLineageLock::lock(&root_run_id))
+        .then(|| RetryLineageLock::lock_in_store(lifecycle_store, &root_run_id))
         .transpose()?;
     let mut requested_run_id = requested_run_id;
     if enforce_lineage_reservation {
-        let records = store::read_records()?;
+        let records = lifecycle_store.read_records()?;
         let mut successors = records
             .into_iter()
             .filter(|record| record.run_id != root_run_id)
-            .filter(|record| retry_root_run_id(record).ok().as_deref() == Some(&root_run_id))
+            .filter(|record| {
+                retry_root_run_id_in_store(lifecycle_store, record)
+                    .ok()
+                    .as_deref()
+                    == Some(&root_run_id)
+            })
             .collect::<Vec<_>>();
         successors.sort_by(|left, right| left.run_id.cmp(&right.run_id));
         if let Some(active) = successors.iter().find(|record| !record.state.is_terminal()) {
@@ -4358,9 +4508,19 @@ fn retry_with_force_inner(
             ));
         }
     }
-    let mut plan = load_controller_plan(&source.run_id)?;
+    let mut plan = load_controller_plan_in_store(lifecycle_store, &source.run_id)?;
+    // Both restorations below are filesystem work on the plan value rather than
+    // lifecycle-store work: they re-point task workspace roots at durable
+    // checkouts, and both are no-ops for a plan carrying no Cook candidate
+    // evidence. The initial one reads only the workspace it is restoring. The
+    // follow-up one materializes a whole checkout under an artifact root, which
+    // is why it takes this store's own — see its doc comment for the one reach
+    // that remains ambient there.
     super::cook_workspace_restore::restore_initial_cook_candidate_workspace(&mut plan)?;
-    super::cook_workspace_restore::restore_follow_up_cook_candidate_workspace(&mut plan)?;
+    super::cook_workspace_restore::restore_follow_up_cook_candidate_workspace_in_root(
+        &mut plan,
+        &lifecycle_store.artifact_root(),
+    )?;
     if source
         .acceptance
         .as_ref()
@@ -4416,17 +4576,14 @@ fn retry_with_force_inner(
         metadata.insert("retry_root".to_string(), json!(root_run_id));
     }
     metadata.insert("retry_requested_at".to_string(), json!(now_timestamp()));
-    let mut record = submit_plan_with_runtime_admission_on_runner_with_metadata(
+    let mut record = submit_plan_with_runtime_admission_in_store(
+        lifecycle_store,
         &plan,
         requested_run_id,
         execution_runner_id(),
         Some(metadata),
-        |run_id| {
-            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
-                run_id,
-                || Ok(store::read_record(run_id)?.state.is_terminal()),
-            )
-        },
+        admission_status,
+        admit_runtime,
     )?;
     if let Some(mut acceptance) = source.acceptance.clone() {
         // A repair is a new candidate, but it retains the rejected verdict and
@@ -4445,7 +4602,7 @@ fn retry_with_force_inner(
             .as_ref()
             .map(|acceptance| acceptance.repair_attempts)
             .unwrap_or_default();
-        if let Some(updated) = store::mutate_record(&record.run_id, |child| {
+        if let Some(updated) = lifecycle_store.mutate_record(&record.run_id, |child| {
             child.acceptance = Some(acceptance.clone());
             child.ensure_metadata_object().insert(
                 "acceptance_repair_lineage".to_string(),
@@ -4457,7 +4614,12 @@ fn retry_with_force_inner(
         }
     }
     if enforce_lineage_reservation {
-        persist_retry_lineage(&source.run_id, &root_run_id, &record.run_id)?;
+        persist_retry_lineage_in_store(
+            lifecycle_store,
+            &source.run_id,
+            &root_run_id,
+            &record.run_id,
+        )?;
     }
     Ok(record)
 }
@@ -4470,8 +4632,19 @@ struct RetryLineageLock {
 }
 
 impl RetryLineageLock {
-    fn lock(root_run_id: &str) -> Result<Self> {
-        let path = paths::homeboy_data()?
+    /// Reserve a lineage beside the injected store's own run directory.
+    ///
+    /// This lock is the whole reservation: it is what makes "does an active
+    /// successor already exist?" a decision one process at a time. Taken at
+    /// `paths::homeboy_data()` while the scan and the successor write went to an
+    /// injected root, two concurrent retries in two roots would serialize
+    /// against each other for no reason, and — the direction that actually
+    /// loses — two retries in the *same* injected root reached from processes
+    /// with different ambient homes would not serialize at all, so both would
+    /// scan, both would see no active successor, and both would allocate one.
+    fn lock_in_store(lifecycle_store: &AgentTaskLifecycleStore, root_run_id: &str) -> Result<Self> {
+        let path = lifecycle_store
+            .data_root()
             .join("agent-task-runs")
             .join("retry-lineages")
             .join(format!("{}.lock", sanitize_run_id(root_run_id)));
@@ -4499,13 +4672,20 @@ impl RetryLineageLock {
     }
 }
 
-fn retry_root_run_id(record: &AgentTaskRunRecord) -> Result<String> {
+/// Walk the `retry_of` chain to the lineage root inside an explicitly rooted
+/// store. The walk decides which lineage lock is taken and which successors
+/// count as this run's own, so a parent read from another home would reserve and
+/// scan a lineage that does not exist here.
+fn retry_root_run_id_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> Result<String> {
     let mut current = record.clone();
     for _ in 0..RETRY_LINEAGE_LIMIT {
         let Some(parent) = current.metadata.get("retry_of").and_then(Value::as_str) else {
             return Ok(current.run_id);
         };
-        current = store::read_record(&sanitize_run_id(parent))?;
+        current = lifecycle_store.read_record(&sanitize_run_id(parent))?;
     }
     Err(Error::validation_invalid_argument(
         "retry_of",
@@ -4527,14 +4707,23 @@ fn active_retry_successor_error(record: &AgentTaskRunRecord) -> Error {
     )
 }
 
-fn persist_retry_lineage(source_run_id: &str, root_run_id: &str, child_run_id: &str) -> Result<()> {
+/// Stamp the successor onto the source and root records inside an explicitly
+/// rooted store. This is the durable evidence the next lineage scan reads, so
+/// writing it ambiently would leave the injected root's own lineage empty and
+/// let the following retry allocate beside a successor it cannot see.
+fn persist_retry_lineage_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    source_run_id: &str,
+    root_run_id: &str,
+    child_run_id: &str,
+) -> Result<()> {
     let mut targets = vec![sanitize_run_id(source_run_id)];
     let root_run_id = sanitize_run_id(root_run_id);
     if !targets.contains(&root_run_id) {
         targets.push(root_run_id.clone());
     }
     for run_id in targets {
-        store::mutate_record(&run_id, |record| {
+        lifecycle_store.mutate_record(&run_id, |record| {
             let metadata = record.ensure_metadata_object();
             let lineage = metadata
                 .entry("retries".to_string())
@@ -4567,8 +4756,33 @@ pub fn find_unbound_cook_retry_successor(
     attempt: u32,
     plan: &AgentTaskPlan,
 ) -> Result<Option<AgentTaskRunRecord>> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    find_unbound_cook_retry_successor_in_store(
+        &lifecycle_store,
+        source_run_id,
+        cook_id,
+        attempt,
+        plan,
+    )
+}
+
+/// Find the Cook retry reservation inside an explicitly rooted store.
+///
+/// The caller treats `None` as authority to create a reservation, so this read
+/// has to come from the store the reservation was made in. Answered ambiently it
+/// fails in both directions: a successor reserved here reads back as absent and
+/// a second one is minted over it, or an unrelated home's successor is adopted
+/// and this Cook attempt is bound to a run that does not exist in its own root.
+pub(crate) fn find_unbound_cook_retry_successor_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    source_run_id: &str,
+    cook_id: &str,
+    attempt: u32,
+    plan: &AgentTaskPlan,
+) -> Result<Option<AgentTaskRunRecord>> {
     let prefix = format!("{}-attempt-{attempt}-", sanitize_run_id(cook_id));
-    let mut matches = store::read_retry_successors(&sanitize_run_id(source_run_id))?
+    let mut matches = lifecycle_store
+        .read_retry_successors(&sanitize_run_id(source_run_id))?
         .into_iter()
         .filter(|record| record.run_id.starts_with(&prefix))
         .filter(|record| record.plan_id == plan.plan_id)

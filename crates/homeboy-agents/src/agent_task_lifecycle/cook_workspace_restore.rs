@@ -9,7 +9,27 @@ use homeboy_core::{Error, Result};
 
 use crate::agent_task_scheduler::AgentTaskPlan;
 
-pub(super) fn restore_follow_up_cook_candidate_workspace(plan: &mut AgentTaskPlan) -> Result<()> {
+/// Restore a Cook follow-up candidate workspace under an explicitly named
+/// artifact root.
+///
+/// The baseline this materializes is a whole working-tree checkout, and it is
+/// published under an artifact root rather than a process temp dir so it can be
+/// seen and reaped (#11128). Resolved ambiently, a retry driven from an
+/// explicitly rooted store would write that checkout under another home's
+/// artifact root and then hand the retried plan a workspace path outside the
+/// root that owns the run — the same class of cross-home artifact write #12618
+/// found in the terminal projection.
+///
+/// The durable promotion below is *not* rooted here, deliberately.
+/// `persisted_promotion_for_attempt` reads through `agent_task_lifecycle::status`,
+/// which reconciles and writes as it reads; its `_in_store` sibling is a plain
+/// record read instead. Substituting one for the other would change what an
+/// existing caller of the ambient retry sees, so rooting it waits on the slice
+/// that roots `status` itself (#7505).
+pub(super) fn restore_follow_up_cook_candidate_workspace_in_root(
+    plan: &mut AgentTaskPlan,
+    artifact_root: &Path,
+) -> Result<()> {
     let candidate_tasks = plan
         .tasks
         .iter()
@@ -100,8 +120,9 @@ pub(super) fn restore_follow_up_cook_candidate_workspace(plan: &mut AgentTaskPla
             None,
         ));
     }
-    let baseline = crate::agent_task_service::materialize_follow_up_baseline(
+    let baseline = crate::agent_task_service::materialize_follow_up_baseline_in_root(
         &promotion,
+        artifact_root,
         source_run_id,
         &task.task_id,
     )?;
