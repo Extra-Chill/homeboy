@@ -311,6 +311,10 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub fn require_detached_cook_handoff_fence_open(&self, cook_id: &str) -> Result<()> {
+        super::lifecycle_ops::require_detached_cook_handoff_fence_open_in_store(self, cook_id)
+    }
+
     pub fn start_candidate_adoption_with_policy(
         &self,
         run_id: &str,
