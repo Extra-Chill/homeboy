@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.8] - 2026-08-16
+
+### Changed
+- give the detached-handoff cluster explicit stores
+- align rooted recipe failure status
+- align baseline fixtures
+- bound archived test replay
+- pin one-time archive replay
+- pin repaired test tooling
+- root Cook handoff fence reads
+- give the run-claim family explicit stores
+- root Cook scratch capacity
+
+### Fixed
+- isolate baseline fixtures
+- repair runner lifecycle baseline
+- align process lifecycle baseline
+- validate reconstructed Cook workspace
+- repair bounded archive replay failures
+- bind deferred provisioning to lifecycle store
+- preserve durable Cook entry contracts
+
 ## [0.350.7] - 2026-08-16
 
 ### Changed
