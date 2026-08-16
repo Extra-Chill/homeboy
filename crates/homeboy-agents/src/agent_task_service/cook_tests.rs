@@ -31,7 +31,7 @@ use crate::agent_task_finalization::{
     AgentTaskPrRef, AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
     RealAgentTaskPrFinalizationBackend,
 };
-use crate::agent_task_lifecycle::AgentTaskRunState;
+use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
 use crate::agent_task_scheduler::AgentTaskState;
 use homeboy_core::run_lifecycle_record::{
     ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
@@ -1968,6 +1968,67 @@ fn moving_base_recovery_isolates_identical_attempts_across_explicit_stores() {
     assert_ne!(
         left_lifecycle_store.run_dir(run_id),
         right_lifecycle_store.run_dir(run_id)
+    );
+}
+
+#[test]
+fn candidate_adoption_lifecycle_and_promotion_evidence_do_not_alias_across_explicit_roots() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left_store = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right_store = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let cook_id = "same-adoption-cook";
+    let run_id = "same-adoption-run";
+    let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+
+    for (store, candidate_sha, model, root) in [
+        (&left_store, "left-candidate", "left-model", "left"),
+        (&right_store, "right-candidate", "right-model", "right"),
+    ] {
+        store
+            .submit_plan_with_runtime_admission(&options.initial_plan, run_id, |_| {
+                Ok(serde_json::json!({ "root": root }))
+            })
+            .unwrap();
+        store.record_cook_attempt(cook_id, 1, run_id).unwrap();
+        store
+            .start_candidate_adoption_with_policy(
+                run_id,
+                candidate_sha,
+                model,
+                "verification",
+                false,
+                false,
+            )
+            .unwrap();
+        store
+            .checkpoint_candidate_adoption(run_id, "finalization", "finalize pull request")
+            .unwrap();
+        store
+            .record_promotion(run_id, serde_json::json!({ "root": root }))
+            .unwrap();
+        store
+            .record_candidate_adoption_result(run_id, serde_json::json!({ "root": root }))
+            .unwrap();
+        store.finish_candidate_adoption(run_id, None).unwrap();
+    }
+
+    for (store, candidate_sha, model, root) in [
+        (&left_store, "left-candidate", "left-model", "left"),
+        (&right_store, "right-candidate", "right-model", "right"),
+    ] {
+        let record = store.read_record(run_id).unwrap();
+        let adoption = record.candidate_adoption.unwrap();
+        assert_eq!(adoption.candidate_sha, candidate_sha);
+        assert_eq!(adoption.ai_model, model);
+        assert_eq!(adoption.result.unwrap()["root"], root);
+        assert_eq!(record.metadata["latest_promotion"]["root"], root);
+    }
+
+    assert_ne!(left_store.run_dir(run_id), right_store.run_dir(run_id));
+    assert_ne!(
+        left_store.cook_index_path(cook_id),
+        right_store.cook_index_path(cook_id)
     );
 }
 

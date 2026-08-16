@@ -3136,7 +3136,7 @@ fn child_execution_budget(
     }
 }
 
-fn validate_cook_follow_up_stores(
+pub(super) fn validate_cook_follow_up_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<()> {

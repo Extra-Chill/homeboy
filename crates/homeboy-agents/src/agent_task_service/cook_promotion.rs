@@ -80,7 +80,7 @@ pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
     ))
 }
 
-fn promotion_source_in_store(
+pub(crate) fn promotion_source_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<(String, Option<PathBuf>)> {

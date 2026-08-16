@@ -141,7 +141,7 @@ impl<'a> CookExecutionPreparation<'a> {
         )
     }
 
-    fn recover_for_adoption_with_runtime(
+    pub(crate) fn recover_for_adoption_with_runtime(
         &self,
         cook_id: &str,
         run_id: &str,
@@ -349,12 +349,12 @@ fn materialize_cook_attempt_with_stores_and_runtime(
     Ok(())
 }
 
-fn reconcile_reserved_cancellation(cook_id: &str) -> Result<()> {
+pub(crate) fn reconcile_reserved_cancellation(cook_id: &str) -> Result<()> {
     agent_task_lifecycle::cancel_reserved_detached_cook_handoff_attempt_if_cancelled(cook_id)
         .map(|_| ())
 }
 
-fn production_runtime_admission(
+pub(crate) fn production_runtime_admission(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> impl FnOnce(&str) -> Result<Value> + '_ {
     move |run_id| {
