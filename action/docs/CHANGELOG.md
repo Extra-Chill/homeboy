@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.14.1] - 2026-08-16
+
+### Fixed
+- isolate downloaded test archives
+
 ## [2.14.0] - 2026-08-16
 
 ### Added
