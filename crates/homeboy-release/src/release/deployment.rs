@@ -576,6 +576,7 @@ mod tests {
     };
     use crate::release::workflow::run_command;
     use homeboy_core::component::{Component, VersionTarget};
+    use homeboy_core::defaults;
     use homeboy_core::project::{self, Project, ProjectComponentAttachment};
     use homeboy_core::server::{self, Server};
     use homeboy_core::test_support::with_isolated_home;
@@ -1012,12 +1013,19 @@ mod tests {
     #[test]
     fn release_recover_resumes_only_failed_project_with_published_source_projection() {
         with_isolated_home(|home| {
+            let mut config = defaults::load_config();
+            config.defaults.permissions.remote.dir_mode = "g+rwx".to_string();
+            defaults::save_config(&config).expect("save fixture permissions");
             let source = home.path().join("source");
             let successful_target = home.path().join("successful-target");
             let retry_target = home.path().join("retry-target");
             std::fs::create_dir_all(&source).expect("source directory");
             std::fs::create_dir_all(&successful_target).expect("successful target");
             std::fs::create_dir_all(&retry_target).expect("retry target");
+            let successful_component = successful_target.join("plugins/successful");
+            std::fs::create_dir_all(&successful_component).expect("successful component target");
+            std::fs::write(successful_component.join("VERSION"), "1.2.3\n")
+                .expect("pre-release remote version");
             run_git(&source, &["init", "-q", "--initial-branch", "main"]);
             run_git(&source, &["config", "user.email", "test@example.com"]);
             run_git(&source, &["config", "user.name", "Homeboy Test"]);

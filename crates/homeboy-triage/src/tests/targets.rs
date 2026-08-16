@@ -247,12 +247,19 @@ fn rig_target_threads_rig_component_triage_remote_override() {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].component_id, "playground");
         assert_eq!(
+            refs[0].remote_url.as_deref(),
+            Some("https://github.com/example-org/wordpress-playground.git")
+        );
+        assert_eq!(
             refs[0].triage_remote_url.as_deref(),
             Some("https://github.com/WordPress/wordpress-playground.git")
         );
+        let resolved = resolve_repo(&refs[0]).expect("rig target resolves its triage remote");
+        assert_eq!(resolved.repo.owner, "WordPress");
+        assert_eq!(resolved.repo.repo, "wordpress-playground");
         assert_eq!(
-            resolve_repo(&refs[0]).unwrap().repo.owner,
-            "WordPress".to_string()
+            resolved.source_repo.expect("source remote retained").owner,
+            "example-org"
         );
     });
 }
