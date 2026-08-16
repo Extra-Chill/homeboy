@@ -677,6 +677,287 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
 }
 
 #[test]
+fn detached_handoff_siblings_advance_only_the_injected_store() {
+    // The detached-handoff cluster is admission state: a pending parent, the
+    // durable cancellation fence a child reads before it may materialize, and
+    // the child and supervisor identities that keep the admission lease live.
+    // Absence in a second root is too weak a negative for that — every one of
+    // these writes is equally "absent" from a root the work simply never
+    // reached. So both roots are seeded with the *same* parent in the *same*
+    // pre-supervisor shape, every act below is made through a sibling handed
+    // `seeded`, and the second root is then asserted to be still **eligible**:
+    // its handoff still pending, its fence still open, its admission still
+    // live, and its parent still able to take a child and a supervisor of its
+    // own. A write that leaked into an ambient root satisfies every positive
+    // assertion here and fails that (#7505).
+    //
+    // The two admission guards are proved directionally rather than by absence:
+    // the same call with the same Cook id is refused by one root and answered
+    // by the other, decided only by which store was injected.
+    //
+    // No environment is mutated: both roots come from
+    // `HermeticTestContext::path_roots()`.
+    let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
+    let other_context = homeboy_core::test_support::HermeticTestContext::new();
+    assert_ne!(seeded_context.data_dir(), other_context.data_dir());
+
+    let seeded =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(seeded_context.path_roots());
+    let other =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(other_context.path_roots());
+
+    let handoff_cook_id = "rooted-detached-handoff-parent";
+    let indexed_cook_id = "rooted-detached-handoff-indexed";
+    let collision_cook_id = "rooted-detached-handoff-collision";
+    let indexed_attempt_run_id = "rooted-detached-handoff-indexed-attempt-1";
+    let plan = test_plan();
+
+    // The parent shape is reproduced rather than produced. The submit branch of
+    // `record_detached_cook_handoff_parent_in_store` runs controller admission,
+    // which is deliberately *not* a lifecycle root: it writes under
+    // `paths::controller_runtimes_store()` and takes a machine-global admission
+    // lock. Driving it here would reach the operator's real home and serialize
+    // against every peer test, so this test exercises the branches that decide
+    // *whether* to submit and never the submit itself. Every other function in
+    // this cluster is driven end to end.
+    let seed_pending_parent =
+        |lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore, cook_id: &str| {
+            lifecycle_store
+                .submit_plan_with_runtime_admission(&plan, cook_id, |_| Ok(json!({})))
+                .expect("submit a detached handoff parent identity");
+            lifecycle_store
+                .mutate_record(cook_id, |record| {
+                    record.ensure_metadata_object().insert(
+                        "detached_cook_handoff".to_string(),
+                        json!({
+                            "state": "pending",
+                            "admission_state": "pre_supervisor",
+                            "admission_deadline_at": (chrono::Utc::now()
+                                + chrono::Duration::seconds(3_600))
+                            .to_rfc3339(),
+                            "cook_id": cook_id,
+                            "cancellation_fence": { "state": "open" },
+                        }),
+                    );
+                    true
+                })
+                .expect("seed the pre-supervisor handoff shape");
+        };
+
+    for lifecycle_store in [&seeded, &other] {
+        seed_pending_parent(lifecycle_store, handoff_cook_id);
+        seed_pending_parent(lifecycle_store, indexed_cook_id);
+    }
+    // The collision guard's two answers, one per root, under one Cook id: an
+    // unrelated run in the first, this Cook's own handoff parent in the second.
+    seeded
+        .submit_plan_with_runtime_admission(&plan, collision_cook_id, |_| Ok(json!({})))
+        .expect("submit an unrelated run under the Cook id in the first root");
+    seed_pending_parent(&other, collision_cook_id);
+    // The alias guard's evidence, published in the first root only.
+    seeded
+        .write_cook_index_attempt(
+            indexed_cook_id,
+            1,
+            indexed_attempt_run_id,
+            now_timestamp(),
+            None,
+        )
+        .expect("publish a Cook attempt alias in the first root only");
+
+    // Re-recording a live handoff parent is the idempotent branch: it answers
+    // from the injected store's own record instead of submitting a second one.
+    let readmitted = record_detached_cook_handoff_parent_in_store(&seeded, handoff_cook_id)
+        .expect("re-record the live handoff parent in the injected store");
+    assert_eq!(readmitted.run_id, handoff_cook_id);
+    assert_eq!(
+        readmitted.metadata["detached_cook_handoff"]["admission_state"],
+        "pre_supervisor"
+    );
+    assert!(
+        readmitted.metadata.get("cook_progress").is_none(),
+        "the idempotent branch must answer from the durable parent, not submit a new one"
+    );
+
+    // The alias guard, both directions. Only the first root published the Cook
+    // index, so only the first root refuses.
+    let aliased = record_detached_cook_handoff_parent_in_store(&seeded, indexed_cook_id)
+        .expect_err("an indexed Cook attempt refuses a fresh handoff parent");
+    assert_eq!(
+        aliased.code.as_str(),
+        ErrorCode::ValidationInvalidArgument.as_str()
+    );
+    assert_eq!(
+        aliased.message,
+        "detached Cook id already resolves to an existing Cook attempt"
+    );
+    assert_eq!(
+        record_detached_cook_handoff_parent_in_store(&other, indexed_cook_id)
+            .expect("the second root published no alias and answers from its own parent")
+            .metadata["detached_cook_handoff"]["admission_state"],
+        "pre_supervisor",
+        "an alias published in the injected store must not decide the second root"
+    );
+
+    // The collision guard, both directions, under one Cook id.
+    let collided = record_detached_cook_handoff_parent_in_store(&seeded, collision_cook_id)
+        .expect_err("an unrelated run under the Cook id refuses a handoff parent");
+    assert_eq!(
+        collided.code.as_str(),
+        ErrorCode::ValidationInvalidArgument.as_str()
+    );
+    assert_eq!(
+        collided.message,
+        "detached Cook id collides with an existing non-handoff run"
+    );
+    assert_eq!(
+        record_detached_cook_handoff_parent_in_store(&other, collision_cook_id)
+            .expect("the second root holds this Cook's own handoff parent")
+            .run_id,
+        collision_cook_id
+    );
+
+    // The fence is open in both roots, so the child may proceed in either.
+    require_detached_cook_handoff_fence_open_in_store(&seeded, handoff_cook_id)
+        .expect("an open fence admits the child in the injected store");
+
+    // Attach the child, then the supervisor, through the injected store only.
+    let child_pid = 424_242;
+    let start_identity = homeboy_core::process::ProcessStartIdentity::Linux {
+        starttime_ticks: 4_242,
+    };
+    let attached = record_detached_cook_handoff_child_in_store(
+        &seeded,
+        handoff_cook_id,
+        child_pid,
+        start_identity.clone(),
+    )
+    .expect("attach the child identity in the injected store");
+    assert_eq!(
+        attached.metadata["detached_cook_handoff"]["admission_state"],
+        "child_attached"
+    );
+    assert_eq!(
+        attached.metadata["detached_cook_handoff"]["child_pid"],
+        child_pid
+    );
+    assert_eq!(
+        attached.metadata["detached_cook_handoff"]["cancellation_fence"]["state"], "open",
+        "attaching a child carries the durable fence forward"
+    );
+
+    record_detached_cook_supervisor_in_store(&seeded, handoff_cook_id, "daemon-job-rooted")
+        .expect("attach the supervising daemon job in the injected store");
+
+    // The positive: every write is durable in the store that was handed in.
+    let supervised = seeded
+        .read_record(handoff_cook_id)
+        .expect("read the injected store's handoff parent back");
+    assert_eq!(
+        supervised.metadata["detached_cook_handoff"]["supervisor_job_id"],
+        "daemon-job-rooted"
+    );
+    assert_eq!(
+        supervised.metadata["detached_cook_handoff"]["admission_state"],
+        "supervising"
+    );
+    assert_eq!(
+        supervised.metadata["detached_cook_handoff"]["reattach_command"],
+        format!("homeboy agent-task status {handoff_cook_id} --full")
+    );
+    // A supervised admission is live without consulting the process table, so
+    // the predicates are decided by the record alone.
+    let now = chrono::Utc::now();
+    assert!(has_pending_detached_cook_handoff(&supervised));
+    assert!(detached_cook_admission_is_live(&supervised, now));
+    assert!(!has_expired_detached_cook_admission(&supervised, now));
+
+    // Close the fence in the injected store only. The fence is the one piece of
+    // handoff state a *child process* reads on its own, so proving it is read
+    // from the store it was handed is the point of this pair.
+    seeded
+        .mutate_record(handoff_cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
+                json!("cancelled");
+            true
+        })
+        .expect("close the injected store's cancellation fence");
+    let fenced = require_detached_cook_handoff_fence_open_in_store(&seeded, handoff_cook_id)
+        .expect_err("a cancelled fence refuses the child in the store that holds it");
+    assert_eq!(
+        fenced.code.as_str(),
+        ErrorCode::ValidationInvalidArgument.as_str()
+    );
+    assert_eq!(
+        fenced.message,
+        "detached Cook handoff was cancelled before its attempt could materialize"
+    );
+
+    // The negative: the second root holds the same identity and saw none of it.
+    // Absence first.
+    let untouched = other
+        .read_record(handoff_cook_id)
+        .expect("the second root still has its own handoff parent");
+    assert_eq!(untouched.state, AgentTaskRunState::Queued);
+    assert_eq!(
+        untouched.metadata["detached_cook_handoff"]["admission_state"],
+        "pre_supervisor"
+    );
+    for key in [
+        "child_pid",
+        "child_start_identity",
+        "child_supervisor_deadline_at",
+        "supervisor_job_id",
+        "reattach_command",
+    ] {
+        assert!(
+            untouched.metadata["detached_cook_handoff"]
+                .get(key)
+                .is_none(),
+            "second root must not observe `{key}` written through the injected store"
+        );
+    }
+
+    // Then the stronger half: the second root is not merely missing the
+    // evidence, it is still *eligible*. Its handoff is still pending, its fence
+    // is still open, its admission lease is still live, and its parent will
+    // still accept the child and supervisor the injected store already took —
+    // none of which is true of state some other call already consumed.
+    assert!(has_pending_detached_cook_handoff(&untouched));
+    assert!(
+        detached_cook_admission_is_live(&untouched, now),
+        "the injected store's supervisor must not have consumed the second root's lease"
+    );
+    assert!(!has_expired_detached_cook_admission(&untouched, now));
+    assert_eq!(
+        untouched.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
+        "open"
+    );
+    require_detached_cook_handoff_fence_open_in_store(&other, handoff_cook_id)
+        .expect("the fence closed in the injected store must leave the second root's fence open");
+    assert_eq!(
+        record_detached_cook_handoff_child_in_store(
+            &other,
+            handoff_cook_id,
+            child_pid,
+            start_identity,
+        )
+        .expect("the second root's parent still accepts its own child")
+        .metadata["detached_cook_handoff"]["admission_state"],
+        "child_attached"
+    );
+    record_detached_cook_supervisor_in_store(&other, handoff_cook_id, "daemon-job-second-root")
+        .expect("the second root's parent still accepts its own supervisor");
+    assert_eq!(
+        other
+            .read_record(handoff_cook_id)
+            .expect("read the second root's parent back")
+            .metadata["detached_cook_handoff"]["supervisor_job_id"],
+        "daemon-job-second-root"
+    );
+}
+
+#[test]
 fn a_supervision_stop_survives_an_hour_of_routine_resource_samples() {
     // #7015: the point of the evidence is to answer "why was this stopped?"
     // after the fact. If the decision shared an array with the sample stream, a
