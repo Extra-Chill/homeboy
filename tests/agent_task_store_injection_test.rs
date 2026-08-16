@@ -310,26 +310,6 @@ const KNOWN_AMBIENT_REACHING_ROOTED_FUNCTIONS: &[(&str, &str)] = &[
         "crates/homeboy-agents/src/agent_task_lifecycle/lifecycle_ops.rs",
         "substantive_candidate_in_store",
     ),
-    // Both take an `AgentTaskBatchStore` and reach the *lifecycle* ambient half,
-    // so they split a batch operation across two homes: the batch state follows
-    // the injected root while the run-record existence check and the per-child
-    // artifact read follow whichever home the process happens to sit in.
-    //
-    // Neither is new. They have had this shape since the batch store was
-    // introduced (#12560); they became visible only when the lifecycle counterparts
-    // `run_record_exists` and `artifacts` were rooted, which is what turns them
-    // into recognised ambient wrappers. Closing them means threading an
-    // `AgentTaskLifecycleStore` alongside the batch store through both call
-    // chains, which is a batch-side slice with its own equivalence argument --
-    // not a rider on the lifecycle read surface that merely exposed them.
-    (
-        "crates/homeboy-agents/src/agent_task_batch.rs",
-        "expire_stalled_fanout_admission_in_store",
-    ),
-    (
-        "crates/homeboy-agents/src/agent_task_batch.rs",
-        "artifacts_in_store",
-    ),
 ];
 
 #[test]
