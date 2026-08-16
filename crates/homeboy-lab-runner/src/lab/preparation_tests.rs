@@ -838,7 +838,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
     assert_eq!(
         prepared,
         LabRunnerPreparation::FallBackLocal {
-            reason: "connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner refresh-homeboy lab --ref bbbbbbbbbbbb --reconnect`".to_string()
+            reason: "connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner doctor lab --scope lab-offload`".to_string()
         }
     );
 }
@@ -887,7 +887,7 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
     assert!(err.message.contains("homeboy 0.219.0"));
     assert!(err
         .message
-        .contains("homeboy runner refresh-homeboy lab --ref "));
+        .contains("homeboy runner doctor lab --scope lab-offload"));
     assert!(err
         .details
         .get("tried")
@@ -896,20 +896,11 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
         .flatten()
         .any(|suggestion| suggestion
             .as_str()
-            .is_some_and(|value| value.contains("homeboy runner refresh-homeboy lab --ref "))));
-    let action = &err.details[homeboy_core::error::ACTIONS_DETAILS_KEY][0];
-    assert_eq!(action["id"], "runner.refresh_homeboy");
-    assert_eq!(action["program"], "homeboy");
-    assert_eq!(action["args"][0], "runner");
-    assert_eq!(action["args"][1], "refresh-homeboy");
-    assert_eq!(action["args"][2], "lab");
-    assert_eq!(action["args"][3], "--ref");
-    assert_eq!(action["args"][4], "bbbbbbbbbbbb");
-    assert_eq!(action["args"][5], "--reconnect");
-    assert_eq!(
-        action["evidence"]["recovery_plan"][0],
-        err.details["tried"][0]
-    );
+            .is_some_and(|value| value.contains("homeboy runner doctor lab --scope lab-offload"))));
+    assert!(err
+        .details
+        .get(homeboy_core::error::ACTIONS_DETAILS_KEY)
+        .is_none());
 }
 
 #[test]

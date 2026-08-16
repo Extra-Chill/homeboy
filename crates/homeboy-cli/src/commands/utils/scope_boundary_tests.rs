@@ -2,7 +2,8 @@
 //!
 //! #10312 asked for `Scope` to be promoted to a clap arg group and flattened
 //! into eight commands. Three of them (`triage landing`, `build`, `status`)
-//! migrated in #10510. The other five did **not**, and each refusal is a real
+//! migrated in #10510. `build` later moved under `review`; the other five did
+//! **not** migrate, and each refusal is a real
 //! property of that command's argument shape rather than an omission:
 //!
 //! | Command | Why it is not one scope |
@@ -29,7 +30,7 @@ use clap::{Command, CommandFactory, Parser};
 const SHARED_GROUP: [&str; 6] = ["project", "fleet", "component", "rig", "path", "workspace"];
 
 /// The command nodes #10510 migrated onto the shared group.
-const MIGRATED: [&[&str]; 3] = [&["triage", "landing"], &["build"], &["status"]];
+const MIGRATED: [&[&str]; 2] = [&["triage", "landing"], &["status"]];
 
 fn parses(argv: &[&str]) -> bool {
     Cli::try_parse_from(argv).is_ok()

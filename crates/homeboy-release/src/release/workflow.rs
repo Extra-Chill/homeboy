@@ -119,6 +119,9 @@ pub fn run_command_with_workspace(
                 false,
                 serde_json::json!({ "error": error.to_string() }),
             )?;
+            return Err(error.with_hint(format!(
+                "Inspect readiness evidence: homeboy release readiness show {owner_run_ref}"
+            )));
         }
         return Err(error);
     }
@@ -1140,6 +1143,7 @@ mod tests {
         let gate = &mut readiness.gate_results[0];
         gate.status = "passed".to_string();
         gate.reason = None;
+        gate.evidence_refs = vec!["evidence://lint".to_string()];
         gate.provenance = Some(super::super::types::ReleaseReadinessProvenance {
             dependencies: std::collections::BTreeMap::from([(
                 "dependency".to_string(),

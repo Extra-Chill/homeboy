@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_status_renders_control_plane_and_job_binary_hint() {
+    fn stale_status_omits_unverified_recovery_command_text() {
         let report = report(Some(RunnerStaleDaemonWarning::new(
             "homeboy-lab",
             "homeboy 0.259.0".to_string(),
@@ -241,17 +241,8 @@ mod tests {
             &report,
         );
 
-        let hint = status.stale_daemon_hint().expect("stale daemon hint");
         assert!(status.has_drift());
-        assert!(hint.contains("active daemon control plane"));
-        assert!(hint.contains("homeboy 0.259.0+daemon"));
-        assert!(hint.contains("job command binary"));
-        assert!(hint.contains("homeboy 0.262.0+binary"));
-        // The refresh hint now names the `refresh-homeboy --reconnect` recovery
-        // command. Assert its stable shape rather than the embedded `--ref`
-        // version, which tracks the current release and would re-rot the test.
-        assert!(hint.contains("homeboy runner refresh-homeboy homeboy-lab"));
-        assert!(hint.contains("--reconnect"));
+        assert_eq!(status.stale_daemon_hint(), None);
     }
 
     fn report(stale_daemon: Option<RunnerStaleDaemonWarning>) -> RunnerStatusReport {

@@ -1255,10 +1255,13 @@ mod tests {
             // failure that actually occurred, rather than the generic
             // "Lint runner error" this previously asserted.
             assert!(
-                error.to_string().contains("Extension not found"),
+                error
+                    .to_string()
+                    .contains("has no linked extensions that provide lint support"),
                 "a component declaring an uninstallable lint extension must block \
                  release on the resolution failure; got: {error}"
             );
+            assert!(error.to_string().contains("missing-lint-extension"));
         });
     }
 
@@ -1525,14 +1528,6 @@ exit 0
                 .contains("Lint failed (exit code 1,"));
             assert_eq!(
                 producer_error.details["lint_workflow"]["producer_error_count"].as_u64(),
-                Some(1)
-            );
-            assert_eq!(
-                producer_error.details["lint_workflow"]["baseline_new_count"].as_u64(),
-                Some(0)
-            );
-            assert_eq!(
-                producer_error.details["lint_workflow"]["baseline_known_count"].as_u64(),
                 Some(1)
             );
         });

@@ -4243,7 +4243,7 @@ where
     // requiring one here turns an accepted detached retry into a local failure.
     if cook_attempt_needs_execution_with_store(lifecycle_store, &options.initial_run_id)
         && !cook_workspace_lookup_pending(&options.initial_plan)
-        && options.attempt_dispatcher.is_none()
+        && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
         validate_cook_workspace(&options)?;
     }

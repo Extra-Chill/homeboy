@@ -856,7 +856,9 @@ impl RunnerStatusReport {
         let unresolved_generations = generations
             .iter()
             .filter(|generation| {
-                !generation.active_job_count_authoritative && generation.active_job_count > 0
+                (!generation.admission_owner || !connected)
+                    && !generation.active_job_count_authoritative
+                    && generation.active_job_count > 0
             })
             .collect::<Vec<_>>();
         let unresolved_retained_projection_count = unresolved_generations
@@ -1329,8 +1331,8 @@ mod status_serialization_tests {
         );
         assert_eq!(
             summary.next_action.as_deref(),
-            Some("homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"),
-            "the legacy serialized recovery remains the action source when argv is unavailable"
+            None,
+            "legacy command text must not become executable recovery authority"
         );
         assert!(!summary.safe_to_rotate, "missing daemon evidence is unsafe");
     }
@@ -1363,10 +1365,7 @@ mod status_serialization_tests {
         assert!(summary.daemon_fresh);
         assert!(!summary.daemon_compatible);
         assert!(!summary.accepting_jobs);
-        assert_eq!(
-            summary.next_action.as_deref(),
-            Some("homeboy runner refresh-homeboy homeboy-lab --ref configured --reconnect")
-        );
+        assert_eq!(summary.next_action, None);
     }
 
     #[test]
@@ -1667,7 +1666,7 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn disconnected_stale_daemon_with_retained_projections_points_to_refresh() {
+    fn disconnected_stale_daemon_with_retained_projections_points_to_reconcile() {
         let mut report = base_report();
         report.connected = false;
         report.state = RunnerSessionState::Disconnected;
@@ -1719,7 +1718,7 @@ mod status_serialization_tests {
         assert_eq!(summary.unresolved_retained_projection_count, 2);
         assert_eq!(
             summary.next_action.as_deref(),
-            Some("homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect")
+            Some("homeboy runner reconcile homeboy-lab")
         );
     }
 }
