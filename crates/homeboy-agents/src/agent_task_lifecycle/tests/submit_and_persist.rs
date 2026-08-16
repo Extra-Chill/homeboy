@@ -18,6 +18,34 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn accepted_daemon_context_keeps_a_pidless_runner_submission_live() {
+    with_isolated_home(|_| {
+        let run_id = "accepted-daemon-runner-submission";
+        let context =
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+                Some(run_id),
+                "runner-1",
+                "00000000-0000-4000-8000-000000000001",
+                "homeboy",
+                "reservation-1",
+            )
+            .expect("accepted context");
+        let mut record = submit_plan(&test_plan(), Some(run_id)).expect("submit run");
+        set_run_state(&mut record, AgentTaskRunState::Running);
+        record.updated_at = Some(now_timestamp());
+        project_runner_execution_context(&mut record.metadata, &context)
+            .expect("project accepted authority");
+        store::write_record(&record).expect("persist runner-local record");
+
+        let status = status(run_id).expect("runner-local status");
+        assert_eq!(status.runner_job_id(), Some(context.runner_job_id()));
+        assert!(status.metadata.get("runner_execution_context").is_some());
+        assert!(status.metadata.get("stale_running").is_none());
+        assert!(status.metadata.get("stale_running_reason").is_none());
+    });
+}
+
+#[test]
 fn retry_first_visible_record_always_has_indexed_predecessor_identity() {
     with_isolated_home(|_| {
         let source_id = "retry-atomic-source";
