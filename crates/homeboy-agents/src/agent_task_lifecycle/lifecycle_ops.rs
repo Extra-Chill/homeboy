@@ -1531,7 +1531,18 @@ pub(crate) fn project_runner_execution_context(
 }
 
 pub(crate) fn persist_controller_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<()> {
-    store::write_plan(run_id, plan).map(|_| ())
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    persist_controller_plan_in_store(&lifecycle_store, run_id, plan)
+}
+
+pub(crate) fn persist_controller_plan_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+) -> Result<()> {
+    lifecycle_store
+        .write_controller_plan(run_id, plan)
+        .map(|_| ())
 }
 
 pub(crate) fn controller_runtime_for_runner_execution(
@@ -1643,7 +1654,20 @@ pub fn release_cook_terminal_notification_claim(cook_id: &str) -> Result<()> {
 /// Store the latest compact notification delivery outcome for Cook/status
 /// readers. The caller supplies an already redacted, bounded projection.
 pub fn record_cook_terminal_notification_outcome(cook_id: &str, outcome: Value) -> Result<()> {
-    store::write_cook_notification_outcome(cook_id, &outcome)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_terminal_notification_outcome_in_store(&lifecycle_store, cook_id, outcome)
+}
+
+/// Store the latest compact notification delivery outcome beside the injected
+/// store's own Cook index. The marker is a file next to `index.json`, not an
+/// observation row, so it follows this store's data root rather than the
+/// ambient one.
+pub fn record_cook_terminal_notification_outcome_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    outcome: Value,
+) -> Result<()> {
+    lifecycle_store.write_cook_notification_outcome(cook_id, &outcome)
 }
 
 /// Read the latest terminal notification outcome without loading Cook attempts.
@@ -2072,15 +2096,42 @@ pub fn record_cook_progress(
     record_cook_progress_with_activity(run_id, phase, attempt, detail, None)
 }
 
+/// Persist the controller-owned Cook phase into an explicitly rooted store.
+pub fn record_cook_progress_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    attempt: u32,
+    detail: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    record_cook_progress_with_activity_in_store(
+        lifecycle_store,
+        run_id,
+        phase,
+        attempt,
+        detail,
+        None,
+    )
+}
+
 /// Retain a redacted, bounded controller failure independently of continuation
 /// claim transitions. Claims describe ownership; they must not replace cause.
 pub fn record_cook_controller_failure(
     run_id: &str,
     diagnostic: &Value,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_controller_failure_in_store(&lifecycle_store, run_id, diagnostic)
+}
+
+pub fn record_cook_controller_failure_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    diagnostic: &Value,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let diagnostic = diagnostic.clone();
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         record
             .ensure_metadata_object()
             .insert("cook_controller_failure".to_string(), diagnostic);
@@ -2193,10 +2244,20 @@ pub fn record_cook_observer_event(
     phase: &str,
     diagnostic: Value,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_observer_event_in_store(&lifecycle_store, run_id, phase, diagnostic)
+}
+
+pub fn record_cook_observer_event_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    diagnostic: Value,
+) -> Result<AgentTaskRunRecord> {
     const MAX_EVENTS: usize = 16;
 
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let metadata = record.ensure_metadata_object();
         let events = metadata
             .entry("cook_observer_events".to_string())
@@ -2246,8 +2307,19 @@ pub fn record_cook_supervision(
     sample: Option<Value>,
     decisions: Vec<Value>,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_supervision_in_store(&lifecycle_store, run_id, attempt, sample, decisions)
+}
+
+pub fn record_cook_supervision_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    attempt: u32,
+    sample: Option<Value>,
+    decisions: Vec<Value>,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let now = now_timestamp();
         let metadata = record.ensure_metadata_object();
         if let Some(sample) = sample {
@@ -2302,8 +2374,18 @@ pub fn record_cook_supervision_stop(
     attempt: u32,
     outcome: Value,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_supervision_stop_in_store(&lifecycle_store, run_id, attempt, outcome)
+}
+
+pub fn record_cook_supervision_stop_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    attempt: u32,
+    outcome: Value,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let metadata = record.ensure_metadata_object();
         let events = metadata
             .entry("cook_supervision_events".to_string())
@@ -2334,8 +2416,18 @@ pub fn record_cook_terminal_result(
     terminal_success: bool,
     exit_code: i32,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_terminal_result_in_store(&lifecycle_store, run_id, terminal_success, exit_code)
+}
+
+pub fn record_cook_terminal_result_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    terminal_success: bool,
+    exit_code: i32,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let Some(progress) = record
             .ensure_metadata_object()
             .get_mut("cook_progress")
@@ -4386,13 +4478,23 @@ pub fn record_cook_recovery_checkpoint(
     phase: &str,
     next_command: &str,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_recovery_checkpoint_in_store(&lifecycle_store, run_id, phase, next_command)
+}
+
+pub fn record_cook_recovery_checkpoint_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    next_command: &str,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let checkpoint = json!({
         "schema": "homeboy/agent-task-cook-recovery-checkpoint/v1",
         "phase": phase,
         "next_command": next_command,
     });
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         if record.metadata.get("cook_recovery_checkpoint") == Some(&checkpoint) {
             return false;
         }
@@ -4404,7 +4506,7 @@ pub fn record_cook_recovery_checkpoint(
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }
 
@@ -5250,8 +5352,17 @@ pub fn record_cook_force_with_lease_receipt(
     run_id: &str,
     receipt: Value,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_force_with_lease_receipt_in_store(&lifecycle_store, run_id, receipt)
+}
+
+pub fn record_cook_force_with_lease_receipt_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    receipt: Value,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         if record.metadata.get("cook_force_with_lease_receipt") == Some(&receipt) {
             return false;
         }
@@ -5263,7 +5374,7 @@ pub fn record_cook_force_with_lease_receipt(
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }
 
