@@ -879,7 +879,7 @@ impl RunnerStatusReport {
             .map(|generation| generation.generation.clone());
         let unresolved_generation = generations
             .iter()
-            .find(|generation| generation.active_job_count > 0)
+            .find(|generation| !generation.admission_owner && generation.active_job_count > 0)
             .map(|generation| generation.generation.clone());
         let admission_blocking_job_ids = blocking_generation
             .as_deref()

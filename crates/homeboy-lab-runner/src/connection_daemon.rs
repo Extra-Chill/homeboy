@@ -278,6 +278,15 @@ fn probe_daemon_health_until_durable(
             Ok(report) => return Err(DaemonHealthProbeFailure::IdentityMismatch(Box::new(report))),
             Err(message) => {
                 attempts.push(format!("durability observation {observation}: {message}"));
+                if !tunnel_process_identity_matches(tunnel_pid, tunnel_process_start_identity) {
+                    attempts.push(format!(
+                        "durability observation {observation}: owned tunnel process exited or changed identity after health failure"
+                    ));
+                    return Err(DaemonHealthProbeFailure::TunnelExited {
+                        message: "owned SSH tunnel exited or changed identity after a health failure during the post-establishment durability window".to_string(),
+                        attempts,
+                    });
+                }
                 return Err(DaemonHealthProbeFailure::Unreachable {
                     message: format!("remote daemon health endpoint failed during post-establishment durability observation {observation}"),
                     attempts,
@@ -1349,6 +1358,67 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "an exited tunnel must fail within the bounded durability window"
         );
+        assert!(child.wait().expect("reap tunnel child").success());
+        server.join().expect("server");
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn durability_health_failure_rechecks_tunnel_identity() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let body = serde_json::json!({
+            "freshness": report("lease-live", 7331).freshness,
+            "pid": 7331,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("initial health request");
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).expect("read request");
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .expect("health response");
+            let (second, _) = listener.accept().expect("durability health request");
+            std::thread::sleep(Duration::from_millis(100));
+            drop(second);
+        });
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 0.3")
+            .spawn()
+            .expect("start tunnel child");
+        let pid = child.id();
+        let identity = super::super::capture_tunnel_process_start_identity(Some(pid))
+            .expect("capture child identity")
+            .expect("child identity");
+        let daemon = RemoteDaemon {
+            address: address.to_string(),
+            pid: Some(7331),
+            lease_id: Some("lease-live".to_string()),
+            version: None,
+            build_identity: None,
+            inspected_freshness: None,
+        };
+
+        let failure = probe_daemon_health_until_durable(
+            &format!("http://{address}"),
+            &daemon,
+            Some(pid),
+            Some(&identity),
+        )
+        .expect_err("exited tunnel after durability health failure is terminal");
+        assert!(matches!(
+            failure,
+            DaemonHealthProbeFailure::TunnelExited { .. }
+        ));
+        assert_eq!(failure_stage(&failure), "tunnel_durability");
         assert!(child.wait().expect("reap tunnel child").success());
         server.join().expect("server");
     }
