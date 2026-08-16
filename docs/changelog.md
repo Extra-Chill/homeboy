@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.6] - 2026-08-16
+
+### Changed
+- root reserved handoff cancellation
+
 ## [0.350.5] - 2026-08-16
 
 ### Changed
