@@ -957,6 +957,454 @@ fn detached_handoff_siblings_advance_only_the_injected_store() {
     );
 }
 
+/// The authority fixture used by the run-outcome rooting proof.
+///
+/// The verifier registry is process-global by design — it is configured trust
+/// material and a subprocess contract, not a durable lifecycle root — so it is
+/// installed through the serializing test guard rather than by mutating any
+/// environment.
+struct RootedAcceptanceVerifier;
+
+impl AgentTaskAcceptanceVerifier for RootedAcceptanceVerifier {
+    fn provenance(&self) -> AgentTaskAcceptanceVerifierProvenance {
+        AgentTaskAcceptanceVerifierProvenance {
+            verifier: "rooted-independent-review".to_string(),
+            configuration: "rooted-policy-revision-1".to_string(),
+        }
+    }
+
+    fn verify_acceptance(
+        &self,
+        request: &AgentTaskAcceptanceVerificationRequest,
+    ) -> Result<AgentTaskAcceptanceAttestation> {
+        if request.token != "rooted-token" {
+            return Err(Error::validation_invalid_argument(
+                "token",
+                "rooted fixture verifier rejected token",
+                None,
+                None,
+            ));
+        }
+        Ok(AgentTaskAcceptanceAttestation {
+            actor: "rooted-reviewer".to_string(),
+            authority: request.requirement.authority.clone(),
+            policy: request.requirement.policy.clone(),
+            issued_at: "2020-01-01T00:00:00Z".to_string(),
+            provider_ref: "rooted://acceptance/1".to_string(),
+            signature: "rooted-signature".to_string(),
+            key_id: "rooted-key".to_string(),
+        })
+    }
+
+    fn revalidate_attestation(
+        &self,
+        request: &AgentTaskAcceptanceVerificationRequest,
+        attestation: &AgentTaskAcceptanceAttestation,
+    ) -> Result<()> {
+        if attestation.signature != "rooted-signature"
+            || attestation.authority != request.requirement.authority
+            || attestation.policy != request.requirement.policy
+        {
+            return Err(Error::validation_invalid_argument(
+                "acceptance",
+                "rooted fixture attestation did not match the signed request",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A routed placement decision that a controller-local outcome verifies.
+///
+/// Deliberately *not* a submission stamp: `normalize_missing_execution_placement_decision_in_store`
+/// only supersedes a stamp, and the outcome recorder compares `decision_id`,
+/// which is a deterministic content identity and therefore identical in both
+/// roots.
+fn rooted_placement_decision() -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        "rooted-run-outcome-policy",
+        "1",
+        homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            repository: "repo".to_string(),
+            workspace: "workspace".to_string(),
+            task: "task-a".to_string(),
+            candidate: None,
+            base: None,
+        },
+        homeboy_lab_runner_contract::Placement::Auto,
+        homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+        None,
+        homeboy_lab_runner_contract::ExecutionPlacementFallback {
+            local_allowed: false,
+            reason: None,
+        },
+        homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+            authorized: false,
+            authority: None,
+        },
+    )
+}
+
+/// An applied promotion complete enough to open acceptance.
+fn rooted_applied_promotion() -> Value {
+    json!({
+        "status": "applied",
+        "verified_base": { "sha": "rooted-base" },
+        "provenance": { "candidate": { "fingerprint": {
+            "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+            "target_path": "/repo",
+            "head": "rooted-candidate",
+            "base": "rooted-candidate-parent",
+            "changed_files": ["src/lib.rs"],
+            "sha256": "rooted-candidate-sha",
+            "tree": "rooted-candidate-tree",
+        } } },
+    })
+}
+
+#[test]
+fn run_outcome_siblings_record_only_into_the_injected_store() {
+    // The run-outcome family writes the evidence a run is *judged* by: the
+    // verified placement of the execution, the authority verdict on its
+    // candidate, the terminal artifact projection, the durable controller
+    // failure, and the finalization that a dependency rebase re-arms. Absence
+    // in a second root is far too weak a negative for that — every one of these
+    // writes is equally "absent" from a root the work simply never reached.
+    //
+    // So both roots are seeded with the *same* run identity in the *same*
+    // pre-outcome shape: the same submission stamp, the same applied promotion,
+    // the same pending acceptance, the same reserved provider execution, the
+    // same recorded controller failure, the same finalization, the same
+    // terminal state, and the same aggregate. Every act below is made through a
+    // sibling handed `seeded`. The second root is then asserted to be *still in
+    // its original state* — still accepting the same verdict, still
+    // un-completed, still un-projected, still un-invalidated, still bindable —
+    // which is what a leak into an ambient root cannot satisfy while every
+    // positive assertion here still passes (#7505).
+    //
+    // Two guards are proved directionally rather than by absence: the same call
+    // with the same run id and the same argument is answered one way by one root
+    // and the opposite way by the other, decided only by which store was
+    // injected.
+    //
+    // No environment is mutated: both roots come from
+    // `HermeticTestContext::path_roots()`. The acceptance verifier registry is
+    // process-global trust material, not a lifecycle root, and is installed
+    // through its own serializing guard.
+    let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
+    let other_context = homeboy_core::test_support::HermeticTestContext::new();
+    assert_ne!(seeded_context.data_dir(), other_context.data_dir());
+
+    let seeded =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(seeded_context.path_roots());
+    let other =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(other_context.path_roots());
+
+    let run_id = "rooted-run-outcome";
+    let mut plan = test_plan();
+    plan.metadata = json!({
+        "acceptance": { "authority": "rooted-review", "policy": "rooted-release" },
+    });
+    let aggregate = succeeded_aggregate(&plan);
+    let decision = rooted_placement_decision();
+    let outcome = decision
+        .outcome(
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            None,
+        )
+        .expect("a controller-local outcome verifies a local decision");
+
+    for lifecycle_store in [&seeded, &other] {
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+            .expect("submit the same run identity into both roots");
+        // A reserved provider execution, reproduced rather than produced.
+        // `reserve_provider_execution_in_store` is a claim-family sibling that a
+        // prior slice already rooted; what this test needs is the durable shape
+        // it leaves behind, so the binding recorder has something to find.
+        lifecycle_store
+            .mutate_record(run_id, |record| {
+                record.ensure_metadata_object().insert(
+                    "provider_executions".to_string(),
+                    json!([{
+                        "key": "task-a:1",
+                        "task_id": "task-a",
+                        "attempt": 1,
+                        "state": "running",
+                    }]),
+                );
+                true
+            })
+            .expect("seed the same reserved provider execution into both roots");
+        record_cook_controller_failure_in_store(
+            lifecycle_store,
+            run_id,
+            &json!({ "reason": "rooted-controller-failure" }),
+        )
+        .expect("seed the same controller failure into both roots");
+        record_cook_finalization_in_store(
+            lifecycle_store,
+            run_id,
+            json!({ "status": "published", "pr": 1 }),
+        )
+        .expect("seed the same finalization into both roots");
+        record_promotion_in_store(lifecycle_store, run_id, rooted_applied_promotion())
+            .expect("seed the same applied promotion into both roots");
+        lifecycle_store
+            .mutate_record(run_id, |record| {
+                set_run_state(record, AgentTaskRunState::Succeeded);
+                record.updated_at = Some(now_timestamp());
+                true
+            })
+            .expect("terminalize the same run in both roots");
+        lifecycle_store
+            .write_aggregate(run_id, &aggregate)
+            .expect("seed the same durable aggregate into both roots");
+        assert_eq!(
+            lifecycle_store
+                .read_record(run_id)
+                .expect("read the seeded record back")
+                .acceptance
+                .expect("an applied promotion opens acceptance")
+                .verdict,
+            AgentTaskAcceptanceVerdict::Pending,
+            "both roots start from the identical pending verdict"
+        );
+    }
+
+    // Adopt the routed decision over the submission stamp — in the first root
+    // only. The second root keeps the stamp it was submitted with, which is
+    // what makes the outcome recorder answer directionally below.
+    assert!(
+        normalize_missing_execution_placement_decision_in_store(&seeded, run_id, &decision)
+            .expect("adopt a canonical decision in the injected store"),
+        "a submission stamp is superseded by a routed decision"
+    );
+
+    // DIRECTIONAL PAIR 1. The identical verified outcome, for the identical run
+    // id, is accepted by the root that adopted the decision it names and refused
+    // by the root that did not. Nothing about the call distinguishes them.
+    record_execution_placement_outcome_in_store(&seeded, run_id, outcome.clone())
+        .expect("the injected store owns the decision this outcome verifies");
+    let contradicted = record_execution_placement_outcome_in_store(&other, run_id, outcome.clone())
+        .expect_err("the second root's own decision contradicts this outcome");
+    assert_eq!(
+        contradicted.code.as_str(),
+        ErrorCode::ValidationInvalidArgument.as_str()
+    );
+    assert_eq!(
+        contradicted.message,
+        "verified placement outcome contradicts the durable routing decision"
+    );
+
+    record_provider_execution_process_in_store(&seeded, run_id, "task-a", 1, 515_151)
+        .expect("bind the provider process in the injected store");
+
+    let _verifier = AcceptanceVerifierTestGuard::install(Box::new(RootedAcceptanceVerifier));
+    let accepted = record_acceptance_verdict_in_store(
+        &seeded,
+        run_id,
+        AgentTaskAcceptanceVerdict::Accepted,
+        vec!["review://rooted/1".to_string()],
+        "rooted-token".to_string(),
+    )
+    .expect("record the authority verdict into the injected store");
+    assert_eq!(
+        accepted
+            .acceptance
+            .as_ref()
+            .expect("acceptance record")
+            .verdict,
+        AgentTaskAcceptanceVerdict::Accepted
+    );
+
+    clear_cook_controller_failure_in_store(&seeded, run_id)
+        .expect("clear the controller failure in the injected store");
+    let invalidated = invalidate_cook_finalization_for_dependency_in_store(
+        &seeded,
+        run_id,
+        "dependency-sha",
+        "homeboy agent-task cook-continue",
+    )
+    .expect("re-arm the finalization in the injected store");
+    assert_eq!(
+        invalidated.metadata["latest_promotion"]["status"],
+        "verification_pending"
+    );
+    assert!(
+        reconcile_terminal_artifact_projection_in_store(&seeded, run_id)
+            .expect("reproject terminal artifacts in the injected store"),
+        "a terminal record with a durable plan and aggregate is reprojectable"
+    );
+
+    // The positive: every outcome is durable in the store that was handed in.
+    let persisted = seeded
+        .read_record(run_id)
+        .expect("read the seeded record back");
+    assert_eq!(
+        persisted.metadata["execution_placement_decision"]["decision_id"],
+        decision.decision_id
+    );
+    assert_eq!(
+        persisted.metadata["execution_placement_normalized"]["reason"],
+        "durable run carried a submission-derived placement decision"
+    );
+    assert_eq!(
+        persisted.metadata["execution_placement_outcome"]["decision_id"],
+        decision.decision_id
+    );
+    assert_eq!(
+        persisted.metadata["provider_executions"][0]["owner_pid"],
+        515_151
+    );
+    let acceptance = persisted
+        .acceptance
+        .as_ref()
+        .expect("durable acceptance record");
+    assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Accepted);
+    assert_eq!(acceptance.actor.as_deref(), Some("rooted-reviewer"));
+    assert_eq!(acceptance.signature.as_deref(), Some("rooted-signature"));
+    assert!(persisted.metadata.get("cook_controller_failure").is_none());
+    assert!(persisted.metadata.get("cook_finalization").is_none());
+    assert_eq!(
+        persisted.metadata["cook_recovery_source_checkpoint"]["dependency_revision"],
+        "dependency-sha"
+    );
+    assert_eq!(
+        persisted.metadata["latest_promotion"]["status"],
+        "verification_pending"
+    );
+    assert_eq!(
+        persisted.metadata["artifact_projection"]["status"],
+        "complete"
+    );
+
+    // The negative, absence first: the second root holds the same run identity
+    // and observed none of it.
+    let untouched = other
+        .read_record(run_id)
+        .expect("the second root still has its own record");
+    assert_eq!(
+        untouched.metadata["execution_placement_decision"]["policy_id"],
+        homeboy_lab_runner_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
+        "the second root's decision must still be the stamp it was submitted with"
+    );
+    for key in [
+        "execution_placement_normalized",
+        "execution_placement_outcome",
+        "artifact_projection",
+        "cook_recovery_source_checkpoint",
+    ] {
+        assert!(
+            untouched.metadata.get(key).is_none(),
+            "second root must not observe `{key}` written through the injected store"
+        );
+    }
+    assert!(
+        untouched.metadata["provider_executions"][0]
+            .get("owner_pid")
+            .is_none(),
+        "second root must not observe the provider process bound through the injected store"
+    );
+
+    // Then the stronger half: the second root is not merely missing the
+    // evidence, it is still in its *original* state. Its controller failure
+    // still stands, its finalization is still published, its promotion is still
+    // applied, and its verdict is still pending — none of which is true of
+    // outcome state some other call already recorded.
+    assert_eq!(
+        untouched.metadata["cook_controller_failure"]["reason"], "rooted-controller-failure",
+        "clearing the injected store's failure must not clear the second root's"
+    );
+    assert_eq!(
+        untouched.metadata["cook_finalization"]["status"],
+        "published"
+    );
+    assert_eq!(untouched.metadata["latest_promotion"]["status"], "applied");
+    assert_eq!(
+        untouched
+            .acceptance
+            .as_ref()
+            .expect("the second root keeps its own acceptance record")
+            .verdict,
+        AgentTaskAcceptanceVerdict::Pending
+    );
+
+    // And it is still *eligible*: every operation the injected store already
+    // performed can still be performed here, on the second root's own state.
+    let second_verdict = record_acceptance_verdict_in_store(
+        &other,
+        run_id,
+        AgentTaskAcceptanceVerdict::Accepted,
+        vec!["review://rooted/2".to_string()],
+        "rooted-token".to_string(),
+    )
+    .expect("the second root still accepts the same verdict")
+    .acceptance
+    .expect("acceptance record");
+    assert_eq!(second_verdict.verdict, AgentTaskAcceptanceVerdict::Accepted);
+    assert!(
+        second_verdict.history.is_empty(),
+        "the second root moved from pending, so the injected store's verdict was never recorded here"
+    );
+    record_provider_execution_process_in_store(&other, run_id, "task-a", 1, 626_262)
+        .expect("the second root's reservation is still bindable");
+    clear_cook_controller_failure_in_store(&other, run_id)
+        .expect("the second root still owns its controller failure");
+    assert!(
+        reconcile_terminal_artifact_projection_in_store(&other, run_id)
+            .expect("the second root is still reprojectable"),
+        "the injected store's projection must not consume the second root's"
+    );
+    let second_invalidated = invalidate_cook_finalization_for_dependency_in_store(
+        &other,
+        run_id,
+        "dependency-sha",
+        "homeboy agent-task cook-continue",
+    )
+    .expect("the second root's finalization is still invalidatable");
+    assert!(
+        second_invalidated
+            .metadata
+            .get("cook_finalization")
+            .is_none(),
+        "the second root still had a finalization of its own to re-arm"
+    );
+
+    let second_root = other
+        .read_record(run_id)
+        .expect("read the second root's record back");
+    assert_eq!(
+        second_root.metadata["provider_executions"][0]["owner_pid"],
+        626_262
+    );
+    assert!(second_root
+        .metadata
+        .get("cook_controller_failure")
+        .is_none());
+    assert_eq!(
+        second_root.metadata["artifact_projection"]["status"],
+        "complete"
+    );
+
+    // DIRECTIONAL PAIR 2. The identical adoption offer, for the identical run
+    // id, is refused by the root that already holds this decision and accepted
+    // by the root whose submission stamp was never superseded.
+    assert!(
+        !normalize_missing_execution_placement_decision_in_store(&seeded, run_id, &decision)
+            .expect("re-offering the adopted decision is answered, not errored"),
+        "the injected store already carries this exact decision"
+    );
+    assert!(
+        normalize_missing_execution_placement_decision_in_store(&other, run_id, &decision)
+            .expect("the second root still holds an unsuperseded submission stamp"),
+        "an adoption made in the injected store must not decide the second root"
+    );
+}
+
 #[test]
 fn a_supervision_stop_survives_an_hour_of_routine_resource_samples() {
     // #7015: the point of the evidence is to answer "why was this stopped?"

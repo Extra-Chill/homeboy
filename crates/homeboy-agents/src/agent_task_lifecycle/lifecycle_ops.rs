@@ -898,7 +898,22 @@ pub fn normalize_missing_execution_placement_decision(
     run_id: &str,
     decision: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
 ) -> Result<bool> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    normalize_missing_execution_placement_decision_in_store(&lifecycle_store, run_id, decision)
+}
+
+/// Adopt a canonical placement decision inside an explicitly rooted store.
+///
+/// The persisted-decision read and the adoption write are one decision, so they
+/// share one store. Read ambiently, a decision already recorded in another home
+/// could veto an adoption here, or a supersedable submission stamp found there
+/// could authorize a write into this store that its own record never justified.
+pub fn normalize_missing_execution_placement_decision_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    decision: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
+) -> Result<bool> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     let persisted =
         serde_json::from_value::<homeboy_lab_runner_contract::ExecutionPlacementDecision>(
             record.metadata["execution_placement_decision"].clone(),
@@ -924,7 +939,7 @@ pub fn normalize_missing_execution_placement_decision(
         "reason": reason,
         "adopted_decision_id": decision.decision_id,
     });
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(true)
 }
 
@@ -935,7 +950,24 @@ pub fn record_execution_placement_outcome(
     run_id: &str,
     outcome: homeboy_lab_runner_contract::ExecutionPlacementOutcome,
 ) -> Result<()> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_execution_placement_outcome_in_store(&lifecycle_store, run_id, outcome)
+}
+
+/// Append a provider-verified placement outcome inside an explicitly rooted
+/// store.
+///
+/// The decision this outcome is checked against and the record it is appended
+/// to are read and written through the same store. Reading the decision
+/// ambiently would let another home's routing decide whether a verified
+/// execution here is a stale replay, and would fail closed or open on evidence
+/// that never described this run.
+pub fn record_execution_placement_outcome_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    outcome: homeboy_lab_runner_contract::ExecutionPlacementOutcome,
+) -> Result<()> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     let decision: homeboy_lab_runner_contract::ExecutionPlacementDecision = serde_json::from_value(
         record.metadata["execution_placement_decision"].clone(),
     )
@@ -970,7 +1002,7 @@ pub fn record_execution_placement_outcome(
                 Some("serialize placement outcome".to_string()),
             )
         })?;
-    store::write_record(&record)
+    lifecycle_store.write_record(&record)
 }
 
 /// Restore an explicit plan placement decision onto a legacy run record.
@@ -979,7 +1011,22 @@ pub fn record_execution_placement_outcome(
 /// decision must remain unclassified rather than acquiring a synthetic local
 /// contract that could contradict later runner evidence.
 pub fn normalize_local_execution_placement(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    normalize_local_execution_placement_in_store(&lifecycle_store, run_id)
+}
+
+/// Restore an explicit plan placement decision onto a legacy record inside an
+/// explicitly rooted store.
+///
+/// The plan read moves with the record. `load_plan` resolves a Cook alias
+/// against the ambient index and then reads the ambient run directory, so an
+/// ambient reach here could copy another home's plan decision onto this store's
+/// record — the one restoration this operation exists to make trustworthy.
+pub fn normalize_local_execution_placement_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if record
         .metadata
         .get("execution_placement_decision")
@@ -987,7 +1034,7 @@ pub fn normalize_local_execution_placement(run_id: &str) -> Result<AgentTaskRunR
     {
         return Ok(record);
     }
-    let plan = load_plan(&record.run_id)?;
+    let plan = load_controller_plan_in_store(lifecycle_store, &record.run_id)?;
     let Some(decision) = plan
         .metadata
         .get("execution_placement_decision")
@@ -1002,7 +1049,7 @@ pub fn normalize_local_execution_placement(run_id: &str) -> Result<AgentTaskRunR
         "execution_placement_normalization".to_string(),
         json!({ "source": "controller_plan", "reason": "legacy_or_null_record_decision" }),
     );
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -1848,8 +1895,30 @@ pub fn record_completed_run(
     aggregate: &AgentTaskAggregate,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = submit_plan(plan, requested_run_id)?;
-    record_aggregate(&mut record, plan, aggregate)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_completed_run_in_store(&lifecycle_store, plan, aggregate, requested_run_id)
+}
+
+/// Submit and immediately terminalize one run inside an explicitly rooted
+/// store.
+///
+/// Both halves follow the injected root. Splitting them is the failure this
+/// sibling exists to make impossible: a submission in one home followed by an
+/// aggregate write in another leaves a queued record that never completes and a
+/// terminal projection with no run behind it, and neither write ever fails.
+///
+/// The controller-runtime admission that `submit_plan_in_store` performs stays
+/// process-global by design — it is a content-addressed executable pin shared
+/// across homes, not durable lifecycle state, so it is not one of this store's
+/// roots.
+pub fn record_completed_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    aggregate: &AgentTaskAggregate,
+    requested_run_id: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = submit_plan_in_store(lifecycle_store, plan, requested_run_id)?;
+    record_aggregate_in_store(lifecycle_store, &mut record, plan, aggregate)
 }
 
 pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
@@ -2244,9 +2313,29 @@ pub fn record_provider_execution_process(
     attempt: u32,
     pid: u32,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_provider_execution_process_in_store(&lifecycle_store, run_id, task_id, attempt, pid)
+}
+
+/// Bind a reserved provider execution to its subprocess inside an explicitly
+/// rooted store.
+///
+/// The reservation this binding looks for was made in one store, so the lookup
+/// has to happen there too. An ambient reach would either find no reservation
+/// and reject a legitimate process, or bind this run's provider PID onto
+/// another home's identically-keyed execution — and process liveness read back
+/// from the wrong record is exactly the evidence this write exists to keep
+/// separate across child runs.
+pub fn record_provider_execution_process_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    pid: u32,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let key = format!("{task_id}:{attempt}");
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let Some(execution) = record.metadata["provider_executions"]
             .as_array_mut()
             .and_then(|executions| {
@@ -2339,8 +2428,23 @@ pub fn record_cook_controller_failure_in_store(
 /// controller failure remains in the failed continuation artifact, but must not
 /// be presented as the cause of a later terminal promotion or finalization.
 pub fn clear_cook_controller_failure(run_id: &str) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    clear_cook_controller_failure_in_store(&lifecycle_store, run_id)
+}
+
+/// Clear a durable controller failure inside an explicitly rooted store.
+///
+/// This is the erasing half of [`record_cook_controller_failure_in_store`] and
+/// has to follow the same root. An ambient reach would leave the injected
+/// store's failure standing — so a rearmed continuation would still be
+/// presented as the cause of a later promotion — while silently erasing a
+/// failure in whatever home the environment pointed at.
+pub fn clear_cook_controller_failure_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         record
             .ensure_metadata_object()
             .remove("cook_controller_failure")
@@ -3401,7 +3505,27 @@ pub(crate) fn record_run_aggregate_in_store(
 /// recovery path for historical runner results whose aggregate was persisted
 /// before the controller finalized its artifact-byte projection.
 pub fn reconcile_terminal_artifact_projection(run_id: &str) -> Result<bool> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    reconcile_terminal_artifact_projection_in_store(&lifecycle_store, run_id)
+}
+
+/// Reproject terminal artifacts inside an explicitly rooted store.
+///
+/// Every input and every output follows the injected root: the terminal record,
+/// the controller-owned plan, the aggregate the byte checks are derived from,
+/// and the observation registry the projection is published into. That last one
+/// is the reason this sibling exists — `record_terminal_artifact_projection`
+/// opens the observation database and resolves the artifact root ambiently, so
+/// a reprojection driven from one home's aggregate would have registered its
+/// controller-owned bytes under another home's artifact root while every
+/// positive assertion still passed. `PathRoots` carries `artifacts` separately
+/// from `data`, and `open_observation_initialized` is what binds both to this
+/// store.
+pub fn reconcile_terminal_artifact_projection_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if !record.state.is_terminal() {
         return Ok(false);
     }
@@ -3409,10 +3533,10 @@ pub fn reconcile_terminal_artifact_projection(run_id: &str) -> Result<bool> {
     // Require the controller-owned plan as part of the durable lifecycle
     // contract even though artifact projection derives its byte checks from the
     // aggregate. The runner staging plan is never a recovery input.
-    let _plan = store::read_controller_plan(&record.run_id)?;
-    let aggregate = store::read_aggregate(&record.run_id)?;
-    record_terminal_artifact_projection(&mut record, &aggregate)?;
-    update_cook_candidate_after_completion(&record, &aggregate, None)?;
+    let _plan = lifecycle_store.read_controller_plan(&record.run_id)?;
+    let aggregate = lifecycle_store.read_aggregate(&record.run_id)?;
+    record_terminal_artifact_projection_in_store(lifecycle_store, &mut record, &aggregate)?;
+    update_cook_candidate_after_completion_in_store(lifecycle_store, &record, &aggregate, None)?;
     Ok(true)
 }
 
@@ -4801,8 +4925,35 @@ pub fn invalidate_cook_finalization_for_dependency(
     dependency_revision: &str,
     next_command: &str,
 ) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    invalidate_cook_finalization_for_dependency_in_store(
+        &lifecycle_store,
+        run_id,
+        dependency_revision,
+        next_command,
+    )
+}
+
+/// Re-arm a finalized candidate inside an explicitly rooted store.
+///
+/// This is the invalidating half of [`record_cook_finalization_in_store`], and
+/// like [`clear_cook_moving_base_recovery_in_store`] it has to erase from the
+/// same root that recorded. Its idempotence guard reads the checkpoint it is
+/// about to write, so an ambient reach would decide "already re-armed" from
+/// another home's evidence and leave this store's finalization standing — the
+/// exact state that lets a stale review be published as if its gates had been
+/// rerun.
+///
+/// The unchanged-record fallback read follows the injected store too, so the
+/// record handed back to the caller is always the one this call operated on.
+pub fn invalidate_cook_finalization_for_dependency_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    dependency_revision: &str,
+    next_command: &str,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let metadata = record.ensure_metadata_object();
         // Retrying the same invalidation after an interrupted coordinator must
         // preserve the original review evidence and leave its timestamp stable.
@@ -4847,7 +4998,7 @@ pub fn invalidate_cook_finalization_for_dependency(
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }
 
@@ -5441,9 +5592,65 @@ pub fn record_acceptance_verdict(
     record_acceptance_verdict_with_feedback(run_id, verdict, evidence_refs, token, None)
 }
 
+/// Record a verdict against an explicitly rooted store. The thin delegation to
+/// the feedback-bearing sibling mirrors the ambient pair exactly.
+pub fn record_acceptance_verdict_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    verdict: AgentTaskAcceptanceVerdict,
+    evidence_refs: Vec<String>,
+    token: String,
+) -> Result<AgentTaskRunRecord> {
+    record_acceptance_verdict_with_feedback_in_store(
+        lifecycle_store,
+        run_id,
+        verdict,
+        evidence_refs,
+        token,
+        None,
+    )
+}
+
 /// Record a verdict with bounded reviewer feedback for the single durable Cook
 /// remediation that follows a rejection.
 pub fn record_acceptance_verdict_with_feedback(
+    run_id: &str,
+    verdict: AgentTaskAcceptanceVerdict,
+    evidence_refs: Vec<String>,
+    token: String,
+    feedback: Option<String>,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_acceptance_verdict_with_feedback_in_store(
+        &lifecycle_store,
+        run_id,
+        verdict,
+        evidence_refs,
+        token,
+        feedback,
+    )
+}
+
+/// Record an authority verdict inside an explicitly rooted store.
+///
+/// The pre-verification binding read, the drift comparison made again under the
+/// record mutation, and the durable verdict write are one compare-and-swap and
+/// all three follow the injected root. Read ambiently, the binding this call
+/// sends to the authority would describe another home's applied promotion,
+/// while the verdict it produced landed here — a signed attestation bound to a
+/// candidate this store never promoted, with the drift guard that exists to
+/// catch exactly that comparing the wrong two records.
+///
+/// The bounded validation guards are repeated here rather than moved behind the
+/// ambient entry point: a blank token, an empty evidence list, oversized
+/// feedback, and feedback on a non-rejection are refused before any store is
+/// touched, exactly as they are today.
+///
+/// The acceptance verifier registry is deliberately left process-global. It is
+/// configured trust material and a subprocess contract, not durable lifecycle
+/// state, so it is not one of this store's roots.
+pub fn record_acceptance_verdict_with_feedback_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     verdict: AgentTaskAcceptanceVerdict,
     evidence_refs: Vec<String>,
@@ -5481,7 +5688,7 @@ pub fn record_acceptance_verdict_with_feedback(
             None,
         ));
     }
-    let existing = store::read_record(&run_id)?;
+    let existing = lifecycle_store.read_record(&run_id)?;
     let acceptance = existing.acceptance.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "acceptance",
@@ -5548,7 +5755,7 @@ pub fn record_acceptance_verdict_with_feedback(
         return Ok(existing);
     }
     let mut promotion_drifted = false;
-    let record = store::mutate_record(&run_id, |record| {
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
         let Some(acceptance) = record.acceptance.as_mut() else {
             promotion_drifted = true;
             return false;
