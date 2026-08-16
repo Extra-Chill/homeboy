@@ -131,6 +131,13 @@
       "description": "When cargo-nextest is selected but unavailable, fall back to cargo test. Set false or HOMEBOY_RUST_NEXTEST_FALLBACK=0 to fail with an install diagnostic instead."
     },
     {
+      "id": "rust_nextest_measured_counts",
+      "label": "Rust nextest measured counts",
+      "type": "boolean",
+      "default": true,
+      "description": "Measure unsharded cargo nextest runs by parsing libtest-json-plus events into Homeboy test results. Applies only when rust_test_runner is already nextest; it does not select the runner. nextest emits no 'test result:' lines, so without this an unsharded nextest run produces no structured counts at all. Set false or HOMEBOY_RUST_NEXTEST_MEASURED_COUNTS=0 to run nextest with its human-readable output and no measured result."
+    },
+    {
       "id": "rust_nextest_filter_max_bytes",
       "label": "Rust nextest filter maximum bytes",
       "type": "integer",
