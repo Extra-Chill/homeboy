@@ -2826,12 +2826,11 @@ fn wait_for_pid_file(path: &std::path::Path) -> libc::pid_t {
 #[cfg(unix)]
 fn assert_pid_exits(pid: libc::pid_t) {
     let deadline = Instant::now() + Duration::from_secs(2);
-    while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+    while crate::process::pid_is_running(pid as u32) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_ne!(
-        unsafe { libc::kill(pid, 0) },
-        0,
+    assert!(
+        !crate::process::pid_is_running(pid as u32),
         "process {pid} remained live"
     );
 }
