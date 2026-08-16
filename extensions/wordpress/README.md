@@ -702,6 +702,18 @@ shorthand; Homeboy core only sees generic durable agent-task plans.
 and runtime-path dispatch; it forwards to the WordPress payload so both monorepo
 and installed extension layouts use the same implementation.
 
+Reach that tree through `scripts/lib/agent-runtime-paths.cjs`, never through a
+fixed relative path. `agent-runtimes` is a shared asset declared in
+`homeboy-extension-root.json`, and Homeboy installs it at `<homeboy>/agent-runtimes`
+— a sibling of `<homeboy>/extensions`, one level further from this extension than
+a monorepo checkout puts it. A linked dev install hides the difference because
+Node resolves a symlinked script back to the checkout, so a hardcoded
+`../../../agent-runtimes/...` passes locally and fails on every copied install.
+The resolver probes both layouts and reports the probed paths plus a reinstall
+remediation when the shared tree is absent, and `scripts/build/setup.sh` verifies
+the runtime files this extension's entrypoints need so an incomplete payload
+fails at setup rather than at shard bootstrap.
+
 The generic provider boundary is documented in
 [`../docs/agent-runtime-package-contract.md`](../docs/agent-runtime-package-contract.md).
 Discovery exposes the required request fields, outcome status vocabulary,

@@ -10,11 +10,19 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
+/**
+ * Internal dependencies
+ */
 import { createTimeoutLineRedactor, recipeRunProjection, readBoundedText, wpCodeboxTimeoutDiagnostics } from '../lib/wp-codebox-timeout-diagnostics.mjs';
 import { configuredWpCodeboxPhpunitTimeoutSeconds } from '../lib/wp-codebox-phpunit-timeout.mjs';
 
 const require = createRequire(import.meta.url);
-const { preflightWpCodeboxCommand } = require('../../../agent-runtimes/wp-codebox/lib/wp-codebox-runtime-selection.js');
+// Shared agent runtimes install beside the extensions directory, so their path
+// relative to this script differs between a checkout and an install. Resolving
+// through the helper keeps both layouts loadable and turns an incomplete
+// install into a diagnostic instead of a MODULE_NOT_FOUND stack (#12585).
+const { requireAgentRuntimeModule } = require('../lib/agent-runtime-paths.cjs');
+const { preflightWpCodeboxCommand } = requireAgentRuntimeModule('wp-codebox/lib/wp-codebox-runtime-selection.js');
 
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
 const phpunitTimeoutSeconds = configuredWpCodeboxPhpunitTimeoutSeconds(process.env, settings);

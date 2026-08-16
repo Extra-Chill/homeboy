@@ -673,6 +673,27 @@ def default_sibling_path(component_root, sibling_name):
     return os.path.join(os.path.dirname(os.path.abspath(component_root)), sibling_name)
 
 
+def agent_runtime_file(script_dir, relative_path):
+    """Resolve a file inside a shared agent runtime across both layouts.
+
+    `agent-runtimes` is a shared asset: Homeboy installs it beside the
+    extensions directory (<homeboy>/agent-runtimes), one level above where a
+    monorepo checkout puts it relative to the extension (<repo>/agent-runtimes).
+    Probing a single layout resolves to a nonexistent path on a copied install
+    (#12585). Falls back to the installed candidate so the caller reports a
+    missing runner path rather than an empty argument.
+    """
+    extension_root = os.path.dirname(os.path.abspath(script_dir))
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(extension_root)), 'agent-runtimes', relative_path),
+        os.path.join(os.path.dirname(extension_root), 'agent-runtimes', relative_path),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
+
+
 def wp_codebox_workspace_slug_from_path(source):
     return re.sub(r'[^a-zA-Z0-9_-]', '-', os.path.basename(str(source or '')).split('@')[0])
 
@@ -1002,10 +1023,8 @@ def wp_codebox_task_runner_args(data, settings, script_dir):
     component_root = data.get('root') or data.get('component_path') or os.getcwd()
     homeboy_path = settings.get('wp_codebox_homeboy_path') or os.environ.get('HOMEBOY_WP_CODEBOX_HOMEBOY_PATH') or default_sibling_path(component_root, 'homeboy')
     homeboy_extensions_path = settings.get('wp_codebox_homeboy_extensions_path') or os.environ.get('HOMEBOY_WP_CODEBOX_HOMEBOY_EXTENSIONS_PATH') or default_sibling_path(component_root, 'homeboy-extensions')
-    extension_root = os.path.dirname(os.path.dirname(script_dir))
-
     args = [
-        os.path.join(extension_root, 'agent-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+        agent_runtime_file(script_dir, os.path.join('wp-codebox', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs')),
     ]
     if os.path.isdir(homeboy_path):
         args.extend(['--homeboy', homeboy_path])

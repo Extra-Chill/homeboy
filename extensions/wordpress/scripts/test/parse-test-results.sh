@@ -46,8 +46,23 @@ fi
 ADAPTERS_HELPER="${HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS:-${SHARED_LIB_DIR}/test-result-adapters.sh}"
 # shellcheck source=../../../scripts/lib/test-result-adapters.sh
 source "$ADAPTERS_HELPER"
-WP_CODEBOX_ADAPTERS_HELPER="${HOMEBOY_WP_CODEBOX_TEST_RESULT_ADAPTERS:-${SCRIPT_DIR}/../../../agent-runtimes/wp-codebox/scripts/lib/test-result-adapters.sh}"
-if [ -f "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
+# Shared agent runtimes install beside the extensions directory
+# (<homeboy>/agent-runtimes), one level above where a monorepo checkout puts
+# them relative to this script. Probe both so an installed extension still
+# finds the WP Codebox result adapters instead of silently parsing without
+# them (#12585).
+WP_CODEBOX_ADAPTERS_HELPER="${HOMEBOY_WP_CODEBOX_TEST_RESULT_ADAPTERS:-}"
+if [ -z "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
+    for candidate in \
+        "${SCRIPT_DIR}/../../../../agent-runtimes/wp-codebox/scripts/lib/test-result-adapters.sh" \
+        "${SCRIPT_DIR}/../../../agent-runtimes/wp-codebox/scripts/lib/test-result-adapters.sh"; do
+        if [ -f "$candidate" ]; then
+            WP_CODEBOX_ADAPTERS_HELPER="$candidate"
+            break
+        fi
+    done
+fi
+if [ -n "$WP_CODEBOX_ADAPTERS_HELPER" ] && [ -f "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
     # shellcheck source=/dev/null
     source "$WP_CODEBOX_ADAPTERS_HELPER"
 fi
