@@ -11614,6 +11614,140 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
 }
 
 #[test]
+fn cook_promotion_finalizes_into_the_injected_stores_across_split_recipe_and_lifecycle_roots() {
+    let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
+    assert_ne!(recipe_context.data_dir(), lifecycle_context.data_dir());
+
+    let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
+
+    let cook_id = "split-root-finalization-cook";
+    let run_id = "split-root-finalization-run";
+    let target = tempfile::tempdir().expect("fixture target");
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = run_id.to_string();
+    options.initial_plan.tasks[0].executor.model = Some("split-root-model".to_string());
+
+    // The durable recipe lineage is promotion's recipe half; seed it only in the
+    // recipe root.
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist the recipe in the recipe root");
+    // The run record, the Cook index, and the provider aggregate are promotion's
+    // lifecycle half; seed them only in the lifecycle root.
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&options.initial_plan, run_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("seed the run record in the lifecycle root");
+    lifecycle_store
+        .record_cook_attempt(cook_id, 1, run_id)
+        .expect("record the cook attempt in the lifecycle root");
+    lifecycle_store
+        .record_run_aggregate(
+            run_id,
+            &options.initial_plan,
+            &review_form_aggregate(&options.initial_plan),
+        )
+        .expect("record the review-form aggregate in the lifecycle root");
+
+    let promotion = promotion_with_existing_path(run_id, target.path());
+    // The read half of promotion resolves both stores explicitly: the recipe
+    // lineage from the recipe root, the provider identity from the lifecycle
+    // root's controller plan.
+    let finalization_options = cook_finalization_options_with_stores(
+        &recipe_store,
+        &lifecycle_store,
+        &options,
+        run_id,
+        &promotion,
+        Vec::new(),
+    )
+    .expect("build finalization options through the injected split-root store pair");
+    assert_eq!(
+        finalization_options.review_dossier.ai_assistance.model,
+        "split-root-model"
+    );
+
+    let mut backend = CaptureBackend {
+        synthetic_gate_proof: Some(promotion.clone()),
+        ..Default::default()
+    };
+    let finalization = finalize_or_load_cook_pr_with_backend_with_stores(
+        &recipe_store,
+        &lifecycle_store,
+        &options,
+        run_id,
+        &promotion,
+        &mut backend,
+    )
+    .expect("finalize through the injected split-root store pair");
+
+    assert_eq!(finalization["status"], "review_ready");
+    assert!(backend.created);
+    // The lineage read reached the recipe root: finalization requires the
+    // finalizing run to be declared by the persisted recipe, and only the
+    // recipe root holds one.
+    assert!(recipe_store.recipe_exists(cook_id));
+    assert_eq!(
+        recipe_store
+            .load_recipe(cook_id)
+            .expect("read the recipe in the recipe root")
+            .attempts[0]
+            .run_id,
+        run_id
+    );
+
+    // The finalization receipt and the promotion record landed in the lifecycle
+    // root, not in whatever root ambient state would have resolved.
+    let record = lifecycle_store
+        .read_record(run_id)
+        .expect("read the run record in the lifecycle root");
+    assert!(record.metadata.get("cook_finalization").is_some());
+    assert!(record.metadata.get("promotions").is_some());
+    assert!(lifecycle_store
+        .run_dir(run_id)
+        .starts_with(lifecycle_context.data_dir()));
+    assert_eq!(
+        lifecycle_store
+            .read_cook_index(cook_id)
+            .expect("read the cook index in the lifecycle root")
+            .latest_run_id,
+        run_id
+    );
+
+    // The negatives: a store built on the opposite root sees neither half, so
+    // the injected pair — not an ambient root — decided every read and write.
+    let recipe_root_lifecycle_store = AgentTaskLifecycleStore::new(recipe_context.path_roots());
+    assert!(!recipe_root_lifecycle_store
+        .record_exists(run_id)
+        .expect("no run record in the recipe root"));
+    assert!(!recipe_root_lifecycle_store.cook_index_exists(cook_id));
+    let lifecycle_root_recipe_store = CookRecipeStore::new(lifecycle_context.path_roots());
+    assert!(!lifecycle_root_recipe_store.recipe_exists(cook_id));
+    let error = cook_finalization_options_with_stores(
+        &lifecycle_root_recipe_store,
+        &lifecycle_store,
+        &options,
+        run_id,
+        &promotion,
+        Vec::new(),
+    )
+    .expect_err("the lifecycle root holds no recipe lineage for this Cook");
+    assert_eq!(error.code.as_str(), "internal.io_error");
+    assert!(error.details["context"]
+        .as_str()
+        .expect("the IO error names the recipe path it read")
+        .starts_with(
+            lifecycle_context
+                .data_dir()
+                .to_str()
+                .expect("utf-8 lifecycle data root")
+        ));
+}
+
+#[test]
 fn manual_finalization_identity_resolves_cook_and_failed_attempt_or_reserves_fresh_id() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-11334";
