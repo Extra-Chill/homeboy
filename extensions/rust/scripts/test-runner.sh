@@ -887,6 +887,22 @@ rust_nextest_archive_args() {
     printf '%s\n' --archive-file "${HOMEBOY_RUST_NEXTEST_ARCHIVE}"
 }
 
+rust_nextest_materialized_archive_args() {
+    local extract_dir="$1"
+    printf '%s\n' \
+        --cargo-metadata "${extract_dir}/target/nextest/cargo-metadata.json" \
+        --binaries-metadata "${extract_dir}/target/nextest/binaries-metadata.json" \
+        --target-dir-remap "${extract_dir}/target"
+}
+
+rust_validate_materialized_archive() {
+    local extract_dir="$1"
+    if [ ! -f "${extract_dir}/target/nextest/cargo-metadata.json" ] || [ ! -f "${extract_dir}/target/nextest/binaries-metadata.json" ]; then
+        echo "Rust test error: nextest archive materialization did not produce replay metadata in ${extract_dir}/target/nextest" >&2
+        return 1
+    fi
+}
+
 # Preflight listing and execution take different workspace arguments without an
 # archive, and both are pinned by tests; only the archive case is shared.
 rust_nextest_list_source_args() {
@@ -919,6 +935,19 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
     fi
     SHARD_TOOL="${EXTENSION_PATH}/scripts/test-shard-inventory.py"
     SHARD_DATA="$(mktemp)"
+    NEXTEST_ARCHIVE_EXTRACT_DIR="${HOMEBOY_RUST_NEXTEST_EXTRACT_DIR:-}"
+    if [ "$SELECTED_RUNNER" = "nextest" ] && [ -n "${HOMEBOY_RUST_NEXTEST_ARCHIVE:-}" ]; then
+        if [ ! -f "${HOMEBOY_RUST_NEXTEST_ARCHIVE}" ]; then
+            echo "Rust test error: HOMEBOY_RUST_NEXTEST_ARCHIVE does not exist: ${HOMEBOY_RUST_NEXTEST_ARCHIVE}" >&2
+            rm -f "$SHARD_DATA"
+            exit 1
+        fi
+        if [ -z "$NEXTEST_ARCHIVE_EXTRACT_DIR" ] && ! homeboy_runner_harness_temp_dir NEXTEST_ARCHIVE_EXTRACT_DIR; then
+            rm -f "$SHARD_DATA"
+            exit 1
+        fi
+        export HOMEBOY_RUST_NEXTEST_EXTRACT_DIR="$NEXTEST_ARCHIVE_EXTRACT_DIR"
+    fi
     SHARD_ARGS=(--project "$PROJECT_PATH" --runner "$SELECTED_RUNNER" --output "$SHARD_DATA")
     if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ]; then
         SHARD_ARGS+=(--manifest "$HOMEBOY_TEST_SHARD_MANIFEST")
@@ -1024,13 +1053,26 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
         # reverse) would validate membership against binaries that are not the
         # ones executed.
         NEXTEST_LIST_SOURCE_ARGS=()
-        while IFS= read -r NEXTEST_SOURCE_ARG; do
-            NEXTEST_LIST_SOURCE_ARGS+=("$NEXTEST_SOURCE_ARG")
-        done < <(rust_nextest_list_source_args) || true
         NEXTEST_RUN_SOURCE_ARGS=()
-        while IFS= read -r NEXTEST_SOURCE_ARG; do
-            NEXTEST_RUN_SOURCE_ARGS+=("$NEXTEST_SOURCE_ARG")
-        done < <(rust_nextest_run_source_args) || true
+        if [ -n "${HOMEBOY_RUST_NEXTEST_ARCHIVE:-}" ]; then
+            if ! rust_validate_materialized_archive "$NEXTEST_ARCHIVE_EXTRACT_DIR"; then
+                SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+                rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+                rust_nextest_cleanup 1
+                exit 1
+            fi
+            while IFS= read -r NEXTEST_SOURCE_ARG; do
+                NEXTEST_RUN_SOURCE_ARGS+=("$NEXTEST_SOURCE_ARG")
+            done < <(rust_nextest_materialized_archive_args "$NEXTEST_ARCHIVE_EXTRACT_DIR")
+            NEXTEST_LIST_SOURCE_ARGS=("${NEXTEST_RUN_SOURCE_ARGS[@]}")
+        else
+            while IFS= read -r NEXTEST_SOURCE_ARG; do
+                NEXTEST_LIST_SOURCE_ARGS+=("$NEXTEST_SOURCE_ARG")
+            done < <(rust_nextest_list_source_args) || true
+            while IFS= read -r NEXTEST_SOURCE_ARG; do
+                NEXTEST_RUN_SOURCE_ARGS+=("$NEXTEST_SOURCE_ARG")
+            done < <(rust_nextest_run_source_args) || true
+        fi
         if [ "${#NEXTEST_LIST_SOURCE_ARGS[@]}" -eq 0 ] || [ "${#NEXTEST_RUN_SOURCE_ARGS[@]}" -eq 0 ]; then
             SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
             rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"

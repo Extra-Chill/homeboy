@@ -135,9 +135,23 @@ def nextest_archive():
 
 def nextest_inventory(workspace_root):
     archive = nextest_archive()
-    # `--archive-file` carries its own workspace, so it replaces `--workspace`
-    # in the same argv position rather than joining it.
-    source = ["--archive-file", archive] if archive else ["--workspace"]
+    extract_dir = os.environ.get("HOMEBOY_RUST_NEXTEST_EXTRACT_DIR", "").strip()
+    if extract_dir and not archive:
+        fail("HOMEBOY_RUST_NEXTEST_EXTRACT_DIR requires HOMEBOY_RUST_NEXTEST_ARCHIVE")
+    cargo_metadata = os.path.join(extract_dir, "target", "nextest", "cargo-metadata.json")
+    binaries_metadata = os.path.join(extract_dir, "target", "nextest", "binaries-metadata.json")
+    if extract_dir and os.path.isfile(cargo_metadata) and os.path.isfile(binaries_metadata):
+        source = [
+            "--cargo-metadata", cargo_metadata,
+            "--binaries-metadata", binaries_metadata,
+            "--target-dir-remap", os.path.join(extract_dir, "target"),
+        ]
+    elif archive and extract_dir:
+        source = ["--archive-file", archive, "--extract-to", extract_dir]
+    else:
+        # `--archive-file` carries its own workspace, so it replaces
+        # `--workspace` in the same argv position rather than joining it.
+        source = ["--archive-file", archive] if archive else ["--workspace"]
     command = ["cargo", "nextest", "list", *source, "--run-ignored", "all", "--message-format", "json"]
     result = run(command, workspace_root)
     if result.returncode:
