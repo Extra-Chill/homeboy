@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.12.4] - 2026-08-16
+
+### Fixed
+- run strict commands on macOS runners with a portable containment backend
+- respect review build placement support
+
 ## [2.12.3] - 2026-08-14
 
 ### Changed
