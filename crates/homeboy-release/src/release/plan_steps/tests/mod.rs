@@ -1193,51 +1193,54 @@ fn head_release_skip_publish_still_uploads_existing_artifacts() {
 
 #[test]
 fn release_plan_warns_when_configured_extensions_have_no_publish_action() {
-    let mut component = fixture_component();
-    component.extensions = Some(std::collections::HashMap::from([(
-        "wordpress".to_string(),
-        ScopedExtensionConfig::default(),
-    )]));
-    let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
-        "name": "WordPress",
-        "version": "1.0.0",
-        "actions": [
-            {
-                "id": "release.package",
-                "label": "Package release",
-                "type": "command",
-                "command": "true"
-            }
-        ]
-    }))
-    .expect("extension manifest");
-    extension.id = "wordpress".to_string();
-    let mut warnings = Vec::new();
-    let mut hints = Vec::new();
-    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
-    let options = ReleaseOptions {
-        bump_type: "patch".to_string(),
-        ..Default::default()
-    };
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut component = fixture_component();
+        component.extensions = Some(std::collections::HashMap::from([(
+            "wordpress".to_string(),
+            ScopedExtensionConfig::default(),
+        )]));
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "WordPress",
+            "version": "1.0.0",
+            "actions": [
+                {
+                    "id": "release.package",
+                    "label": "Package release",
+                    "type": "command",
+                    "command": "true"
+                }
+            ]
+        }))
+        .expect("extension manifest");
+        extension.id = "wordpress".to_string();
+        let mut warnings = Vec::new();
+        let mut hints = Vec::new();
+        let release_scope =
+            ReleaseScope::resolve(&component, &component.id).expect("release scope");
+        let options = ReleaseOptions {
+            bump_type: "patch".to_string(),
+            ..Default::default()
+        };
 
-    let _steps = build_release_steps(
-        &component,
-        &[extension],
-        "1.0.0",
-        "1.0.1",
-        &fixture_changelog_plan(),
-        &options,
-        &release_scope,
-        &mut warnings,
-        &mut hints,
-    )
-    .expect("steps");
+        let _steps = build_release_steps(
+            &component,
+            &[extension],
+            "1.0.0",
+            "1.0.1",
+            &fixture_changelog_plan(),
+            &options,
+            &release_scope,
+            &mut warnings,
+            &mut hints,
+        )
+        .expect("steps");
 
-    assert!(warnings.iter().any(|warning| {
-        warning.contains("configured extensions (wordpress)")
-            && warning.contains("release.package")
-            && warning.contains("no extension provides 'release.publish'")
-    }));
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("configured extensions (wordpress)")
+                && warning.contains("release.package")
+                && warning.contains("no extension provides 'release.publish'")
+        }));
+    });
 }
 
 #[test]

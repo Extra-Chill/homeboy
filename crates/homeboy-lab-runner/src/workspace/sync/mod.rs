@@ -3482,6 +3482,8 @@ fn liveness(state: &str, observations: Vec<String>) -> RunnerWorkspaceLivenessEv
 
 #[cfg(target_os = "linux")]
 fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
+    use std::os::unix::fs::MetadataExt;
+
     const MAX_PROCESSES: usize = 4096;
     const MAX_FDS_PER_PROCESS: usize = 1024;
     let target = path.to_string_lossy();
@@ -3502,14 +3504,30 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
             return liveness("unknown", vec!["process_probe_process_limit".to_string()]);
         }
         let process_path = process.path();
+        let foreign_process = match fs::metadata(&process_path) {
+            Ok(metadata) => metadata.uid() != unsafe { libc::geteuid() },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                return liveness("unknown", vec!["process_probe_metadata_failed".to_string()])
+            }
+        };
         let cwd = match fs::read_link(process_path.join("cwd")) {
             Ok(cwd) => cwd,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            // Runner workspaces and every process allowed to own them share the
+            // runner's OS identity. Protected processes under another UID are
+            // outside that ownership boundary; same-UID ambiguity stays closed.
+            Err(err) if foreign_process && err.kind() == std::io::ErrorKind::PermissionDenied => {
+                continue
+            }
             Err(_) => return liveness("unknown", vec!["process_probe_cwd_failed".to_string()]),
         };
         let command = match fs::read(process_path.join("cmdline")) {
             Ok(command) => command,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) if foreign_process && err.kind() == std::io::ErrorKind::PermissionDenied => {
+                continue
+            }
             Err(_) => return liveness("unknown", vec!["process_probe_argv_failed".to_string()]),
         };
         if cwd.starts_with(path) || String::from_utf8_lossy(&command).contains(target.as_ref()) {
@@ -3518,6 +3536,9 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
         let fds = match fs::read_dir(process_path.join("fd")) {
             Ok(fds) => fds,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) if foreign_process && err.kind() == std::io::ErrorKind::PermissionDenied => {
+                continue
+            }
             Err(_) => return liveness("unknown", vec!["process_probe_fd_failed".to_string()]),
         };
         for (index, fd) in fds.flatten().enumerate() {

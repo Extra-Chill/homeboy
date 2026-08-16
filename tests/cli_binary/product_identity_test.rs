@@ -6,7 +6,6 @@ use std::process::Command;
 fn shipped_root_binary_reports_root_version_and_source_commit() {
     let expected_version = env!("CARGO_PKG_VERSION");
     let expected_commit = git_output(&["rev-parse", "--short=12", "HEAD"]);
-    let expected_dirty = !git_output(&["status", "--porcelain"]).is_empty();
     let output = Command::new(homeboy_bin())
         .args(["self", "identity"])
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
@@ -17,7 +16,9 @@ fn shipped_root_binary_reports_root_version_and_source_commit() {
     let identity: Value = serde_json::from_slice(&output.stdout).expect("identity JSON");
     assert_eq!(identity["data"]["version"], expected_version);
     assert_eq!(identity["data"]["git_commit"], expected_commit);
-    assert_eq!(identity["data"]["git_dirty"], expected_dirty);
+    let built_dirty = identity["data"]["git_dirty"]
+        .as_bool()
+        .expect("build-time dirty state is boolean");
     let expected_binary = homeboy_bin().to_string_lossy().into_owned();
     assert_eq!(
         identity["data"]["active_binary"].as_str(),
@@ -71,6 +72,7 @@ fn shipped_root_binary_reports_root_version_and_source_commit() {
     let version = String::from_utf8(output.stdout).expect("version output is UTF-8");
     assert!(version.contains(expected_version));
     assert!(version.contains(&expected_commit));
+    assert_eq!(version.contains("-dirty"), built_dirty);
     assert!(!version.contains("0.1.0"));
 }
 

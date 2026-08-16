@@ -763,7 +763,7 @@ mod tests {
         std::fs::write(dir.join("VERSION"), "1.2.3\n").expect("version");
         std::fs::write(dir.join("package.json"), r#"{"version":"1.2.3"}"#).expect("package");
         std::fs::write(dir.join("CHANGELOG.md"), "# Changelog\n").expect("changelog");
-        git(dir, &["init", "-q"]);
+        git(dir, &["init", "-q", "--initial-branch=main"]);
         git(dir, &["config", "user.email", "test@example.com"]);
         git(dir, &["config", "user.name", "Test"]);
         git(dir, &["add", "."]);

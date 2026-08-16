@@ -125,9 +125,15 @@ fn scheduler_recovers_a_worker_killed_before_claim_creation() {
         while !worker_file.is_file() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
+        if !worker_file.is_file() && worker.is_finished() {
+            panic!(
+                "scheduler exited before persisting worker startup identity: {:#?}",
+                worker.join().expect("scheduler thread")
+            );
+        }
         assert!(
             worker_file.is_file(),
-            "scheduler persisted worker startup identity"
+            "scheduler remained live without persisting worker startup identity"
         );
         let worker_record: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&worker_file).expect("worker record"))
@@ -205,9 +211,15 @@ fn scheduler_restart_adopts_a_live_worker_without_reinvoking_helper() {
     while !worker_file.is_file() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }
+    if !worker_file.is_file() && first.is_finished() {
+        panic!(
+            "first scheduler exited before persisting worker startup identity: {:#?}",
+            first.join().expect("first scheduler thread")
+        );
+    }
     assert!(
         worker_file.is_file(),
-        "first scheduler persisted its worker"
+        "first scheduler remained live without persisting its worker"
     );
 
     let restarted = thread::spawn(|| {

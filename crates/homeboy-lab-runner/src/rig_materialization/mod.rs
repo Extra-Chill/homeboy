@@ -75,7 +75,7 @@ fn materialize_lab_stack_from_repository(
     for pr in &stack.prs {
         script.push_str(&format!("; {}", verify(&pr.head)));
         script.push_str(&format!(
-            "; parents=$(git -C {destination} rev-list --parents -n 1 {sha} | wc -w | tr -d ' '); if test \"$parents\" -gt 2; then test -n {mainline}; git -C {destination} cherry-pick --quiet -m {mainline} {sha} >/dev/null; else git -C {destination} cherry-pick --quiet {sha} >/dev/null; fi",
+            "; parents=$(git -C {destination} rev-list --parents -n 1 {sha} | wc -w | tr -d ' '); if test \"$parents\" -gt 2; then test -n {mainline}; git -C {destination} -c user.name=Homeboy -c user.email=homeboy@localhost cherry-pick --quiet -m {mainline} {sha} >/dev/null; else git -C {destination} -c user.name=Homeboy -c user.email=homeboy@localhost cherry-pick --quiet {sha} >/dev/null; fi",
             destination = q(destination),
             sha = q(&pr.head.sha),
             mainline = q(&pr.merge_mainline.map(|value| value.to_string()).unwrap_or_default()),

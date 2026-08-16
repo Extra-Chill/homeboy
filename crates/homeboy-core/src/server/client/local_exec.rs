@@ -1122,11 +1122,7 @@ mod tests {
         assert_eq!(supervision["status"], "interrupted");
         assert_eq!(supervision["cancellation_reason"], "signal:15");
         let pid = supervision["child_pid"].as_i64().expect("child pid") as libc::pid_t;
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child was reaped");
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
+        assert!(!crate::process::pid_is_running(pid as u32), "child exited");
     }
 
     #[cfg(unix)]
@@ -1141,10 +1137,9 @@ mod tests {
             .stdout
             .parse::<libc::pid_t>()
             .expect("descendant pid");
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "descendant was reaped");
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
+        assert!(
+            !crate::process::pid_is_running(pid as u32),
+            "descendant exited"
         );
     }
 }

@@ -1242,7 +1242,7 @@ const PROCESS_TERMINATION_GRACE: Duration = Duration::from_millis(100);
 /// owns cleanup of descendants that inherit the SSH output pipes.
 pub(super) fn wrap_timed_remote_command(command: &str) -> String {
     format!(
-        "command -v setsid >/dev/null 2>&1 || {{ printf '%s\\n' 'Homeboy timed SSH execution requires remote setsid process authority.' >&2; exit 127; }}; setsid sh -c {} & __homeboy_remote_pid=$!; __homeboy_remote_cleanup() {{ kill -TERM -\"$__homeboy_remote_pid\" 2>/dev/null || true; __homeboy_remote_attempt=0; while kill -0 -\"$__homeboy_remote_pid\" 2>/dev/null && [ \"$__homeboy_remote_attempt\" -lt 10 ]; do sleep 0.01; __homeboy_remote_attempt=$((__homeboy_remote_attempt + 1)); done; kill -KILL -\"$__homeboy_remote_pid\" 2>/dev/null || true; }}; trap '__homeboy_remote_cleanup; exit 143' HUP INT TERM; wait \"$__homeboy_remote_pid\"; __homeboy_remote_status=$?; __homeboy_remote_cleanup; exit \"$__homeboy_remote_status\"",
+        "command -v setsid >/dev/null 2>&1 || {{ printf '%s\\n' 'Homeboy timed SSH execution requires remote setsid process authority.' >&2; exit 127; }}; exec 9<&0; setsid sh -c {} <&9 9<&- & __homeboy_remote_pid=$!; exec 9<&-; __homeboy_remote_cleanup() {{ kill -TERM -\"$__homeboy_remote_pid\" 2>/dev/null || true; __homeboy_remote_attempt=0; while kill -0 -\"$__homeboy_remote_pid\" 2>/dev/null && [ \"$__homeboy_remote_attempt\" -lt 10 ]; do sleep 0.01; __homeboy_remote_attempt=$((__homeboy_remote_attempt + 1)); done; kill -KILL -\"$__homeboy_remote_pid\" 2>/dev/null || true; }}; trap '__homeboy_remote_cleanup; exit 143' HUP INT TERM; wait \"$__homeboy_remote_pid\"; __homeboy_remote_status=$?; __homeboy_remote_cleanup; exit \"$__homeboy_remote_status\"",
         shell::quote_arg(command)
     )
 }

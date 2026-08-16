@@ -301,11 +301,12 @@ fn tunnel_process_identity_matches(
 ) -> bool {
     match (pid, expected) {
         (Some(pid), Some(expected)) => {
-            super::capture_tunnel_process_start_identity(Some(pid))
-                .ok()
-                .flatten()
-                .as_ref()
-                == Some(expected)
+            homeboy_core::process::pid_is_running(pid)
+                && super::capture_tunnel_process_start_identity(Some(pid))
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    == Some(expected)
         }
         // Loopback connections have no SSH child to own.
         (None, None) => true,

@@ -2445,7 +2445,7 @@ mod tests {
             let mut fallback = provider("fallback.provider", "fallback");
             fallback.readiness_invocation = Some(
                 serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
                 }))
                 .expect("readiness invocation"),
             );
@@ -2484,14 +2484,14 @@ mod tests {
             let mut ready = provider("ready.provider", "ready");
             ready.readiness_invocation = Some(
                 serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
                 }))
                 .expect("ready readiness invocation"),
             );
             let mut failing = provider("failing.provider", "failing");
             failing.readiness_invocation = Some(
                 serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"configuration\",\"retryable\":false,\"remediation\":\"install the executable\",\"reason\":\"executable_not_found\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"configuration\",\"retryable\":false,\"remediation\":\"install the executable\",\"reason\":\"executable_not_found\",\"cache_key\":\"test\",\"identity\":{}}'"]
                 }))
                 .expect("failing readiness invocation"),
             );

@@ -672,7 +672,14 @@ fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
         .spawn()
         .expect("process with daemon state environment");
 
-    let store = super::process_durable_store_path(process.id(), true).expect("procfs store path");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let store = loop {
+        if let Some(store) = super::process_durable_store_path(process.id(), true) {
+            break store;
+        }
+        assert!(Instant::now() < deadline, "procfs store path");
+        std::thread::sleep(Duration::from_millis(10));
+    };
     process.kill().expect("stop process");
     process.wait().expect("reap process");
 
@@ -1458,7 +1465,7 @@ fn local_child_reservation_recovery_requires_death_before_one_replacement() {
 #[test]
 fn legacy_child_recovery_exact_evidence_is_idempotent_and_conflicts_fail_closed() {
     with_isolated_home(|_| {
-        let (store, job, endpoint) = legacy_recovery_fixture("lease-dead");
+        let (_store, job, endpoint) = legacy_recovery_fixture("lease-dead");
         let recovered = super::recover_missing_child_identity(
             "lease-dead",
             u32::MAX,
@@ -1468,7 +1475,12 @@ fn legacy_child_recovery_exact_evidence_is_idempotent_and_conflicts_fail_closed(
             1,
         )
         .expect("absent child identity recovers exactly one job");
-        let events = store.events(job.id).expect("events");
+        let events = JobStore::open_without_reconciliation(
+            &crate::paths::daemon_jobs_file().expect("jobs path"),
+        )
+        .expect("reopen recovered store")
+        .events(job.id)
+        .expect("events");
         assert_eq!(recovered.status, JobStatus::Failed);
         assert_eq!(
             events
@@ -1493,7 +1505,13 @@ fn legacy_child_recovery_exact_evidence_is_idempotent_and_conflicts_fail_closed(
         .expect("identical evidence is idempotent");
         assert_eq!(replay.id, recovered.id);
         assert_eq!(replay.status, recovered.status);
-        assert_eq!(store.events(job.id).expect("events").len(), events.len());
+        let replay_events = JobStore::open_without_reconciliation(
+            &crate::paths::daemon_jobs_file().expect("jobs path"),
+        )
+        .expect("reopen replayed store")
+        .events(job.id)
+        .expect("events");
+        assert_eq!(replay_events.len(), events.len());
 
         let conflict = super::recover_missing_child_identity(
             "lease-dead",

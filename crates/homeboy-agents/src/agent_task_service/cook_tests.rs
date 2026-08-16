@@ -6587,7 +6587,7 @@ fn cook_persists_materialization_failure_without_provider_execution() {
         let result =
             run_cook(options, UnusedExecutor).expect("cook records materialization failure");
 
-        assert_eq!(result.value.status, "pre_execution_failure");
+        assert_eq!(result.value.status, "pre_execution_failure", "{result:#?}");
         assert_eq!(result.value.attempts.len(), 1);
         assert!(result.value.failure_context.is_some());
         assert!(super::super::recipe_exists(cook_id).expect("durable recipe lookup"));
