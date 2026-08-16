@@ -310,10 +310,8 @@ assert_not_contains "${TMPDIR}/smoke-file.out" "WP_CODEBOX_STUB"
 cat > "${component}/homeboy-test-manifest.json" <<'JSON'
 {
   "schema": "homeboy/test-manifest/v1",
+  "default_environment": "standalone-php",
   "tests": {
-    "tests/import-agent-ability-smoke.php": {
-      "environment": "standalone-php"
-    },
     "tests/queue-routing-smoke.php": {
       "environment": "wordpress"
     }

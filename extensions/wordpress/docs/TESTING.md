@@ -68,19 +68,22 @@ rejected with a clear error.
 ## Real-WordPress host smokes
 
 Standalone PHP smoke files can live under `tests/**/*-smoke.php`. They are
-diagnostic/operator targets, not default release gates. Declare each smoke's
-environment in a root `homeboy-test-manifest.json` using schema
-`homeboy/test-manifest/v1`. Its `tests` object maps exact test paths to an
-`environment` of `standalone-php` or `wordpress`. Undeclared PHP smokes default
-to `wordpress`. `standalone-php` scripts run directly with PHP; `wordpress`
-scripts use the selected runtime backend with component mounts, dependency
-mounts, drop-in handling, WordPress version selection, and `wordpress.run-php`:
+diagnostic/operator targets, not default release gates. Declare smoke
+environments in a root `homeboy-test-manifest.json` using schema
+`homeboy/test-manifest/v1`. `default_environment` applies to undeclared files,
+and the `tests` object maps exact test paths to overrides. Both accept
+`standalone-php` or `wordpress`; omitting `default_environment` preserves the
+`wordpress` default. `standalone-php` scripts run directly with PHP;
+`wordpress` scripts use the selected runtime backend with component mounts,
+dependency mounts, drop-in handling, WordPress version selection, and
+`wordpress.run-php`:
 
 ```json
 {
   "schema": "homeboy/test-manifest/v1",
+  "default_environment": "standalone-php",
   "tests": {
-    "tests/contract-smoke.php": { "environment": "standalone-php" }
+    "tests/runtime-smoke.php": { "environment": "wordpress" }
   }
 }
 ```

@@ -14,9 +14,9 @@ set -euo pipefail
 #     `json.dumps(record_without_that_key, sort_keys=True, separators=(",",":"))`,
 #     which is the byte layout core reproduces by hand.
 #
-# Enumeration must also match what the runner would actually execute. A file the
-# runner cannot route must not appear, or a shard would claim a test that never
-# runs and the aggregate totals would not reconcile.
+# Enumeration must also match the runner's default release gates. Explicit
+# diagnostic smoke targets must not become required checks merely because the
+# suite is sharded.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -44,7 +44,7 @@ homeboy_runner_init() {
 }
 SH
 
-# Routable by the runner: host PHP smoke, JS smoke, shell smoke, node test, PHPUnit.
+# Explicit diagnostic smokes remain routable, but are not release-gate inventory.
 printf '<?php\n' > "${plugin}/tests/alpha-smoke.php"
 printf '<?php\n' > "${plugin}/tests/nested/beta-smoke.php"
 printf '// js\n'  > "${plugin}/tests/gamma-smoke.js"
@@ -56,6 +56,7 @@ printf '<?php\n'  > "${plugin}/tests/test-eta.php"
 # Not routable, and must not be enumerated: a fixture, a support file, and
 # anything inside a skipped directory.
 printf '<?php\n' > "${plugin}/tests/fixture-data.php"
+printf '<?php\n' > "${plugin}/tests/nested/test-helper.php"
 printf '<?php\n' > "${plugin}/vendor/pkg/tests/vendor-smoke.php"
 printf '// dep\n' > "${plugin}/node_modules/x/dep-smoke.js"
 
@@ -93,10 +94,6 @@ ids = [t["id"] for t in doc["tests"]]
 assert len(ids) == len(set(ids)), "test ids must be unique"
 
 expected = {
-    "tests/alpha-smoke.php": ("smoke", "host-php-smoke"),
-    "tests/nested/beta-smoke.php": ("smoke", "host-php-smoke"),
-    "tests/gamma-smoke.js": ("smoke", "host-js-smoke"),
-    "tests/delta-smoke.sh": ("smoke", "host-shell-smoke"),
     "tests/epsilon.test.js": ("test", "node-test"),
     "tests/ZetaTest.php": ("test", "phpunit"),
     "tests/test-eta.php": ("test", "phpunit"),

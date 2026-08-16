@@ -147,16 +147,17 @@ def classify(relative):
     name = relative.rsplit("/", 1)[-1]
     in_tests = within_tests_tree(relative)
 
-    if in_tests and name.endswith("-smoke.php"):
-        return "smoke", "host-php-smoke"
-    if in_tests and name.endswith("-smoke.js"):
-        return "smoke", "host-js-smoke"
-    if in_tests and name.endswith("-smoke.sh"):
-        return "smoke", "host-shell-smoke"
+    # Smoke scripts are explicit diagnostic/operator targets, not default
+    # release gates. Changed-scope and --file routing still execute them.
+    if in_tests and name.endswith(("-smoke.php", "-smoke.js", "-smoke.sh")):
+        return None
     for suffix in (".test.js", ".test.cjs", ".test.mjs", ".test.jsx", ".test.ts", ".test.tsx"):
         if name.endswith(suffix):
             return "test", "node-test"
-    if name.endswith("Test.php") or name.startswith("test-") and name.endswith(".php"):
+    root_test_prefix = relative.startswith("tests/test-") or relative.startswith(
+        "wordpress/tests/test-"
+    )
+    if name.endswith("Test.php") or (root_test_prefix and name.endswith(".php")):
         return "test", "phpunit"
     return None
 

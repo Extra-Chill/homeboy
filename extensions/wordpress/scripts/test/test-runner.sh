@@ -110,7 +110,8 @@ homeboy_wordpress_test_environment() {
         elif (.tests | type) != "object" then
             error("expected tests object")
         else
-            (.tests[$testFile].environment // "wordpress") as $environment
+            (.default_environment // "wordpress") as $defaultEnvironment
+            | (.tests[$testFile].environment // $defaultEnvironment) as $environment
             | if $environment == "wordpress" or $environment == "standalone-php" then
                 $environment
             else

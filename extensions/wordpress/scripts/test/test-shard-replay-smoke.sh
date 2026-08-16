@@ -34,21 +34,7 @@ jq -e '
 
 printf '<?php\nclass AlphaTest extends PHPUnit\\Framework\\TestCase {}\n' > "${component}/tests/Unit/AlphaTest.php"
 printf '<?php\nclass BetaTest extends PHPUnit\\Framework\\TestCase {}\n' > "${component}/tests/Unit/BetaTest.php"
-printf '<?php\necho "standalone smoke ran\\n";\n' > "${component}/tests/standalone-smoke.php"
-printf '<?php\necho "wordpress smoke ran\\n";\n' > "${component}/tests/wordpress-smoke.php"
-printf 'console.log("js smoke ran");\n' > "${component}/tests/browser-smoke.js"
 printf 'import test from "node:test";\ntest("node shard", () => console.log("node test ran"));\n' > "${component}/tests/worker.test.mjs"
-printf '#!/usr/bin/env bash\necho "shell smoke ran"\n' > "${component}/tests/contract-smoke.sh"
-chmod +x "${component}/tests/contract-smoke.sh"
-cat > "${component}/homeboy-test-manifest.json" <<'JSON'
-{
-  "schema": "homeboy/test-manifest/v1",
-  "tests": {
-    "tests/standalone-smoke.php": { "environment": "standalone-php" },
-    "tests/wordpress-smoke.php": { "environment": "wordpress" }
-  }
-}
-JSON
 
 runner_prelude="${WORKDIR}/runner-prelude.sh"
 cat > "$runner_prelude" <<'SH'
@@ -124,20 +110,16 @@ run_manifest() {
 
 first="${WORKDIR}/shard-1.json"
 second="${WORKDIR}/shard-2.json"
-write_manifest "$first" shard-1 tests/Unit/AlphaTest.php tests/standalone-smoke.php tests/wordpress-smoke.php tests/browser-smoke.js tests/worker.test.mjs tests/contract-smoke.sh
+write_manifest "$first" shard-1 tests/Unit/AlphaTest.php tests/worker.test.mjs
 write_manifest "$second" shard-2 tests/Unit/BetaTest.php
 
 run_manifest "$first" "${WORKDIR}/first.out"
-assert_contains "${WORKDIR}/first.out" 'TEST_SHARD_MANIFEST:id=shard-1 selected=6'
-assert_contains "${WORKDIR}/first.out" 'PHP_SMOKE_OK:tests/standalone-smoke.php'
-assert_contains "${WORKDIR}/first.out" 'HOST_SMOKE_OK:tests/wordpress-smoke.php'
-assert_contains "${WORKDIR}/first.out" 'js smoke ran'
+assert_contains "${WORKDIR}/first.out" 'TEST_SHARD_MANIFEST:id=shard-1 selected=2'
 assert_contains "${WORKDIR}/first.out" 'node test ran'
-assert_contains "${WORKDIR}/first.out" 'shell smoke ran'
 assert_contains "${WORKDIR}/first.out" 'PHPUNIT_CHANGED=tests/Unit/AlphaTest.php'
 assert_contains "${WORKDIR}/first.out" 'PHPUNIT_EXECUTED:tests/Unit/AlphaTest.php'
-assert_contains "${WORKDIR}/first.out" 'TEST_SHARD_SUMMARY:id=shard-1 selected=6 routed=6 status=passed'
-if [ "$(jq -r '.total' "${WORKDIR}/first.out.results.json")" -ne 6 ]; then
+assert_contains "${WORKDIR}/first.out" 'TEST_SHARD_SUMMARY:id=shard-1 selected=2 routed=2 status=passed'
+if [ "$(jq -r '.total' "${WORKDIR}/first.out.results.json")" -ne 2 ]; then
     fail 'shard result sidecar does not match first manifest membership'
 fi
 assert_not_contains "${WORKDIR}/first.out" 'BetaTest.php'
@@ -157,7 +139,7 @@ HOMEBOY_TEST_SHARD_MANIFEST="$first" \
 HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="${WORKDIR}/write-test-results.sh" \
 HOMEBOY_TEST_RESULTS_FILE="${WORKDIR}/parsed-results.json" \
     bash "${EXTENSION_PATH}/scripts/test/parse-test-results.sh" "${WORKDIR}/first.out"
-if [ "$(jq -r '.total' "${WORKDIR}/parsed-results.json")" -ne 6 ]; then
+if [ "$(jq -r '.total' "${WORKDIR}/parsed-results.json")" -ne 2 ]; then
     fail 'result parser does not recover validated shard membership'
 fi
 
@@ -219,11 +201,11 @@ if HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
     HOMEBOY_TEST_SHARD_MANIFEST="$first" \
     HOMEBOY_TEST_SCOPE_KIND="exclusive_env" \
     HOMEBOY_TEST_SCOPE_ENV_NAME="HOMEBOY_WORDPRESS_HOST_SMOKE_FILES" \
-    HOMEBOY_TEST_SCOPE_ENV_VALUE="tests/standalone-smoke.php" \
+    HOMEBOY_TEST_SCOPE_ENV_VALUE="tests/diagnostic-smoke.php" \
         bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${WORKDIR}/exclusive.out" 2>&1; then
     fail 'exclusive scope bypassed the shard manifest'
 fi
 assert_contains "${WORKDIR}/exclusive.out" 'is mutually exclusive with HOMEBOY_TEST_SCOPE_KIND=exclusive_env'
-assert_not_contains "${WORKDIR}/exclusive.out" 'standalone smoke ran'
+assert_not_contains "${WORKDIR}/exclusive.out" 'PHP_SMOKE_BEGIN:'
 
 printf 'All WordPress test shard replay checks passed.\n'

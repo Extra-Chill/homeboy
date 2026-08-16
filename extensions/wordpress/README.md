@@ -124,22 +124,23 @@ Available factories from the WordPress test framework: `user`, `post`,
 ### Real-WordPress host smokes
 
 Standalone smoke files matching `tests/**/*-smoke.php` are diagnostic/operator
-targets, not default release gates. A component can declare each file's required
-environment in a root `homeboy-test-manifest.json`:
+targets, not default release gates. A component can declare a default and exact
+per-file environment overrides in a root `homeboy-test-manifest.json`:
 
 ```json
 {
   "schema": "homeboy/test-manifest/v1",
+  "default_environment": "standalone-php",
   "tests": {
-    "tests/contract-smoke.php": { "environment": "standalone-php" },
     "tests/runtime-smoke.php": { "environment": "wordpress" }
   }
 }
 ```
 
 `standalone-php` files run directly with PHP, while `wordpress` files are
-mounted with the component and executed via `wordpress.run-php`. Undeclared
-PHP smokes default to `wordpress`, preserving the existing runtime behavior.
+mounted with the component and executed via `wordpress.run-php`. An exact
+`tests` entry overrides `default_environment`. Omitting `default_environment`
+keeps the existing `wordpress` default.
 
 To rerun one existing smoke on demand before pushing:
 
