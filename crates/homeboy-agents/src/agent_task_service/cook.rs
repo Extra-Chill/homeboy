@@ -272,25 +272,6 @@ fn claim_pre_artifact_interruption_retry(
     )
 }
 
-fn claim_pre_artifact_interruption_retry_with_store(
-    recipe_store: &CookRecipeStore,
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-    plan: &AgentTaskPlan,
-    replace_semantic_attempt: bool,
-) -> Result<Option<(u32, String)>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    claim_pre_artifact_interruption_retry_with_stores(
-        (recipe_store, &lifecycle_store),
-        cook_id,
-        attempt,
-        run_id,
-        plan,
-        replace_semantic_attempt,
-    )
-}
-
 fn claim_pre_artifact_interruption_retry_with_stores(
     stores: (&CookRecipeStore, &AgentTaskLifecycleStore),
     cook_id: &str,
@@ -4097,30 +4078,6 @@ where
     )
 }
 
-fn run_cook_with_boundaries_observed_inner_with_store<E, S>(
-    store: &CookRecipeStore,
-    options: AgentTaskCookServiceOptions,
-    executor: E,
-    side_effects: S,
-    durable_observer: Option<&CookProgressObserver<'_>>,
-    allow_historical_terminal: bool,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-    S: CookSideEffectService,
-{
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    run_cook_with_boundaries_observed_inner_with_stores(
-        store,
-        &lifecycle_store,
-        options,
-        executor,
-        side_effects,
-        durable_observer,
-        allow_historical_terminal,
-    )
-}
-
 /// The Cook spine, bound to explicit recipe and lifecycle roots. Every durable
 /// write on this path resolves through the two passed stores, so a caller can
 /// place a Cook's recipe and its lifecycle records wherever it owns them
@@ -5219,8 +5176,8 @@ where
                         1,
                     ));
                 }
-                match claim_pre_artifact_interruption_retry_with_store(
-                    store,
+                match claim_pre_artifact_interruption_retry_with_stores(
+                    (store, lifecycle_store),
                     &cook_id,
                     attempt,
                     &run_id,
