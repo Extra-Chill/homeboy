@@ -88,6 +88,10 @@ impl AgentTaskLifecycleStore {
         self.roots.artifacts().to_path_buf()
     }
 
+    pub(crate) fn controller_scratch_root(&self) -> PathBuf {
+        self.data_root().join("controller-scratch")
+    }
+
     pub(crate) fn matches_current_environment(&self) -> Result<bool> {
         Ok(self.roots == paths::PathRoots::from_environment()?)
     }
