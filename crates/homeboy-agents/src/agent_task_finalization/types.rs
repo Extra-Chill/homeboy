@@ -336,6 +336,18 @@ pub trait AgentTaskPrFinalizationBackend {
     fn validate_candidate(&mut self, _options: &AgentTaskPrFinalizationOptions) -> Result<()> {
         Ok(())
     }
+    fn validate_candidate_in_store(
+        &mut self,
+        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        _options: &AgentTaskPrFinalizationOptions,
+    ) -> Result<()> {
+        Err(Error::validation_invalid_argument(
+            "finalization_backend",
+            "backend does not support explicit lifecycle-store candidate validation",
+            None,
+            None,
+        ))
+    }
     fn current_branch(&mut self, path: &str) -> Result<String>;
     fn changed_files(&mut self, path: &str) -> Result<Vec<String>>;
     fn resolve_base(&mut self, _path: &str, base: &str) -> Result<AgentTaskPrResolvedBase> {

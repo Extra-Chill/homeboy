@@ -36,8 +36,8 @@ use super::cook::{
     CookFollowUpBudgetScope, CookFollowUpDispatch,
 };
 use super::cook_promotion::{
-    cook_report, finalize_or_load_cook_pr_with_backend_with_store, persisted_promotion_for_attempt,
-    promotion_source, CookReportInput,
+    cook_report, finalize_or_load_cook_pr_with_backend_with_stores,
+    persisted_promotion_for_attempt, promotion_source, CookReportInput,
 };
 use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
@@ -239,6 +239,16 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let store = CookRecipeStore::from_current_data_root()?;
+    // Adoption is an env-resolving entry point: nothing above it can inject a
+    // root, because every one of its callers is a frozen `pub` signature. Both
+    // durable roots are therefore resolved here, adjacent and visible, so the
+    // pair handed to remediation dispatch and to finalization is provably the
+    // same pair. Resolving the lifecycle root here surfaces no failure earlier
+    // than before: `agent_task_lifecycle::load_plan` below runs unconditionally
+    // ahead of every return in this function and already resolves this exact
+    // constructor through its own default store.
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let (record, recipe) = resolve_adoption_target_with_attempt(cook_or_run_id, attempt)?;
     let cook_id = &recipe.cook_id;
     let mut options = super::reconstruct_adoption_options(&recipe)?;
@@ -681,8 +691,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             },
             Err(error) => return Err(error),
         };
-        let lifecycle_store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
         let dispatch = dispatch_cook_follow_up(
             (&store, &lifecycle_store),
             &options,
@@ -722,8 +730,13 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                     options,
                     executor,
                     |options, run_id, promotion| {
-                        finalize_or_load_cook_pr_with_backend_with_store(
-                            &store, options, run_id, promotion, backend,
+                        finalize_or_load_cook_pr_with_backend_with_stores(
+                            &store,
+                            &lifecycle_store,
+                            options,
+                            run_id,
+                            promotion,
+                            backend,
                         )
                     },
                 )?;
@@ -835,8 +848,9 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         "finalization",
         "finalize pull request",
     )?;
-    let mut finalization = match finalize_or_load_cook_pr_with_backend_with_store(
+    let mut finalization = match finalize_or_load_cook_pr_with_backend_with_stores(
         &store,
+        &lifecycle_store,
         &options,
         &record.run_id,
         &promotion,
