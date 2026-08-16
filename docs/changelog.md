@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.9] - 2026-08-16
+
+### Changed
+- root Cook lifecycle write callers
+- give the run re-entry family explicit stores
+- catch rooted siblings that reach ambient store state
+- give run-outcome recording explicit stores
+
+### Fixed
+- trust durable review verification
+- preserve attached local execution
+
 ## [0.350.8] - 2026-08-16
 
 ### Changed
