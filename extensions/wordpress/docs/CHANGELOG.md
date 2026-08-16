@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.35.5] - 2026-08-16
+
+### Fixed
+- resolve shared agent runtimes from the installed layout
+
 ## [3.35.4] - 2026-08-15
 
 ### Fixed
