@@ -856,7 +856,9 @@ impl RunnerStatusReport {
         let unresolved_generations = generations
             .iter()
             .filter(|generation| {
-                !generation.active_job_count_authoritative && generation.active_job_count > 0
+                !generation.admission_owner
+                    && !generation.active_job_count_authoritative
+                    && generation.active_job_count > 0
             })
             .collect::<Vec<_>>();
         let unresolved_retained_projection_count = unresolved_generations
@@ -877,7 +879,7 @@ impl RunnerStatusReport {
             .map(|generation| generation.generation.clone());
         let unresolved_generation = generations
             .iter()
-            .find(|generation| generation.active_job_count > 0)
+            .find(|generation| !generation.admission_owner && generation.active_job_count > 0)
             .map(|generation| generation.generation.clone());
         let admission_blocking_job_ids = blocking_generation
             .as_deref()
@@ -1652,14 +1654,9 @@ mod status_serialization_tests {
 
         let summary = report.admission_summary_with_generations(&generations, &owners, 0);
 
-        assert_eq!(summary.unresolved_retained_projection_count, 2);
-        assert_eq!(summary.unresolved_job_owners.len(), 2);
-        assert_eq!(summary.unresolved_job_owners[0].job_id, "job-a");
-        assert_eq!(summary.unresolved_job_owners[0].generation, "lease-current");
-        assert_eq!(
-            summary.unresolved_job_owners[0].ownership_source,
-            "generation_ledger"
-        );
+        assert_eq!(summary.unresolved_retained_projection_count, 0);
+        assert!(summary.unresolved_generation_ids.is_empty());
+        assert!(summary.unresolved_job_owners.is_empty());
         assert_eq!(
             summary.next_action.as_deref(),
             Some("homeboy runner connect homeboy-lab")
