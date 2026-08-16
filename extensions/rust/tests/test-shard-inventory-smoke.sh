@@ -87,6 +87,15 @@ if [ "${1:-}" = 'metadata' ]; then
 fi
 if [ "${1:-}" = 'nextest' ] && [ "${2:-}" = 'list' ]; then
   [ -z "${HOMEBOY_FAKE_NEXTEST_LOG:-}" ] || printf 'list %s\n' "$*" >> "$HOMEBOY_FAKE_NEXTEST_LOG"
+  args=("$@")
+  for ((index = 0; index < ${#args[@]}; index++)); do
+    if [ "${args[$index]}" = '--extract-to' ]; then
+      extract_dir="${args[$((index + 1))]}"
+      mkdir -p "${extract_dir}/target/nextest"
+      : > "${extract_dir}/target/nextest/cargo-metadata.json"
+      : > "${extract_dir}/target/nextest/binaries-metadata.json"
+    fi
+  done
   # cargo-nextest writes build progress to stderr before its JSON list payload.
   printf '   Compiling shard-smoke v0.1.0\n' >&2
   if [ "${HOMEBOY_NEXTEST_LIST_MODE:-pass}" = stderr-json-only ]; then
@@ -620,12 +629,15 @@ archive = sys.argv[2]
 replay = [line for line in lines if line.startswith(("list ", "run "))]
 assert len(replay) == 3, lines
 assert replay[1].startswith("list nextest list") and replay[2].startswith("run nextest run"), replay
+assert f"--archive-file {archive}" in replay[0] and "--extract-to" in replay[0], replay
 for line in replay[1:]:
-    assert f"--archive-file {archive}" in line, line
+    assert "--archive-file" not in line, replay
+    assert "--cargo-metadata" in line and "--binaries-metadata" in line and "--target-dir-remap" in line, replay
+for line in replay[1:]:
     assert " --workspace " not in line, line
     assert "--manifest-path" not in line, line
 PY_ARCHIVE
-printf 'PASS: nextest archive replaces workspace compilation for shard listing and execution\n'
+printf 'PASS: nextest archive is materialized once for shard listing and execution\n'
 
 # A declared archive that is not present must fail closed rather than silently
 # falling back to a full-workspace compile, which would erase the saving and
@@ -656,7 +668,9 @@ HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
 HOMEBOY_SKIP_LINT=1 \
 HOMEBOY_RUST_TEST_RUNNER=nextest \
 HOMEBOY_RUST_NEXTEST_FILTER_MAX_BYTES=150 \
+HOMEBOY_RUST_NEXTEST_ARCHIVE="$WORK_DIR/archive.tar.zst" \
 HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_FAKE_NEXTEST_LOG="$WORK_DIR/batched-nextest-all.log" \
 HOMEBOY_FAKE_NEXTEST_RUN_LOG="$WORK_DIR/batched-nextest.log" \
 HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
 HOMEBOY_RUNTIME_SIDECAR_WRITER="$WORK_DIR/sidecar-writer.sh" \
@@ -667,7 +681,7 @@ HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
 PATH="$BIN_DIR:$PATH" \
 bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/batched-nextest.out"
 
-python3 - "$WORK_DIR/batched-nextest.log" "$WORK_DIR/batched-nextest-results.json" <<'PY'
+python3 - "$WORK_DIR/batched-nextest.log" "$WORK_DIR/batched-nextest-results.json" "$WORK_DIR/batched-nextest-all.log" "$WORK_DIR/archive.tar.zst" <<'PY'
 import json
 import re
 import sys
@@ -683,7 +697,15 @@ for line in lines:
 assert selected == ["member::member_works", "unit::alpha", "unit::beta", "api::works"], selected
 assert len(selected) == len(set(selected)), selected
 assert json.load(open(sys.argv[2])) == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}
+replay = open(sys.argv[3]).read().splitlines()
+archive = sys.argv[4]
+archive_calls = [line for line in replay if f"--archive-file {archive}" in line]
+assert len(archive_calls) == 1 and "--extract-to" in archive_calls[0], replay
+materialized_calls = [line for line in replay if "--cargo-metadata" in line]
+assert len(materialized_calls) == 8, replay
+assert all("--archive-file" not in line for line in materialized_calls), replay
 PY
+printf 'PASS: multi-batch replay extracts its nextest archive exactly once\n'
 
 # A shard killed by its wall-clock budget never reaches a terminal emit, so the
 # only thing that can report the gap is evidence already written to disk. Record
