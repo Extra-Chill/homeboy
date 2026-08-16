@@ -38,6 +38,10 @@ inputs:
     description: 'Git URL or path to install the extension from.'
     required: false
     default: 'https://github.com/Extra-Chill/homeboy-extensions'
+  extension-ref:
+    description: 'Optional git revision to install from the extension source.'
+    required: false
+    default: ''
 
   # ── Commands ──
   commands:
@@ -410,6 +414,7 @@ runs:
         EXTENSION_ID: ${{ steps.read-config.outputs.portable-extension }}
         EXTENSION_INPUT: ${{ inputs.extension }}
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
+        EXTENSION_REF: ${{ inputs.extension-ref }}
         COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
       run: bash ${{ github.action_path }}/scripts/setup/install-extension.sh
 

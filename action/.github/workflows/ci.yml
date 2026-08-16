@@ -29,6 +29,10 @@ on:
         description: 'Git URL or path to install the extension from.'
         type: string
         default: 'https://github.com/Extra-Chill/homeboy-extensions'
+      extension-ref:
+        description: 'Optional git revision to install from the extension source.'
+        type: string
+        default: ''
       args:
         description: 'Additional arguments passed to each Homeboy command.'
         type: string
@@ -491,6 +495,7 @@ jobs:
           rust-toolchain: ${{ inputs.rust-toolchain }}
           extension: ${{ inputs.extension }}
           extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
           commands: ${{ matrix.command }}
           expected-commands: ${{ inputs.expected-commands || inputs.commands }}
           component: ${{ inputs.component }}
@@ -607,6 +612,7 @@ jobs:
           rust-toolchain: ${{ inputs.rust-toolchain }}
           extension: ${{ inputs.extension }}
           extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
           commands: ${{ matrix.command }}
           expected-commands: ${{ inputs.expected-commands || inputs.commands }}
           component: ${{ inputs.component }}
@@ -735,6 +741,7 @@ jobs:
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
           extension: ${{ inputs.extension }}
           extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
           commands: ${{ needs.plan.outputs.test-command }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
@@ -875,6 +882,7 @@ jobs:
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
           extension: ${{ inputs.extension }}
           extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
           commands: ${{ matrix.command }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
