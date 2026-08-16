@@ -59,12 +59,33 @@ BACKEND_GUARANTEE = {
 }
 
 
-def identity(pid):
+LinuxProcess = collections.namedtuple("LinuxProcess", ("ppid", "state", "start", "command"))
+
+
+def linux_process(pid, include_command=False):
     try:
-        fields = open(f"/proc/{pid}/stat", encoding="utf-8").read().split()
-        return None if fields[2] == "Z" else int(fields[21])
+        stat = open(f"/proc/{pid}/stat", encoding="utf-8").read()
+        closing_parenthesis = stat.rfind(")")
+        if closing_parenthesis < 0:
+            return None
+        fields = stat[closing_parenthesis + 2 :].split()
+        state, ppid, start = fields[0], int(fields[1]), int(fields[19])
+        command = stat[stat.find("(") + 1 : closing_parenthesis]
+        if include_command:
+            try:
+                cmdline = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").strip()
+                if cmdline:
+                    command = cmdline.decode("utf-8", errors="replace")
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                pass
+        return LinuxProcess(ppid=ppid, state=state, start=start, command=command)
     except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
         return None
+
+
+def identity(pid):
+    entry = linux_process(pid)
+    return None if entry is None or entry.state == "Z" else entry.start
 
 
 def descendants(root):
@@ -73,9 +94,10 @@ def descendants(root):
         if not entry.name.isdigit():
             continue
         try:
-            fields = open(f"/proc/{entry.name}/stat", encoding="utf-8").read().split()
-            children.setdefault(int(fields[3]), []).append(int(entry.name))
-        except (FileNotFoundError, ProcessLookupError, PermissionError, IndexError, ValueError):
+            process = linux_process(int(entry.name))
+            if process is not None:
+                children.setdefault(process.ppid, []).append(int(entry.name))
+        except PermissionError:
             # A process that exits between scandir and read surfaces as ESRCH
             # (ProcessLookupError), not just ENOENT. Scanning all of /proc means
             # this race is routine; letting it escape kills the supervisor and
@@ -112,6 +134,32 @@ def known_live(known):
         return any(identity(pid) == start for pid, start in known)
     except PermissionError:
         return None
+
+
+def live_member_details(known):
+    members = []
+    for pid, start in known:
+        entry = linux_process(pid, include_command=True)
+        if entry is None or entry.state == "Z" or entry.start != start:
+            continue
+        ancestry, parent = [pid], entry.ppid
+        while parent > 0 and parent not in ancestry:
+            ancestry.append(parent)
+            parent_entry = linux_process(parent)
+            if parent_entry is None:
+                break
+            parent = parent_entry.ppid
+        members.append((pid, entry, "<-".join(str(member) for member in ancestry)))
+    return members
+
+
+def report_live_members(label, known):
+    for pid, entry, ancestry in live_member_details(known):
+        command = entry.command.replace("\r", " ").replace("\n", " ")[:500]
+        print(
+            f"::warning::{label} live containment member: pid={pid} state={entry.state} "
+            f"command={command!r} ancestry={ancestry}."
+        )
 
 
 def reap_children():
@@ -445,13 +493,23 @@ def run_linux(args):
         time.sleep(0.05)
 
     exit_code = process.wait()
-    reap_children()
-    if not observe() or known_live(known) is None:
-        close_pidfds(known)
-        return 125
+    drain_deadline = time.monotonic() + args.cleanup_timeout
+    while True:
+        reap_children()
+        if not observe():
+            close_pidfds(known)
+            return 125
+        live = known_live(known)
+        if live is None:
+            close_pidfds(known)
+            return 125
+        if not live or time.monotonic() >= drain_deadline:
+            break
+        time.sleep(0.05)
     leaked_containment = False
-    if known_live(known):
+    if live:
         leaked_containment = True
+        report_live_members(args.label, known)
         if not terminate("finalization found live command containment"):
             close_pidfds(known)
             return 125

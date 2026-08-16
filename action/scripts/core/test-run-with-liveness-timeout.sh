@@ -131,6 +131,41 @@ if [ "$(uname -s)" = Linux ]; then
   printf 'PASS: strict commands without leaked descendants report their own exit codes\n'
 fi
 
+# A JVM-style launcher can exit just before its already-stopping worker. The
+# subreaper must reap that child during finalization rather than killing it and
+# rewriting retained structured success as a timeout.
+if [ "$(uname -s)" = Linux ]; then
+  short_lived_output='{"success":true,"data":{"exit_code":0,"termination":"completed"}}'
+  HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=5 HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS=1 bash "${RUNNER}" --log-file "${TMP_DIR}/short-lived-command.log" "short-lived JVM child" python3 -c 'import os, sys, time; os.write(1, sys.argv[1].encode()); pid = os.fork(); os._exit(0) if pid else (time.sleep(0.2), os._exit(0))' "${short_lived_output}" >"${TMP_DIR}/short-lived.log" 2>&1
+  if [ "$(<"${TMP_DIR}/short-lived-command.log")" != "${short_lived_output}" ]; then
+    printf 'FAIL: natural descendant drain discarded structured command output\n'
+    exit 1
+  fi
+  if grep -q 'leaked descendants' "${TMP_DIR}/short-lived.log"; then
+    printf 'FAIL: naturally exiting JVM-style child was reported as leaked\n'
+    exit 1
+  fi
+  printf 'PASS: Linux supervisor reaps a naturally exiting JVM-style child and preserves structured success\n'
+
+  live_pid_file="${TMP_DIR}/strict-live.pid"
+  set +e
+  HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=5 HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS=1 bash "${RUNNER}" --log-file "${TMP_DIR}/strict-live-command.log" "genuine live child" python3 -c 'import os, sys, time; pid = os.fork(); os._exit(0) if pid else (open(sys.argv[1], "w").write(str(os.getpid())), time.sleep(30), os._exit(0))' "${live_pid_file}" >"${TMP_DIR}/strict-live.log" 2>&1
+  live_exit=$?
+  set -e
+  live_pid="$(<"${live_pid_file}")"
+  if [ "${live_exit}" -ne 124 ] || kill -0 "${live_pid}" 2>/dev/null; then
+    printf 'FAIL: strict supervisor did not fail and contain a genuinely live child\n'
+    exit 1
+  fi
+  for detail in "pid=${live_pid}" 'state=' 'command=' 'ancestry='; do
+    if ! grep -q "${detail}" "${TMP_DIR}/strict-live.log"; then
+      printf 'FAIL: live-child diagnostic omitted %s\n' "${detail}"
+      exit 1
+    fi
+  done
+  printf 'PASS: genuine live descendants remain failures with actionable process diagnostics\n'
+fi
+
 python3 - "${ROOT_DIR}/scripts/core/run-with-liveness-timeout-supervisor.py" <<'PY'
 import importlib.util
 import os
