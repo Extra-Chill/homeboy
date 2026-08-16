@@ -3953,12 +3953,8 @@ where
             .map(|attempt| attempt.attempt)
             .unwrap_or(1);
         let phase = result.value.disposition.phase();
-        // Last ambient lifecycle reach on this path: run_cook_with_boundaries_reported
-        // has no store in scope, and giving it one requires threading a parameter
-        // through the 3623-3961 boundary chain (#7505).
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
         if let Err(error) = report_cook_progress(
-            &lifecycle_store,
+            lifecycle_store,
             durable_observer,
             &result.value.cook_id,
             run_id,
