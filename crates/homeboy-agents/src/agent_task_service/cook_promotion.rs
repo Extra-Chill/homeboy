@@ -881,15 +881,6 @@ pub(crate) fn moving_base_recovery_for_run(run_id: &str) -> Result<Option<Moving
     moving_base_recovery_for_run_with_stores(&recipe_store, &lifecycle_store, run_id)
 }
 
-pub(crate) fn moving_base_recovery_for_run_with_store(
-    store: &super::cook_recipe::CookRecipeStore,
-    run_id: &str,
-) -> Result<Option<MovingBaseCookRecovery>> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    moving_base_recovery_for_run_with_stores(store, &lifecycle_store, run_id)
-}
-
 pub(crate) fn moving_base_recovery_for_run_with_stores(
     store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -1634,19 +1625,10 @@ pub(crate) fn finalize_or_load_cook_pr(
     promotion: &AgentTaskPromotionReport,
 ) -> Result<Value> {
     let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    finalize_or_load_cook_pr_with_store(&store, options, successful_run_id, promotion)
-}
-
-pub(crate) fn finalize_or_load_cook_pr_with_store(
-    store: &super::cook_recipe::CookRecipeStore,
-    options: &AgentTaskCookServiceOptions,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-) -> Result<Value> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     finalize_or_load_cook_pr_with_stores(
-        store,
+        &store,
         &lifecycle_store,
         options,
         successful_run_id,
@@ -1737,20 +1719,10 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     backend: &mut B,
 ) -> Result<Value> {
     let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    finalize_cook_pr_with_backend_with_store(&store, options, successful_run_id, promotion, backend)
-}
-
-pub(crate) fn finalize_cook_pr_with_backend_with_store<B: AgentTaskPrFinalizationBackend>(
-    store: &super::cook_recipe::CookRecipeStore,
-    options: &AgentTaskCookServiceOptions,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    backend: &mut B,
-) -> Result<Value> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     finalize_cook_pr_with_backend_with_stores(
-        store,
+        &store,
         &lifecycle_store,
         options,
         successful_run_id,
@@ -1800,20 +1772,10 @@ pub(crate) fn cook_finalization_options(
     overrides: Vec<AgentTaskReviewOverride>,
 ) -> Result<AgentTaskPrFinalizationOptions> {
     let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    cook_finalization_options_with_store(&store, options, successful_run_id, promotion, overrides)
-}
-
-pub(crate) fn cook_finalization_options_with_store(
-    store: &super::cook_recipe::CookRecipeStore,
-    options: &AgentTaskCookServiceOptions,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    overrides: Vec<AgentTaskReviewOverride>,
-) -> Result<AgentTaskPrFinalizationOptions> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     cook_finalization_options_with_stores(
-        store,
+        &store,
         &lifecycle_store,
         options,
         successful_run_id,
