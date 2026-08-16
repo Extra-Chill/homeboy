@@ -298,6 +298,15 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled(
+        &self,
+        cook_id: &str,
+    ) -> Result<bool> {
+        super::lifecycle_ops::cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
+            self, cook_id,
+        )
+    }
+
     pub fn start_candidate_adoption_with_policy(
         &self,
         run_id: &str,

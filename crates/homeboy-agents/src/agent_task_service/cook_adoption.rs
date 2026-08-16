@@ -1288,7 +1288,12 @@ fn materialize_adoption_attempt_in_stores(
                 Some(&|run_id| homeboy_core::controller_runtime::admission_status(run_id).ok()),
                 agent_task_lifecycle::execution_runner_id(),
                 super::cook_pre_execution::production_runtime_admission(lifecycle_store),
-                super::cook_pre_execution::reconcile_reserved_cancellation,
+                |cook_id| {
+                    super::cook_pre_execution::reconcile_reserved_cancellation_in_store(
+                        lifecycle_store,
+                        cook_id,
+                    )
+                },
             )?;
     Ok((record, recipe))
 }
