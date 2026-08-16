@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.12.5] - 2026-08-16
+
+### Fixed
+- drain exited descendants before containment failure
+- separate portable component identity from path
+
 ## [2.12.4] - 2026-08-16
 
 ### Fixed
