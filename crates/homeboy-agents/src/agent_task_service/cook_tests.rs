@@ -6718,7 +6718,7 @@ fn run_cook_persists_recipe_in_explicit_store_only() {
         let result = run_cook_with_store(&store, options, UnusedExecutor)
             .expect("Cook reports the lifecycle materialization failure");
 
-        assert_eq!(result.value.status, "pre_execution_failure");
+        assert_eq!(result.value.status, "durable_failure");
         assert!(store.recipe_exists(cook_id));
         assert!(!super::super::recipe_exists(cook_id).expect("ambient recipe lookup"));
     });
