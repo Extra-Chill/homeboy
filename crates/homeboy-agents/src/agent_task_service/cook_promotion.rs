@@ -1660,28 +1660,10 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend<B: AgentTaskPrFinalizationBa
     backend: &mut B,
 ) -> Result<Value> {
     let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    finalize_or_load_cook_pr_with_backend_with_store(
-        &store,
-        options,
-        successful_run_id,
-        promotion,
-        backend,
-    )
-}
-
-pub(crate) fn finalize_or_load_cook_pr_with_backend_with_store<
-    B: AgentTaskPrFinalizationBackend,
->(
-    store: &super::cook_recipe::CookRecipeStore,
-    options: &AgentTaskCookServiceOptions,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    backend: &mut B,
-) -> Result<Value> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     finalize_or_load_cook_pr_with_backend_with_stores(
-        store,
+        &store,
         &lifecycle_store,
         options,
         successful_run_id,
