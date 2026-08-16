@@ -202,13 +202,13 @@ Keep the service disabled for production until #2990 and #2991 are merged. For
 private smoke tests before #2991, use the one-shot worker shape from the active
 implementation branch or PR notes instead of a hand-rolled infinite loop.
 
-## 4. Reverse workspace sync
+## 4. Reverse workspace staging
 
-Reverse workspace sync is gated by #2947. Until it lands, controller-originated
-commands can only smoke simple brokered execution that does not require syncing a
-controller checkout to the runner through the reverse session.
+Controller-originated durable work stages its verified source through the reverse
+broker before the runner executes it. The runner receives the staged workspace
+descriptor and must keep the resulting path beneath its configured workspace root.
 
-Expected modes after #2947:
+Supported source forms are:
 
 - `git`: the runner materializes a repo-backed clean commit/ref itself.
 - `snapshot-over-tunnel`: the controller streams a filtered archive through the reverse
@@ -222,8 +222,8 @@ by `homeboy runner workspace sync`.
 
 ## 5. Minimal end-to-end smoke
 
-Run this only after #2990, #2991, #2992, and #2947 have landed or in an explicit
-private smoke environment that provides equivalent branch builds.
+Run this against a connected reverse runner with a broker endpoint and a configured
+workspace root.
 
 1. Start or verify the controller broker service:
 

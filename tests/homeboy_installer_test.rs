@@ -128,6 +128,8 @@ fn run_installer(
         .env("HOMEBOY_TEST_EVIDENCE", &evidence)
         .env("HOMEBOY_TEST_EVENTS", &events)
         .env("HOMEBOY_TEST_BIN_DIR", &install_dir)
+        // Archive inspection must be independent of caller tar defaults.
+        .env("TAR_OPTIONS", "--invalid-homeboy-installer-option")
         .env("PATH", format!("{}:/usr/bin:/bin", tools.display()));
     if force_sudo {
         command.env("HOMEBOY_INSTALL_USE_SUDO", "true");
