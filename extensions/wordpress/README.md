@@ -166,6 +166,36 @@ HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND=wp-codebox homeboy test <component-id>
 The `test-runner-wp-codebox.sh` script name and existing WP Codebox settings are
 preserved for compatibility with the current implementation.
 
+### Fatal runtime crashes
+
+A PHP-WASM trap (`RuntimeError: null function or function signature mismatch`
+and friends) leaves the interpreter unusable, but the WP Codebox CLI logs the
+rejection instead of exiting — so the recipe-run promise never settles and the
+run sits until its budget expires. On #12617 that turned a crash which happened
+in the first seconds into a 24-minute shard, reported only as a timeout.
+
+The adapter watches recipe-run output for an *unclaimed* fatal error — an
+unhandled rejection or uncaught exception carrying a WebAssembly `RuntimeError`
+— and arms a short deadline instead of waiting out the budget. A stack frame
+mentioning `php.wasm` on its own does not qualify; traces get logged for
+non-fatal reasons.
+
+The grace window is what makes acting on the signature safe: a run that somehow
+recovers and finishes inside it is untouched, while a wedged one costs about a
+minute instead of the full budget.
+
+```bash
+# default 60s; 0 disables early termination
+HOMEBOY_WP_CODEBOX_RUNTIME_CRASH_GRACE_SECONDS=60 homeboy test <component-id>
+```
+
+The same value can be set as `wp_codebox_runtime_crash_grace_seconds` in
+extension settings. When a crash is detected the run reports
+`PHPUNIT_ZERO_TESTS cause=runtime_crashed`, and
+`files/wp-codebox-timeout-diagnostics.json` carries
+`termination.result = "runtime_crash"` plus a `runtime_crash` object naming the
+signature — so the failure names the crash rather than the elapsed budget.
+
 ### Runtime dependencies
 
 If a plugin depends on other local plugins at runtime, declare them via

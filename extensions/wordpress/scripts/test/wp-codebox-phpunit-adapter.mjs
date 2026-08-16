@@ -15,6 +15,7 @@ import { createRequire } from 'node:module';
  */
 import { createTimeoutLineRedactor, recipeRunProjection, readBoundedText, wpCodeboxTimeoutDiagnostics } from '../lib/wp-codebox-timeout-diagnostics.mjs';
 import { configuredWpCodeboxPhpunitTimeoutSeconds } from '../lib/wp-codebox-phpunit-timeout.mjs';
+import { configuredWpCodeboxRuntimeCrashGraceSeconds, createWpCodeboxRuntimeCrashDetector } from '../lib/wp-codebox-runtime-crash.mjs';
 
 const require = createRequire(import.meta.url);
 // Shared agent runtimes install beside the extensions directory, so their path
@@ -26,6 +27,7 @@ const { preflightWpCodeboxCommand } = requireAgentRuntimeModule('wp-codebox/lib/
 
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
 const phpunitTimeoutSeconds = configuredWpCodeboxPhpunitTimeoutSeconds(process.env, settings);
+const runtimeCrashGraceSeconds = configuredWpCodeboxRuntimeCrashGraceSeconds(process.env, settings);
 const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMPONENT_PATH');
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(scriptDirectory, '../..');
@@ -151,32 +153,56 @@ async function runCaptured(args, timeoutSeconds) {
     const stderrFile = createWriteStream(stderrPath);
     const stdoutRedactor = createTimeoutLineRedactor(secretValues);
     const stderrRedactor = createTimeoutLineRedactor(secretValues);
+    const crashDetector = createWpCodeboxRuntimeCrashDetector();
     let childError;
     let timedOut = false;
+    let crashTimer;
     const startedAt = Date.now();
     let stdoutPreview = Buffer.alloc(0);
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const terminate = () => {
       killChildGroup(child, 'SIGTERM');
       // Do not clear or unref this timer when the leader exits: a descendant
       // can ignore SIGTERM after the CLI has been reaped.
       setTimeout(() => killChildGroup(child, 'SIGKILL'), 5000);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminate();
     }, timeoutSeconds * 1000);
+
+    // A wasm trap the runtime never claimed will not resolve on its own, so
+    // stop paying the full budget for it. The grace window is what keeps this
+    // safe: a run that recovers and finishes inside it is left alone.
+    const armCrashDeadline = (chunk) => {
+      if (crashTimer || runtimeCrashGraceSeconds === 0 || !crashDetector.write(chunk)) {
+        return;
+      }
+      const crash = crashDetector.crash();
+      process.stdout.write(`WP Codebox runtime crash detected (${crash.id}): ${crash.message}\n`);
+      process.stdout.write(`Terminating the recipe-run in ${runtimeCrashGraceSeconds}s unless it completes first.\n`);
+      crashTimer = setTimeout(() => {
+        timedOut = true;
+        terminate();
+      }, runtimeCrashGraceSeconds * 1000);
+    };
 
     child.stdout.on('data', (chunk) => {
       if (stdoutPreview.byteLength < 128 * 1024) {
         stdoutPreview = Buffer.concat([stdoutPreview, chunk.subarray(0, (128 * 1024) - stdoutPreview.byteLength)]);
       }
+      armCrashDeadline(chunk);
       chunk = stdoutRedactor.write(chunk);
       stdoutFile.write(chunk);
     });
     child.stderr.on('data', (chunk) => {
+      armCrashDeadline(chunk);
       chunk = stderrRedactor.write(chunk);
       stderrFile.write(chunk);
     });
     child.on('error', (error) => { childError = error; });
     child.on('close', (status, signal) => {
       clearTimeout(timer);
+      clearTimeout(crashTimer);
       const stdoutTail = stdoutRedactor.end();
       const stderrTail = stderrRedactor.end();
       stdoutFile.write(stdoutTail);
@@ -191,18 +217,28 @@ async function runCaptured(args, timeoutSeconds) {
           reject(childError);
           return;
         }
+        const runtimeCrash = crashDetector.crash();
         resolve({
           status: status ?? 1,
           stdoutPath,
           stderrPath,
           stdoutPreview: stdoutPreview.toString('utf8'),
           timedOut,
+          runtimeCrash,
           elapsedSeconds: Math.ceil((Date.now() - startedAt) / 1000),
-          termination: { result: timedOut ? 'timeout' : 'exited', signal, code: status },
+          // A crash that we terminated on is reported as such: naming the
+          // budget would describe the symptom and hide the cause.
+          termination: { result: terminationResult(runtimeCrash, timedOut), signal, code: status },
         });
       }, reject);
     });
   });
+}
+function terminationResult(runtimeCrash, timedOut) {
+  if (runtimeCrash) {
+    return 'runtime_crash';
+  }
+  return timedOut ? 'timeout' : 'exited';
 }
 function killChildGroup(child, signal) {
   if (!child || typeof child.pid !== 'number') {
@@ -999,6 +1035,7 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     ],
     payload: recipeRun,
     stderr,
+    runtimeCrash: execution.runtimeCrash,
     secretValues: configuredSecretValues(),
   }) : null;
   if (timeoutEvidence) {
@@ -1137,6 +1174,19 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
     }
     if (executed > 0) {
       return { cause: 'tests_executed', detail: `PHPUnit executed ${executed} test(s).`, remediation: 'No execution diagnosis is required.' };
+    }
+    // Ranked under the stage markers, which name the failing seam directly, and
+    // over every ledger-derived cause: with a trapped runtime the ledger is a
+    // description of the wreckage, not of what stopped the run.
+    if (execution?.runtimeCrash) {
+      const crash = execution.runtimeCrash;
+      return {
+        cause: 'runtime_crashed',
+        detail: `The WP Codebox runtime raised an unclaimed fatal error before PHPUnit executed (${crash.id}): ${crash.message}`,
+        remediation: crash.wasm_frame
+          ? 'A PHP-WASM trap leaves the interpreter unusable, so the recipe-run cannot recover. Read logs/recipe-run.stderr.log for the faulting stack and identify the PHP call that trapped; an unsupported extension call (for example async mysqli polling) is the usual cause.'
+          : 'Read logs/recipe-run.stderr.log for the faulting stack; the runtime terminated before PHPUnit could be invoked.',
+      };
     }
     if (recipeRunSteps?.parse_status === 'unparseable') {
       return {

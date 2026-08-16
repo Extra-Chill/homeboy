@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+/**
+ * External dependencies
+ */
+
 import { open, readFile } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 
@@ -20,6 +24,7 @@ export function wpCodeboxTimeoutDiagnostics({
   artifacts = [],
   payload,
   stderr = '',
+  runtimeCrash = null,
   secretValues = secretValuesFromEnvironment(process.env),
 } = {}) {
   const recipeRun = asObject(payload);
@@ -47,6 +52,14 @@ export function wpCodeboxTimeoutDiagnostics({
       code: Number.isInteger(termination.code) ? termination.code : undefined,
     },
     artifact_refs: artifacts.slice(0, 20).map((artifact) => boundedText(artifact, FIELD_BYTES, secretValues)).filter(Boolean),
+    // A fatal runtime crash is the cause; the elapsed budget is only how long
+    // it took to notice. Project it as its own field so a consumer does not
+    // have to grep the excerpts to find out which one it was reading.
+    runtime_crash: asObject(runtimeCrash) ? withoutUndefined({
+      id: boundedText(runtimeCrash.id, FIELD_BYTES, secretValues) || undefined,
+      message: boundedText(runtimeCrash.message, FIELD_BYTES, secretValues) || undefined,
+      wasm_frame: runtimeCrash.wasm_frame === true ? true : undefined,
+    }) : undefined,
     excerpts: boundedText(stderr, TEXT_EXCERPT_BYTES, secretValues) || undefined,
   };
   removeUndefined(diagnostic.termination);
