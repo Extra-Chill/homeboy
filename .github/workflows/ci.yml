@@ -258,7 +258,7 @@ jobs:
       args: --skip-lint
       expected-commands: review audit,review lint,review test
       component: homeboy
-      extension-ref: aeb1babffa6a3cd22301846302a2769d92e4ee13
+      extension-ref: 691d0527d7a4b3917649043a7f91a81913a139ab
       source: .
       scope: auto
       differential-gating: 'true'
