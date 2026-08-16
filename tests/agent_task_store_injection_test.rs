@@ -81,13 +81,6 @@ const KNOWN_MIXED_STORE_FUNCTIONS: &[(&str, &str)] = &[
         "crates/homeboy-agents/src/agent_task_service/cook.rs",
         "run_cook_with_boundaries_reported",
     ),
-    // Takes `&super::cook_recipe::CookRecipeStore` and resolves the lifecycle
-    // store with `?`. Three live callers, two of them in `cook_adoption.rs`, so
-    // this is a cook_promotion/cook_adoption slice.
-    (
-        "crates/homeboy-agents/src/agent_task_service/cook_promotion.rs",
-        "finalize_or_load_cook_pr_with_backend_with_store",
-    ),
 ];
 
 #[test]
