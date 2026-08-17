@@ -1285,6 +1285,16 @@ fn restrict_provenance_permissions(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
+/// Deliberately NOT rooted (#7505).
+///
+/// Both reads below describe the *live process environment* a child is about to
+/// be launched from, and they are read as a pair: `HOME` is only an equality
+/// probe against the job's own `HOME`, and the data dir is the answer given
+/// when they differ. Injecting the data root while `HOME` stayed ambient is the
+/// exact split this campaign exists to kill, and injecting both would first
+/// require deciding what `HOME` even means for a caller-supplied root — a
+/// semantics question, not a mechanical refactor. The already-injectable seam
+/// is [`durable_homeboy_data_dir_for_job`], which takes both as parameters.
 fn preserve_durable_homeboy_data_dir(
     command: &mut std::process::Command,
     job_env: &HashMap<String, String>,
