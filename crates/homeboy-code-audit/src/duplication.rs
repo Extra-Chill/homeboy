@@ -165,6 +165,14 @@ fn pick_canonical(locations: &[String]) -> String {
 /// Detect duplicate groups with canonical file selection.
 ///
 /// Returns structured data the fixer uses to remove duplicates.
+///
+/// Since #12583 the engine calls [`detect_duplicate_groups_scoped`] on both the
+/// scoped and unscoped paths (unscoped passes the full corpus as its own seed),
+/// so this wrapper's only remaining callers are the tests that use it as the
+/// unscoped oracle for the scope-seeded equivalence assertions. It stays compiled
+/// in release builds as the documented unscoped entry point; the `cfg_attr` only
+/// keeps `dead_code` quiet where nothing but tests reach it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<DuplicateGroup> {
     detect_duplicate_groups_scoped(fingerprints, fingerprints)
 }
@@ -312,6 +320,14 @@ fn is_test_location(
 /// `convention_methods` are excluded — identical implementations across
 /// convention-following files are expected behavior (e.g. `__construct`,
 /// `checkPermission`, interface methods with identical bodies).
+///
+/// Since #12583 the engine calls [`detect_duplicates_scoped`] on both the scoped
+/// and unscoped paths (unscoped passes the full corpus as its own seed), so this
+/// wrapper's only remaining callers are the tests that use it as the unscoped
+/// oracle for the scope-seeded equivalence assertions. It stays compiled in
+/// release builds as the documented unscoped entry point; the `cfg_attr` only
+/// keeps `dead_code` quiet where nothing but tests reach it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn detect_duplicates(
     fingerprints: &[&FileFingerprint],
     convention_methods: &std::collections::HashSet<String>,
