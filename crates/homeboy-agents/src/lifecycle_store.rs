@@ -76,8 +76,12 @@ impl AgentTaskLifecycleStore {
             .join("index.json")
     }
 
+    /// The observation database below these roots.
+    ///
+    /// Delegates to `paths` so this can never name a different file than the
+    /// path `ObservationStore::*_in_roots` opens for the same roots.
     pub fn observation_db_path(&self) -> PathBuf {
-        self.roots.data().join("homeboy.sqlite")
+        paths::observation_db_in_root(self.roots.data())
     }
 
     pub(crate) fn data_root(&self) -> PathBuf {
@@ -162,14 +166,17 @@ impl AgentTaskLifecycleStore {
     }
 
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
-        ObservationStore::open_initialized_for_lifecycle_at_roots(
-            self.observation_db_path(),
-            self.artifact_root(),
-        )
+        ObservationStore::open_initialized_for_lifecycle_in_roots(&self.roots)
     }
 
+    /// Read the observation store through this store's own roots.
+    ///
+    /// This previously injected only the database path and left artifact
+    /// resolution ambient, so a reader opened from injected roots reported
+    /// artifacts against a different root than the database it read them from
+    /// (#7505).
     pub fn open_observation_readonly(&self) -> Result<ObservationStore> {
-        ObservationStore::open_readonly_at(self.observation_db_path())
+        ObservationStore::open_readonly_in_roots(&self.roots)
     }
 
     pub fn with_config_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
