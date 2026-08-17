@@ -23,7 +23,14 @@ pub(super) struct DependencyPackage {
     pub files: usize,
 }
 
-pub(super) fn prepare(
+/// Seal (or reuse) a controller dependency package below an explicitly injected
+/// data root.
+///
+/// Reuse and publication share the one root: the `is_file` hit, the staging
+/// file, and the final rename all derive from `root` below, so a package can
+/// never be read out of one home and republished into another (#7505).
+pub(super) fn prepare_in_roots(
+    data_root: &Path,
     workspace: &Path,
     plan: &[homeboy_core::deps::DependencyInstallPlanStep],
 ) -> Result<Option<DependencyPackage>> {
@@ -42,7 +49,7 @@ pub(super) fn prepare(
         },
     )?);
     let key = content_hash::sha256_hex(format!("{key}\0{outputs_identity}").as_bytes());
-    let root = homeboy_core::paths::homeboy_data()?.join("cache/dependency-packages/v1");
+    let root = data_root.join("cache/dependency-packages/v1");
     let path = root.join(format!("{key}.zip"));
     if path.is_file() {
         let bytes = fs::metadata(&path)

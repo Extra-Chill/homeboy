@@ -293,8 +293,8 @@ fn test_download_placement_sanitizes_a_traversal_filename() {
             "..",
             "../../etc/passwd",
         ] {
-            let placement =
-                resolve_placement(&token, None, Some(hostile)).expect("placement resolves");
+            let placement = resolve_placement(&artifact_root, &token, None, Some(hostile))
+                .expect("placement resolves");
             assert_eq!(
                 placement.output_path.parent(),
                 Some(cache.as_path()),
@@ -326,7 +326,10 @@ fn test_download_placement_sanitizes_a_traversal_filename() {
 /// silently rewriting one would put bytes somewhere unpredictable.
 #[test]
 fn test_download_placement_rejects_a_percent_encoded_traversal_token() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        // The root is injected and never consulted: both identifiers are
+        // refused before anything is joined onto it.
+        let artifact_root = home.path().join("artifacts");
         let token = RemoteArtifactToken::parse(
             "runner-artifact://lab/%2E%2E%2F%2E%2E%2F%2E%2E%2Froot%2F.ssh/authorized_keys",
         )
@@ -334,7 +337,7 @@ fn test_download_placement_rejects_a_percent_encoded_traversal_token() {
         // The parser hands the writer an already-decoded traversal.
         assert_eq!(token.run_id, "../../../root/.ssh");
 
-        let error = resolve_placement(&token, None, Some("authorized_keys"))
+        let error = resolve_placement(&artifact_root, &token, None, Some("authorized_keys"))
             .expect_err("the writer must refuse it");
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
         assert!(
@@ -348,7 +351,7 @@ fn test_download_placement_rejects_a_percent_encoded_traversal_token() {
             RemoteArtifactToken::parse("runner-artifact://%2E%2E%2F%2E%2E%2Fetc/run-1/artifact-1")
                 .expect("parse token");
         assert_eq!(runner_token.runner_id, "../../etc");
-        let error = resolve_placement(&runner_token, None, Some("passwd"))
+        let error = resolve_placement(&artifact_root, &runner_token, None, Some("passwd"))
             .expect_err("the writer must refuse it");
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
     });
@@ -362,9 +365,15 @@ fn test_download_placement_honours_an_explicit_output_without_tagging_it() {
         let token = RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1")
             .expect("parse token");
         let explicit = home.path().join("elsewhere").join("report.json");
+        let artifact_root = home.path().join("artifacts");
 
-        let placement =
-            resolve_placement(&token, Some(explicit.clone()), Some("../../evil")).expect("resolve");
+        let placement = resolve_placement(
+            &artifact_root,
+            &token,
+            Some(explicit.clone()),
+            Some("../../evil"),
+        )
+        .expect("resolve");
 
         assert_eq!(placement.output_path, explicit);
         assert!(placement.cache_dir.is_none());
@@ -403,12 +412,10 @@ fn test_content_disposition_traversal_is_neutralized_by_the_writer() {
 
         let token = RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1")
             .expect("parse token");
-        let placement = resolve_placement(&token, None, Some(&parsed)).expect("resolve");
-        let cache = homeboy_core::paths::artifact_root()
-            .expect("artifact root")
-            .join("runner")
-            .join("lab")
-            .join("run-1");
+        let artifact_root = homeboy_core::paths::artifact_root().expect("artifact root");
+        let placement =
+            resolve_placement(&artifact_root, &token, None, Some(&parsed)).expect("resolve");
+        let cache = artifact_root.join("runner").join("lab").join("run-1");
         assert_eq!(placement.output_path.parent(), Some(cache.as_path()));
         assert_eq!(placement.file_name, "etc_cron.d_x");
     });
