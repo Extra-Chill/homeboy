@@ -303,16 +303,23 @@ mod tests {
     }
     #[test]
     fn packages_and_reuses_dependency_outputs() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().unwrap();
-            fs::create_dir(root.path().join("deps")).unwrap();
-            fs::write(root.path().join("deps/a"), "ok").unwrap();
-            let first = prepare(root.path(), &plan()).unwrap().unwrap();
-            fs::remove_file(&first.path).unwrap();
-            let second = prepare(root.path(), &plan()).unwrap().unwrap();
-            assert_eq!(first.sha256, second.sha256);
-            assert_eq!(first.path, second.path);
-        });
+        // No `with_isolated_home`: `prepare_in_roots` consults `data_root` for
+        // the package cache and nothing else, so an explicit root is the whole
+        // isolation this test needs. It no longer serializes behind
+        // `home_lock`, which is the point of #7505.
+        let data_root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("deps")).unwrap();
+        fs::write(root.path().join("deps/a"), "ok").unwrap();
+        let first = prepare_in_roots(data_root.path(), root.path(), &plan())
+            .unwrap()
+            .unwrap();
+        fs::remove_file(&first.path).unwrap();
+        let second = prepare_in_roots(data_root.path(), root.path(), &plan())
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.sha256, second.sha256);
+        assert_eq!(first.path, second.path);
     }
     #[test]
     fn rejects_hash_mismatch() {
@@ -322,8 +329,11 @@ mod tests {
     }
     #[test]
     fn reports_missing_outputs_without_a_package() {
+        let data_root = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        assert!(prepare(root.path(), &plan()).unwrap().is_none());
+        assert!(prepare_in_roots(data_root.path(), root.path(), &plan())
+            .unwrap()
+            .is_none());
     }
 
     #[test]
