@@ -30,7 +30,7 @@ const artifactRoot = path.join(tempRoot, 'artifacts');
 
 fs.writeFileSync(fakeBin, `#!/usr/bin/env node
 if (process.argv.includes('--version')) {
-  process.stdout.write('0.20.0');
+  process.stdout.write('0.21.0');
   process.exit(0);
 }
 const fs = require('node:fs');

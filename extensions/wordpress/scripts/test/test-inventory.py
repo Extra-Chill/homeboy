@@ -127,63 +127,72 @@ def runner_fingerprint(root, config, runner):
     return digest(f"{runner}\0{result.stdout.strip()}")
 
 
-def within_tests_tree(relative):
-    """Match the runner's own `tests/` and `wordpress/tests/` prefixes."""
-    parts = relative.split("/")
-    if parts[0] == "tests":
-        return True
-    return len(parts) > 1 and parts[0] == "wordpress" and parts[1] == "tests"
+def settings():
+    raw_settings = os.environ.get("HOMEBOY_SETTINGS_JSON") or "{}"
+    try:
+        value = json.loads(raw_settings)
+    except json.JSONDecodeError:
+        value = {}
+    return value if isinstance(value, dict) else {}
 
 
-def classify(relative):
-    """Return (target_kind, target) or None, mirroring the runner's matchers.
+def host_test_path(project, plugin_slug, sandbox_path):
+    mounts = settings().get("wp_codebox_phpunit_mounts") or []
+    for mount in sorted(mounts, key=lambda item: len(item.get("target", "")) if isinstance(item, dict) else 0, reverse=True):
+        if not isinstance(mount, dict):
+            continue
+        source = mount.get("source")
+        target = mount.get("target")
+        if not isinstance(source, str) or not isinstance(target, str):
+            continue
+        target = target.rstrip("/")
+        if sandbox_path != target and not sandbox_path.startswith(f"{target}/"):
+            continue
+        return Path(source).joinpath(sandbox_path[len(target):].lstrip("/"))
 
-    These predicates are the ones `test-runner.sh` uses to route a changed-scope
-    selection, so the inventory enumerates exactly the population the runner
-    would execute. A file the runner cannot route must not appear here: a shard
-    would then claim a test that never runs, and the aggregate totals would not
-    reconcile.
-    """
-    name = relative.rsplit("/", 1)[-1]
-    in_tests = within_tests_tree(relative)
+    plugin_root = f"/wordpress/wp-content/plugins/{plugin_slug}/"
+    if sandbox_path.startswith(plugin_root):
+        return project / sandbox_path[len(plugin_root):]
 
-    # Smoke scripts are explicit diagnostic/operator targets, not default
-    # release gates. Changed-scope and --file routing still execute them.
-    if in_tests and name.endswith(("-smoke.php", "-smoke.js", "-smoke.sh")):
-        return None
-    for suffix in (".test.js", ".test.cjs", ".test.mjs", ".test.jsx", ".test.ts", ".test.tsx"):
-        if name.endswith(suffix):
-            return "test", "node-test"
-    root_test_prefix = relative.startswith("tests/test-") or relative.startswith(
-        "wordpress/tests/test-"
-    )
-    if name.endswith("Test.php") or (root_test_prefix and name.endswith(".php")):
-        return "test", "phpunit"
-    return None
+    fail(f"discovered PHPUnit file has no declared host mount: {sandbox_path}")
 
 
-def enumerate_tests(root, package, config):
-    skip = set(config.get("fingerprint_skip_dirs") or [])
+def enumerate_tests(project, package, discovery_file):
+    try:
+        discovery = json.loads(Path(discovery_file).read_text())
+    except OSError as error:
+        fail(f"could not read WP Codebox discovery result: {error}")
+    except json.JSONDecodeError as error:
+        fail(f"WP Codebox discovery result is not valid JSON: {error}")
+    if not isinstance(discovery, dict) or discovery.get("schema") != "wp-codebox/phpunit-discovery/v1":
+        fail("WP Codebox discovery result has an unsupported schema")
+    plugin_slug = discovery.get("plugin_slug")
+    files = discovery.get("files")
+    if not isinstance(plugin_slug, str) or not plugin_slug or not isinstance(files, list) or not files:
+        fail("WP Codebox discovery result has no plugin identity or files")
+    if any(not isinstance(path, str) or not path.startswith("/") for path in files):
+        fail("WP Codebox discovery files must be unique sandbox-absolute paths")
+    if len(files) != len(set(files)):
+        fail("WP Codebox discovery files must be unique sandbox-absolute paths")
+
     tests = {}
-    for directory, subdirectories, files in os.walk(root):
-        subdirectories[:] = [name for name in subdirectories if name not in skip]
-        for name in files:
-            relative = str((Path(directory) / name).relative_to(root))
-            classified = classify(relative)
-            if not classified:
-                continue
-            target_kind, target = classified
-            # The path is the id: it is what HOMEBOY_CHANGED_TEST_FILES already
-            # carries, so a shard manifest slice can be replayed through the
-            # existing changed-scope routing without a second selector format.
-            tests[relative] = {
-                "id": relative,
-                "package": package,
-                "target": target,
-                "target_kind": target_kind,
-                "name": name,
-                "expected_outcome": "executed",
-            }
+    project = project.resolve()
+    for sandbox_path in files:
+        path = host_test_path(project, plugin_slug, sandbox_path).resolve()
+        try:
+            relative = str(path.relative_to(project))
+        except ValueError:
+            fail(f"configured PHPUnit test file escapes the component: {path}")
+        if not path.is_file():
+            fail(f"discovered PHPUnit test file is missing on the host: {path}")
+        tests[relative] = {
+            "id": relative,
+            "package": package,
+            "target": "phpunit",
+            "target_kind": "test",
+            "name": path.name,
+            "expected_outcome": "executed",
+        }
     return [tests[key] for key in sorted(tests)]
 
 
@@ -210,6 +219,7 @@ def main():
     parser.add_argument("--extension-path", required=True, help="extension root holding wordpress.json")
     parser.add_argument("--runner", default="wordpress", help="declared runner identity")
     parser.add_argument("--package", default="", help="package label recorded on each test")
+    parser.add_argument("--discovery-file", required=True, help="WP Codebox canonical discovery result")
     parser.add_argument("--output", required=True, help="file to write the inventory to")
     args = parser.parse_args()
 
@@ -217,7 +227,7 @@ def main():
     root = workspace_root(args.project, config)
     package = args.package or Path(args.project).resolve().name
 
-    tests = enumerate_tests(root, package, config)
+    tests = enumerate_tests(Path(args.project).resolve(), package, args.discovery_file)
     if not tests:
         # Core refuses an empty inventory, and it is right to: an empty
         # enumeration cannot be distinguished from a broken producer, and

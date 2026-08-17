@@ -29,7 +29,7 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
-function createFixtureWpCodebox(root, version = '0.20.0') {
+function createFixtureWpCodebox(root, version = '0.21.0') {
   fs.mkdirSync(root, { recursive: true });
   const binPath = path.join(root, 'fixture-wp-codebox.js');
   fs.writeFileSync(binPath, `#!/usr/bin/env node
@@ -128,7 +128,7 @@ try {
   const stalePayload = JSON.parse(stale.stdout);
   assert.equal(stalePayload.diagnostics[0].class, 'codebox.preflight.wp_codebox_version_too_old', stale.stdout);
   assert.equal(stalePayload.diagnostics[0].data.selected.version, '0.19.0');
-  assert.equal(stalePayload.diagnostics[0].data.required_version, '0.20.0');
+  assert.equal(stalePayload.diagnostics[0].data.required_version, '0.21.0');
   assert.equal(fs.existsSync(staleCapturePath), false, 'a rejected runtime must not start a recipe');
 
   const environmentalPrecedence = runTaskRunner(request, [

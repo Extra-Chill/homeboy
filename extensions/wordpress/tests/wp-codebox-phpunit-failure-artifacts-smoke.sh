@@ -36,7 +36,7 @@ cat > "$FAKE_BIN" <<'SH'
 set -euo pipefail
 
 if [ "${1:-}" = "--version" ]; then
-	printf '0.20.0\n'
+	printf '0.21.0\n'
 	exit 0
 fi
 

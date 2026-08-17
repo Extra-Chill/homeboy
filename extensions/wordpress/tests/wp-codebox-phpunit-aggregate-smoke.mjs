@@ -56,7 +56,7 @@ await writeFile(cli, `#!/usr/bin/env node
 import fs from 'node:fs';
 const args = process.argv.slice(2);
 const value = (name) => args[args.indexOf(name) + 1];
-if (args.includes('--version')) { process.stdout.write(process.env.WP_CODEBOX_FIXTURE_VERSION || '0.20.0'); process.exit(0); }
+if (args.includes('--version')) { process.stdout.write(process.env.WP_CODEBOX_FIXTURE_VERSION || '0.21.0'); process.exit(0); }
 if (process.env.DISPATCHED) { fs.appendFileSync(process.env.DISPATCHED, JSON.stringify(args) + '\\n'); }
 if (args[0] === 'recipe') { fs.writeFileSync(value('--output'), JSON.stringify({ schema: 'wp-codebox/workspace-recipe/v1' })); process.exit(0); }
 const artifacts = value('--artifacts');
@@ -172,7 +172,7 @@ try {
   assert.equal(fs.existsSync(staleDispatch), false, 'an old runtime must not begin a recipe');
 
   const prereleaseDispatch = path.join(root, 'prerelease-dispatched.jsonl');
-  const prerelease = spawnSync(runner, [], { env: { ...process.env, DISPATCHED: prereleaseDispatch, WP_CODEBOX_FIXTURE_VERSION: '0.20.0-rc.1', HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'prerelease-artifacts'), HOMEBOY_SETTINGS_JSON: '{}' }, encoding: 'utf8' });
+  const prerelease = spawnSync(runner, [], { env: { ...process.env, DISPATCHED: prereleaseDispatch, WP_CODEBOX_FIXTURE_VERSION: '0.21.0-rc.1', HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'prerelease-artifacts'), HOMEBOY_SETTINGS_JSON: '{}' }, encoding: 'utf8' });
   assert.notEqual(prerelease.status, 0);
   assert.match(prerelease.stderr, /wp_codebox_version_too_old/);
   assert.equal(fs.existsSync(prereleaseDispatch), false, 'a prerelease runtime must not begin a recipe');

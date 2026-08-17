@@ -34,6 +34,7 @@ jq -e '
 
 printf '<?php\nclass AlphaTest extends PHPUnit\\Framework\\TestCase {}\n' > "${component}/tests/Unit/AlphaTest.php"
 printf '<?php\nclass BetaTest extends PHPUnit\\Framework\\TestCase {}\n' > "${component}/tests/Unit/BetaTest.php"
+printf '<?php\nclass BehaviorSpec extends PHPUnit\\Framework\\TestCase {}\n' > "${component}/tests/Unit/behavior-spec.php"
 printf 'import test from "node:test";\ntest("node shard", () => console.log("node test ran"));\n' > "${component}/tests/worker.test.mjs"
 
 runner_prelude="${WORKDIR}/runner-prelude.sh"
@@ -48,6 +49,10 @@ SH
 cat > "${WORKDIR}/stubs/wp-codebox.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY:-}" = "1" ]; then
+    jq -cn '{schema:"wp-codebox/phpunit-discovery/v1",plugin_slug:"component",phpunit_xml:"/wordpress/wp-content/plugins/component/phpunit.xml.dist",test_root:"/wordpress/wp-content/plugins/component/tests",selected_testsuites:[],files:["/wordpress/wp-content/plugins/component/tests/Unit/AlphaTest.php","/wordpress/wp-content/plugins/component/tests/Unit/BetaTest.php","/wordpress/wp-content/plugins/component/tests/Unit/behavior-spec.php"]}'
+    exit 0
+fi
 printf 'PHPUNIT_CHANGED=%s\n' "${HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES:-}"
 while IFS= read -r test_file; do
     [ -z "$test_file" ] || printf 'PHPUNIT_EXECUTED:%s\n' "$test_file"
@@ -72,11 +77,14 @@ homeboy_write_test_results() {
 SH
 
 inventory="${WORKDIR}/inventory.json"
+discovery="${WORKDIR}/discovery.json"
+HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY=1 "${WORKDIR}/stubs/wp-codebox.sh" > "$discovery"
 python3 "${EXTENSION_PATH}/scripts/test/test-inventory.py" \
     --project "$component" \
     --extension-path "$EXTENSION_PATH" \
     --runner wordpress \
     --package component \
+    --discovery-file "$discovery" \
     --output "$inventory" >/dev/null
 
 write_manifest() {
@@ -110,16 +118,15 @@ run_manifest() {
 
 first="${WORKDIR}/shard-1.json"
 second="${WORKDIR}/shard-2.json"
-write_manifest "$first" shard-1 tests/Unit/AlphaTest.php tests/worker.test.mjs
+write_manifest "$first" shard-1 tests/Unit/behavior-spec.php
 write_manifest "$second" shard-2 tests/Unit/BetaTest.php
 
 run_manifest "$first" "${WORKDIR}/first.out"
-assert_contains "${WORKDIR}/first.out" 'TEST_SHARD_MANIFEST:id=shard-1 selected=2'
-assert_contains "${WORKDIR}/first.out" 'node test ran'
-assert_contains "${WORKDIR}/first.out" 'PHPUNIT_CHANGED=tests/Unit/AlphaTest.php'
-assert_contains "${WORKDIR}/first.out" 'PHPUNIT_EXECUTED:tests/Unit/AlphaTest.php'
-assert_contains "${WORKDIR}/first.out" 'TEST_SHARD_SUMMARY:id=shard-1 selected=2 routed=2 status=passed'
-if [ "$(jq -r '.total' "${WORKDIR}/first.out.results.json")" -ne 2 ]; then
+assert_contains "${WORKDIR}/first.out" 'TEST_SHARD_MANIFEST:id=shard-1 selected=1'
+assert_contains "${WORKDIR}/first.out" 'PHPUNIT_CHANGED=tests/Unit/behavior-spec.php'
+assert_contains "${WORKDIR}/first.out" 'PHPUNIT_EXECUTED:tests/Unit/behavior-spec.php'
+assert_contains "${WORKDIR}/first.out" 'TEST_SHARD_SUMMARY:id=shard-1 selected=1 routed=1 status=passed'
+if [ "$(jq -r '.total' "${WORKDIR}/first.out.results.json")" -ne 1 ]; then
     fail 'shard result sidecar does not match first manifest membership'
 fi
 assert_not_contains "${WORKDIR}/first.out" 'BetaTest.php'
@@ -139,7 +146,7 @@ HOMEBOY_TEST_SHARD_MANIFEST="$first" \
 HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="${WORKDIR}/write-test-results.sh" \
 HOMEBOY_TEST_RESULTS_FILE="${WORKDIR}/parsed-results.json" \
     bash "${EXTENSION_PATH}/scripts/test/parse-test-results.sh" "${WORKDIR}/first.out"
-if [ "$(jq -r '.total' "${WORKDIR}/parsed-results.json")" -ne 2 ]; then
+if [ "$(jq -r '.total' "${WORKDIR}/parsed-results.json")" -ne 1 ]; then
     fail 'result parser does not recover validated shard membership'
 fi
 

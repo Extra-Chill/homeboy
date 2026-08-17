@@ -26,6 +26,7 @@ const { requireAgentRuntimeModule } = require('../lib/agent-runtime-paths.cjs');
 const { preflightWpCodeboxCommand } = requireAgentRuntimeModule('wp-codebox/lib/wp-codebox-runtime-selection.js');
 
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
+const discoveryOnly = process.env.HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY === '1';
 const phpunitTimeoutSeconds = configuredWpCodeboxPhpunitTimeoutSeconds(process.env, settings);
 const runtimeCrashGraceSeconds = configuredWpCodeboxRuntimeCrashGraceSeconds(process.env, settings);
 const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMPONENT_PATH');
@@ -47,8 +48,10 @@ const phpunitProfile = await resolvePhpunitProfile(settings, pluginSourceDirecto
 const phpunitBootstrap = resolvePhpunitBootstrap(settings, phpunitProfile);
 const topology = await resolveWordPressTopology(settings, pluginSourceDirectory);
 const databaseService = resolveDatabaseService(settings, process.env);
-requireDatabaseServiceCapability(databaseService);
-runPrepareSteps(settings.wp_codebox_prepare_steps, pluginSourceDirectory);
+if (!discoveryOnly) {
+  requireDatabaseServiceCapability(databaseService);
+  runPrepareSteps(settings.wp_codebox_prepare_steps, pluginSourceDirectory);
+}
 const directory = await mkdtemp(path.join(tmpdir(), 'homeboy-wp-codebox-phpunit-'));
 const optionsPath = path.join(directory, 'options.json');
 const recipePath = path.join(directory, 'recipe.json');
@@ -63,7 +66,7 @@ const runArtifacts = path.join(artifacts, `wp-codebox-phpunit.${process.pid}`);
 // The component under review is deliberately absent from this: its vendor/ is
 // produced by the declared dependency-materialization phase before the runner
 // is ever invoked.
-const dependencies = (await dependencyPaths(settings, [componentPath, pluginSourceDirectory])).map((source) => {
+const dependencies = (discoveryOnly ? [] : await dependencyPaths(settings, [componentPath, pluginSourceDirectory])).map((source) => {
   const dependencySlug = path.basename(source).replace(/@[^/]+$/, '');
   return { source, slug: dependencySlug, sandboxDirectory: sandboxPluginDirectory(dependencySlug), composer: 'install' };
 });
@@ -82,29 +85,32 @@ const activationPlan = [
   ...dependencies.map(({ source, slug: dependencySlug, composer }) => ({ role: 'validation-dependency', source, slug: dependencySlug, composer })),
   { role: 'target', source: root, sourceSubpath: subpath, slug },
 ];
-await requireHarness(harnessSource);
+if (!discoveryOnly) {
+  await requireHarness(harnessSource);
+}
 const options = clean({
   wordpressVersion: settings.wordpress_runtime_version,
   phpVersion: settings.wordpress_runtime_php_version,
-  databaseType: settings.database_type,
-  services: databaseService ? [databaseService.service] : undefined,
+  databaseType: discoveryOnly ? 'sqlite' : settings.database_type,
+  services: !discoveryOnly && databaseService ? [databaseService.service] : undefined,
   pluginSlug: slug,
   extra_plugins: activationPlan.map(({ role, ...plugin }) => clean({ ...plugin, activate: true })),
   dependencyMounts: [...new Set([sandboxPluginDirectory(slug), ...dependencies.map(({ sandboxDirectory }) => sandboxDirectory)])],
-  selectedTestFile,
-  changedTestFiles: changedTestFileScope.sandbox,
+  selectedTestFile: discoveryOnly ? '' : selectedTestFile,
+  changedTestFiles: discoveryOnly ? [] : changedTestFileScope.sandbox,
+  discoveryOnly,
   testRoot: phpunitProfile.testRoot,
   phpunitXml: phpunitProfile.config,
   cwd: phpunitProfile.cwd,
-  phpunitArgs: process.argv.slice(2),
+  phpunitArgs: discoveryOnly ? [] : process.argv.slice(2),
   env: settings.bench_env,
   wpConfigDefines: settings.wp_config_defines,
   autoloadFile: '/wp-codebox-vendor/autoload.php',
   bootstrapMode: phpunitBootstrap.mode,
   projectBootstrap: phpunitBootstrap.projectBootstrap,
-  multisite: topology.multisite,
+  multisite: discoveryOnly ? false : topology.multisite,
   preloadFiles: settings.wp_codebox_phpunit_preload_files,
-  mounts: [...canonicalMounts(settings.wp_codebox_phpunit_mounts), { source: harnessSource, target: '/wp-codebox-vendor', mode: 'readonly' }],
+  mounts: [...canonicalMounts(settings.wp_codebox_phpunit_mounts), ...(!discoveryOnly ? [{ source: harnessSource, target: '/wp-codebox-vendor', mode: 'readonly' }] : [])],
 });
 
 try {
@@ -117,27 +123,62 @@ try {
   // replaced this runner's shell implementation with the Node adapter and the
   // banner went with it, leaving the PHPUnit path as the only one whose run
   // logs do not say what executed them.
-  process.stdout.write('Running PHPUnit tests via WP Codebox...\n');
-  process.stdout.write(`  Plugin: ${slug} (${pluginSourceDirectory})\n`);
-  process.stdout.write('  Backend: wp-codebox\n');
+  if (!discoveryOnly) {
+    process.stdout.write('Running PHPUnit tests via WP Codebox...\n');
+    process.stdout.write(`  Plugin: ${slug} (${pluginSourceDirectory})\n`);
+    process.stdout.write('  Backend: wp-codebox\n');
+  }
   await writeFile(optionsPath, `${JSON.stringify(options)}\n`);
   run(['recipe', 'build', 'phpunit', '--options', optionsPath, '--output', recipePath]);
-  await applyDatabaseServiceAuthorization(recipePath);
+  if (!discoveryOnly) {
+    await applyDatabaseServiceAuthorization(recipePath);
+  }
   await mkdir(runArtifacts, { recursive: true });
-  await persistRecipeEvidence(runArtifacts, options, recipePath, phpunitProfile, dependencies);
+  if (!discoveryOnly) {
+    await persistRecipeEvidence(runArtifacts, options, recipePath, phpunitProfile, dependencies);
+  }
   const executionArgs = ['recipe-run', '--recipe', recipePath, '--artifacts', runArtifacts, '--json'];
-  if (databaseService?.boundary) {
+  if (!discoveryOnly && databaseService?.boundary) {
     executionArgs.push('--approve-external-service-writes', '--policy', JSON.stringify(databaseService.policy));
   }
   const execution = await runCaptured(executionArgs, phpunitTimeoutSeconds);
-  const artifactStatus = await handoffArtifacts(runArtifacts, execution);
-  if (execution.status !== 0 || !['passed', 'skipped'].includes(artifactStatus)) {
-    process.exitCode = execution.timedOut ? 124 : (execution.status || 1);
+  if (discoveryOnly) {
+    try {
+      if (execution.status !== 0) {
+        const stdout = (await readBoundedText(execution.stdoutPath, 8 * 1024)).trim();
+        const stderr = (await readBoundedText(execution.stderrPath, 8 * 1024)).trim();
+        const diagnostic = [stdout, stderr].filter(Boolean).join('\n');
+        throw new Error(`WP Codebox PHPUnit discovery failed with exit ${execution.status}${diagnostic ? `: ${diagnostic}` : '.'}`);
+      }
+      process.stdout.write(`${JSON.stringify(await readDiscoveryResult(execution.stdoutPath))}\n`);
+    } finally {
+      await rm(runArtifacts, { recursive: true, force: true });
+    }
   } else {
-    process.stdout.write('WP Codebox test run complete.\n');
+    const artifactStatus = await handoffArtifacts(runArtifacts, execution);
+    if (execution.status !== 0 || !['passed', 'skipped'].includes(artifactStatus)) {
+      process.exitCode = execution.timedOut ? 124 : (execution.status || 1);
+    } else {
+      process.stdout.write('WP Codebox test run complete.\n');
+    }
   }
 } finally {
   await rm(directory, { recursive: true, force: true });
+}
+async function readDiscoveryResult(stdoutPath) {
+  const payload = JSON.parse(await readFile(stdoutPath, 'utf8'));
+  const execution = Array.isArray(payload?.executions)
+    ? payload.executions.find((entry) => entry?.command === 'wordpress.phpunit')
+    : undefined;
+  const result = JSON.parse(execution?.stdout || 'null');
+  if (result?.schema !== 'wp-codebox/phpunit-discovery/v1'
+    || result.plugin_slug !== slug
+    || !Array.isArray(result.files)
+    || result.files.length === 0
+    || result.files.some((file) => typeof file !== 'string' || !file.startsWith('/'))) {
+    throw new Error('WP Codebox returned an invalid PHPUnit discovery result.');
+  }
+  return result;
 }
 async function runCaptured(args, timeoutSeconds) {
   const logsDirectory = path.join(runArtifacts, 'logs');

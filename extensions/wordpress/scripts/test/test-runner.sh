@@ -48,6 +48,23 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Component path: ${COMPONENT_PATH:-$(pwd)}"
 fi
 
+homeboy_wordpress_discover_phpunit_files() {
+    local output_file="$1"
+    local discovery_tmp
+    discovery_tmp="$(mktemp)" || return 1
+    if ! HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY=1 bash "$WP_CODEBOX_RUNNER" > "$discovery_tmp"; then
+        rm -f "$discovery_tmp"
+        echo "ERROR: WP Codebox canonical PHPUnit discovery failed." >&2
+        return 1
+    fi
+    if ! jq -e '.schema == "wp-codebox/phpunit-discovery/v1" and (.files | type == "array" and length > 0)' "$discovery_tmp" >/dev/null 2>&1; then
+        rm -f "$discovery_tmp"
+        echo "ERROR: WP Codebox returned an invalid canonical PHPUnit discovery result." >&2
+        return 1
+    fi
+    mv "$discovery_tmp" "$output_file"
+}
+
 # Inventory-only mode enumerates the suite without running any of it, so that
 # Homeboy can plan bounded shards. It must return before any runner is selected:
 # a producer that executed tests would defeat the point, and core deliberately
@@ -72,21 +89,31 @@ if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = "1" ]; then
         echo "Error: could not create temporary WordPress test inventory." >&2
         exit 1
     }
+    discovery_data="$(mktemp)" || {
+        rm -f "$inventory_data"
+        echo "Error: could not create temporary WordPress PHPUnit discovery result." >&2
+        exit 1
+    }
+    if ! homeboy_wordpress_discover_phpunit_files "$discovery_data"; then
+        rm -f "$inventory_data" "$discovery_data"
+        exit 1
+    fi
     if ! python3 "$INVENTORY_TOOL" \
         --project "$PLUGIN_PATH" \
         --extension-path "$EXTENSION_PATH" \
         --runner "${HOMEBOY_WORDPRESS_INVENTORY_RUNNER:-wordpress}" \
         --package "${HOMEBOY_COMPONENT_ID:-wordpress}" \
+        --discovery-file "$discovery_data" \
         --output "$inventory_data"; then
-        rm -f "$inventory_data"
+        rm -f "$inventory_data" "$discovery_data"
         exit 1
     fi
     if ! cp "$inventory_data" "$HOMEBOY_TEST_INVENTORY_FILE"; then
-        rm -f "$inventory_data"
+        rm -f "$inventory_data" "$discovery_data"
         exit 1
     fi
     cat "$inventory_data"
-    rm -f "$inventory_data"
+    rm -f "$inventory_data" "$discovery_data"
     exit 0
 fi
 
@@ -906,16 +933,27 @@ homeboy_wordpress_load_test_shard_manifest() {
     }
 
     current_inventory="$(mktemp)" || return 1
+    local current_discovery
+    current_discovery="$(mktemp)" || {
+        rm -f "$current_inventory"
+        return 1
+    }
+    if ! homeboy_wordpress_discover_phpunit_files "$current_discovery"; then
+        rm -f "$current_inventory" "$current_discovery"
+        return 2
+    fi
     if ! python3 "${SCRIPT_DIR}/test-inventory.py" \
         --project "$PLUGIN_PATH" \
         --extension-path "$EXTENSION_PATH" \
         --runner wordpress \
         --package "${HOMEBOY_COMPONENT_ID:-wordpress}" \
+        --discovery-file "$current_discovery" \
         --output "$current_inventory" >/dev/null; then
-        rm -f "$current_inventory"
+        rm -f "$current_inventory" "$current_discovery"
         echo "ERROR: could not regenerate the current WordPress test inventory for shard validation." >&2
         return 2
     fi
+    rm -f "$current_discovery"
 
     current_runner="$(jq -r '.runner_fingerprint' "$current_inventory")"
     current_workspace="$(jq -r '.workspace_fingerprint' "$current_inventory")"
@@ -957,14 +995,6 @@ homeboy_wordpress_load_test_shard_manifest() {
         selected_count=$((selected_count + 1))
         if ! test_rel="$(homeboy_wordpress_rel_test_file "$test_file")"; then
             echo "ERROR: WordPress shard ${shard_id} assigned a missing or out-of-component test: ${test_file}" >&2
-            return 2
-        fi
-        if ! homeboy_wordpress_is_js_smoke_file "$test_rel" \
-            && ! homeboy_wordpress_is_shell_smoke_file "$test_rel" \
-            && ! homeboy_wordpress_is_node_test_file "$test_rel" \
-            && ! homeboy_wordpress_is_php_smoke_file "$test_rel" \
-            && ! homeboy_wordpress_is_phpunit_test_file "$test_rel"; then
-            echo "ERROR: WordPress shard ${shard_id} assigned an unroutable test: ${test_rel}" >&2
             return 2
         fi
     done <<< "$shard_tests"
@@ -1009,10 +1039,6 @@ homeboy_wordpress_run_php_smoke_files() {
 
 homeboy_wordpress_replay_test_shard() {
     local test_file test_rel
-    local js_smoke_files=""
-    local shell_smoke_files=""
-    local node_test_files=""
-    local php_smoke_files=""
     local phpunit_files=""
     local selected=0
     local routed=0
@@ -1021,32 +1047,11 @@ homeboy_wordpress_replay_test_shard() {
         [ -n "$test_file" ] || continue
         selected=$((selected + 1))
         test_rel="$(homeboy_wordpress_rel_test_file "$test_file")" || return 2
-        if homeboy_wordpress_is_js_smoke_file "$test_rel"; then
-            js_smoke_files+="${js_smoke_files:+$'\n'}${test_rel}"
-            echo "TEST_SHARD_ROUTE:${test_rel}:runner=host-js-smoke"
-        elif homeboy_wordpress_is_shell_smoke_file "$test_rel"; then
-            shell_smoke_files+="${shell_smoke_files:+$'\n'}${test_rel}"
-            echo "TEST_SHARD_ROUTE:${test_rel}:runner=host-shell-smoke"
-        elif homeboy_wordpress_is_node_test_file "$test_rel"; then
-            node_test_files+="${node_test_files:+$'\n'}${test_rel}"
-            echo "TEST_SHARD_ROUTE:${test_rel}:runner=node-test"
-        elif homeboy_wordpress_is_php_smoke_file "$test_rel"; then
-            php_smoke_files+="${php_smoke_files:+$'\n'}${test_rel}"
-            echo "TEST_SHARD_ROUTE:${test_rel}:runner=host-php-smoke"
-        elif homeboy_wordpress_is_phpunit_test_file "$test_rel"; then
-            phpunit_files+="${phpunit_files:+$'\n'}${test_rel}"
-            echo "TEST_SHARD_ROUTE:${test_rel}:runner=phpunit"
-        else
-            echo "ERROR: WordPress shard ${HOMEBOY_WORDPRESS_SHARD_ID} could not route ${test_rel}." >&2
-            return 2
-        fi
+        phpunit_files+="${phpunit_files:+$'\n'}${test_rel}"
+        echo "TEST_SHARD_ROUTE:${test_rel}:runner=phpunit"
         routed=$((routed + 1))
     done <<< "$HOMEBOY_WORDPRESS_SHARD_TEST_FILES"
 
-    [ -z "$js_smoke_files" ] || homeboy_wordpress_run_js_smoke_files "$js_smoke_files" || return $?
-    [ -z "$shell_smoke_files" ] || homeboy_wordpress_run_shell_smoke_files "$shell_smoke_files" || return $?
-    [ -z "$node_test_files" ] || homeboy_wordpress_run_js_unit_test_files "$node_test_files" || return $?
-    [ -z "$php_smoke_files" ] || homeboy_wordpress_run_php_smoke_files "$php_smoke_files" || return $?
     if [ -n "$phpunit_files" ]; then
         export HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES="$phpunit_files"
         WORDPRESS_RUNTIME_RUNNER="$(homeboy_wordpress_runtime_runner)" || return $?

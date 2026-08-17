@@ -31,8 +31,9 @@ fail() {
 }
 
 plugin="${WORKDIR}/plugin"
-mkdir -p "${plugin}/tests/nested" "${plugin}/inc" "${plugin}/vendor/pkg/tests" "${plugin}/node_modules/x"
+mkdir -p "${plugin}/tests/nested" "${plugin}/custom-suite" "${plugin}/inc" "${plugin}/vendor/pkg/tests" "${plugin}/node_modules/x"
 printf '{}\n' > "${plugin}/composer.json"
+printf '<phpunit/>\n' > "${plugin}/phpunit.xml.dist"
 printf '<?php\n' > "${plugin}/inc/Runtime.php"
 
 runner_prelude="${WORKDIR}/runner-prelude.sh"
@@ -44,6 +45,22 @@ homeboy_runner_init() {
 }
 SH
 
+default_discovery="${WORKDIR}/default-discovery.json"
+custom_discovery="${WORKDIR}/custom-discovery.json"
+jq -cn '{schema:"wp-codebox/phpunit-discovery/v1",plugin_slug:"fixture-plugin",phpunit_xml:"/wordpress/wp-content/plugins/fixture-plugin/phpunit.xml.dist",test_root:"/wordpress/wp-content/plugins/fixture-plugin/tests",selected_testsuites:[],files:["/wordpress/wp-content/plugins/fixture-plugin/tests/ZetaTest.php","/wordpress/wp-content/plugins/fixture-plugin/tests/test-eta.php"]}' > "$default_discovery"
+jq -cn '{schema:"wp-codebox/phpunit-discovery/v1",plugin_slug:"fixture-plugin",phpunit_xml:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom/phpunit.xml.dist",test_root:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom",selected_testsuites:[],files:["/wordpress/wp-content/plugins/fixture-plugin/tests/custom/behavior-spec.php"]}' > "$custom_discovery"
+discovery_stub="${WORKDIR}/wp-codebox-discovery.sh"
+cat > "$discovery_stub" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${HOMEBOY_SETTINGS_JSON:-}" == *'wp_codebox_phpunit_test_root'* ]]; then
+    cat "$custom_discovery"
+else
+    cat "$default_discovery"
+fi
+SH
+chmod +x "$discovery_stub"
+
 # Explicit diagnostic smokes remain routable, but are not release-gate inventory.
 printf '<?php\n' > "${plugin}/tests/alpha-smoke.php"
 printf '<?php\n' > "${plugin}/tests/nested/beta-smoke.php"
@@ -52,9 +69,9 @@ printf '# sh\n'   > "${plugin}/tests/delta-smoke.sh"
 printf '// node\n' > "${plugin}/tests/epsilon.test.js"
 printf '<?php\n'  > "${plugin}/tests/ZetaTest.php"
 printf '<?php\n'  > "${plugin}/tests/test-eta.php"
+printf '<?php\n'  > "${plugin}/custom-suite/behavior-spec.php"
 
-# Not routable, and must not be enumerated: a fixture, a support file, and
-# anything inside a skipped directory.
+# Fixtures, support files, and skipped dependencies are not members either.
 printf '<?php\n' > "${plugin}/tests/fixture-data.php"
 printf '<?php\n' > "${plugin}/tests/nested/test-helper.php"
 printf '<?php\n' > "${plugin}/vendor/pkg/tests/vendor-smoke.php"
@@ -65,6 +82,7 @@ run_producer() {
     HOMEBOY_COMPONENT_PATH="$plugin" \
     HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
     HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+    HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="$discovery_stub" \
     HOMEBOY_TEST_INVENTORY_FILE="$1" \
     HOMEBOY_TEST_INVENTORY_ONLY=1 \
         bash "$RUNNER"
@@ -94,7 +112,6 @@ ids = [t["id"] for t in doc["tests"]]
 assert len(ids) == len(set(ids)), "test ids must be unique"
 
 expected = {
-    "tests/epsilon.test.js": ("test", "node-test"),
     "tests/ZetaTest.php": ("test", "phpunit"),
     "tests/test-eta.php": ("test", "phpunit"),
 }
@@ -115,7 +132,17 @@ canonical = json.dumps(record, sort_keys=True, separators=(",", ":"))
 assert hashlib.sha256(canonical.encode()).hexdigest() == doc["inventory_fingerprint"], \
     "inventory_fingerprint is not the canonical digest core will recompute"
 
-print(f"PASS: enumerated {len(ids)} routable tests, fingerprints are canonical")
+print(f"PASS: enumerated {len(ids)} canonical full-suite tests, fingerprints are canonical")
+PY
+
+custom_settings="$(jq -cn --arg source "${plugin}/custom-suite" \
+    '{wp_codebox_phpunit_test_root:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom",wp_codebox_phpunit_mounts:[{source:$source,target:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom"}]}')"
+HOMEBOY_SETTINGS_JSON="$custom_settings" run_producer "${WORKDIR}/custom.json" > /dev/null || fail "configured test-root inventory failed"
+python3 - "${WORKDIR}/custom.json" <<'PY' || fail "configured test-root assertions failed"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert [test["id"] for test in doc["tests"]] == ["custom-suite/behavior-spec.php"], doc["tests"]
+print("PASS: configured PHPUnit root defines canonical inventory membership")
 PY
 
 # Determinism: identical input must produce an identical document, or a shard
@@ -148,20 +175,28 @@ after_php="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wo
 [ "$before_ws" != "$after_php" ] || fail "a declared PHP source edit did not move the workspace fingerprint"
 printf 'PASS: declared source edits move the workspace fingerprint\n'
 
+# PHPUnit configuration defines canonical membership and must invalidate stale
+# shard manifests even when all previously assigned files still exist.
+printf '<phpunit cacheResult="false"/>\n' > "${plugin}/phpunit.xml.dist"
+run_producer "${WORKDIR}/phpunit-config.json" > /dev/null || fail "producer failed after PHPUnit config edit"
+after_phpunit_config="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace_fingerprint"])' "${WORKDIR}/phpunit-config.json")"
+[ "$after_php" != "$after_phpunit_config" ] || fail "a PHPUnit config edit did not move the workspace fingerprint"
+printf 'PASS: PHPUnit config edits move the workspace fingerprint\n'
+
 # An empty enumeration is refused: it cannot be told apart from a broken
 # producer, and sharding nothing would report a green suite that ran no tests.
 empty="${WORKDIR}/empty"
 mkdir -p "${empty}"
 printf '{}\n' > "${empty}/composer.json"
 if python3 "$PRODUCER" --project "$empty" --extension-path "$EXTENSION_PATH" \
-    --runner wordpress --output "${WORKDIR}/empty.json" >/dev/null 2>&1; then
+    --runner wordpress --discovery-file "$default_discovery" --output "${WORKDIR}/empty.json" >/dev/null 2>&1; then
     fail "producer accepted a component with no tests"
 fi
 printf 'PASS: an empty enumeration is refused\n'
 
 # An undeclared runner has no version command and therefore no identity.
 if python3 "$PRODUCER" --project "$plugin" --extension-path "$EXTENSION_PATH" \
-    --runner not-declared --output "${WORKDIR}/bad-runner.json" >/dev/null 2>&1; then
+    --runner not-declared --discovery-file "$default_discovery" --output "${WORKDIR}/bad-runner.json" >/dev/null 2>&1; then
     fail "producer accepted an undeclared runner"
 fi
 printf 'PASS: an undeclared runner is refused\n'
@@ -173,6 +208,7 @@ if HOMEBOY_COMPONENT_ID=fixture-plugin \
     HOMEBOY_COMPONENT_PATH="$plugin" \
     HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
     HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+    HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="$discovery_stub" \
     HOMEBOY_TEST_INVENTORY_FILE="${WORKDIR}/failed.json" \
     HOMEBOY_TEST_INVENTORY_ONLY=1 \
     HOMEBOY_WORDPRESS_INVENTORY_RUNNER=not-declared \

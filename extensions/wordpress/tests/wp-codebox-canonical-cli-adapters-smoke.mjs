@@ -22,7 +22,7 @@ await writeFile(writeResults, `homeboy_write_test_results() { printf '{"total":%
 await writeFile(cli, `#!/usr/bin/env node
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 const args = process.argv.slice(2);
-if (args.includes('--version')) { process.stdout.write('0.20.0'); process.exit(0); }
+if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
 await appendFile(process.env.OBSERVED, JSON.stringify(args) + '\\n');
 if (args[0] === 'recipe' && args[1] === 'build') {
   const options = JSON.parse(await readFile(args[args.indexOf('--options') + 1], 'utf8'));

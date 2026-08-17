@@ -187,7 +187,7 @@ try {
   fs.writeFileSync(fakeWpCodebox, `#!/usr/bin/env node
 const fs = require('node:fs');
 if (process.argv.includes('--version')) {
-  process.stdout.write('0.20.0');
+  process.stdout.write('0.21.0');
   process.exit(0);
 }
 const inputFile = process.argv.find((arg) => arg.startsWith('--input-file=')).slice('--input-file='.length);

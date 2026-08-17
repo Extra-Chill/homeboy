@@ -20,7 +20,7 @@ await writeFile(path.join(dependency, 'composer.json'), '{}\n');
 await writeFile(cli, `#!/usr/bin/env node
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 const args = process.argv.slice(2);
-if (args.includes('--version')) { process.stdout.write('0.20.0'); process.exit(0); }
+if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
 if (args[0] === 'runtime' && args[1] === 'descriptor') {
   const capabilities = process.env.OMIT_NATIVE_DATABASE_CAPABILITY === '1' ? [] : ['runtime-service:mysql:native:mariadb'];
   process.stdout.write(JSON.stringify({

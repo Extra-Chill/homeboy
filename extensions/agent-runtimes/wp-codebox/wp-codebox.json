@@ -3,7 +3,7 @@
   "id": "wp-codebox",
   "name": "WP Codebox",
   "version": "1.5.3",
-  "minimum_version": "0.20.0",
+  "minimum_version": "0.21.0",
   "description": "WP Codebox agent runtime for Homeboy agent tasks.",
   "contract_producers": [
     {

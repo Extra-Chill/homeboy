@@ -24,7 +24,7 @@ try {
   const declaration = manifest.agent_task_executors[0].runner_readiness[0];
   assert.deepEqual(declaration.invocation.argv, ['node', '{{runtime_path}}/scripts/agent/homeboy-wp-codebox-runner-readiness.cjs']);
   assert.equal(declaration.remediation, 'homeboy extension setup wordpress');
-  assert.equal(manifest.minimum_version, '0.20.0');
+  assert.equal(manifest.minimum_version, '0.21.0');
   assert.equal(manifest.version, '1.5.3');
   const stalePath = path.join(temp, 'stale-path');
   const stale = path.join(stalePath, 'wp-codebox');
@@ -56,38 +56,38 @@ try {
 
   const cachedCurrent = path.join(temp, 'cached-current');
   const cachedCli = path.join(cachedCurrent, 'source/packages/cli/dist/index.js');
-  executable(cachedCli, '0.20.0');
+  executable(cachedCli, '0.21.0');
   const cached = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: cachedCurrent, PATH: `${stalePath}:${process.env.PATH}` });
   assert.equal(cached.ready, true);
   assert.equal(cached.identity.executable, cachedCli);
   assert.equal(cached.identity.source, 'managed');
-  assert.equal(cached.identity.version, '0.20.0');
+  assert.equal(cached.identity.version, '0.21.0');
 
   const override = path.join(temp, 'override');
-  executable(override, '0.20.0');
+  executable(override, '0.21.0');
   const explicit = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: incomplete, HOMEBOY_WP_CODEBOX_BIN: override, PATH: `${stalePath}:${process.env.PATH}` });
   assert.equal(explicit.ready, true);
   assert.equal(explicit.identity.executable, override);
   assert.equal(explicit.identity.source, 'configured');
-  assert.equal(explicit.identity.version, '0.20.0');
-  assert.equal(explicit.required_version, '0.20.0');
+  assert.equal(explicit.identity.version, '0.21.0');
+  assert.equal(explicit.required_version, '0.21.0');
 
   const settingsBin = path.join(temp, 'settings-bin');
-  executable(settingsBin, '0.20.0');
+  executable(settingsBin, '0.21.0');
   const settingsOnly = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: incomplete, HOMEBOY_SETTINGS_WP_CODEBOX_BIN: settingsBin, PATH: `${stalePath}:${process.env.PATH}` });
   assert.equal(settingsOnly.ready, true);
   assert.equal(settingsOnly.identity.executable, settingsBin);
   assert.equal(settingsOnly.identity.source, 'configured');
 
   const jsonSettingsBin = path.join(temp, 'json-settings-bin');
-  executable(jsonSettingsBin, '0.20.0');
+  executable(jsonSettingsBin, '0.21.0');
   const jsonSettingsOnly = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: incomplete, HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: jsonSettingsBin }), PATH: `${stalePath}:${process.env.PATH}` });
   assert.equal(jsonSettingsOnly.ready, true);
   assert.equal(jsonSettingsOnly.identity.executable, jsonSettingsBin);
   assert.equal(jsonSettingsOnly.identity.source, 'configured');
 
   const currentManaged = path.join(temp, 'current-managed');
-  executable(path.join(currentManaged, 'source/packages/cli/dist/index.js'), '0.20.0');
+  executable(path.join(currentManaged, 'source/packages/cli/dist/index.js'), '0.21.0');
   const oldOverride = path.join(temp, 'old-override');
   executable(oldOverride, '0.19.0');
   const configuredWins = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: currentManaged, HOMEBOY_WP_CODEBOX_BIN: oldOverride, PATH: `${stalePath}:${process.env.PATH}` });
@@ -96,11 +96,11 @@ try {
   assert.equal(configuredWins.identity.source, 'configured');
 
   const prerelease = path.join(temp, 'prerelease');
-  executable(prerelease, '0.20.0-rc.1');
+  executable(prerelease, '0.21.0-rc.1');
   const prereleaseResult = run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: incomplete, HOMEBOY_WP_CODEBOX_BIN: prerelease, PATH: `${stalePath}:${process.env.PATH}` });
   assert.equal(prereleaseResult.ready, false);
   assert.equal(prereleaseResult.classification, 'wp_codebox_version_too_old');
-  assert.equal(prereleaseResult.identity.version, '0.20.0-rc.1');
+  assert.equal(prereleaseResult.identity.version, '0.21.0-rc.1');
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }

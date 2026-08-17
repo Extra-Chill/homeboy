@@ -72,7 +72,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const args = process.argv.slice(2)
-if (args.includes('--version')) { process.stdout.write('0.20.0'); process.exit(0) }
+if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0) }
 fs.writeFileSync(process.env.FAKE_WP_CODEBOX_ARGS_FILE, `${args.join('\n')}\n`)
 
 if (args[0] === 'recipe' && args[1] === 'build' && args[2] === 'phpunit') {
