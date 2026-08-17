@@ -28,10 +28,29 @@ pub(super) fn lab_handoff_acceptance_timeout_seconds() -> i64 {
 /// A per-run advisory lock makes concurrent status/artifact/Cook readers
 /// reread and persist one coherent aggregate and terminal projection.
 pub fn reconcile_deferred_candidate(run_id: &str) -> Result<bool> {
-    let run_id = resolve_run_id(run_id)?;
-    let lock_path = paths::homeboy_data()?
-        .join("agent-task-runs")
-        .join(&run_id)
+    reconcile_deferred_candidate_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
+/// The store-rooted counterpart of [`reconcile_deferred_candidate`].
+///
+/// The advisory lock is the whole point of this operation, so it must be taken
+/// in the same installation the record, aggregate, plan, and terminal
+/// projection are read and written in. The ambient form resolved the data root
+/// for the lock separately from the root every `store::` shim below it resolved
+/// for itself, which is a lock that excludes nobody as soon as the two differ
+/// (#7505). Deriving it from `run_dir` also makes the lock path agree with the
+/// aggregate path, which already sanitized the resolved run id when the lock
+/// did not.
+pub(crate) fn reconcile_deferred_candidate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    let run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
+    let lock_path = lifecycle_store
+        .run_dir(&run_id)
         .join("deferred-candidate.lock");
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|error| Error::internal_io(error.to_string(), None))?;
@@ -50,8 +69,8 @@ pub fn reconcile_deferred_candidate(run_id: &str) -> Result<bool> {
         })?;
     let _lock = DeferredCandidateLock::lock(file)?;
 
-    let mut record = store::read_record(&run_id)?;
-    let mut aggregate = match store::read_aggregate(&run_id) {
+    let mut record = lifecycle_store.read_record(&run_id)?;
+    let mut aggregate = match lifecycle_store.read_aggregate(&run_id) {
         Ok(aggregate) => aggregate,
         // The worker may finish before the aggregate is committed. A later
         // read retries from durable state rather than inventing a projection.
@@ -177,13 +196,16 @@ pub fn reconcile_deferred_candidate(run_id: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let plan = store::read_controller_plan(&run_id)?;
+    let plan = lifecycle_store.read_controller_plan(&run_id)?;
     aggregate.status = aggregate_status(&aggregate.outcomes);
     aggregate.totals = aggregate_totals(plan.tasks.len(), &aggregate.outcomes);
-    let aggregate_path = store::aggregate_path(&run_id)?.display().to_string();
+    let aggregate_path = lifecycle_store
+        .aggregate_path(&run_id)
+        .display()
+        .to_string();
     apply_aggregate_to_record(&mut record, &plan, &aggregate, aggregate_path);
-    store::write_aggregate_and_record(&record, &aggregate)?;
-    record_terminal_artifact_projection(&mut record, &aggregate)?;
+    lifecycle_store.write_aggregate_and_record(&record, &aggregate)?;
+    record_terminal_artifact_projection_in_store(lifecycle_store, &mut record, &aggregate)?;
     Ok(true)
 }
 

@@ -102,6 +102,17 @@ impl AgentTaskLifecycleStore {
         super::workspace_claims::workspace_claim_store_at(self.data_root())
     }
 
+    /// Terminal workspace authority bound to this store's own roots.
+    ///
+    /// Authority receipts and their release markers are a permission gate over
+    /// a retained runner workspace, so they must be read and written in the
+    /// same installation the record lives in (#7505).
+    pub(crate) fn workspace_terminal_authority_store(
+        &self,
+    ) -> super::workspace_authority::WorkspaceTerminalAuthorityStore {
+        super::workspace_authority::WorkspaceTerminalAuthorityStore::from_roots(&self.roots)
+    }
+
     /// Submit an exact run identity using this store's durable lifecycle roots.
     /// The admission callback supplies runtime evidence without coupling tests to
     /// the ambient controller runtime.
@@ -691,17 +702,14 @@ impl AgentTaskLifecycleStore {
     /// receipt first, then the workspace owner lease.
     pub(crate) fn project_terminal_record_after_unlock(&self, run_id: &str) -> Result<()> {
         let record = self.read_record(run_id)?;
-        super::workspace_authority::WorkspaceTerminalAuthorityStore::new(
-            self.data_root(),
-            self.roots.config().to_path_buf(),
-        )
-        .persist_terminal_from_record(&record)
-        .and_then(|_| {
-            super::workspace_claims::release_terminal_record_workspace_owner_in_store(
-                &super::workspace_claims::workspace_claim_store_at(self.data_root()),
-                &record,
-            )
-        })
+        self.workspace_terminal_authority_store()
+            .persist_terminal_from_record(&record)
+            .and_then(|_| {
+                super::workspace_claims::release_terminal_record_workspace_owner_in_store(
+                    &super::workspace_claims::workspace_claim_store_at(self.data_root()),
+                    &record,
+                )
+            })
     }
 
     pub fn write_aggregate_and_record(
