@@ -1017,9 +1017,16 @@ fn parse_body<T: for<'de> Deserialize<'de>>(body: Option<Value>, label: &str) ->
 }
 
 fn workspace_claim_store() -> Result<crate::workspace_claim::WorkspaceClaimStore> {
-    Ok(crate::workspace_claim::WorkspaceClaimStore::new(
-        paths::homeboy_data()?.join("reverse-broker-workspace-claims"),
-    ))
+    Ok(workspace_claim_store_in_root(&paths::homeboy_data()?))
+}
+
+/// [`workspace_claim_store`] below an explicitly injected data root.
+fn workspace_claim_store_in_root(
+    data_root: &std::path::Path,
+) -> crate::workspace_claim::WorkspaceClaimStore {
+    crate::workspace_claim::WorkspaceClaimStore::new(
+        data_root.join("reverse-broker-workspace-claims"),
+    )
 }
 
 fn workspace_claim_now_ms() -> u64 {

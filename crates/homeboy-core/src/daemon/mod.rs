@@ -2098,9 +2098,21 @@ fn validate_admission_lease(expected_lease_id: &str, actual_lease_id: &str) -> R
 }
 
 fn daemon_workspace_claim_store() -> Result<crate::workspace_claim::WorkspaceClaimStore> {
-    Ok(crate::workspace_claim::WorkspaceClaimStore::new(
-        crate::paths::homeboy_data()?.join("daemon-workspace-claims"),
+    Ok(daemon_workspace_claim_store_in_root(
+        &crate::paths::homeboy_data()?,
     ))
+}
+
+/// [`daemon_workspace_claim_store`] below an explicitly injected data root.
+///
+/// Every register/renew/release of a workspace owner lease currently calls the
+/// ambient form independently, so the acquire and its heartbeat only agree
+/// because the process environment happens to be stable. A caller that holds a
+/// root should build the store once and reuse it.
+fn daemon_workspace_claim_store_in_root(
+    data_root: &std::path::Path,
+) -> crate::workspace_claim::WorkspaceClaimStore {
+    crate::workspace_claim::WorkspaceClaimStore::new(data_root.join("daemon-workspace-claims"))
 }
 
 fn workspace_claim_now_ms() -> u64 {

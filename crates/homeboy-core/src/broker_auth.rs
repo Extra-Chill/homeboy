@@ -32,7 +32,7 @@
 //! is never installed on runner enforcement hosts.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
@@ -415,7 +415,12 @@ pub fn extract_bearer_token(header_lines: &str) -> Option<String> {
 
 /// Path to the broker auth store on disk.
 pub fn store_path() -> Result<PathBuf> {
-    Ok(paths::homeboy()?.join("broker_auth.json"))
+    Ok(store_path_in_root(&paths::homeboy()?))
+}
+
+/// [`store_path`] below an explicitly injected config root.
+pub fn store_path_in_root(config_root: &Path) -> PathBuf {
+    config_root.join("broker_auth.json")
 }
 
 fn sha256_hex(token: &str) -> String {
