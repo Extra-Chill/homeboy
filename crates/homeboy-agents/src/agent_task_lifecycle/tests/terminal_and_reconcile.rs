@@ -2877,6 +2877,79 @@ fn cancellation_race_defers_to_a_durable_provider_success() {
             replay.metadata["provider_executions"][0]["state"],
             json!("succeeded")
         );
+        assert_eq!(replay.metadata["provider_executions_consumed"], json!(1));
+    });
+}
+
+#[test]
+fn provider_terminalization_observes_cancellation_that_won_the_race() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("provider-terminal-cancel-race")).expect("submitted");
+        mark_running("provider-terminal-cancel-race").expect("running");
+        reserve_provider_execution("provider-terminal-cancel-race", &plan.tasks[0], 1)
+            .expect("reserved");
+        cancel_run("provider-terminal-cancel-race", Some("stale owner"))
+            .expect("cancellation recorded");
+
+        let terminal = record_provider_execution_terminal(
+            "provider-terminal-cancel-race",
+            "task-a",
+            1,
+            "timed_out",
+        )
+        .expect("provider timeout observes the durable cancellation");
+
+        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            terminal.metadata["provider_executions"][0]["state"],
+            json!("cancelled")
+        );
+        assert_eq!(terminal.metadata["provider_executions_consumed"], json!(1));
+    });
+}
+
+#[test]
+fn provider_terminalization_rejects_an_invalid_terminal_state() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("invalid-provider-terminal-state")).expect("submitted");
+        reserve_provider_execution("invalid-provider-terminal-state", &plan.tasks[0], 1)
+            .expect("reserved");
+
+        let error = record_provider_execution_terminal(
+            "invalid-provider-terminal-state",
+            "task-a",
+            1,
+            "running",
+        )
+        .expect_err("running is not a terminal provider state");
+
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(
+            status("invalid-provider-terminal-state")
+                .expect("durable record")
+                .metadata["provider_executions"][0]["state"],
+            json!("running")
+        );
+    });
+}
+
+#[test]
+fn provider_terminalization_rejects_a_missing_execution_attempt() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("missing-provider-terminal-attempt")).expect("submitted");
+
+        let error = record_provider_execution_terminal(
+            "missing-provider-terminal-attempt",
+            "task-a",
+            1,
+            "timed_out",
+        )
+        .expect_err("a terminal result needs a reserved execution attempt");
+
+        assert_eq!(error.code, ErrorCode::InternalUnexpected);
     });
 }
 
