@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.14.2] - 2026-08-17
+
+### Fixed
+- defer differential verdict to reconciliation
+
 ## [2.14.1] - 2026-08-16
 
 ### Fixed
