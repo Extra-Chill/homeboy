@@ -16,7 +16,8 @@ if ! grep -q 'name: Candidate \${{ matrix.title }}' "${ROOT_DIR}/.github/workflo
   || ! grep -q "if: steps.resolve-commands.outputs.has-test == 'true'" "${ROOT_DIR}/action.yml" \
   || ! grep -q '^      cleanup-timeout-seconds:' "${ROOT_DIR}/.github/workflows/ci.yml" \
   || [ "$(grep -c '^          cleanup-timeout-seconds: \${{ inputs.cleanup-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml")" -ne 4 ] \
-  || ! grep -A2 'name: Fail candidate phase when terminal evidence is not pass' "${ROOT_DIR}/.github/workflows/ci.yml" | grep -q "if: always() && steps.phase.outcome == 'failure'"; then
+  || ! grep -A2 'name: Fail candidate phase when terminal evidence is not pass' "${ROOT_DIR}/.github/workflows/ci.yml" | grep -q "if: always() && inputs.differential-gating != 'true' && steps.phase.outcome == 'failure'" \
+  || ! grep -A2 'name: Fail candidate Test shard when terminal evidence is not pass' "${ROOT_DIR}/.github/workflows/ci.yml" | grep -q "if: always() && inputs.differential-gating != 'true' && steps.phase.outcome == 'failure'"; then
   printf 'FAIL: reusable CI Test job does not pass its exact matrix command to the action\n'
   exit 1
 fi

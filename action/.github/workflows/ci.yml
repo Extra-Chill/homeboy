@@ -559,10 +559,11 @@ jobs:
           if-no-files-found: warn
 
       # The action deliberately continues through publication so reconciliation
-      # receives the terminal evidence, but the candidate check itself must
-      # still report that same terminal failure before a PR can be merged.
+      # receives terminal evidence. Under differential gating the final command
+      # job owns pass/fail; a known baseline failure must not leave a second raw
+      # candidate check red after reconciliation passes.
       - name: Fail candidate phase when terminal evidence is not pass
-        if: always() && steps.phase.outcome == 'failure'
+        if: always() && inputs.differential-gating != 'true' && steps.phase.outcome == 'failure'
         run: exit 1
 
   baseline:
@@ -920,8 +921,9 @@ jobs:
       # Mirrors "Fail candidate phase when terminal evidence is not pass" in the
       # unsharded candidate job. The action deliberately continues through
       # publication so reconciliation receives the terminal evidence, and the
-      # upload above has already run, so aggregation is unaffected -- but the
-      # shard check itself must still report its own terminal failure.
+      # upload above has already run, so aggregation is unaffected. Differential
+      # reconciliation owns the final verdict when enabled; otherwise each shard
+      # still reports its own terminal failure.
       #
       # Without this, a shard that fails or exceeds test-timeout-seconds reports
       # success while writing "timeout" into its manifest. Reconciliation then
@@ -930,7 +932,7 @@ jobs:
       # only success, and the real cause is nowhere near the failing check.
       #
       - name: Fail candidate Test shard when terminal evidence is not pass
-        if: always() && steps.phase.outcome == 'failure'
+        if: always() && inputs.differential-gating != 'true' && steps.phase.outcome == 'failure'
         run: exit 1
       - name: Restore consumer Git exclusions
         if: always() && steps.prepare-workspace.outcome == 'success'
