@@ -856,6 +856,13 @@ struct ArtifactPortabilityUnit {
 /// concurrently with the other detector families. The scan-statistics logging
 /// stays with the caller, which is what keeps the log lines in their original
 /// order.
+///
+/// The `None` artifact root is not a gap: the engine holds no injected roots
+/// yet, and `None` makes the detector anchor on the root reported by the
+/// recorded-artifact provider that supplied the runs. When `audit_internal`
+/// grows a `PathRoots`, pass `Some(roots.artifacts())` here — and register the
+/// provider with `audit_artifact_provider::register_in_roots` for the same
+/// roots, or the two halves disagree (#7505).
 fn run_artifact_portability(
     plan: &AuditExecutionPlan,
     component_id: &str,
@@ -866,11 +873,12 @@ fn run_artifact_portability(
         plan.detector_enabled("artifact_portability"),
         || {
             if audit_config.artifact_portability.is_empty() {
-                artifact_portability::run_report(component_id)
+                artifact_portability::run_report(component_id, None)
             } else {
                 artifact_portability::run_report_with_config(
                     component_id,
                     &audit_config.artifact_portability,
+                    None,
                 )
             }
         },
@@ -939,18 +947,20 @@ fn audit_root_only(
     );
 
     // `artifact_portability` stays hand-sequenced (logs scan statistics even
-    // when empty), mirroring the full path.
+    // when empty), mirroring the full path. See `run_artifact_portability` for
+    // why the artifact root is `None` here.
     let artifact_portability_report = time_audit_detector(
         timing,
         "detector.artifact_portability",
         plan.detector_enabled("artifact_portability"),
         || {
             if audit_config.artifact_portability.is_empty() {
-                artifact_portability::run_report(component_id)
+                artifact_portability::run_report(component_id, None)
             } else {
                 artifact_portability::run_report_with_config(
                     component_id,
                     &audit_config.artifact_portability,
+                    None,
                 )
             }
         },
