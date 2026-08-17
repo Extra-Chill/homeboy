@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::conventions::AuditFinding;
 use crate::findings::{Finding, Severity};
@@ -29,40 +29,38 @@ pub(crate) fn run_with_config(
     component_id: &str,
     config: &ArtifactPortabilityConfig,
 ) -> Vec<Finding> {
-    run_report_with_config(component_id, config).findings
+    run_report_with_config(component_id, config, None).findings
 }
 
-pub(crate) fn run_report(component_id: &str) -> ArtifactPortabilityReport {
-    run_report_with_config(component_id, &ArtifactPortabilityConfig::default())
-}
-
-/// Ambient boundary for the portability scan: resolve the artifact root once,
-/// then run rooted.
-///
-/// The boundary deliberately stops here rather than moving out into
-/// `engine::audit_internal`. The recorded runs this detector scans arrive from
-/// `recorded_artifacts::recent_recorded_runs`, which dispatches through a
-/// process-global provider registry whose only real implementation
-/// (`homeboy_core::observation::audit_artifact_provider`) opens the observation
-/// store from the *ambient* data root. Threading `PathRoots` into the audit
-/// engine would therefore honor an injected artifact root while still reading
-/// an ambient store — the split-home shape this campaign exists to remove
-/// (#7505). Rooting the audit engine has to wait for the provider contract to
-/// carry roots.
-pub(crate) fn run_report_with_config(
+pub(crate) fn run_report(
     component_id: &str,
-    config: &ArtifactPortabilityConfig,
+    artifact_root: Option<&Path>,
 ) -> ArtifactPortabilityReport {
-    let artifact_root = homeboy_paths::artifact_root().ok();
-    run_report_with_config_in_roots(component_id, config, artifact_root.as_deref())
+    run_report_with_config(
+        component_id,
+        &ArtifactPortabilityConfig::default(),
+        artifact_root,
+    )
 }
 
-/// Portability scan against an explicitly supplied artifact root.
+/// Scan a component's recorded runs for non-portable artifact paths.
 ///
-/// `None` retains the historical degrade-to-no-root behavior: without a root
-/// there is no store-anchored exemption, so only relative and non-temp paths
-/// read as portable.
-pub(crate) fn run_report_with_config_in_roots(
+/// `artifact_root` is the caller's injected artifact root. Pass `Some` ONLY
+/// when the recorded-artifact provider was registered against the same roots
+/// (`audit_artifact_provider::register_in_roots`); an injected root paired with
+/// an ambiently-registered provider compares one home's paths against another
+/// home's root and flags every stored artifact as non-portable (#7505).
+///
+/// `None` — the current behavior at every call site — takes the root from the
+/// provider that supplied the runs, so the two can never disagree. It is NOT
+/// "resolve it ambiently": this detector no longer reads process-global path
+/// state at all.
+///
+/// If neither the caller nor the provider can name a root, the scan DEGRADES:
+/// root-anchored paths simply lose their exemption and the remaining
+/// heuristics (relative, runner-artifact ref, runtime-temp markers) decide. It
+/// never becomes an error.
+pub(crate) fn run_report_with_config(
     component_id: &str,
     config: &ArtifactPortabilityConfig,
     artifact_root: Option<&Path>,
@@ -75,10 +73,12 @@ pub(crate) fn run_report_with_config_in_roots(
         run_window,
         ..Default::default()
     };
-    let runs = crate::recorded_artifacts::recent_recorded_runs(component_id, run_window);
+    let scan = crate::recorded_artifacts::recent_recorded_run_scan(component_id, run_window);
+    let artifact_root: Option<PathBuf> =
+        artifact_root.map(Path::to_path_buf).or(scan.artifact_root);
     let path_policy = config.with_generic_defaults();
 
-    for run in runs {
+    for run in scan.runs {
         report.runs_scanned += 1;
         let artifacts = &run.artifacts;
         report.artifacts_scanned += artifacts.len();
@@ -90,13 +90,17 @@ pub(crate) fn run_report_with_config_in_roots(
             if artifact.artifact_type != "file" && artifact.artifact_type != "directory" {
                 continue;
             }
-            if artifact_path_is_portable(&artifact.path, artifact_root, &path_policy) {
+            if artifact_path_is_portable(&artifact.path, artifact_root.as_deref(), &path_policy) {
                 continue;
             }
             report.findings.push(artifact_path_finding(&run, artifact));
         }
-        let metadata_scan =
-            metadata_path_findings(&run, &artifact_paths, artifact_root, &path_policy);
+        let metadata_scan = metadata_path_findings(
+            &run,
+            &artifact_paths,
+            artifact_root.as_deref(),
+            &path_policy,
+        );
         report.metadata_fields_scanned += metadata_scan.fields_scanned;
         report.findings.extend(metadata_scan.findings);
     }
@@ -342,6 +346,157 @@ mod tests {
         ArtifactRecord, NewRunRecord, ObservationStore, RunListFilter,
     };
     use homeboy_core::test_support::with_isolated_home;
+    use std::path::{Path, PathBuf};
+
+    /// One synthetic recorded run holding `artifact_path`, but only for
+    /// component `demo`.
+    ///
+    /// The component filter is not decoration. A registered provider outlives
+    /// the test that installed it — there is no unregister — so an unfiltered
+    /// provider would feed a fabricated run to every later test in this binary
+    /// that audits any component. Scoping to `demo` makes these providers
+    /// indistinguishable from the no-op for everyone else.
+    fn synthetic_runs(component_id: &str, artifact_path: &str) -> Vec<AuditRecordedRun> {
+        if component_id != "demo" {
+            return Vec::new();
+        }
+        vec![AuditRecordedRun {
+            id: "run-1".to_string(),
+            command: Some("homeboy test demo".to_string()),
+            metadata_json: serde_json::json!({}),
+            artifacts: vec![AuditRecordedArtifact {
+                id: "artifact-1".to_string(),
+                kind: "results".to_string(),
+                artifact_type: "file".to_string(),
+                path: artifact_path.to_string(),
+            }],
+        }]
+    }
+
+    /// Provider that reports a fixed artifact root and one recorded run whose
+    /// artifact sits under it. No store, no ambient state — which is the point:
+    /// it isolates "where does the detector get its root from?" (#7505).
+    struct RootedProvider {
+        artifact_root: PathBuf,
+        artifact_path: String,
+    }
+
+    impl RootedProvider {
+        fn under_root(artifact_root: PathBuf) -> Self {
+            let artifact_path = artifact_root
+                .join("run-1/results.json")
+                .to_string_lossy()
+                .into_owned();
+            Self {
+                artifact_root,
+                artifact_path,
+            }
+        }
+    }
+
+    impl AuditRecordedArtifactProvider for RootedProvider {
+        fn recent_runs(&self, component_id: &str, _limit: usize) -> Vec<AuditRecordedRun> {
+            synthetic_runs(component_id, &self.artifact_path)
+        }
+
+        fn artifact_root(&self) -> Option<PathBuf> {
+            Some(self.artifact_root.clone())
+        }
+    }
+
+    /// Same runs, but the root is unresolvable. Exercises the degrade path.
+    struct RootlessProvider {
+        artifact_path: String,
+    }
+
+    impl AuditRecordedArtifactProvider for RootlessProvider {
+        fn recent_runs(&self, component_id: &str, _limit: usize) -> Vec<AuditRecordedRun> {
+            synthetic_runs(component_id, &self.artifact_path)
+        }
+
+        fn artifact_root(&self) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    /// With no injected root the detector anchors on the root the PROVIDER
+    /// reports, so an artifact under an injected home reads as portable even
+    /// though it is nowhere near the ambient artifact root. Before #7505 this
+    /// compared against `homeboy_paths::artifact_root()` and flagged it.
+    ///
+    /// Wrapped in `with_isolated_home` purely for the serialization it provides:
+    /// the recorded-artifact registry is process-global, so two tests
+    /// registering different providers concurrently would stomp each other.
+    #[test]
+    fn anchors_on_the_root_reported_by_the_provider() {
+        with_isolated_home(|_| {
+            let artifact_root = PathBuf::from("/injected-home/artifacts");
+            register_audit_recorded_artifact_provider(Box::new(RootedProvider::under_root(
+                artifact_root.clone(),
+            )));
+
+            assert!(super::run_report("demo", None).findings.is_empty());
+        });
+    }
+
+    /// Injecting the same root the provider is rooted on agrees with it. This
+    /// is the supported way to hand `artifact_portability` an injected root.
+    #[test]
+    fn injected_root_matching_the_provider_agrees_with_it() {
+        with_isolated_home(|_| {
+            let artifact_root = PathBuf::from("/injected-home/artifacts");
+            register_audit_recorded_artifact_provider(Box::new(RootedProvider::under_root(
+                artifact_root.clone(),
+            )));
+
+            assert!(super::run_report("demo", Some(artifact_root.as_path()))
+                .findings
+                .is_empty());
+        });
+    }
+
+    /// Injecting a root the provider does not share is the misuse the docs warn
+    /// about, and it still reads every stored artifact as non-portable. Pinned
+    /// so the failure mode stays visible rather than becoming folklore: the fix
+    /// is to register the provider `_in_roots`, not to change this detector.
+    #[test]
+    fn injected_root_disagreeing_with_the_provider_flags_everything() {
+        with_isolated_home(|_| {
+            register_audit_recorded_artifact_provider(Box::new(RootedProvider::under_root(
+                PathBuf::from("/injected-home/artifacts"),
+            )));
+
+            let report = super::run_report("demo", Some(Path::new("/other-home/artifacts")));
+
+            assert_eq!(report.findings.len(), 1);
+            assert_eq!(
+                report.findings[0].kind,
+                AuditFinding::NonPortableArtifactPath
+            );
+        });
+    }
+
+    /// An unresolvable artifact root DEGRADES the scan: the root-anchored
+    /// exemption is simply unavailable and the remaining heuristics decide. It
+    /// is never an error, and the report is still produced.
+    #[test]
+    fn unresolvable_artifact_root_degrades_instead_of_failing() {
+        with_isolated_home(|_| {
+            register_audit_recorded_artifact_provider(Box::new(RootlessProvider {
+                artifact_path: "/injected-home/artifacts/run-1/results.json".to_string(),
+            }));
+            let absolute = super::run_report("demo", None);
+            assert_eq!(absolute.runs_scanned, 1);
+            assert_eq!(absolute.findings.len(), 1);
+
+            register_audit_recorded_artifact_provider(Box::new(RootlessProvider {
+                artifact_path: "artifacts/run-1/results.json".to_string(),
+            }));
+            let relative = super::run_report("demo", None);
+            assert_eq!(relative.runs_scanned, 1);
+            assert!(relative.findings.is_empty());
+        });
+    }
 
     /// Store-backed recorded-artifact provider registered directly into the audit
     /// crate's own registry, so these in-crate tests read from the same static
@@ -388,6 +543,12 @@ mod tests {
                     }
                 })
                 .collect()
+        }
+
+        /// This provider opens the store ambiently, so its root is the ambient
+        /// one — the same root the runs it just returned were written under.
+        fn artifact_root(&self) -> Option<PathBuf> {
+            homeboy_paths::artifact_root().ok()
         }
     }
 
@@ -741,7 +902,7 @@ mod tests {
             }
 
             register_store_artifact_provider();
-            let report = super::run_report("demo");
+            let report = super::run_report("demo", None);
 
             assert_eq!(report.run_window, DEFAULT_OBSERVATION_RUN_WINDOW);
             assert_eq!(report.runs_scanned, 60);
@@ -790,6 +951,7 @@ mod tests {
                     observation_run_window: Some(2),
                     ..Default::default()
                 },
+                None,
             );
 
             assert_eq!(report.run_window, 2);
