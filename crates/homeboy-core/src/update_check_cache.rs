@@ -13,7 +13,7 @@
 use crate::paths;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current unix timestamp in seconds. Returns `0` if the system clock is
@@ -29,14 +29,27 @@ pub fn now_unix() -> u64 {
 /// `None` when the homeboy directory cannot be resolved (matching the
 /// prior per-module behavior — callers treat this as "no cache").
 pub fn cache_path(filename: &str) -> Option<PathBuf> {
-    paths::homeboy().ok().map(|path| path.join(filename))
+    paths::homeboy()
+        .ok()
+        .map(|root| cache_path_in_root(&root, filename))
+}
+
+/// [`cache_path`] below an explicitly injected config root.
+pub fn cache_path_in_root(config_root: &Path, filename: &str) -> PathBuf {
+    config_root.join(filename)
 }
 
 /// Read and deserialize a cache payload from `filename` under the
 /// homeboy data directory. Returns `None` on any I/O or JSON error so
 /// the caller falls through to a fresh fetch.
 pub fn read_cache<T: DeserializeOwned>(filename: &str) -> Option<T> {
-    let path = cache_path(filename)?;
+    let config_root = paths::homeboy().ok()?;
+    read_cache_in_root(&config_root, filename)
+}
+
+/// [`read_cache`] against an explicitly injected config root.
+pub fn read_cache_in_root<T: DeserializeOwned>(config_root: &Path, filename: &str) -> Option<T> {
+    let path = cache_path_in_root(config_root, filename);
     let content = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
 }
@@ -48,10 +61,19 @@ pub fn write_cache<T: Serialize>(filename: &str, payload: &T) {
     let Some(path) = cache_path(filename) else {
         return;
     };
+    write_cache_at(&path, payload);
+}
+
+/// [`write_cache`] against an explicitly injected config root.
+pub fn write_cache_in_root<T: Serialize>(config_root: &Path, filename: &str, payload: &T) {
+    write_cache_at(&cache_path_in_root(config_root, filename), payload);
+}
+
+fn write_cache_at<T: Serialize>(path: &Path, payload: &T) {
     let Ok(content) = serde_json::to_string_pretty(payload) else {
         return;
     };
-    let _ = std::fs::write(&path, content);
+    let _ = std::fs::write(path, content);
 }
 
 /// Pure time-based freshness check: `now - checked_at < interval_secs`.
