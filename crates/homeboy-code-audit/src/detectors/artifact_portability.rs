@@ -36,9 +36,36 @@ pub(crate) fn run_report(component_id: &str) -> ArtifactPortabilityReport {
     run_report_with_config(component_id, &ArtifactPortabilityConfig::default())
 }
 
+/// Ambient boundary for the portability scan: resolve the artifact root once,
+/// then run rooted.
+///
+/// The boundary deliberately stops here rather than moving out into
+/// `engine::audit_internal`. The recorded runs this detector scans arrive from
+/// `recorded_artifacts::recent_recorded_runs`, which dispatches through a
+/// process-global provider registry whose only real implementation
+/// (`homeboy_core::observation::audit_artifact_provider`) opens the observation
+/// store from the *ambient* data root. Threading `PathRoots` into the audit
+/// engine would therefore honor an injected artifact root while still reading
+/// an ambient store — the split-home shape this campaign exists to remove
+/// (#7505). Rooting the audit engine has to wait for the provider contract to
+/// carry roots.
 pub(crate) fn run_report_with_config(
     component_id: &str,
     config: &ArtifactPortabilityConfig,
+) -> ArtifactPortabilityReport {
+    let artifact_root = homeboy_paths::artifact_root().ok();
+    run_report_with_config_in_roots(component_id, config, artifact_root.as_deref())
+}
+
+/// Portability scan against an explicitly supplied artifact root.
+///
+/// `None` retains the historical degrade-to-no-root behavior: without a root
+/// there is no store-anchored exemption, so only relative and non-temp paths
+/// read as portable.
+pub(crate) fn run_report_with_config_in_roots(
+    component_id: &str,
+    config: &ArtifactPortabilityConfig,
+    artifact_root: Option<&Path>,
 ) -> ArtifactPortabilityReport {
     let run_window = config
         .observation_run_window
@@ -49,7 +76,6 @@ pub(crate) fn run_report_with_config(
         ..Default::default()
     };
     let runs = crate::recorded_artifacts::recent_recorded_runs(component_id, run_window);
-    let artifact_root = homeboy_paths::artifact_root().ok();
     let path_policy = config.with_generic_defaults();
 
     for run in runs {
@@ -64,17 +90,13 @@ pub(crate) fn run_report_with_config(
             if artifact.artifact_type != "file" && artifact.artifact_type != "directory" {
                 continue;
             }
-            if artifact_path_is_portable(&artifact.path, artifact_root.as_deref(), &path_policy) {
+            if artifact_path_is_portable(&artifact.path, artifact_root, &path_policy) {
                 continue;
             }
             report.findings.push(artifact_path_finding(&run, artifact));
         }
-        let metadata_scan = metadata_path_findings(
-            &run,
-            &artifact_paths,
-            artifact_root.as_deref(),
-            &path_policy,
-        );
+        let metadata_scan =
+            metadata_path_findings(&run, &artifact_paths, artifact_root, &path_policy);
         report.metadata_fields_scanned += metadata_scan.fields_scanned;
         report.findings.extend(metadata_scan.findings);
     }
