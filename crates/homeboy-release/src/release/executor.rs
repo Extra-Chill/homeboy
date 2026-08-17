@@ -37,7 +37,8 @@ pub use github_release::release_notes_path;
 pub(crate) use github_release::release_notes_path as github_release_notes_path;
 pub(crate) use github_release::run_github_release;
 pub(crate) use package::{
-    build_release_payload, run_extension_release_preflight, run_package, PackageRequest,
+    build_release_payload, run_extension_release_preflight, run_package, run_package_in_roots,
+    PackageRequest,
 };
 pub(crate) use publish::{publish_response_output, run_publish};
 pub(crate) use tagging::{
@@ -364,7 +365,26 @@ pub(crate) fn run_cleanup(
     component: &Component,
     state: &ReleaseState,
 ) -> Result<ReleaseStepResult> {
-    let failed_package_paths = package::failed_package_owned_paths(component)?;
+    run_cleanup_in_roots(
+        homeboy_core::paths::PathRoots::from_environment()?.data(),
+        component,
+        state,
+    )
+}
+
+/// [`run_cleanup`] against an explicitly injected data root.
+///
+/// Reading the failed-attempt ownership record and acknowledging it are one
+/// transaction over one file. The ambient form resolved the data root once per
+/// call, so a repoint between them could have removed paths recorded in one
+/// home and then acknowledged a record in another, permanently stranding the
+/// first home's entries (#7505).
+pub(crate) fn run_cleanup_in_roots(
+    data_root: &std::path::Path,
+    component: &Component,
+    state: &ReleaseState,
+) -> Result<ReleaseStepResult> {
+    let failed_package_paths = package::failed_package_owned_paths_in_roots(data_root, component)?;
     let mut package_owned_paths = state.package_owned_paths.clone();
     package_owned_paths.extend(failed_package_paths.iter().cloned());
     package_owned_paths.sort();
@@ -384,7 +404,11 @@ pub(crate) fn run_cleanup(
         })?;
         removed_paths.push(path.display().to_string());
     }
-    package::acknowledge_failed_package_owned_paths(component, &failed_package_paths)?;
+    package::acknowledge_failed_package_owned_paths_in_roots(
+        data_root,
+        component,
+        &failed_package_paths,
+    )?;
 
     let data = serde_json::json!({
         "action": "cleanup",
