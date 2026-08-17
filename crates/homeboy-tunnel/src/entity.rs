@@ -1,9 +1,7 @@
 use homeboy_engine_primitives::content_hash;
-use std::path::PathBuf;
 
 use homeboy_core::config::ConfigEntity;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::paths;
 
 use super::types::*;
 use super::validation::validate_service_tunnel;
@@ -44,11 +42,13 @@ impl ConfigEntity for ServiceTunnel {
         Error::service_tunnel_not_found(id, suggestions)
     }
 
-    fn config_path(id: &str) -> Result<PathBuf> {
-        Ok(paths::homeboy()?
-            .join("service-tunnels")
-            .join(format!("{}.json", id)))
-    }
+    // `config_path` is deliberately not overridden. The override this replaces
+    // was `paths::homeboy()?.join("service-tunnels").join("{id}.json")` — byte
+    // for byte what the trait default produces, because `DIR_NAME` is already
+    // `"service-tunnels"`. It was this crate's only ambient root resolution,
+    // and deleting it moves the reach to `ConfigEntity::config_dir`, the single
+    // place the campaign can root it once for every entity (#7505). `Runner`,
+    // `Fleet`, and `Schedule` already rely on the same default.
 
     fn validate(&self) -> Result<()> {
         validate_service_tunnel(self)

@@ -4,6 +4,7 @@ use homeboy_deploy::{
 };
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::Path;
 
 use super::executor::release_cleanup_paths;
 use super::types::{
@@ -406,13 +407,38 @@ struct DeploymentRecovery {
     package_owned_paths: Vec<String>,
 }
 
-fn recovery_path(component_id: &str) -> Result<std::path::PathBuf> {
-    Ok(homeboy_core::paths::homeboy_data()?
+/// The release deploy recovery checkpoint below an explicitly injected data
+/// root.
+///
+/// Infallible: every caller already resolves the root once at its own
+/// boundary, so the only fallible step left is resolution itself.
+fn recovery_path_in_roots(data_root: &Path, component_id: &str) -> std::path::PathBuf {
+    data_root
         .join("release-deploy-runs")
-        .join(format!("{}.json", component_id.replace('/', "_"))))
+        .join(format!("{}.json", component_id.replace('/', "_")))
 }
 
 fn save_recovery(
+    component: &homeboy_core::component::Component,
+    expected_version: Option<&str>,
+    projects: &[String],
+    config: &DeployConfig,
+    deploy_run_id: &str,
+    package_owned_paths: &[String],
+) -> Result<()> {
+    save_recovery_in_roots(
+        homeboy_core::paths::PathRoots::from_environment()?.data(),
+        component,
+        expected_version,
+        projects,
+        config,
+        deploy_run_id,
+        package_owned_paths,
+    )
+}
+
+fn save_recovery_in_roots(
+    data_root: &Path,
     component: &homeboy_core::component::Component,
     expected_version: Option<&str>,
     projects: &[String],
@@ -436,7 +462,7 @@ fn save_recovery(
         component_path: component.local_path.clone(),
         package_owned_paths: package_owned_paths.to_vec(),
     };
-    let path = recovery_path(&component.id)?;
+    let path = recovery_path_in_roots(data_root, &component.id);
     fs::create_dir_all(path.parent().expect("recovery path parent"))
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     let temporary = path.with_extension("json.tmp");
@@ -453,15 +479,30 @@ fn save_recovery(
 }
 
 fn remove_recovery(component_id: &str) -> Result<()> {
-    let path = recovery_path(component_id)?;
+    remove_recovery_in_roots(
+        homeboy_core::paths::PathRoots::from_environment()?.data(),
+        component_id,
+    )
+}
+
+fn remove_recovery_in_roots(data_root: &Path, component_id: &str) -> Result<()> {
+    let path = recovery_path_in_roots(data_root, component_id);
     if path.exists() {
         fs::remove_file(path).map_err(|error| Error::internal_io(error.to_string(), None))?;
     }
     Ok(())
 }
 
+/// Resume a checkpointed release deployment.
+///
+/// The checkpoint read and the checkpoint removal below share one resolution,
+/// so a run cannot consume a record from one home and then clear the record in
+/// another. The redeploy between them — `deploy::run_multi` — still resolves
+/// its own roots inside `homeboy-deploy`; that boundary is not reachable from
+/// here without changing a public signature (#7505).
 pub(super) fn resume_deployment(component_id: &str) -> Result<Option<ReleaseDeploymentResult>> {
-    let path = recovery_path(component_id)?;
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
+    let path = recovery_path_in_roots(roots.data(), component_id);
     if !path.exists() {
         return Ok(None);
     }
@@ -505,7 +546,7 @@ pub(super) fn resume_deployment(component_id: &str) -> Result<Option<ReleaseDepl
         if !record.component_path.is_empty() {
             cleanup_release_artifacts(&record.component_path, &record.package_owned_paths);
         }
-        remove_recovery(component_id)?;
+        remove_recovery_in_roots(roots.data(), component_id)?;
     }
     Ok(Some(deployment))
 }
@@ -582,6 +623,16 @@ mod tests {
     use homeboy_core::test_support::with_isolated_home;
     use std::io::Write;
     use std::path::Path;
+
+    /// The checkpoint path for the ambient home these tests already isolate.
+    fn recovery_path(component_id: &str) -> std::path::PathBuf {
+        super::recovery_path_in_roots(
+            homeboy_core::paths::PathRoots::from_environment()
+                .expect("path roots")
+                .data(),
+            component_id,
+        )
+    }
 
     fn run_git(path: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
@@ -1130,9 +1181,7 @@ mod tests {
             assert!(successful_target
                 .join("plugins/successful/plugin.txt")
                 .exists());
-            assert!(super::recovery_path("fixture")
-                .expect("recovery path")
-                .exists());
+            assert!(recovery_path("fixture").exists());
             assert!(source.join("build/intermediate").is_file());
             assert!(source.join("fixture-1.2.4.tgz").is_file());
 
@@ -1204,9 +1253,7 @@ mod tests {
                 release_commit
             );
             assert!(
-                !super::recovery_path("fixture")
-                    .expect("recovery path")
-                    .exists(),
+                !recovery_path("fixture").exists(),
                 "terminal success clears the durable checkpoint"
             );
 
