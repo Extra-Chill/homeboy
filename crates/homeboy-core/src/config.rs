@@ -368,15 +368,46 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
         Self::ENTITY_TYPE
     }
 
+    /// Returns the config directory below an already-resolved config root.
+    ///
+    /// This is the rooted primitive every other path resolution derives from.
+    /// Override *this*, never the ambient [`ConfigEntity::config_dir`]: an
+    /// override that resolves its own root would silently ignore the root the
+    /// generic CRUD layer hands it, which is invisible at the call site and
+    /// indistinguishable from working code (#7505, #12595).
+    fn config_dir_in_root(config_root: &Path) -> PathBuf {
+        config_root.join(Self::DIR_NAME)
+    }
+
     /// Returns the config directory path.
+    ///
+    /// Ambient sibling of [`ConfigEntity::config_dir_in_root`]: resolves the
+    /// process config root once and delegates. Do not override.
     fn config_dir() -> Result<PathBuf> {
-        Ok(paths::homeboy()?.join(Self::DIR_NAME))
+        Ok(Self::config_dir_in_root(&paths::homeboy()?))
+    }
+
+    /// Returns the config file path for a given ID below an already-resolved
+    /// config root.
+    ///
+    /// Default: `{config_root}/{DIR_NAME}/{id}.json`. Override *this* for
+    /// non-standard layouts — for example the directory-backed
+    /// `{dir}/{id}/{id}.json` shape used by projects and extensions.
+    ///
+    /// Overriding the ambient [`ConfigEntity::config_path`] instead is the
+    /// shadowing bug this rooting exists to remove: the rooted default would be
+    /// bypassed for that entity alone, so it would read and write a different
+    /// home than every other entity in the same operation.
+    fn config_path_in_root(config_root: &Path, id: &str) -> PathBuf {
+        Self::config_dir_in_root(config_root).join(format!("{}.json", id))
     }
 
     /// Returns the config file path for a given ID.
-    /// Default: `{dir}/{id}.json`. Override for non-standard paths.
+    ///
+    /// Ambient sibling of [`ConfigEntity::config_path_in_root`]: resolves the
+    /// process config root once and delegates. Do not override.
     fn config_path(id: &str) -> Result<PathBuf> {
-        Ok(Self::config_dir()?.join(format!("{}.json", id)))
+        Ok(Self::config_path_in_root(&paths::homeboy()?, id))
     }
 
     /// Whether this entity accepts `{dir}/{id}.json` entries while listing.
@@ -385,6 +416,11 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
     }
 
     /// Entity-specific validation. Override to add custom validation rules.
+    ///
+    /// This hook is still ambient. Implementations that read *other* entities
+    /// (`Project::validate` -> `server::exists`, `Runner::validate` ->
+    /// `server::load`) resolve their own config root, which is why `save` and
+    /// `create` have no `_in_root` sibling yet — see [`crate::entity_crud`].
     fn validate(&self) -> Result<()> {
         Ok(())
     }
@@ -414,6 +450,10 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
     /// Return IDs of entities that depend on this one (for safe delete).
     /// Override to check referential integrity before deletion.
     /// Default: no dependents.
+    ///
+    /// Still ambient, like [`ConfigEntity::validate`]: `Server::dependents`
+    /// lists projects from the process config root, so `delete_safe` has no
+    /// `_in_root` sibling yet.
     fn dependents(_id: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -447,15 +487,19 @@ fn reject_reserved_derived_fields<T: ConfigEntity>(value: &serde_json::Value) ->
 #[derive(Clone, Copy)]
 pub(crate) struct ConfigEntityMetadata {
     entity_type: &'static str,
-    exists: fn(&str) -> bool,
-    aliases: fn() -> Vec<(String, String)>,
+    /// Rooted probes. Collision detection compares every registered entity
+    /// against one ID, so all of them must be answered from the *same* home;
+    /// an ambient probe here would let one entity's existence check land in a
+    /// different config root than the write it is guarding.
+    exists: fn(&Path, &str) -> bool,
+    aliases: fn(&Path) -> Vec<(String, String)>,
 }
 
 fn entity_metadata<T: ConfigEntity>() -> ConfigEntityMetadata {
     ConfigEntityMetadata {
         entity_type: T::ENTITY_TYPE,
-        exists: exists::<T>,
-        aliases: alias_entries::<T>,
+        exists: exists_in_root::<T>,
+        aliases: alias_entries_in_root::<T>,
     }
 }
 
@@ -510,8 +554,8 @@ pub fn registered_config_entity_types() -> Vec<&'static str> {
         .collect()
 }
 
-fn alias_entries<T: ConfigEntity>() -> Vec<(String, String)> {
-    list::<T>()
+fn alias_entries_in_root<T: ConfigEntity>(config_root: &Path) -> Vec<(String, String)> {
+    list_in_root::<T>(config_root)
         .unwrap_or_default()
         .into_iter()
         .flat_map(|entity| {
@@ -524,13 +568,18 @@ fn alias_entries<T: ConfigEntity>() -> Vec<(String, String)> {
         .collect()
 }
 
-pub fn load<T: ConfigEntity>(id: &str) -> Result<T> {
-    let path = T::config_path(id)?;
+/// Load an entity from an already-resolved config root.
+///
+/// The miss path re-reads the directory to resolve aliases and suggest near
+/// misses; it does so under the *same* root as the initial probe, so a "not
+/// found" and its suggestions can never describe two different homes.
+pub fn load_in_root<T: ConfigEntity>(config_root: &Path, id: &str) -> Result<T> {
+    let path = T::config_path_in_root(config_root, id);
     if !path.exists() {
-        let entities = list::<T>().unwrap_or_default();
+        let entities = list_in_root::<T>(config_root).unwrap_or_default();
         // Try alias resolution before giving up
         if let Some(real_id) = resolve_alias_in(id, &entities) {
-            let alias_path = T::config_path(&real_id)?;
+            let alias_path = T::config_path_in_root(config_root, &real_id);
             let content = local_files::local().read(&alias_path)?;
             let mut entity: T = from_str(&content)?;
             entity.set_id(real_id);
@@ -545,6 +594,10 @@ pub fn load<T: ConfigEntity>(id: &str) -> Result<T> {
     entity.set_id(id.to_string());
     entity.post_load(&content);
     Ok(entity)
+}
+
+pub fn load<T: ConfigEntity>(id: &str) -> Result<T> {
+    load_in_root::<T>(&paths::homeboy()?, id)
 }
 
 fn resolve_alias_in<T: ConfigEntity>(alias: &str, entities: &[T]) -> Option<String> {
@@ -583,8 +636,9 @@ fn entry_path_and_id<T: ConfigEntity>(entry: &local_files::Entry) -> Option<(Pat
     }
 }
 
-pub fn list<T: ConfigEntity>() -> Result<Vec<T>> {
-    let dir = T::config_dir()?;
+/// List every entity below an already-resolved config root.
+pub fn list_in_root<T: ConfigEntity>(config_root: &Path) -> Result<Vec<T>> {
+    let dir = T::config_dir_in_root(config_root);
     let entries = local_files::local().list(&dir)?;
 
     let mut items: Vec<T> = entries
@@ -625,13 +679,23 @@ pub fn list<T: ConfigEntity>() -> Result<Vec<T>> {
     Ok(items)
 }
 
-pub fn check_id_collision(id: &str, saving_type: &str) -> Result<()> {
+pub fn list<T: ConfigEntity>() -> Result<Vec<T>> {
+    list_in_root::<T>(&paths::homeboy()?)
+}
+
+/// Reject an ID that is already taken by another entity type below
+/// `config_root`.
+///
+/// Every registered entity is probed under the one root passed in. Resolving
+/// per-entity would let the guard clear an ID in one home and the write land in
+/// another — a collision check that fails open.
+pub fn check_id_collision_in_root(config_root: &Path, id: &str, saving_type: &str) -> Result<()> {
     for metadata in config_entity_registry() {
         if metadata.entity_type == saving_type {
             continue;
         }
 
-        if (metadata.exists)(id) {
+        if (metadata.exists)(config_root, id) {
             return Err(Error::config_id_collision(
                 id,
                 saving_type,
@@ -641,13 +705,22 @@ pub fn check_id_collision(id: &str, saving_type: &str) -> Result<()> {
     }
 
     // Check if the ID collides with any existing alias
-    check_alias_collision_all(id, saving_type)?;
+    check_alias_collision_all_in_root(config_root, id, saving_type)?;
 
     Ok(())
 }
 
-/// Check if a given ID or alias collides with any existing entity's aliases.
-fn check_alias_collision_all(id: &str, saving_type: &str) -> Result<()> {
+pub fn check_id_collision(id: &str, saving_type: &str) -> Result<()> {
+    check_id_collision_in_root(&paths::homeboy()?, id, saving_type)
+}
+
+/// Check if a given ID or alias collides with any existing entity's aliases
+/// below an already-resolved config root.
+fn check_alias_collision_all_in_root(
+    config_root: &Path,
+    id: &str,
+    saving_type: &str,
+) -> Result<()> {
     let id_lower = id.to_lowercase();
 
     for metadata in config_entity_registry() {
@@ -655,7 +728,7 @@ fn check_alias_collision_all(id: &str, saving_type: &str) -> Result<()> {
             continue;
         }
 
-        for (entity_id, alias) in (metadata.aliases)() {
+        for (entity_id, alias) in (metadata.aliases)(config_root) {
             if alias.to_lowercase() == id_lower {
                 return Err(Error::config(format!(
                     "ID '{}' conflicts with an alias on {} '{}'",
@@ -675,15 +748,19 @@ fn check_alias_collision_all(id: &str, saving_type: &str) -> Result<()> {
 /// `config_path` is `{dir}/{id}/{id}.json`), serializes the entity as pretty
 /// JSON, and writes the file. Callers are responsible for validation and
 /// collision checks before invoking this helper.
-fn write_entity<T: ConfigEntity>(entity: &T) -> Result<()> {
-    let path = T::config_path(entity.id())?;
-    local_files::ensure_app_dirs()?;
+fn write_entity_in_root<T: ConfigEntity>(config_root: &Path, entity: &T) -> Result<()> {
+    let path = T::config_path_in_root(config_root, entity.id());
+    local_files::ensure_app_dirs_in_root(config_root)?;
     if let Some(parent) = path.parent() {
         local_files::local().ensure_dir(parent)?;
     }
     let content = to_string_pretty(entity)?;
     local_files::local().write(&path, &content)?;
     Ok(())
+}
+
+fn write_entity<T: ConfigEntity>(entity: &T) -> Result<()> {
+    write_entity_in_root(&paths::homeboy()?, entity)
 }
 
 pub fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
@@ -751,10 +828,11 @@ pub fn create<T: ConfigEntity>(json_spec: &str, skip_existing: bool) -> Result<C
     Ok(CreateOutput::Single(create_single_from_json::<T>(&raw)?))
 }
 
-pub fn delete<T: ConfigEntity>(id: &str) -> Result<()> {
-    let path = T::config_path(id)?;
+/// Delete an entity below an already-resolved config root, unconditionally.
+pub fn delete_in_root<T: ConfigEntity>(config_root: &Path, id: &str) -> Result<()> {
+    let path = T::config_path_in_root(config_root, id);
     if !path.exists() {
-        let suggestions = find_similar_ids::<T>(id);
+        let suggestions = find_similar_ids_in_root::<T>(config_root, id);
         return Err(T::not_found_error(id.to_string(), suggestions));
     }
     local_files::local().delete(&path)?;
@@ -777,12 +855,24 @@ pub fn delete<T: ConfigEntity>(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn exists<T: ConfigEntity>(id: &str) -> bool {
-    T::config_path(id).map(|p| p.exists()).unwrap_or(false)
+pub fn delete<T: ConfigEntity>(id: &str) -> Result<()> {
+    delete_in_root::<T>(&paths::homeboy()?, id)
 }
 
-pub fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
-    let dir = T::config_dir()?;
+/// Whether an entity with this ID exists below an already-resolved config root.
+pub fn exists_in_root<T: ConfigEntity>(config_root: &Path, id: &str) -> bool {
+    T::config_path_in_root(config_root, id).exists()
+}
+
+pub fn exists<T: ConfigEntity>(id: &str) -> bool {
+    // An unresolvable config root keeps the historical "does not exist"
+    // answer rather than surfacing an error through a bool-returning probe.
+    paths::homeboy().is_ok_and(|config_root| exists_in_root::<T>(&config_root, id))
+}
+
+/// List entity IDs below an already-resolved config root.
+pub fn list_ids_in_root<T: ConfigEntity>(config_root: &Path) -> Result<Vec<String>> {
+    let dir = T::config_dir_in_root(config_root);
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -794,6 +884,10 @@ pub fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
         .collect();
     ids.sort();
     Ok(ids)
+}
+
+pub fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
+    list_ids_in_root::<T>(&paths::homeboy()?)
 }
 
 // ============================================================================
@@ -1157,13 +1251,21 @@ pub fn delete_safe<T: ConfigEntity>(id: &str) -> Result<()> {
 /// Find entity IDs similar to the given target.
 /// Uses prefix matching, suffix matching, and Levenshtein distance.
 /// Returns up to 3 matches prioritized by match quality.
-pub fn find_similar_ids<T: ConfigEntity>(target: &str) -> Vec<String> {
-    let entities = match list::<T>() {
+pub fn find_similar_ids_in_root<T: ConfigEntity>(config_root: &Path, target: &str) -> Vec<String> {
+    let entities = match list_in_root::<T>(config_root) {
         Ok(e) => e,
         Err(_) => return vec![],
     };
 
     find_similar_ids_in(target, &entities)
+}
+
+pub fn find_similar_ids<T: ConfigEntity>(target: &str) -> Vec<String> {
+    let Ok(config_root) = paths::homeboy() else {
+        return vec![];
+    };
+
+    find_similar_ids_in_root::<T>(&config_root, target)
 }
 
 fn find_similar_ids_in<T: ConfigEntity>(target: &str, entities: &[T]) -> Vec<String> {
@@ -1457,9 +1559,24 @@ mod tests {
 
 /// Generate standard CRUD wrapper functions for a `ConfigEntity` type.
 ///
-/// The base invocation generates 9 universal wrappers that every entity needs:
+/// The base invocation generates the universal wrappers every entity needs:
 /// `load`, `list`, `save`, `delete`, `exists`, `remove_from_json`, `create`,
 /// `rename`, `delete_safe`.
+///
+/// Operations whose whole reach is path resolution also get an `_in_root`
+/// sibling — `load_in_root`, `list_in_root`, `delete_in_root`,
+/// `exists_in_root` (and `list_ids_in_root` under the `list_ids` feature) —
+/// which resolve every path from the config root they are handed instead of
+/// from process-global state.
+///
+/// `save`, `create`, `rename`, `delete_safe` and `merge` deliberately have no
+/// rooted sibling yet: they run the `validate`/`dependents` trait hooks, and
+/// some implementations of those hooks read *other* entities ambiently
+/// (`Project::validate` -> `server::exists`, `Runner::validate` ->
+/// `server::load`, `Server::dependents` -> `project::list`). A rooted wrapper
+/// over an ambient hook would resolve half its state from the injected root and
+/// half from the environment, which is the exact split this rooting exists to
+/// remove. Root those hooks first (#7505).
 ///
 /// `rename` calls `config::rename`, then the entity's `on_rename` hook
 /// (for updating references in other entities), then reloads.
@@ -1495,8 +1612,21 @@ macro_rules! entity_crud {
             $crate::config::load::<$Entity>(id)
         }
 
+        /// Load from an already-resolved config root.
+        pub fn load_in_root(
+            config_root: &::std::path::Path,
+            id: &str,
+        ) -> $crate::Result<$Entity> {
+            $crate::config::load_in_root::<$Entity>(config_root, id)
+        }
+
         pub fn list() -> $crate::Result<Vec<$Entity>> {
             $crate::config::list::<$Entity>()
+        }
+
+        /// List from an already-resolved config root.
+        pub fn list_in_root(config_root: &::std::path::Path) -> $crate::Result<Vec<$Entity>> {
+            $crate::config::list_in_root::<$Entity>(config_root)
         }
 
         pub fn save(entity: &$Entity) -> $crate::Result<()> {
@@ -1507,8 +1637,18 @@ macro_rules! entity_crud {
             $crate::config::delete::<$Entity>(id)
         }
 
+        /// Delete from an already-resolved config root.
+        pub fn delete_in_root(config_root: &::std::path::Path, id: &str) -> $crate::Result<()> {
+            $crate::config::delete_in_root::<$Entity>(config_root, id)
+        }
+
         pub fn exists(id: &str) -> bool {
             $crate::config::exists::<$Entity>(id)
+        }
+
+        /// Existence probe against an already-resolved config root.
+        pub fn exists_in_root(config_root: &::std::path::Path, id: &str) -> bool {
+            $crate::config::exists_in_root::<$Entity>(config_root, id)
         }
 
         pub fn remove_from_json(
@@ -1544,6 +1684,13 @@ macro_rules! entity_crud {
     (@feature $Entity:ty, list_ids) => {
         pub fn list_ids() -> $crate::Result<Vec<String>> {
             $crate::config::list_ids::<$Entity>()
+        }
+
+        /// List IDs from an already-resolved config root.
+        pub fn list_ids_in_root(
+            config_root: &::std::path::Path,
+        ) -> $crate::Result<Vec<String>> {
+            $crate::config::list_ids_in_root::<$Entity>(config_root)
         }
     };
 
