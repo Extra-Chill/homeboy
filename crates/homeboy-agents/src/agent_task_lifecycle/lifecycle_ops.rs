@@ -1904,15 +1904,24 @@ pub fn record_completed_run_in_store(
 }
 
 pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    let run_id = resolve_run_id(run_id)?;
-    store::read_controller_plan(&run_id)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    load_plan_in_store(&lifecycle_store, run_id)
+}
+
+/// [`load_plan`] against explicitly injected durable lifecycle roots.
+pub fn load_plan_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskPlan> {
+    let run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
+    lifecycle_store.read_controller_plan(&run_id)
 }
 
 /// Load the plan owned by this controller's durable run identity. Runner paths
 /// projected into lifecycle metadata are transport evidence, not retry input.
 pub fn load_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    let run_id = resolve_run_id(run_id)?;
-    store::read_controller_plan(&run_id)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    load_controller_plan_in_store(&lifecycle_store, run_id)
 }
 
 /// Load the controller-owned plan from an explicitly rooted store. Both halves
@@ -2372,7 +2381,18 @@ pub fn record_provider_execution_process_in_store(
 
 /// Return the unambiguous running provider PID for activity sampling.
 pub fn running_owner_pid(run_id: &str) -> Result<Option<u32>> {
-    Ok(store::read_record(&sanitize_run_id(run_id))?.owner_pid())
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    running_owner_pid_in_store(&lifecycle_store, run_id)
+}
+
+/// [`running_owner_pid`] against explicitly injected durable lifecycle roots.
+pub fn running_owner_pid_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<u32>> {
+    Ok(lifecycle_store
+        .read_record(&sanitize_run_id(run_id))?
+        .owner_pid())
 }
 
 /// Persist the controller-owned Cook phase independently of provider output.
@@ -2822,7 +2842,17 @@ pub(crate) fn record_provider_execution_terminal_in_store(
 /// boundary remains active, so callers use this durable predicate to stop
 /// sampling during that bounded cleanup phase.
 pub fn has_active_provider_execution(run_id: &str) -> Result<bool> {
-    let record = store::read_record(&sanitize_run_id(run_id))?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    has_active_provider_execution_in_store(&lifecycle_store, run_id)
+}
+
+/// [`has_active_provider_execution`] against explicitly injected durable
+/// lifecycle roots.
+pub fn has_active_provider_execution_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    let record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     Ok(record.metadata["provider_executions"]
         .as_array()
         .is_some_and(|executions| {
@@ -4041,8 +4071,17 @@ fn status_with_options_inner(
 /// authoritative when an operator explicitly asks to refresh liveness, but a
 /// wedged runner must never hide state already persisted by the controller.
 pub fn persisted_status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let resolved_run_id = resolve_run_id(run_id)?;
-    store::read_record_bounded(&resolved_run_id)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    persisted_status_in_store(&lifecycle_store, run_id)
+}
+
+/// [`persisted_status`] against explicitly injected durable lifecycle roots.
+pub fn persisted_status_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let resolved_run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
+    lifecycle_store.read_record_bounded(&resolved_run_id)
 }
 
 /// Refresh accepted runner handoffs and expire unbound controller handoffs before
@@ -4171,10 +4210,28 @@ pub fn read_records_with_health() -> Result<(Vec<AgentTaskRunRecord>, AgentTaskR
     read_records_with_health_bounded(1000)
 }
 
+/// [`read_records_with_health`] against explicitly injected durable lifecycle
+/// roots.
+pub fn read_records_with_health_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
+    read_records_with_health_bounded_in_store(lifecycle_store, 1000)
+}
+
 pub fn read_records_with_health_bounded(
     limit: usize,
 ) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
-    let (mut records, health) = store::read_records_with_health_bounded(limit)?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    read_records_with_health_bounded_in_store(&lifecycle_store, limit)
+}
+
+/// [`read_records_with_health_bounded`] against explicitly injected durable
+/// lifecycle roots.
+pub fn read_records_with_health_bounded_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    limit: usize,
+) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
+    let (mut records, health) = lifecycle_store.read_records_with_health_bounded(limit)?;
     sort_records_newest_first(&mut records);
     Ok((records, health))
 }
@@ -4185,7 +4242,16 @@ pub fn read_records_with_health_bounded(
 /// selected rather than against the ordinary bounded display snapshot.
 pub fn read_all_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
-    let (mut records, health) = store::read_all_records_with_health()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    read_all_records_with_health_in_store(&lifecycle_store)
+}
+
+/// [`read_all_records_with_health`] against explicitly injected durable
+/// lifecycle roots.
+pub fn read_all_records_with_health_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
+    let (mut records, health) = lifecycle_store.read_all_records_with_health()?;
     sort_records_newest_first(&mut records);
     Ok((records, health))
 }
@@ -4207,11 +4273,22 @@ fn sort_records_newest_first(records: &mut [AgentTaskRunRecord]) {
 /// finished, so the path rather than a transient process-local identifier is
 /// the durable source identity.
 pub fn run_id_for_aggregate_path(path: &std::path::Path) -> Result<Option<String>> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    run_id_for_aggregate_path_in_store(&lifecycle_store, path)
+}
+
+/// [`run_id_for_aggregate_path`] against explicitly injected durable lifecycle
+/// roots.
+pub fn run_id_for_aggregate_path_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    path: &std::path::Path,
+) -> Result<Option<String>> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let mut matching_run_ids = store::read_records()?
+    let mut matching_run_ids = lifecycle_store
+        .read_records()?
         .into_iter()
         .filter_map(|record| {
-            let aggregate_path = store::aggregate_path(&record.run_id).ok()?;
+            let aggregate_path = lifecycle_store.aggregate_path(&record.run_id);
             let aggregate_path = aggregate_path.canonicalize().unwrap_or(aggregate_path);
             (aggregate_path == path).then_some(record.run_id)
         })
@@ -4234,9 +4311,26 @@ pub fn run_record_exists(run_id: &str) -> Result<bool> {
     store::record_exists(&sanitize_run_id(run_id))
 }
 
+/// [`run_record_exists`] against explicitly injected durable lifecycle roots.
+pub fn run_record_exists_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    lifecycle_store.record_exists(&sanitize_run_id(run_id))
+}
+
 /// Non-initializing durable existence check for read-only diagnostics.
 pub fn run_record_exists_readonly(run_id: &str) -> Result<bool> {
     store::record_exists_readonly(&sanitize_run_id(run_id))
+}
+
+/// [`run_record_exists_readonly`] against explicitly injected durable lifecycle
+/// roots.
+pub fn run_record_exists_readonly_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    lifecycle_store.record_exists_readonly(&sanitize_run_id(run_id))
 }
 
 /// Whether a durable run record exists for `run_id` after the same resolution
@@ -4247,6 +4341,15 @@ pub fn run_record_exists_readonly(run_id: &str) -> Result<bool> {
 /// `agent-task retry <id>` to a runner with no such record (#8390).
 pub fn run_record_exists_resolved(run_id: &str) -> Result<bool> {
     store::record_exists(&resolve_run_id(run_id)?)
+}
+
+/// [`run_record_exists_resolved`] against explicitly injected durable lifecycle
+/// roots.
+pub fn run_record_exists_resolved_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    lifecycle_store.record_exists(&resolve_run_id_in_store(lifecycle_store, run_id)?)
 }
 
 pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -4804,7 +4907,16 @@ pub(crate) fn find_unbound_cook_retry_successor_in_store(
 /// before retrying. A persisted follow-up plan names a temporary checkout, not
 /// authority to reuse whatever happens to exist at that path.
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
-    let snapshot = durable_local_read(run_id)?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    artifacts_in_store(&lifecycle_store, run_id)
+}
+
+/// [`artifacts`] against explicitly injected durable lifecycle roots.
+pub fn artifacts_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunArtifacts> {
+    let snapshot = durable_local_read_in_store(lifecycle_store, run_id)?;
     let record = snapshot.record;
     let run_id = record.run_id.clone();
     let aggregate = snapshot.aggregate;
@@ -4863,19 +4975,41 @@ pub struct AgentTaskDurableReadUnavailable {
 /// Read the durable controller record and its local aggregate within the
 /// read-only store budget, without runner liveness reconciliation.
 pub fn durable_local_read(run_id: &str) -> Result<AgentTaskDurableLocalRead> {
-    let record = persisted_status(run_id)?;
-    durable_local_read_record(record)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    durable_local_read_in_store(&lifecycle_store, run_id)
+}
+
+/// [`durable_local_read`] against explicitly injected durable lifecycle roots.
+pub fn durable_local_read_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskDurableLocalRead> {
+    let record = persisted_status_in_store(lifecycle_store, run_id)?;
+    durable_local_read_record_in_store(lifecycle_store, record)
 }
 
 /// Read one concrete durable record without resolving a Cook ID through its
 /// latest attempt. This is the inspection counterpart to [`exact_record`].
 pub fn exact_durable_local_read(run_id: &str) -> Result<AgentTaskDurableLocalRead> {
-    let record = store::read_record_bounded(&sanitize_run_id(run_id))?;
-    durable_local_read_record(record)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    exact_durable_local_read_in_store(&lifecycle_store, run_id)
 }
 
-fn durable_local_read_record(record: AgentTaskRunRecord) -> Result<AgentTaskDurableLocalRead> {
-    let aggregate = match store::read_aggregate_bounded(&record.run_id) {
+/// [`exact_durable_local_read`] against explicitly injected durable lifecycle
+/// roots.
+pub fn exact_durable_local_read_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskDurableLocalRead> {
+    let record = lifecycle_store.read_record_bounded(&sanitize_run_id(run_id))?;
+    durable_local_read_record_in_store(lifecycle_store, record)
+}
+
+fn durable_local_read_record_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: AgentTaskRunRecord,
+) -> Result<AgentTaskDurableLocalRead> {
+    let aggregate = match lifecycle_store.read_aggregate_bounded(&record.run_id) {
         Ok(aggregate) => Some(aggregate),
         Err(error) => {
             return Ok(AgentTaskDurableLocalRead {
@@ -4906,14 +5040,32 @@ fn durable_local_read_record(record: AgentTaskRunRecord) -> Result<AgentTaskDura
 /// Read the aggregate after a transport reconciliation completed it without
 /// scheduling the controller-side synthetic handoff task.
 pub fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
-    let run_id = resolve_run_id(run_id)?;
-    store::read_aggregate(&run_id)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    read_aggregate_in_store(&lifecycle_store, run_id)
+}
+
+/// [`read_aggregate`] against explicitly injected durable lifecycle roots.
+pub fn read_aggregate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskAggregate> {
+    let run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
+    lifecycle_store.read_aggregate(&run_id)
 }
 
 /// Read an immutable attempt directly; unlike `read_aggregate`, this never
 /// treats a Cook ID as an alias for its latest attempt.
 pub fn read_attempt_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
     store::read_aggregate(&sanitize_run_id(run_id))
+}
+
+/// [`read_attempt_aggregate`] against explicitly injected durable lifecycle
+/// roots.
+pub fn read_attempt_aggregate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskAggregate> {
+    lifecycle_store.read_aggregate(&sanitize_run_id(run_id))
 }
 
 pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
@@ -5220,8 +5372,24 @@ pub fn cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
     store::read_cook_index(&sanitize_run_id(cook_id))
 }
 
+/// [`cook_index`] against explicitly injected durable lifecycle roots.
+pub fn cook_index_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<AgentTaskCookIndex> {
+    lifecycle_store.read_cook_index(&sanitize_run_id(cook_id))
+}
+
 pub fn cook_index_exists(cook_id: &str) -> Result<bool> {
     store::cook_index_exists(&sanitize_run_id(cook_id))
+}
+
+/// [`cook_index_exists`] against explicitly injected durable lifecycle roots.
+pub fn cook_index_exists_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<bool> {
+    Ok(lifecycle_store.cook_index_exists(&sanitize_run_id(cook_id)))
 }
 
 #[cfg(test)]
@@ -5566,21 +5734,39 @@ pub fn exact_record(run_id: &str) -> Result<AgentTaskRunRecord> {
     store::read_record(&sanitize_run_id(run_id))
 }
 
+/// [`exact_record`] against explicitly injected durable lifecycle roots.
+pub fn exact_record_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    lifecycle_store.read_record(&sanitize_run_id(run_id))
+}
+
 /// Return the exact durable records a reconciliation request owns. A Cook id
 /// with a materialized detached-handoff parent names both that parent and its
 /// current attempt; an exact attempt remains scoped to itself.
 pub fn reconcile_scope_run_ids(run_id: &str) -> Result<Vec<String>> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    reconcile_scope_run_ids_in_store(&lifecycle_store, run_id)
+}
+
+/// [`reconcile_scope_run_ids`] against explicitly injected durable lifecycle
+/// roots.
+pub fn reconcile_scope_run_ids_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Vec<String>> {
     let requested = sanitize_run_id(run_id);
     let mut run_ids = vec![requested.clone()];
 
-    if let Ok(parent) = store::read_record(&requested) {
+    if let Ok(parent) = lifecycle_store.read_record(&requested) {
         if let Some(attempt_run_id) = parent
             .metadata
             .pointer("/detached_cook_handoff/attempt_run_id")
             .and_then(Value::as_str)
         {
             let attempt_run_id = sanitize_run_id(attempt_run_id);
-            let attempt = store::read_record(&attempt_run_id)?;
+            let attempt = lifecycle_store.read_record(&attempt_run_id)?;
             let attempt_cook_id = attempt.metadata.get("cook_id").and_then(Value::as_str);
             if attempt_cook_id != Some(requested.as_str()) {
                 return Err(Error::validation_invalid_argument(
@@ -5590,7 +5776,7 @@ pub fn reconcile_scope_run_ids(run_id: &str) -> Result<Vec<String>> {
                     None,
                 ));
             }
-            let index = store::read_cook_index(&requested).map_err(|_| {
+            let index = lifecycle_store.read_cook_index(&requested).map_err(|_| {
                 Error::validation_invalid_argument(
                     "detached_cook_handoff.attempt_run_id",
                     "detached Cook handoff attempt has no Cook index authority",
@@ -5613,10 +5799,10 @@ pub fn reconcile_scope_run_ids(run_id: &str) -> Result<Vec<String>> {
             // The handoff binds this repair to its accepted child. A later
             // index retry is a separate attempt and remains out of scope.
             run_ids.push(attempt.run_id);
-        } else if let Ok(index) = store::read_cook_index(&requested) {
+        } else if let Ok(index) = lifecycle_store.read_cook_index(&requested) {
             run_ids.push(index.latest_run_id);
         }
-    } else if let Ok(index) = store::read_cook_index(&requested) {
+    } else if let Ok(index) = lifecycle_store.read_cook_index(&requested) {
         run_ids[0] = index.latest_run_id;
     }
 
