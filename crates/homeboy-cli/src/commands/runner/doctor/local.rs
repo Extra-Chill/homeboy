@@ -1,17 +1,26 @@
 use super::*;
 use types::*;
 
+/// Probe the local runner.
+///
+/// `artifact_root` is injected rather than resolved here: the doctor reports
+/// the artifact root it probed, and a probe that answered from a root the
+/// command around it never resolved is exactly the readiness lie #7505 is
+/// about. `None` means the caller could not resolve one, which keeps the
+/// historical workspace-relative fallback below.
 pub fn report(
     runner_id: &str,
     runner: Option<&Runner>,
     options: &RunnerDoctorOptions,
+    artifact_root: Option<&Path>,
 ) -> RunnerDoctorOutput {
     let workspace_root = runner
         .and_then(|runner| runner.workspace_root.as_ref())
         .map(PathBuf::from)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let artifact_root = crate::core::paths::artifact_root()
-        .unwrap_or_else(|_| workspace_root.join(".homeboy-artifacts"));
+    let artifact_root = artifact_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_root.join(".homeboy-artifacts"));
     let mut checks = Vec::new();
     let mut tools = BTreeMap::new();
 

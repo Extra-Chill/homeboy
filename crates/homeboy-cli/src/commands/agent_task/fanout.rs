@@ -2773,9 +2773,16 @@ fn load_batch_cook_fanout_plan(
     args: &AgentTaskFanoutInputArgs,
     allow_private_execution_input: bool,
 ) -> Result<BatchCookFanoutPlan> {
+    // Both private-plan reads below answer the same security question — is the
+    // supplied path THE controller-owned artifact? — so they have to agree on
+    // where that artifact lives. Resolving the data root twice let the
+    // pre-read permission validation and the path authorization consult two
+    // different answers: a plan whose parent missed the first check could still
+    // satisfy the second, and the owner-only permission gate would be skipped.
+    let data_root = homeboy::core::paths::homeboy_data()?;
     let raw = if let Some(path) = args.input.strip_prefix('@') {
         let path = PathBuf::from(path);
-        if path.parent() == Some(private_batch_plan_dir()?.as_path()) {
+        if path.parent() == Some(private_batch_plan_dir_in_roots(&data_root).as_path()) {
             validate_private_plan_path_before_read(&path)?;
         }
         read_batch_plan_input(path)?
@@ -2806,7 +2813,7 @@ fn load_batch_cook_fanout_plan(
                 None,
             )
         })?;
-        let expected_path = private_batch_plan_path(fanout_id)?;
+        let expected_path = private_batch_plan_path_in_roots(&data_root, fanout_id);
         let supplied_path = args
             .input
             .strip_prefix('@')
@@ -2955,16 +2962,27 @@ fn private_plan_digest(plan: &Value) -> Result<String> {
 }
 
 fn private_batch_plan_path(fanout_id: &str) -> Result<PathBuf> {
-    Ok(private_batch_plan_dir()?.join(format!(
+    Ok(private_batch_plan_path_in_roots(
+        &homeboy::core::paths::homeboy_data()?,
+        fanout_id,
+    ))
+}
+
+fn private_batch_plan_path_in_roots(data_root: &Path, fanout_id: &str) -> PathBuf {
+    private_batch_plan_dir_in_roots(data_root).join(format!(
         "{}.json",
         homeboy::core::paths::sanitize_path_segment(fanout_id)
-    )))
+    ))
 }
 
 fn private_batch_plan_dir() -> Result<PathBuf> {
-    Ok(homeboy::core::paths::homeboy_data()?
-        .join("agent-task")
-        .join("private-batch-plans"))
+    Ok(private_batch_plan_dir_in_roots(
+        &homeboy::core::paths::homeboy_data()?,
+    ))
+}
+
+fn private_batch_plan_dir_in_roots(data_root: &Path) -> PathBuf {
+    data_root.join("agent-task").join("private-batch-plans")
 }
 
 fn validate_private_plan_path_before_read(path: &PathBuf) -> Result<()> {
