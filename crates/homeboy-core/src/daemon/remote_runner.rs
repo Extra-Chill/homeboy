@@ -869,12 +869,18 @@ fn heartbeat(
         request.workspace_owner_lease.as_ref(),
     )?;
     let lease_ms = request.lease_ms.unwrap_or(30_000);
+    // One authority for the renewal and its failure-recovery write. The renewal
+    // advances the durable owner epoch, so recording the failure against a
+    // separately resolved store would strand the advanced lease unrecoverable.
+    let owner_claim_store = match request.workspace_owner_lease.as_ref() {
+        Some(_) => Some(workspace_claim_store()?),
+        None => None,
+    };
     let renewed_owner_lease = request
         .workspace_owner_lease
         .as_ref()
-        .map(|lease| {
-            workspace_claim_store()?.renew_owner(lease, lease_ms, workspace_claim_now_ms())
-        })
+        .zip(owner_claim_store.as_ref())
+        .map(|(lease, store)| store.renew_owner(lease, lease_ms, workspace_claim_now_ms()))
         .transpose()?;
     let job = match job_store.renew_remote_runner_claim_with_workspace_owner_lease(
         job_id,
@@ -888,8 +894,10 @@ fn heartbeat(
         Err(error) => {
             // The authority has advanced but the queue did not. Preserve typed
             // recovery work rather than accepting either epoch ambiguously.
-            if let Some(lease) = renewed_owner_lease.as_ref() {
-                let _ = workspace_claim_store()?.record_owner_release_failure(lease, &error);
+            if let (Some(lease), Some(store)) =
+                (renewed_owner_lease.as_ref(), owner_claim_store.as_ref())
+            {
+                let _ = store.record_owner_release_failure(lease, &error);
             }
             return Err(error);
         }
@@ -1016,17 +1024,23 @@ fn parse_body<T: for<'de> Deserialize<'de>>(body: Option<Value>, label: &str) ->
     })
 }
 
-fn workspace_claim_store() -> Result<crate::workspace_claim::WorkspaceClaimStore> {
-    Ok(workspace_claim_store_in_root(&paths::homeboy_data()?))
-}
+/// Directory name of the reverse-broker claim authority. Named once so a
+/// release can never be rebuilt from a second copy of the literal.
+const REVERSE_BROKER_WORKSPACE_CLAIMS_DIR: &str = "reverse-broker-workspace-claims";
 
-/// [`workspace_claim_store`] below an explicitly injected data root.
+/// Construct the reverse-broker claim authority below an already-resolved data
+/// root. Callers holding a lease across more than one operation resolve this
+/// once and reuse the value.
 fn workspace_claim_store_in_root(
     data_root: &std::path::Path,
 ) -> crate::workspace_claim::WorkspaceClaimStore {
     crate::workspace_claim::WorkspaceClaimStore::new(
-        data_root.join("reverse-broker-workspace-claims"),
+        data_root.join(REVERSE_BROKER_WORKSPACE_CLAIMS_DIR),
     )
+}
+
+fn workspace_claim_store() -> Result<crate::workspace_claim::WorkspaceClaimStore> {
+    Ok(workspace_claim_store_in_root(&paths::homeboy_data()?))
 }
 
 fn workspace_claim_now_ms() -> u64 {
