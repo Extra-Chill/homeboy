@@ -42,13 +42,20 @@ impl ConfigEntity for ServiceTunnel {
         Error::service_tunnel_not_found(id, suggestions)
     }
 
-    // `config_path` is deliberately not overridden. The override this replaces
-    // was `paths::homeboy()?.join("service-tunnels").join("{id}.json")` — byte
-    // for byte what the trait default produces, because `DIR_NAME` is already
-    // `"service-tunnels"`. It was this crate's only ambient root resolution,
-    // and deleting it moves the reach to `ConfigEntity::config_dir`, the single
-    // place the campaign can root it once for every entity (#7505). `Runner`,
-    // `Fleet`, and `Schedule` already rely on the same default.
+    // `config_path` is deliberately not overridden, and neither is
+    // `config_path_in_root`. The override this replaces was
+    // `paths::homeboy()?.join("service-tunnels").join("{id}.json")` — byte for
+    // byte what the trait default produces, because `DIR_NAME` is already
+    // `"service-tunnels"`. It was this crate's only ambient root resolution.
+    //
+    // Deleting it matters twice over. It moved the reach to
+    // `ConfigEntity::config_dir`, the single place the campaign roots it once
+    // for every entity; and because the rooted default now resolves
+    // `{config_root}/service-tunnels/{id}.json`, an ambient override spelling
+    // the same path from process-global state would have *shadowed* the root
+    // the generic CRUD layer supplies — resolving correctly under ambient use
+    // and silently wrongly under an injected root (#7505). `Runner`, `Fleet`,
+    // and `Schedule` rely on the same default for the same reason.
 
     fn validate(&self) -> Result<()> {
         validate_service_tunnel(self)

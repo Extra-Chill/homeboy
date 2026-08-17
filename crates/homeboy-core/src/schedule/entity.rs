@@ -1,10 +1,7 @@
 //! Schedules as reviewable configuration entities.
 
-use std::path::PathBuf;
-
 use crate::config::ConfigEntity;
 use crate::error::{Error, Result};
-use crate::paths;
 
 use super::types::Schedule;
 
@@ -24,11 +21,10 @@ impl ConfigEntity for Schedule {
         Error::schedule_not_found(id, suggestions)
     }
 
-    fn config_path(id: &str) -> Result<PathBuf> {
-        Ok(paths::homeboy()?
-            .join("schedules")
-            .join(format!("{}.json", id)))
-    }
+    // No `config_path_in_root` override: the rooted default already resolves
+    // `{config_root}/schedules/{id}.json`. The removed ambient override spelled
+    // exactly that path from process-global state, which would have shadowed
+    // the root the generic CRUD layer supplies.
 
     fn validate(&self) -> Result<()> {
         if self.id.trim().is_empty() {

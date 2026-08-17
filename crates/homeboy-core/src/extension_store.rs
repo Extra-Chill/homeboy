@@ -675,7 +675,8 @@ impl crate::config::ConfigEntity for ExtensionManifest {
         crate::Error::extension_not_found(id, suggestions)
     }
 
-    fn config_path(id: &str) -> crate::Result<std::path::PathBuf> {
-        crate::paths::extension_manifest(id)
+    /// Extensions are directory-backed: `{config_root}/extensions/{id}/{id}.json`.
+    fn config_path_in_root(config_root: &std::path::Path, id: &str) -> std::path::PathBuf {
+        crate::paths::extension_manifest_in_root(config_root, id)
     }
 }

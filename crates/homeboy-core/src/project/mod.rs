@@ -193,8 +193,9 @@ impl ConfigEntity for Project {
         Error::project_not_found(id, suggestions)
     }
 
-    fn config_path(id: &str) -> Result<PathBuf> {
-        paths::project_config(id)
+    /// Projects are directory-backed: `{config_root}/projects/{id}/{id}.json`.
+    fn config_path_in_root(config_root: &Path, id: &str) -> PathBuf {
+        paths::project_config_in_root(config_root, id)
     }
 
     fn supports_flat_config_entries() -> bool {
