@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.10] - 2026-08-17
+
+### Changed
+- root the recorded-artifact provider chain
+- bind workspace-claim leases to the authority that issued them
+- root ConfigEntity path resolution and the generic CRUD it feeds
+- root the release, deploy, rig, and tunnel filesystem reaches
+- root ObservationStore on injected PathRoots
+- root homeboy-core's filesystem reaches through PathRoots
+- root the authority gates that resolved a home twice
+- give every derived resolver a root-taking sibling
+- inject filesystem roots at the CLI command boundary
+- root the separable path reaches in audit + extension
+- root the crate's ambient filesystem reaches
+- root the batch side's lifecycle reaches
+- use the scoped duplication path in the engine
+- give the lifecycle read surface explicit stores
+
+### Fixed
+- update the test callers of the renamed prepare
+- restore nextest shard parallelism
+
 ## [0.350.9] - 2026-08-16
 
 ### Changed
