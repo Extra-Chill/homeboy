@@ -4004,7 +4004,38 @@ where
         allow_historical_terminal,
     ) {
         Ok(result) => result,
-        Err(error) => return durable_cook_error_report_with_store(store, &failure_options, error),
+        Err(error) => {
+            // Once the attempt exists, a controller-side validation failure has
+            // not reached a provider and must retain the pre-execution contract.
+            if let Ok(record) = lifecycle_store.read_record(&failure_options.initial_run_id) {
+                if record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
+                    let phase = pre_execution_failure_phase(&error, None);
+                    record_pre_execution_failure(
+                        lifecycle_store,
+                        &failure_options.initial_plan,
+                        &failure_options.initial_run_id,
+                        &error,
+                        phase,
+                    )?;
+                    let record = lifecycle_store.read_record(&failure_options.initial_run_id)?;
+                    return Ok(pre_execution_failure_report(
+                        failure_options.cook_id.clone(),
+                        vec![AgentTaskCookAttemptReport {
+                            attempt: 1,
+                            run_id: failure_options.initial_run_id.clone(),
+                            run_state: format!("{:?}", record.state),
+                            aggregate_path: record.aggregate_path.clone(),
+                            promotion: None,
+                            feedback: None,
+                        }],
+                        pre_execution_failure_details(Some(&record), &error),
+                        error,
+                        Some(&failure_options.initial_run_id),
+                    ));
+                }
+            }
+            return durable_cook_error_report_with_store(store, &failure_options, error);
+        }
     };
     if let Some(run_id) = result.value.latest_run_id.as_deref() {
         let attempt = result
@@ -6068,12 +6099,6 @@ fn cook_attempt_needs_execution_with_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> bool {
-    if lifecycle_store
-        .matches_current_environment()
-        .unwrap_or(false)
-    {
-        return cook_attempt_needs_execution(run_id);
-    }
     lifecycle_store
         .read_record(run_id)
         .map(|record| cook_run_record_needs_execution(&record))

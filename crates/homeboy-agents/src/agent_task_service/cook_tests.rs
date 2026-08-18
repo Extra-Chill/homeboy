@@ -1575,15 +1575,6 @@ fn cook_spine_materializes_into_the_injected_stores_across_split_recipe_and_life
     sibling.task_id = "sibling".to_string();
     options.initial_plan.tasks.push(sibling);
 
-    // Seed only the run record, in the lifecycle root, so materialization never
-    // needs the ambient controller-runtime admission lock. The recipe and the
-    // Cook index below are the spine's own writes.
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&options.initial_plan, run_id, |_| {
-            Ok(serde_json::json!({}))
-        })
-        .expect("seed the run record in the lifecycle root");
-
     let error = run_cook_with_boundaries_observed_inner_with_stores(
         &recipe_store,
         &lifecycle_store,
