@@ -668,6 +668,8 @@ fn agent_task_provider_selection_preflight_error(
         format!("Preflight command: `{}`.", redact_argv_shell_display(command)),
     ];
     hints.retain(|hint| !hint.is_empty());
+    let mut seen_hints = std::collections::BTreeSet::new();
+    hints.retain(|hint| seen_hints.insert(hint.clone()));
 
     let problem = format!(
         "Lab runner `{runner_id}` cannot execute agent-task backend `{}` selector `{selector}` before dispatch: {reason}. No task cells were queued. This points to extension/runtime sync drift between the controller and selected runner, not a task failure.",
@@ -1180,6 +1182,35 @@ mod tests {
             err.details["runner_remediation_command"],
             serde_json::json!("homeboy runner disconnect homeboy-lab")
         );
+    }
+
+    #[test]
+    fn provider_preflight_error_deduplicates_machine_facing_availability_hints() {
+        let selection = AgentTaskProviderSelection {
+            backend: "primary".to_string(),
+            selector: None,
+            runtime_identity: None,
+        };
+        let runner_homeboy = serde_json::json!({
+            "refresh_commands": ["homeboy runner refresh-homeboy homeboy-lab --reconnect"]
+        });
+        let err = agent_task_provider_selection_preflight_error(
+            "homeboy-lab",
+            &selection,
+            true,
+            Some(false),
+            &runner_homeboy,
+            None,
+            &["homeboy".to_string(), "agent-task".to_string()],
+            None,
+            None,
+        );
+        let hints = err.details["tried"].as_array().expect("tried hints");
+        let distinct_hints = hints
+            .iter()
+            .map(|hint| hint.as_str().expect("string hint"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(hints.len(), distinct_hints.len());
     }
 
     #[test]

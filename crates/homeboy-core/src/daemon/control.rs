@@ -1818,6 +1818,14 @@ pub fn recover_missing_child_identity(
             None,
         )
     })?;
+    if pid_is_running(recorded_daemon_pid) {
+        return Err(Error::validation_invalid_argument(
+            "recorded_daemon_pid",
+            "recorded daemon PID became live or was reused during recovery",
+            Some(recorded_daemon_pid.to_string()),
+            None,
+        ));
+    }
     let store = super::JobStore::open_without_reconciliation(crate::paths::daemon_jobs_file()?)?;
     store.recover_missing_child_identity_with_linux_evidence(
         expected_lease_id,

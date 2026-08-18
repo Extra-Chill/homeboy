@@ -80,6 +80,14 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
         right.cook_index_path(cook_id)
     );
     assert_ne!(left.observation_db_path(), right.observation_db_path());
+    assert_ne!(
+        left.controller_scratch_root(),
+        right.controller_scratch_root()
+    );
+    assert!(left.controller_scratch_root().starts_with(left.data_root()));
+    assert!(right
+        .controller_scratch_root()
+        .starts_with(right.data_root()));
     assert_eq!(
         left.read_controller_plan(run_id).unwrap().plan_id,
         "left-plan"
@@ -139,6 +147,38 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
                 .expect("right lock");
         });
     });
+}
+
+#[test]
+fn detached_handoff_fences_resolve_only_from_the_explicit_lifecycle_root() {
+    let left_context = homeboy_core::test_support::HermeticTestContext::new();
+    let right_context = homeboy_core::test_support::HermeticTestContext::new();
+    let left = AgentTaskLifecycleStore::new(left_context.path_roots());
+    let right = AgentTaskLifecycleStore::new(right_context.path_roots());
+    let cook_id = "same-handoff-fence-cook";
+
+    for (store, state, fence) in [
+        (&left, AgentTaskRunState::Queued, "open"),
+        (&right, AgentTaskRunState::Cancelled, "cancelled"),
+    ] {
+        let mut handoff = record(store, cook_id, fence);
+        handoff.state = state;
+        handoff.metadata["detached_cook_handoff"] = json!({
+            "cook_id": cook_id,
+            "state": "pending",
+            "cancellation_fence": { "state": fence },
+        });
+        store.write_record(&handoff).unwrap();
+    }
+
+    left.require_detached_cook_handoff_fence_open(cook_id)
+        .expect("left fence remains open");
+    let error = right
+        .require_detached_cook_handoff_fence_open(cook_id)
+        .expect_err("right fence is cancelled");
+
+    assert_eq!(error.details["field"], "cook_id");
+    assert!(error.message.contains("cancelled"));
 }
 
 #[test]

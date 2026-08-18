@@ -727,7 +727,13 @@ pub(crate) fn record_aggregate_in_store(
     crate::controller_scratch::finalize_run_at(&lifecycle_store.data_root(), &record.run_id)?;
     lifecycle_store.write_aggregate_and_record(record, aggregate)?;
     record_terminal_artifact_projection_in_store(lifecycle_store, record, aggregate)?;
-    update_cook_candidate_after_completion(record, aggregate, None)?;
+    // The Cook index this completion updates belongs to the same store the
+    // aggregate was just committed into. Resolving it ambiently made this
+    // rooted function write its substantive-candidate pointer into whatever
+    // home the environment pointed at, which no positive assertion here can
+    // see: every record and aggregate read back from the injected store is
+    // already correct at that point (#7505).
+    update_cook_candidate_after_completion_in_store(lifecycle_store, record, aggregate, None)?;
     Ok(record.clone())
 }
 
@@ -739,7 +745,7 @@ pub(crate) fn record_terminal_artifact_projection(
     record_terminal_artifact_projection_in_store(&lifecycle_store, record, aggregate)
 }
 
-fn record_terminal_artifact_projection_in_store(
+pub(crate) fn record_terminal_artifact_projection_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,

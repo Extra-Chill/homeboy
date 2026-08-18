@@ -699,7 +699,7 @@ mod tests {
         let local = root.join("local");
         std::fs::create_dir_all(&origin).expect("origin dir");
 
-        git(&origin, &["init", "-b", "main"]);
+        git(&origin, &["init", "-b", "master"]);
         git(&origin, &["config", "user.email", "t@example.com"]);
         git(&origin, &["config", "user.name", "T"]);
         std::fs::write(origin.join("f.txt"), "0\n").expect("seed file");
@@ -721,7 +721,7 @@ mod tests {
         }
 
         // Update tracking refs locally (no working-tree move): the local clone
-        // now knows origin/main is ahead while HEAD stays at v1.0.0.
+        // now knows origin/master is ahead while HEAD stays at v1.0.0.
         git(&local, &["fetch", "origin"]);
         local
     }
@@ -743,7 +743,7 @@ mod tests {
     #[test]
     fn guard_allows_checkout_at_upstream_head() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        // Zero extra upstream commits: HEAD == origin/main, genuinely at head.
+        // Zero extra upstream commits: HEAD == origin/master, genuinely at head.
         let local = stale_checkout_fixture(dir.path(), 0);
 
         assert!(

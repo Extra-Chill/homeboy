@@ -4,8 +4,7 @@ use std::process::Command;
 
 #[test]
 fn shipped_root_binary_reports_root_version_and_source_commit() {
-    let expected_version = env!("CARGO_PKG_VERSION");
-    let expected_commit = git_output(&["rev-parse", "--short=12", "HEAD"]);
+    let expected = homeboy_product_identity::build_identity();
     let output = Command::new(homeboy_bin())
         .args(["self", "identity"])
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
@@ -14,11 +13,15 @@ fn shipped_root_binary_reports_root_version_and_source_commit() {
 
     assert_eq!(output.status.code(), Some(0));
     let identity: Value = serde_json::from_slice(&output.stdout).expect("identity JSON");
-    assert_eq!(identity["data"]["version"], expected_version);
-    assert_eq!(identity["data"]["git_commit"], expected_commit);
-    let built_dirty = identity["data"]["git_dirty"]
-        .as_bool()
-        .expect("build-time dirty state is boolean");
+    assert_eq!(identity["data"]["version"], expected.version);
+    assert_eq!(
+        identity["data"]["git_commit"],
+        serde_json::to_value(expected.git_commit.clone()).expect("serialize build commit")
+    );
+    assert_eq!(
+        identity["data"]["git_dirty"],
+        serde_json::to_value(expected.git_dirty).expect("serialize dirty marker")
+    );
     let expected_binary = homeboy_bin().to_string_lossy().into_owned();
     assert_eq!(
         identity["data"]["active_binary"].as_str(),
@@ -70,21 +73,14 @@ fn shipped_root_binary_reports_root_version_and_source_commit() {
 
     assert_eq!(output.status.code(), Some(0));
     let version = String::from_utf8(output.stdout).expect("version output is UTF-8");
-    assert!(version.contains(expected_version));
-    assert!(version.contains(&expected_commit));
-    assert_eq!(version.contains("-dirty"), built_dirty);
+    assert!(version.contains(&expected.version));
+    if let Some(commit) = &expected.git_commit {
+        assert!(version.contains(commit));
+    }
+    assert_eq!(version.contains("-dirty"), expected.git_dirty == Some(true));
     assert!(!version.contains("0.1.0"));
 }
 
 fn homeboy_bin() -> PathBuf {
     PathBuf::from(std::env::var_os("CARGO_BIN_EXE_homeboy").expect("CARGO_BIN_EXE_homeboy"))
-}
-
-fn git_output(args: &[&str]) -> String {
-    let output = Command::new("git").args(args).output().expect("run git");
-    assert!(output.status.success(), "git command failed");
-    String::from_utf8(output.stdout)
-        .expect("git output is UTF-8")
-        .trim()
-        .to_string()
 }

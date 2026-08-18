@@ -814,9 +814,19 @@ fn persisted_session_version_drift_rejects_admission_with_bounded_recovery() {
     );
     assert_eq!(warning.session_homeboy_version, "0.327.9");
     assert_eq!(warning.active_daemon_control_plane_version, "0.328.0");
+    let actions = warning.safe_recovery_actions();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].id, "runner.refresh_homeboy");
     assert_eq!(
-        warning.recovery_commands,
-        ["homeboy runner refresh-homeboy homeboy-lab --ref 1e63f1ae0369 --reconnect"]
+        actions[0].args,
+        [
+            "runner",
+            "refresh-homeboy",
+            "homeboy-lab",
+            "--ref",
+            "1e63f1ae0369",
+            "--reconnect",
+        ]
     );
 }
 
@@ -1069,9 +1079,10 @@ fn dirty_controller_preserves_a_runner_side_daemon_recovery() {
         warning.mismatch_predicate,
         "active_daemon_control_plane_version != job_command_binary_version"
     );
-    assert_eq!(
-        warning.recovery_commands,
-        ["homeboy runner refresh-homeboy homeboy-lab --ref 1e63f1ae0369 --reconnect"]
+    let actions = warning.safe_recovery_actions();
+    assert!(
+        actions.is_empty(),
+        "the active daemon does not verify this recovery target"
     );
     assert!(!warning.message.contains("upgrade --force"));
 }
@@ -1209,10 +1220,9 @@ fn runtime_path_diagnostics_redact_sensitive_values_without_hiding_path_drift() 
     assert!(!serialized.contains("old-secret"));
     assert!(!serialized.contains("new-secret"));
     assert!(serialized.contains("/srv/extensions?token=[REDACTED]"));
-    assert_eq!(
-        warning.recovery_commands,
-        ["homeboy runner refresh-homeboy homeboy-lab --ref 1e63f1ae0369 --reconnect"]
-    );
+    let actions = warning.safe_recovery_actions();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].id, "runner.refresh_homeboy");
 }
 
 #[test]

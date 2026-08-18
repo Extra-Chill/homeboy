@@ -16,6 +16,9 @@ pub const RUNNER_JOB_EXECUTION_CONTEXT_EVIDENCE_SCHEMA: &str =
     "homeboy/runner-job-execution-context-evidence/v1";
 pub const RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY: &str = "runner-job-execution-context";
 pub const RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION: u32 = 1;
+pub const RUNNER_JOB_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_ID";
+pub const RUNNER_CHILD_RESERVATION_ENV: &str = "HOMEBOY_RUNNER_CHILD_RESERVATION";
+pub const RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_EXECUTION_CONTEXT_ID";
 const MAX_EVIDENCE_BYTES: usize = 8 * 1024;
 
 /// A worker must explicitly advertise this before the broker will hand it a
@@ -313,6 +316,54 @@ impl RunnerJobExecutionContext {
         self.authenticated && self.verification.state == "local"
     }
 
+    /// Resolve authority inherited by a daemon-local child against the durable
+    /// job store. The environment identifies the claim; the persisted running
+    /// job, reservation, and verified context establish it.
+    pub fn from_direct_daemon_child_environment(
+        expected_run_id: &str,
+        expected_runner_id: &str,
+    ) -> Result<Option<Self>> {
+        let reservation_id = std::env::var(RUNNER_CHILD_RESERVATION_ENV).ok();
+        let context_id = std::env::var(RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV).ok();
+        if reservation_id.is_none() && context_id.is_none() {
+            return Ok(None);
+        }
+        let reservation_id = required_environment(reservation_id, RUNNER_CHILD_RESERVATION_ENV)?;
+        let context_id = required_environment(context_id, RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV)?;
+        let runner_job_id =
+            required_environment(std::env::var(RUNNER_JOB_ID_ENV).ok(), RUNNER_JOB_ID_ENV)?;
+        let job_id = uuid::Uuid::parse_str(&runner_job_id).map_err(|_| {
+            rejected("daemon child runner job identity is not a valid durable job id")
+        })?;
+        let store = crate::api_jobs::JobStore::open_without_reconciliation(
+            crate::paths::daemon_jobs_file()?,
+        )?;
+        let evidence = store
+            .handle(job_id)
+            .accepted_local_child_execution_context(
+                &reservation_id,
+                expected_runner_id,
+                expected_run_id,
+                &context_id,
+            )?;
+        let asserted = Self::from_evidence_record(&evidence)?;
+        let accepted = Self::direct_daemon_with_dispatch_metadata(
+            Some(expected_run_id),
+            Some(&asserted.controller_attempt_id),
+            Some(&asserted.accepted_handoff_id),
+            expected_runner_id,
+            &runner_job_id,
+            &asserted.runtime_id,
+            &reservation_id,
+        )?;
+        if accepted.id != context_id || accepted.evidence_record()? != evidence {
+            return Err(rejected(
+                "daemon child execution context does not match its durable reservation",
+            ));
+        }
+        Ok(Some(accepted))
+    }
+
     /// A single bounded, content-addressed durable record shared by controller
     /// and runner recovery. The complete typed context is retained so a restart
     /// never needs to infer authority from lifecycle or environment state.
@@ -405,6 +456,17 @@ fn required(value: &Option<String>, label: &str) -> Result<String> {
         .ok_or_else(|| rejected(&format!("accepted dispatch is missing its {label} receipt")))
 }
 
+fn required_environment(value: Option<String>, name: &str) -> Result<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            rejected(&format!(
+                "daemon child is missing required environment {name}"
+            ))
+        })
+}
+
 fn non_empty(value: &str, label: &str) -> Result<String> {
     value
         .trim()
@@ -449,6 +511,10 @@ pub(crate) fn rejected(reason: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api_jobs::{
+        LocalChildStartDiscriminator, LocalRunnerJob, RunnerJobLifecycleMetadata,
+    };
+    use crate::test_support::{with_isolated_home, EnvVarGuard};
 
     #[test]
     fn local_context_is_explicit_and_never_nullable() {
@@ -560,5 +626,71 @@ mod tests {
         assert!(!serialized.contains(secret));
         assert!(!evidence.contains(secret));
         assert!(serialized.contains("claim_ref"));
+    }
+
+    #[test]
+    fn daemon_child_environment_resolves_only_the_accepted_running_job() {
+        with_isolated_home(|_| {
+            let store = crate::api_jobs::JobStore::open_without_reconciliation(
+                crate::paths::daemon_jobs_file().expect("jobs path"),
+            )
+            .expect("job store");
+            let run_id = "runner-local-run";
+            let runner_id = "runner-1";
+            let job = store.create_test_local_runner_job(Some(LocalRunnerJob {
+                runner_id: runner_id.to_string(),
+                command: vec!["homeboy".to_string()],
+                cwd: None,
+                lifecycle: Some(RunnerJobLifecycleMetadata {
+                    durable_run_id: Some(run_id.to_string()),
+                    ..RunnerJobLifecycleMetadata::default()
+                }),
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
+            }));
+            store.reserve_local_child(job.id).expect("reserve child");
+            let handle = store.handle(job.id);
+            let reservation_id = handle.local_child_reservation_id().expect("reservation id");
+            let context = RunnerJobExecutionContext::direct_daemon(
+                Some(run_id),
+                runner_id,
+                &job.id.to_string(),
+                "homeboy",
+                &reservation_id,
+            )
+            .expect("context");
+            handle
+                .progress(serde_json::json!({
+                    "phase": "runner_job_execution_context_verified",
+                    "execution_context": context.evidence_record().expect("evidence"),
+                }))
+                .expect("record context");
+            handle
+                .start_with_reserved_child_identity(
+                    std::process::id(),
+                    None,
+                    LocalChildStartDiscriminator::Unsupported {
+                        evidence: "test process".to_string(),
+                    },
+                )
+                .expect("start child");
+
+            let _job = EnvVarGuard::set(RUNNER_JOB_ID_ENV, job.id.to_string());
+            let _reservation = EnvVarGuard::set(RUNNER_CHILD_RESERVATION_ENV, &reservation_id);
+            let _context = EnvVarGuard::set(RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV, context.id());
+            let resolved =
+                RunnerJobExecutionContext::from_direct_daemon_child_environment(run_id, runner_id)
+                    .expect("resolve accepted authority")
+                    .expect("direct daemon authority");
+            assert_eq!(resolved.id(), context.id());
+            assert_eq!(resolved.runner_job_id(), job.id.to_string());
+            assert!(resolved.verify_integrity().is_ok());
+
+            let _forged = EnvVarGuard::set(RUNNER_CHILD_RESERVATION_ENV, "forged-reservation");
+            assert!(
+                RunnerJobExecutionContext::from_direct_daemon_child_environment(run_id, runner_id,)
+                    .is_err()
+            );
+        });
     }
 }

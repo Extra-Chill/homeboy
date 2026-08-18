@@ -1199,20 +1199,8 @@ fn release_plan_warns_when_configured_extensions_have_no_publish_action() {
             "wordpress".to_string(),
             ScopedExtensionConfig::default(),
         )]));
-        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
-            "name": "WordPress",
-            "version": "1.0.0",
-            "actions": [
-                {
-                    "id": "release.package",
-                    "label": "Package release",
-                    "type": "command",
-                    "command": "true"
-                }
-            ]
-        }))
-        .expect("extension manifest");
-        extension.id = "wordpress".to_string();
+        let extension = release_extension("wordpress", &["release.package"]);
+        homeboy_extension::save_manifest(&extension).expect("install extension manifest");
         let mut warnings = Vec::new();
         let mut hints = Vec::new();
         let release_scope =

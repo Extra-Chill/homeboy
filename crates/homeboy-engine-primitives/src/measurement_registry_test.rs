@@ -358,7 +358,46 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
                That emptiness is not laundered into a release, because \
                `release-asset-completeness.sh` independently requires every declared sidecar to \
                be present and non-empty before publication -- this script normalizes bytes, that \
-               one decides.",
+                one decides.",
+    },
+    GateLayerSite {
+        file: ".github/ci-required-gates-executed.sh",
+        decision: "exit 0",
+        basis: MeasurementBasis::PerUnitEvaluation,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: the only green outcome is `executed`, after every declared required \
+               context has been independently observed in this run with a success conclusion and \
+               every dependency result is success. Both the declared policy population and the \
+               observed jobs are non-empty before this aggregate can pass; unreadable run jobs, \
+               missing contexts, skipped dependencies, and failed contexts all exit 1.",
+    },
+    GateLayerSite {
+        file: ".github/ci-required-gates-executed.sh",
+        decision: "exit 1",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: every non-executed outcome is a refusal: absent or unreadable input, \
+               no declared contexts, a skipped dependency, a missing job, or a non-success \
+               conclusion. This terminal exit cannot manufacture a green verdict; it is \
+               registered so the scan records the script's complete terminal contract.",
+    },
+    GateLayerSite {
+        file: ".github/ci-required-gates-executed.sh",
+        decision: "exit 0",
+        basis: MeasurementBasis::PerUnitEvaluation,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: the terminal gate first proves the declared context population is non-empty, then evaluates every required dependency and check-run conclusion before passing.",
+    },
+    GateLayerSite {
+        file: ".github/ci-required-gates-executed.sh",
+        decision: "exit 1",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: projects a refusal after the script establishes an inactive run, missing context, skipped dependency, or non-successful gate. A non-zero exit cannot manufacture a pass.",
     },
     GateLayerSite {
         file: ".github/ci-required-gates-executed.sh",

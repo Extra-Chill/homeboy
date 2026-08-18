@@ -1824,6 +1824,7 @@
   "extensions": {
     "rust": {
       "settings": {
+        "rust_test_runner": "nextest",
         "rust_cargo_test_threads": 1,
         "rust_nextest_shard_threads": 1
       }

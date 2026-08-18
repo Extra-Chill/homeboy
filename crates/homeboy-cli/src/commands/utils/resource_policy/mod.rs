@@ -215,7 +215,8 @@ fn runner_selection_context(
 }
 
 pub fn hot_command(command: &Commands) -> Option<HotCommand> {
-    if is_plan_only_command(command)
+    if is_cook_preview(command)
+        || is_plan_only_command(command)
         || is_controller_owned_fanout_coordination(command)
         || is_bounded_agent_task_metadata_read(command)
         || is_local_registry_management(command)
@@ -294,6 +295,15 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             Some(HotCommand::local_only(contract.hot_label, Some(reason)))
         }
     }
+}
+
+pub(crate) fn is_cook_preview(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Cook(cook),
+        }) if cook.preview
+    )
 }
 
 pub fn evaluate(command: HotCommand, resources: &DoctorOutput) -> Option<ResourcePolicyWarning> {
