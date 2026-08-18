@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use clap::Parser;
 use homeboy::core::agent_runtime_manifest::{
@@ -9,7 +9,7 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::api_jobs::{JobEvent, JobStatus};
 use homeboy::core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy::runner::runners::{
-    self as runner, RunnerSession, RunnerStatusReport, RunnerTunnelMode,
+    self as runner, Runner, RunnerKind, RunnerSession, RunnerStatusReport, RunnerTunnelMode,
 };
 use homeboy::runner::{RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState};
 
@@ -27,6 +27,20 @@ use crate::cli_surface::Cli;
 use crate::commands::utils::response::{
     cli_response_for_json_result_for_command, map_cmd_result_to_json,
 };
+
+fn configured_runner(id: &str, kind: RunnerKind) -> Runner {
+    Runner {
+        id: id.to_string(),
+        kind,
+        server_id: None,
+        workspace_root: None,
+        settings: Default::default(),
+        env: HashMap::new(),
+        secret_env: HashMap::new(),
+        resources: HashMap::new(),
+        policy: Default::default(),
+    }
+}
 
 fn runner_session_fixture() -> RunnerSession {
     RunnerSession {
@@ -1335,25 +1349,35 @@ fn runner_status_actions_preserve_runner_ids_for_every_admission_state() {
 fn execution_capabilities_separate_local_placement_from_lab_connections() {
     let connected = connected_report();
     let disconnected = disconnected_report();
+    let remote = configured_runner("homeboy lab", RunnerKind::Ssh);
     let cases = [
-        ("local_only", Vec::new(), true, None),
+        ("local_only", Vec::new(), Vec::new(), true, None),
         (
             "lab_only",
+            vec![remote.clone()],
             vec![connected.clone()],
             false,
             Some(vec!["homeboy lab"]),
         ),
         (
             "both_ready",
+            vec![remote.clone()],
             vec![connected],
             true,
             Some(vec!["homeboy lab"]),
         ),
-        ("neither_ready", vec![disconnected], false, None),
+        (
+            "neither_ready",
+            vec![remote],
+            vec![disconnected],
+            false,
+            None,
+        ),
     ];
 
-    for (name, reports, local_available, connected_ids) in cases {
-        let capabilities = execution_capabilities_with_local_placement(local_available, &reports);
+    for (name, runners, reports, local_available, connected_ids) in cases {
+        let capabilities =
+            execution_capabilities_with_local_placement(local_available, &runners, &reports);
         let lab_connection_available = connected_ids.is_some();
         assert_eq!(
             capabilities.local_placement.available, local_available,
@@ -1379,16 +1403,44 @@ fn execution_capabilities_separate_local_placement_from_lab_connections() {
 }
 
 #[test]
-fn reserved_local_session_is_not_presented_as_a_lab_connection() {
-    let mut reserved_local = disconnected_report();
-    reserved_local.runner_id = "local".to_string();
+fn configured_local_runner_is_not_presented_as_a_lab_connection() {
+    let mut configured_local = disconnected_report();
+    configured_local.runner_id = "project-local".to_string();
     let mut concrete_local = disconnected_report();
-    concrete_local.runner_id = "project-local".to_string();
+    concrete_local.runner_id = "homeboy-lab".to_string();
+    let runners = vec![
+        configured_runner("project-local", RunnerKind::Local),
+        configured_runner("homeboy-lab", RunnerKind::Ssh),
+    ];
 
-    let sessions = non_local_sessions(vec![reserved_local, concrete_local]);
+    let sessions = non_local_sessions(&runners, vec![configured_local, concrete_local]);
 
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].runner_id, "project-local");
+    assert_eq!(sessions[0].runner_id, "homeboy-lab");
+}
+
+#[test]
+fn global_capabilities_include_connected_lab_for_local_and_disconnected_remote_queries() {
+    let local = configured_runner("local", RunnerKind::Local);
+    let disconnected = configured_runner("lab-disconnected", RunnerKind::Ssh);
+    let connected = configured_runner("lab-connected", RunnerKind::Ssh);
+    let mut disconnected_report = disconnected_report();
+    disconnected_report.runner_id = disconnected.id.clone();
+    let mut connected_report = connected_report();
+    connected_report.runner_id = connected.id.clone();
+
+    let capabilities = execution_capabilities_with_local_placement(
+        true,
+        &[local, disconnected, connected],
+        &[disconnected_report, connected_report],
+    );
+
+    assert!(capabilities.local_placement.available);
+    assert!(capabilities.lab_runner_connection.available);
+    assert_eq!(
+        capabilities.lab_runner_connection.connected_runner_ids,
+        ["lab-connected"]
+    );
 }
 
 #[test]
