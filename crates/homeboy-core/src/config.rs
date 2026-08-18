@@ -415,13 +415,23 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
         true
     }
 
-    /// Entity-specific validation. Override to add custom validation rules.
+    /// Entity-specific validation, resolved entirely below an already-resolved
+    /// config root. Override to add custom validation rules.
     ///
-    /// This hook is still ambient. Implementations that read *other* entities
-    /// (`Project::validate` -> `server::exists`, `Runner::validate` ->
-    /// `server::load`) resolve their own config root, which is why `save` and
-    /// `create` have no `_in_root` sibling yet — see [`crate::entity_crud`].
-    fn validate(&self) -> Result<()> {
+    /// This is the *only* validation hook on this trait, and that is the point.
+    /// Implementations routinely read *other* entities — `Project` probes its
+    /// server, `Runner` loads its server, `ServiceTunnel` probes its server —
+    /// and those reads have to land in the same home as the write they are
+    /// guarding. An ambient `validate()` sibling would be overridable, and an
+    /// entity that overrode only the ambient spelling would have its rules
+    /// silently skipped by the rooted CRUD layer while still passing under
+    /// ambient use: correct-looking code, wrong home (#7505, #12595).
+    ///
+    /// Because no ambient spelling exists here, `fn validate(&self)` in an
+    /// `impl ConfigEntity` is a compile error (E0407, "method is not a member
+    /// of trait") rather than a silent shadow. Ambient callers use the free
+    /// function [`validate`], which has no per-entity override point at all.
+    fn validate_in_root(&self, _config_root: &Path) -> Result<()> {
         Ok(())
     }
 
@@ -447,21 +457,27 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
     /// configuration available for provenance-sensitive policies.
     fn post_merge(&mut self, _previous_json: &str) {}
 
-    /// Return IDs of entities that depend on this one (for safe delete).
-    /// Override to check referential integrity before deletion.
+    /// Return IDs of entities below `config_root` that depend on this one (for
+    /// safe delete). Override to check referential integrity before deletion.
     /// Default: no dependents.
     ///
-    /// Still ambient, like [`ConfigEntity::validate`]: `Server::dependents`
-    /// lists projects from the process config root, so `delete_safe` has no
-    /// `_in_root` sibling yet.
-    fn dependents(_id: &str) -> Result<Vec<String>> {
+    /// Rooted, and rooted-only, for the same structural reason as
+    /// [`ConfigEntity::validate_in_root`]. `Server::dependents_in_root` lists
+    /// projects; a referential-integrity probe that reads a different home than
+    /// the delete is a gate that fails open — it would report "no dependents"
+    /// for an entity that is still referenced in the home being written.
+    fn dependents_in_root(_config_root: &Path, _id: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
 
-    /// Update references after rename. Called after the config file is renamed.
-    /// Override to propagate ID changes to entities that reference this one.
-    /// Default: no-op.
-    fn on_rename(_old_id: &str, _new_id: &str) -> Result<()> {
+    /// Update references after rename, below an already-resolved config root.
+    /// Called after the config file is renamed. Override to propagate ID
+    /// changes to entities that reference this one. Default: no-op.
+    ///
+    /// Rooted-only, like the other cross-entity hooks: a fixup that rewrites
+    /// references in a different home than the rename leaves the renamed home
+    /// with dangling references and corrupts an unrelated one.
+    fn on_rename_in_root(_config_root: &Path, _old_id: &str, _new_id: &str) -> Result<()> {
         Ok(())
     }
 }
@@ -759,25 +775,51 @@ fn write_entity_in_root<T: ConfigEntity>(config_root: &Path, entity: &T) -> Resu
     Ok(())
 }
 
-fn write_entity<T: ConfigEntity>(entity: &T) -> Result<()> {
-    write_entity_in_root(&paths::homeboy()?, entity)
+/// Run an entity's validation hook against the process config root.
+///
+/// Ambient sibling of [`ConfigEntity::validate_in_root`], deliberately a *free
+/// function* rather than a trait method: a free generic has no per-entity
+/// override point, so it cannot be specialised into an ambient-only validation
+/// that shadows the rooted hook the CRUD layer calls.
+pub fn validate<T: ConfigEntity>(entity: &T) -> Result<()> {
+    entity.validate_in_root(&paths::homeboy()?)
+}
+
+/// Ambient sibling of [`ConfigEntity::dependents_in_root`]. Free function for
+/// the same reason as [`validate`].
+pub fn dependents<T: ConfigEntity>(id: &str) -> Result<Vec<String>> {
+    T::dependents_in_root(&paths::homeboy()?, id)
+}
+
+/// Validate and write an entity below an already-resolved config root.
+///
+/// Every root-sensitive step — the cross-entity ID/alias collision guard, the
+/// entity's own validation hook, and the write itself — reads the one root
+/// passed in. That is what makes this a whole-root operation rather than the
+/// half-rooted shape the campaign forbids.
+pub fn save_in_root<T: ConfigEntity>(config_root: &Path, entity: &T) -> Result<()> {
+    identifier::validate_component_id(entity.id())?;
+    check_id_collision_in_root(config_root, entity.id(), T::entity_type())?;
+    entity.validate_in_root(config_root)?;
+
+    write_entity_in_root(config_root, entity)
 }
 
 pub fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
-    identifier::validate_component_id(entity.id())?;
-    check_id_collision(entity.id(), T::entity_type())?;
-    entity.validate()?;
-
-    write_entity(entity)
+    save_in_root(&paths::homeboy()?, entity)
 }
 
-/// Internal: create a single entity from a constructed struct.
+/// Internal: create a single entity from a constructed struct below an
+/// already-resolved config root.
 /// Validates ID, checks for existence, runs entity-specific validation, then saves.
-fn create_single<T: ConfigEntity>(entity: T) -> Result<CreateResult<T>> {
+fn create_single_in_root<T: ConfigEntity>(
+    config_root: &Path,
+    entity: T,
+) -> Result<CreateResult<T>> {
     identifier::validate_component_id(entity.id())?;
-    entity.validate()?;
+    entity.validate_in_root(config_root)?;
 
-    if exists::<T>(entity.id()) {
+    if exists_in_root::<T>(config_root, entity.id()) {
         return Err(Error::validation_invalid_argument(
             format!("{}.id", T::entity_type()),
             format!("{} '{}' already exists", T::entity_type(), entity.id()),
@@ -786,9 +828,9 @@ fn create_single<T: ConfigEntity>(entity: T) -> Result<CreateResult<T>> {
         ));
     }
 
-    check_id_collision(entity.id(), T::entity_type())?;
+    check_id_collision_in_root(config_root, entity.id(), T::entity_type())?;
 
-    write_entity(&entity)?;
+    write_entity_in_root(config_root, &entity)?;
 
     Ok(CreateResult {
         id: entity.id().to_string(),
@@ -796,8 +838,12 @@ fn create_single<T: ConfigEntity>(entity: T) -> Result<CreateResult<T>> {
     })
 }
 
-/// Internal: create a single entity from JSON string.
-fn create_single_from_json<T: ConfigEntity>(json_spec: &str) -> Result<CreateResult<T>> {
+/// Internal: create a single entity from JSON string below an already-resolved
+/// config root.
+fn create_single_from_json_in_root<T: ConfigEntity>(
+    config_root: &Path,
+    json_spec: &str,
+) -> Result<CreateResult<T>> {
     let value: serde_json::Value = from_str(json_spec)?;
     reject_reserved_derived_fields::<T>(&value)?;
 
@@ -813,19 +859,36 @@ fn create_single_from_json<T: ConfigEntity>(json_spec: &str) -> Result<CreateRes
         .map_err(|e| Error::validation_invalid_argument("json", e.to_string(), None, None))?;
     entity.set_id(id);
 
-    create_single(entity)
+    create_single_in_root(config_root, entity)
+}
+
+/// Unified create below an already-resolved config root, auto-detecting single
+/// vs bulk operations.
+pub fn create_in_root<T: ConfigEntity>(
+    config_root: &Path,
+    json_spec: &str,
+    skip_existing: bool,
+) -> Result<CreateOutput<T>> {
+    let raw = read_json_spec_to_string(json_spec)?;
+
+    if is_json_array(&raw) {
+        return Ok(CreateOutput::Bulk(create_batch_in_root::<T>(
+            config_root,
+            &raw,
+            skip_existing,
+        )?));
+    }
+
+    Ok(CreateOutput::Single(create_single_from_json_in_root::<T>(
+        config_root,
+        &raw,
+    )?))
 }
 
 /// Unified create that auto-detects single vs bulk operations.
 /// Array input triggers batch create, object input triggers single create.
 pub fn create<T: ConfigEntity>(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<T>> {
-    let raw = read_json_spec_to_string(json_spec)?;
-
-    if is_json_array(&raw) {
-        return Ok(CreateOutput::Bulk(create_batch::<T>(&raw, skip_existing)?));
-    }
-
-    Ok(CreateOutput::Single(create_single_from_json::<T>(&raw)?))
+    create_in_root::<T>(&paths::homeboy()?, json_spec, skip_existing)
 }
 
 /// Delete an entity below an already-resolved config root, unconditionally.
@@ -894,9 +957,10 @@ pub fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
 // Merge Operations
 // ============================================================================
 
-/// Unified merge that auto-detects single vs bulk operations.
-/// Array input triggers batch merge, object input triggers single merge.
-pub fn merge<T: ConfigEntity>(
+/// Unified merge below an already-resolved config root, auto-detecting single
+/// vs bulk operations.
+pub fn merge_in_root<T: ConfigEntity>(
+    config_root: &Path,
     id: Option<&str>,
     json_spec: &str,
     replace_fields: &[String],
@@ -904,23 +968,39 @@ pub fn merge<T: ConfigEntity>(
     let raw = read_json_spec_to_string(json_spec)?;
 
     if is_json_array(&raw) {
-        return Ok(MergeOutput::Bulk(merge_batch_from_json::<T>(&raw)?));
+        return Ok(MergeOutput::Bulk(merge_batch_from_json_in_root::<T>(
+            config_root,
+            &raw,
+        )?));
     }
 
-    Ok(MergeOutput::Single(merge_from_json::<T>(
+    Ok(MergeOutput::Single(merge_from_json_in_root::<T>(
+        config_root,
         id,
         &raw,
         replace_fields,
     )?))
 }
 
+/// Unified merge that auto-detects single vs bulk operations.
+/// Array input triggers batch merge, object input triggers single merge.
+pub fn merge<T: ConfigEntity>(
+    id: Option<&str>,
+    json_spec: &str,
+    replace_fields: &[String],
+) -> Result<MergeOutput> {
+    merge_in_root::<T>(&paths::homeboy()?, id, json_spec, replace_fields)
+}
+
 // ============================================================================
 // Generic JSON Operations
 // ============================================================================
 
-/// Batch create entities from JSON. Parses JSON array (or single object),
-/// validates each entity, and saves. Supports skip_existing flag.
-pub(crate) fn create_batch<T: ConfigEntity>(
+/// Batch create entities from JSON below an already-resolved config root.
+/// Parses JSON array (or single object), validates each entity, and saves.
+/// Supports skip_existing flag.
+pub(crate) fn create_batch_in_root<T: ConfigEntity>(
+    config_root: &Path,
     spec: &str,
     skip_existing: bool,
 ) -> Result<BatchResult> {
@@ -965,12 +1045,12 @@ pub(crate) fn create_batch<T: ConfigEntity>(
         entity.set_id(id.clone());
 
         // Entity-specific validation
-        if let Err(e) = entity.validate() {
+        if let Err(e) = entity.validate_in_root(config_root) {
             summary.record_error(id, e.message.clone());
             continue;
         }
 
-        if exists::<T>(&id) {
+        if exists_in_root::<T>(config_root, &id) {
             if skip_existing {
                 summary.record_skipped(id);
             } else {
@@ -982,7 +1062,7 @@ pub(crate) fn create_batch<T: ConfigEntity>(
             continue;
         }
 
-        if let Err(e) = save(&entity) {
+        if let Err(e) = save_in_root(config_root, &entity) {
             summary.record_error(id, e.message.clone());
             continue;
         }
@@ -993,7 +1073,9 @@ pub(crate) fn create_batch<T: ConfigEntity>(
     Ok(summary)
 }
 
-pub fn merge_from_json<T: ConfigEntity>(
+/// Merge a JSON patch into one entity below an already-resolved config root.
+pub fn merge_from_json_in_root<T: ConfigEntity>(
+    config_root: &Path,
     id: Option<&str>,
     json_spec: &str,
     replace_fields: &[String],
@@ -1021,12 +1103,12 @@ pub fn merge_from_json<T: ConfigEntity>(
     }
     reject_reserved_derived_fields::<T>(&parsed)?;
 
-    let mut entity = load::<T>(&effective_id)?;
+    let mut entity = load_in_root::<T>(config_root, &effective_id)?;
     let previous_json = to_json_string(&entity)?;
     let result = merge_config(&mut entity, parsed, replace_fields)?;
     entity.set_id(effective_id.clone());
     entity.post_merge(&previous_json);
-    save(&entity)?;
+    save_in_root(config_root, &entity)?;
 
     Ok(MergeResult {
         id: effective_id,
@@ -1034,7 +1116,19 @@ pub fn merge_from_json<T: ConfigEntity>(
     })
 }
 
-pub fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchResult> {
+pub fn merge_from_json<T: ConfigEntity>(
+    id: Option<&str>,
+    json_spec: &str,
+    replace_fields: &[String],
+) -> Result<MergeResult> {
+    merge_from_json_in_root::<T>(&paths::homeboy()?, id, json_spec, replace_fields)
+}
+
+/// Merge a JSON array of patches below an already-resolved config root.
+pub fn merge_batch_from_json_in_root<T: ConfigEntity>(
+    config_root: &Path,
+    raw_json: &str,
+) -> Result<BatchResult> {
     let value: serde_json::Value = from_str(raw_json)?;
 
     let items: Vec<serde_json::Value> = if value.is_array() {
@@ -1067,7 +1161,7 @@ pub fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchRes
             continue;
         }
 
-        match load::<T>(&id) {
+        match load_in_root::<T>(config_root, &id) {
             Ok(mut entity) => {
                 let previous_json = match to_json_string(&entity) {
                     Ok(json) => json,
@@ -1080,7 +1174,7 @@ pub fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchRes
                     Ok(_) => {
                         entity.set_id(id.clone());
                         entity.post_merge(&previous_json);
-                        if let Err(e) = save(&entity) {
+                        if let Err(e) = save_in_root(config_root, &entity) {
                             result.record_error(id, e.message.clone());
                         } else {
                             result.record_updated(id);
@@ -1101,7 +1195,13 @@ pub fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchRes
     Ok(result)
 }
 
-pub fn remove_from_json<T: ConfigEntity>(
+pub fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchResult> {
+    merge_batch_from_json_in_root::<T>(&paths::homeboy()?, raw_json)
+}
+
+/// Remove JSON fields from one entity below an already-resolved config root.
+pub fn remove_from_json_in_root<T: ConfigEntity>(
+    config_root: &Path,
     id: Option<&str>,
     json_spec: &str,
 ) -> Result<RemoveResult> {
@@ -1127,9 +1227,9 @@ pub fn remove_from_json<T: ConfigEntity>(
         obj.remove("id");
     }
 
-    let mut entity = load::<T>(&effective_id)?;
+    let mut entity = load_in_root::<T>(config_root, &effective_id)?;
     let result = remove_config(&mut entity, parsed)?;
-    save(&entity)?;
+    save_in_root(config_root, &entity)?;
 
     Ok(RemoveResult {
         id: effective_id,
@@ -1137,7 +1237,20 @@ pub fn remove_from_json<T: ConfigEntity>(
     })
 }
 
-pub fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
+pub fn remove_from_json<T: ConfigEntity>(
+    id: Option<&str>,
+    json_spec: &str,
+) -> Result<RemoveResult> {
+    remove_from_json_in_root::<T>(&paths::homeboy()?, id, json_spec)
+}
+
+/// Rename an entity below an already-resolved config root.
+///
+/// Both paths, the collision guard, the reload, and the rollback save all read
+/// the one root passed in. Resolving the destination path from a different home
+/// than the source is how a rename silently moves a file out of an
+/// installation.
+pub fn rename_in_root<T: ConfigEntity>(config_root: &Path, id: &str, new_id: &str) -> Result<()> {
     let new_id = new_id.to_lowercase();
     identifier::validate_component_id(&new_id)?;
 
@@ -1145,8 +1258,8 @@ pub fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let old_path = T::config_path(id)?;
-    let new_path = T::config_path(&new_id)?;
+    let old_path = T::config_path_in_root(config_root, id);
+    let new_path = T::config_path_in_root(config_root, &new_id);
 
     if new_path.exists() {
         return Err(Error::validation_invalid_argument(
@@ -1163,12 +1276,12 @@ pub fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
     }
 
     // Check cross-entity name collision
-    check_id_collision(&new_id, T::entity_type())?;
+    check_id_collision_in_root(config_root, &new_id, T::entity_type())?;
 
-    let mut entity: T = load(id)?;
+    let mut entity: T = load_in_root(config_root, id)?;
     entity.set_id(new_id.clone());
 
-    local_files::ensure_app_dirs()?;
+    local_files::ensure_app_dirs_in_root(config_root)?;
 
     // For directory-based entities (where the config file lives inside a
     // named directory, e.g. projects/{id}/{id}.json), rename the directory
@@ -1205,7 +1318,7 @@ pub fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
         })?;
     }
 
-    if let Err(error) = save(&entity) {
+    if let Err(error) = save_in_root(config_root, &entity) {
         // Rollback: move back
         if is_directory_based {
             if let (Some(old_dir), Some(new_dir)) = (&old_parent, &new_parent) {
@@ -1220,17 +1333,24 @@ pub fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Delete an entity with referential integrity check.
+pub fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
+    rename_in_root::<T>(&paths::homeboy()?, id, new_id)
+}
+
+/// Delete an entity below an already-resolved config root, with a referential
+/// integrity check.
 ///
-/// Verifies the entity exists, checks for dependents via the trait hook,
-/// and only deletes if nothing references it.
-pub fn delete_safe<T: ConfigEntity>(id: &str) -> Result<()> {
-    if !exists::<T>(id) {
-        let suggestions = find_similar_ids::<T>(id);
+/// The existence probe, the dependency probe, and the delete all read the one
+/// root passed in. A dependency probe answered from a different home is a gate
+/// that fails open: it reports "no dependents" for an entity that is still
+/// referenced in the home being deleted from.
+pub fn delete_safe_in_root<T: ConfigEntity>(config_root: &Path, id: &str) -> Result<()> {
+    if !exists_in_root::<T>(config_root, id) {
+        let suggestions = find_similar_ids_in_root::<T>(config_root, id);
         return Err(T::not_found_error(id.to_string(), suggestions));
     }
 
-    let deps = T::dependents(id)?;
+    let deps = T::dependents_in_root(config_root, id)?;
     if !deps.is_empty() {
         return Err(Error::validation_invalid_argument(
             T::ENTITY_TYPE,
@@ -1245,7 +1365,15 @@ pub fn delete_safe<T: ConfigEntity>(id: &str) -> Result<()> {
         ));
     }
 
-    delete::<T>(id)
+    delete_in_root::<T>(config_root, id)
+}
+
+/// Delete an entity with referential integrity check.
+///
+/// Verifies the entity exists, checks for dependents via the trait hook,
+/// and only deletes if nothing references it.
+pub fn delete_safe<T: ConfigEntity>(id: &str) -> Result<()> {
+    delete_safe_in_root::<T>(&paths::homeboy()?, id)
 }
 
 /// Find entity IDs similar to the given target.
@@ -1563,26 +1691,27 @@ mod tests {
 /// `load`, `list`, `save`, `delete`, `exists`, `remove_from_json`, `create`,
 /// `rename`, `delete_safe`.
 ///
-/// Operations whose whole reach is path resolution also get an `_in_root`
-/// sibling — `load_in_root`, `list_in_root`, `delete_in_root`,
-/// `exists_in_root` (and `list_ids_in_root` under the `list_ids` feature) —
-/// which resolve every path from the config root they are handed instead of
-/// from process-global state.
+/// Every one of them gets an `_in_root` sibling — `load_in_root`,
+/// `list_in_root`, `save_in_root`, `delete_in_root`, `exists_in_root`,
+/// `remove_from_json_in_root`, `create_in_root`, `rename_in_root`,
+/// `delete_safe_in_root` (and `list_ids_in_root` / `merge_in_root` under those
+/// features) — which resolve every path *and every cross-entity read* from the
+/// config root they are handed instead of from process-global state.
 ///
-/// `save`, `create`, `rename`, `delete_safe` and `merge` deliberately have no
-/// rooted sibling yet: they run the `validate`/`dependents` trait hooks, and
-/// some implementations of those hooks read *other* entities ambiently
-/// (`Project::validate` -> `server::exists`, `Runner::validate` ->
-/// `server::load`, `Server::dependents` -> `project::list`). A rooted wrapper
-/// over an ambient hook would resolve half its state from the injected root and
-/// half from the environment, which is the exact split this rooting exists to
-/// remove. Root those hooks first (#7505).
+/// The mutating siblings became possible once `ConfigEntity`'s cross-entity
+/// hooks were rooted. `validate_in_root`, `dependents_in_root` and
+/// `on_rename_in_root` are the only spellings the trait offers, so an entity
+/// cannot supply an ambient-only hook that a rooted wrapper would silently
+/// bypass — the half-rooted shape this campaign exists to remove (#7505).
 ///
-/// `rename` calls `config::rename`, then the entity's `on_rename` hook
-/// (for updating references in other entities), then reloads.
+/// `rename` calls `config::rename`, then the entity's `on_rename_in_root` hook
+/// (for updating references in other entities), then reloads. The ambient
+/// spelling resolves the root once and threads it through all three, so a
+/// rename can never move a file in one installation and fix up references in
+/// another.
 ///
-/// `delete_safe` checks for dependents via the entity's `dependents` hook
-/// before deleting. Use `delete` for unconditional removal.
+/// `delete_safe` checks for dependents via the entity's `dependents_in_root`
+/// hook before deleting. Use `delete` for unconditional removal.
 ///
 /// Optional features add extra wrappers:
 /// - `list_ids` — generates `list_ids() -> Result<Vec<String>>`
@@ -1633,6 +1762,14 @@ macro_rules! entity_crud {
             $crate::config::save(entity)
         }
 
+        /// Validate and write to an already-resolved config root.
+        pub fn save_in_root(
+            config_root: &::std::path::Path,
+            entity: &$Entity,
+        ) -> $crate::Result<()> {
+            $crate::config::save_in_root(config_root, entity)
+        }
+
         pub fn delete(id: &str) -> $crate::Result<()> {
             $crate::config::delete::<$Entity>(id)
         }
@@ -1658,6 +1795,15 @@ macro_rules! entity_crud {
             $crate::config::remove_from_json::<$Entity>(id, json_spec)
         }
 
+        /// Remove JSON fields from an already-resolved config root.
+        pub fn remove_from_json_in_root(
+            config_root: &::std::path::Path,
+            id: Option<&str>,
+            json_spec: &str,
+        ) -> $crate::Result<$crate::RemoveResult> {
+            $crate::config::remove_from_json_in_root::<$Entity>(config_root, id, json_spec)
+        }
+
         pub fn create(
             json_spec: &str,
             skip_existing: bool,
@@ -1665,15 +1811,49 @@ macro_rules! entity_crud {
             $crate::config::create::<$Entity>(json_spec, skip_existing)
         }
 
-        pub fn rename(id: &str, new_id: &str) -> $crate::Result<$Entity> {
-            $crate::config::rename::<$Entity>(id, new_id)?;
+        /// Create into an already-resolved config root.
+        pub fn create_in_root(
+            config_root: &::std::path::Path,
+            json_spec: &str,
+            skip_existing: bool,
+        ) -> $crate::Result<$crate::CreateOutput<$Entity>> {
+            $crate::config::create_in_root::<$Entity>(config_root, json_spec, skip_existing)
+        }
+
+        /// Rename within an already-resolved config root.
+        ///
+        /// The move, the `on_rename_in_root` reference fixup, and the reload
+        /// all read the one root passed in.
+        pub fn rename_in_root(
+            config_root: &::std::path::Path,
+            id: &str,
+            new_id: &str,
+        ) -> $crate::Result<$Entity> {
+            $crate::config::rename_in_root::<$Entity>(config_root, id, new_id)?;
             let resolved_id = new_id.to_lowercase();
-            <$Entity as $crate::config::ConfigEntity>::on_rename(id, &resolved_id)?;
-            load(&resolved_id)
+            <$Entity as $crate::config::ConfigEntity>::on_rename_in_root(
+                config_root,
+                id,
+                &resolved_id,
+            )?;
+            load_in_root(config_root, &resolved_id)
+        }
+
+        pub fn rename(id: &str, new_id: &str) -> $crate::Result<$Entity> {
+            rename_in_root(&$crate::paths::homeboy()?, id, new_id)
         }
 
         pub fn delete_safe(id: &str) -> $crate::Result<()> {
             $crate::config::delete_safe::<$Entity>(id)
+        }
+
+        /// Delete from an already-resolved config root, with the referential
+        /// integrity check.
+        pub fn delete_safe_in_root(
+            config_root: &::std::path::Path,
+            id: &str,
+        ) -> $crate::Result<()> {
+            $crate::config::delete_safe_in_root::<$Entity>(config_root, id)
         }
 
         // --- Optional features ---
@@ -1702,6 +1882,16 @@ macro_rules! entity_crud {
             replace_fields: &[String],
         ) -> $crate::Result<$crate::MergeOutput> {
             $crate::config::merge::<$Entity>(id, json_spec, replace_fields)
+        }
+
+        /// Merge into an already-resolved config root.
+        pub fn merge_in_root(
+            config_root: &::std::path::Path,
+            id: Option<&str>,
+            json_spec: &str,
+            replace_fields: &[String],
+        ) -> $crate::Result<$crate::MergeOutput> {
+            $crate::config::merge_in_root::<$Entity>(config_root, id, json_spec, replace_fields)
         }
     };
 

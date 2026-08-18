@@ -202,10 +202,15 @@ impl ConfigEntity for Project {
         false
     }
 
-    fn validate(&self) -> Result<()> {
+    /// The referenced server is probed in the *same* root the project is being
+    /// written to. Probing the process root instead would let a project be
+    /// accepted into one installation on the strength of a server that only
+    /// exists in another.
+    fn validate_in_root(&self, config_root: &Path) -> Result<()> {
         if let Some(ref sid) = self.server_id {
-            if !server::exists(sid) {
-                let suggestions = config::find_similar_ids::<server::Server>(sid);
+            if !server::exists_in_root(config_root, sid) {
+                let suggestions =
+                    config::find_similar_ids_in_root::<server::Server>(config_root, sid);
                 return Err(Error::server_not_found(sid.clone(), suggestions));
             }
         }

@@ -56,7 +56,7 @@ pub fn to_json_string<T: Serialize>(data: &T) -> Result<String> {
 /// Serialize an entity to JSON and inject an `id` field.
 ///
 /// Many entities use `#[serde(skip_serializing)]` on their `id` field, but
-/// `create_single_from_json()` requires the id to be present. This helper
+/// `create_single_from_json_in_root()` requires the id to be present. This helper
 /// serializes the entity, injects the id, then returns a compact JSON string.
 pub fn serialize_with_id<T: Serialize>(entity: &T, id: &str) -> Result<String> {
     let mut value = serde_json::to_value(entity)

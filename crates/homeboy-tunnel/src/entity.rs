@@ -4,7 +4,7 @@ use homeboy_core::config::ConfigEntity;
 use homeboy_core::error::{Error, Result};
 
 use super::types::*;
-use super::validation::validate_service_tunnel;
+use super::validation::{validate_service_tunnel, validate_service_tunnel_in_root};
 use super::{load, save};
 
 pub fn native_preview_token_sha256(token: &str) -> String {
@@ -57,8 +57,8 @@ impl ConfigEntity for ServiceTunnel {
     // and silently wrongly under an injected root (#7505). `Runner`, `Fleet`,
     // and `Schedule` rely on the same default for the same reason.
 
-    fn validate(&self) -> Result<()> {
-        validate_service_tunnel(self)
+    fn validate_in_root(&self, config_root: &std::path::Path) -> Result<()> {
+        validate_service_tunnel_in_root(config_root, self)
     }
 
     fn aliases(&self) -> &[String] {
