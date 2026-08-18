@@ -8,18 +8,20 @@ use super::super::cook_adoption::{
     resolve_adoption_target_with_attempt_in_stores,
 };
 use super::super::cook_baseline::git_output;
+use super::super::cook_pre_execution::recover_recipe_attempt_with_stores;
 use super::super::cook_promotion::{
     canonical_cook_patch_artifact_id, canonical_cook_recovery_run_id, cook_finalization_options,
     cook_finalization_options_with_stores, cook_promotion_argv, cook_report,
-    finalize_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend,
-    finalize_or_load_cook_pr_with_backend_with_stores, moving_base_recovery_for_run,
-    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
-    moving_base_recovery_report, next_moving_base_recovery, persist_manual_finalization_intent,
-    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
-    persisted_promotion_for_attempt_in_store, prepare_manual_finalization_identity,
-    record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
-    CookReportInput, MovingBaseCookRecovery,
+    finalize_cook_pr_with_backend, finalize_cook_pr_with_backend_with_stores,
+    finalize_or_load_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend_with_stores,
+    moving_base_recovery_for_run, moving_base_recovery_for_run_with_stores,
+    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
+    persist_manual_finalization_intent, persist_manual_finalization_receipt,
+    persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
+    prepare_manual_finalization_identity, record_replacement_gate_proof,
+    recover_cook_pr_with_backend, recover_moving_base_cook_candidate,
+    refreshed_moving_base_recovery, selected_candidate_task_id_in_store, CookReportInput,
+    MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::persist_initial_recipe;
 use super::*;
