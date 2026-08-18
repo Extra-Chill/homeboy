@@ -942,6 +942,53 @@ fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookSe
     }
 }
 
+/// Make the controller/provider verification boundary explicit before the
+/// immutable Cook recipe is persisted. This keeps a provider attempt focused
+/// on a patch instead of duplicating the final gate population in its isolated
+/// workspace. Private gate programs deliberately remain undisclosed.
+fn project_controller_owned_gate_contract(options: &mut AgentTaskCookServiceOptions) {
+    let public_gates = options
+        .gates
+        .verify
+        .iter()
+        .map(|command| format!("`{command}`"))
+        .collect::<Vec<_>>();
+    let private_gate_count = options.gates.private_verify.len();
+    if public_gates.is_empty() && private_gate_count == 0 {
+        return;
+    }
+
+    let mut instructions = vec![
+        "Declared deterministic gates are controller-owned. Homeboy runs them after it harvests your candidate, so use this attempt for the source change and a focused check only when it directly reduces uncertainty.".to_string(),
+    ];
+    if !public_gates.is_empty() {
+        instructions.push(format!(
+            "Controller-owned final gates: {}.",
+            public_gates.join(", ")
+        ));
+    }
+    if private_gate_count > 0 {
+        instructions.push(format!(
+            "Homeboy also owns {private_gate_count} private deterministic gate(s); their programs are intentionally withheld from this attempt."
+        ));
+    }
+    instructions.push(
+        "Report any focused command you run and its result in the reviewer-facing verification evidence; Homeboy records the authoritative final gate evidence separately."
+            .to_string(),
+    );
+    let contract = instructions.join("\n");
+
+    for request in &mut options.initial_plan.tasks {
+        if !request
+            .instructions
+            .contains("Declared deterministic gates are controller-owned.")
+        {
+            request.instructions.push_str("\n\n");
+            request.instructions.push_str(&contract);
+        }
+    }
+}
+
 /// Executes one provider attempt while cook retains ownership of promotion,
 /// gates, retries, and finalization.
 pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
@@ -4119,6 +4166,7 @@ where
             &options.initial_plan.options.execution_budget,
         )?;
     }
+    project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are

@@ -3708,6 +3708,35 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
 }
 
 #[test]
+fn provider_prompt_distinguishes_controller_owned_gates_from_focused_checks() {
+    let mut options = batch_cook_options(
+        "controller-owned-gate-contract",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    options.gates.verify = vec!["cargo test --locked -p homeboy-agents".to_string()];
+    options.gates.private_verify = vec!["private-gate --token secret".to_string()];
+
+    project_controller_owned_gate_contract(&mut options);
+
+    let instructions = &options.initial_plan.tasks[0].instructions;
+    assert!(instructions.contains("Declared deterministic gates are controller-owned."));
+    assert!(instructions.contains("`cargo test --locked -p homeboy-agents`"));
+    assert!(instructions.contains("1 private deterministic gate(s)"));
+    assert!(!instructions.contains("private-gate --token secret"));
+    assert!(instructions.contains("focused check only when it directly reduces uncertainty"));
+    assert!(instructions.contains("authoritative final gate evidence separately"));
+
+    project_controller_owned_gate_contract(&mut options);
+    assert_eq!(
+        options.initial_plan.tasks[0]
+            .instructions
+            .matches("Declared deterministic gates are controller-owned.")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn no_finalize_initial_request_preserves_its_existing_contract() {
     let mut options = batch_cook_options(
         "no-finalize-review-form-contract",
