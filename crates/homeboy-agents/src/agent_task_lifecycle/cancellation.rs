@@ -706,7 +706,23 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
 /// Reconcile an asynchronously cancelled controller-owned staging job. This is
 /// read-side so a CLI that observed only the acknowledgement still converges the
 /// durable cook record after the provider exits.
-pub(super) fn reconcile_controller_job_cancellation(
+///
+/// The two side effects at the end — controller-scratch finalization and
+/// admission cancellation — are the reason this takes a store. Both are durable
+/// writes keyed on the run, and both had ambient forms that resolve their own
+/// roots: `finalize_run` opens `paths::homeboy_data()`'s scratch index and
+/// `paths::artifact_root()`, and `cancel_admission` opens the ambient runtime
+/// root. A read reconciling a record from injected roots would have marked
+/// another home's scratch resources finalized and released another home's
+/// admission (#7505). This mirrors `cancel_exact_run_in_store`, which already
+/// uses exactly these two rooted forms.
+///
+/// The caller mutates `record` in place and persists it itself, so no record
+/// write happens here. There is no ambient wrapper:
+/// `status_with_options_inner` is the only caller and resolves one store for
+/// the whole read.
+pub(super) fn reconcile_controller_job_cancellation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
 ) -> Result<bool> {
     let Some(cancellation) = record
@@ -780,8 +796,15 @@ pub(super) fn reconcile_controller_job_cancellation(
     metadata.remove(METADATA_KEY_STALE_RUNNING);
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
     record.updated_at = Some(now_timestamp());
-    crate::controller_scratch::finalize_run(&record.run_id)?;
-    homeboy_core::controller_runtime::cancel_admission(&record.run_id)?;
+    crate::controller_scratch::finalize_run_at_explicit_roots(
+        &lifecycle_store.data_root(),
+        &lifecycle_store.artifact_root(),
+        &record.run_id,
+    )?;
+    homeboy_core::controller_runtime::cancel_admission_at(
+        &lifecycle_store.data_root().join("controller-runtimes"),
+        &record.run_id,
+    )?;
     Ok(true)
 }
 

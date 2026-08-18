@@ -3813,57 +3813,98 @@ pub fn exact_status(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(status_with_options_inner(run_id, AgentTaskStatusOptions::default(), true)?.record)
 }
 
+/// The shared body of [`status`], [`status_with_options`], and [`exact_status`].
+///
+/// This is an *ambient entry point*, not a rooted one: it accepts no store and
+/// resolves one for itself. What changed in #7505's status slice is that it now
+/// resolves it **once** and hands that single store to every reconciliation step
+/// that has a rooted form, instead of letting a dozen `store::` shims each
+/// resolve `default_store()` independently. Behaviour is unchanged — every one
+/// of those shims resolved `AgentTaskLifecycleStore::from_current_environment()`
+/// too — but the read is now one store away from being rootable.
+///
+/// Four steps still resolve their own roots, and each is its own remaining
+/// slice rather than an oversight:
+///
+/// * `reconcile_pending_runner_submission_intent` and
+///   `expire_unaccepted_lab_handoff` — the latter calls the alias-resolving
+///   `cancel_run` spine (~400 lines, a dozen record writes,
+///   `controller_scratch::finalize_run`, managed-service reconciliation) and
+///   takes `LabHandoffLock`, whose lock path is built from `paths::homeboy_data()`
+///   directly. A lock taken in the wrong home excludes nobody, so that lock has
+///   to move with the store in the same change that roots the spine.
+/// * `reconcile_runner_job_state` — reaches `terminalize_lost_accepted_lab_job`
+///   and `reconcile_runner_job_snapshot`, both of which write aggregates.
+/// * the Cook recipe family (`load_recipe`, `load_recipe_for_attempt`,
+///   `validate_recipe_attempt_record`, `enqueue_terminal_continuation`) — a
+///   `CookRecipeStore`, not a lifecycle store. It is derivable from
+///   `lifecycle_store.data_root()`, but pairing the two stores is the shape
+///   `KNOWN_MIXED_STORE_FUNCTIONS` exists to make someone argue for.
+///
+/// `homeboy_core::controller_runtime::admission_status` has no `_at` form at
+/// all; `cancel_admission_at` does, which is why the cancellation reconciler
+/// below could be rooted and this read could not.
+///
+/// Until those close there is deliberately **no** `status_in_store`. A rooted
+/// status that reconciled four of its steps in another installation would be
+/// strictly worse than the uniform ambience it replaced.
 fn status_with_options_inner(
     run_id: &str,
     options: AgentTaskStatusOptions,
     exact: bool,
 ) -> Result<AgentTaskStatusOutcome> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     let requested_run_id = sanitize_run_id(run_id);
     let resolved_run_id = if exact {
         requested_run_id.clone()
     } else {
-        resolve_run_id(run_id)?
+        resolve_run_id_in_store(&lifecycle_store, run_id)?
     };
-    let _ = reconcile_deferred_candidate(&resolved_run_id)?;
-    let mut record = store::read_record(&resolved_run_id)?;
+    let _ = reconcile_deferred_candidate_in_store(&lifecycle_store, &resolved_run_id)?;
+    let mut record = lifecycle_store.read_record(&resolved_run_id)?;
     if let Ok(admission) = homeboy_core::controller_runtime::admission_status(&record.run_id) {
         record.metadata["controller_admission"] = admission;
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
     }
     if reconcile_candidate_adoption(&mut record) {
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
     }
     if reconcile_pending_runner_submission_intent(&resolved_run_id)? {
-        record = store::read_record(&resolved_run_id)?;
+        record = lifecycle_store.read_record(&resolved_run_id)?;
     }
     if has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
         let _ = expire_unaccepted_lab_handoff(&resolved_run_id)?;
-        record = store::read_record(&resolved_run_id)?;
+        record = lifecycle_store.read_record(&resolved_run_id)?;
     }
     // A daemon can evict a completed job from its active store before a restarted
     // controller observes it. The terminal event log already mirrored into this
     // observation record is sufficient to recover the aggregate and artifacts.
     // Consume it before querying the live runner, which is no longer authority
     // once its active entry has been evicted.
-    if project_persisted_terminal_runner_events(&mut record)? {
-        record = store::read_record(&resolved_run_id)?;
+    if project_persisted_terminal_runner_events_in_store(&lifecycle_store, &mut record)? {
+        record = lifecycle_store.read_record(&resolved_run_id)?;
     }
-    if super::cancellation::reconcile_controller_job_cancellation(&mut record)? {
-        store::write_record(&record)?;
+    if super::cancellation::reconcile_controller_job_cancellation_in_store(
+        &lifecycle_store,
+        &mut record,
+    )? {
+        lifecycle_store.write_record(&record)?;
     }
     if !record.state.is_terminal() {
-        let controller_plan = store::read_controller_plan(&record.run_id)?;
-        let controller_plan_path = store::controller_plan_path(&record.run_id)?
+        let controller_plan = lifecycle_store.read_controller_plan(&record.run_id)?;
+        let controller_plan_path = lifecycle_store
+            .controller_plan_path(&record.run_id)
             .display()
             .to_string();
         if record.plan_path != controller_plan_path {
             record.plan_path = controller_plan_path;
-            store::write_record(&record)?;
+            lifecycle_store.write_record(&record)?;
         }
-        if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
-            let aggregate_path = store::aggregate_path(&record.run_id)
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| "aggregate.json".to_string());
+        if let Ok(aggregate) = lifecycle_store.read_aggregate(&record.run_id) {
+            let aggregate_path = lifecycle_store
+                .aggregate_path(&record.run_id)
+                .display()
+                .to_string();
             let mut reconciled = record.clone();
             let projection_plan = aggregate_projection_plan(&controller_plan, &aggregate);
             apply_aggregate_to_record(
@@ -3874,7 +3915,7 @@ fn status_with_options_inner(
             );
 
             if reconciled != record {
-                if let Err(error) = store::write_record(&reconciled) {
+                if let Err(error) = lifecycle_store.write_record(&reconciled) {
                     reconciled
                         .ensure_metadata_object()
                         .insert("finalization_error".to_string(), json!(error.message));
@@ -3885,7 +3926,7 @@ fn status_with_options_inner(
         }
     }
     if reconcile_local_provider_ownership(&mut record) {
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
     }
     // The only genuinely-remote step in this read. Skipping it for a
     // controller-local record is what makes `agent-task status` answerable while
@@ -3897,17 +3938,20 @@ fn status_with_options_inner(
     }
     record.annotate_stale_running();
     if record != before_liveness_reconciliation {
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
     }
     if record.state.is_terminal() {
-        if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
+        if let Ok(aggregate) = lifecycle_store.read_aggregate(&record.run_id) {
             if reconcile_terminal_provider_models(&mut record, &aggregate) {
-                store::write_record(&record)?;
+                lifecycle_store.write_record(&record)?;
             }
-            if !crate::agent_task_lifecycle::terminal_artifact_projection_is_verified(
-                &record, &aggregate,
+            if !crate::agent_task_lifecycle::terminal_artifact_projection_is_verified_in_store(
+                &lifecycle_store,
+                &record,
+                &aggregate,
             )? {
-                crate::agent_task_lifecycle::record_terminal_artifact_projection(
+                crate::agent_task_lifecycle::record_terminal_artifact_projection_in_store(
+                    &lifecycle_store,
                     &mut record,
                     &aggregate,
                 )?;
@@ -3920,9 +3964,10 @@ fn status_with_options_inner(
             if crate::agent_task_lifecycle::terminal_provider_model_reconciliation_needed(
                 &record, &aggregate,
             ) {
-                let controller_plan = store::read_controller_plan(&record.run_id)?;
+                let controller_plan = lifecycle_store.read_controller_plan(&record.run_id)?;
                 let projection_plan = aggregate_projection_plan(&controller_plan, &aggregate);
-                crate::agent_task_lifecycle::reconcile_terminal_provider_model(
+                crate::agent_task_lifecycle::reconcile_terminal_provider_model_in_store(
+                    &lifecycle_store,
                     &mut record,
                     &projection_plan,
                     &aggregate,
@@ -3959,7 +4004,8 @@ fn status_with_options_inner(
                 ) {
                     Ok(()) => {
                         if let Some(reason) =
-                            crate::agent_task_lifecycle::terminal_artifact_projection_readiness(
+                            crate::agent_task_lifecycle::terminal_artifact_projection_readiness_in_store(
+                                &lifecycle_store,
                                 &record.run_id,
                             )?
                         {
@@ -3982,7 +4028,7 @@ fn status_with_options_inner(
                                     "repair_command": repair_command,
                                 }),
                             );
-                            store::write_record(&record)?;
+                            lifecycle_store.write_record(&record)?;
                             return Ok(AgentTaskStatusOutcome {
                                 record,
                                 runner_probe,
@@ -4028,7 +4074,7 @@ fn status_with_options_inner(
                                         "candidate": candidate,
                                     }),
                                 );
-                                store::write_record(&record)?;
+                                lifecycle_store.write_record(&record)?;
                             }
                             Err(error) => {
                                 record.ensure_metadata_object().insert(
@@ -4039,7 +4085,7 @@ fn status_with_options_inner(
                                         "message": error.message,
                                     }),
                                 );
-                                store::write_record(&record)?;
+                                lifecycle_store.write_record(&record)?;
                             }
                         }
                     }
@@ -4052,7 +4098,7 @@ fn status_with_options_inner(
                                 "message": error.message,
                             }),
                         );
-                        store::write_record(&record)?;
+                        lifecycle_store.write_record(&record)?;
                     }
                 }
             }
@@ -4066,13 +4112,13 @@ fn status_with_options_inner(
                         "message": error.message,
                     }),
                 );
-                store::write_record(&record)?;
+                lifecycle_store.write_record(&record)?;
             }
         }
     }
     if !exact && requested_run_id != record.run_id {
-        if let Ok(index) = store::read_cook_index(&requested_run_id) {
-            project_cook_alias_adoption(&mut record, &index)?;
+        if let Ok(index) = lifecycle_store.read_cook_index(&requested_run_id) {
+            project_cook_alias_adoption_in_store(&lifecycle_store, &mut record, &index)?;
             let metadata = record.ensure_metadata_object();
             metadata.insert("cook_alias".to_string(), json!(requested_run_id));
             metadata.insert(
