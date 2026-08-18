@@ -1240,9 +1240,17 @@ const PROCESS_TERMINATION_GRACE: Duration = Duration::from_millis(100);
 /// Run a timed SSH command in a remote session that Homeboy explicitly owns.
 /// The remote shell, rather than the controller's local `ssh` process group,
 /// owns cleanup of descendants that inherit the SSH output pipes.
+///
+/// The wrapper must also preserve the SSH channel's stdin. A non-job-control
+/// shell redirects the standard input of an asynchronous command to /dev/null
+/// before applying any explicit redirections, so a backgrounded `setsid` child
+/// would otherwise read EOF even though the controller is pumping bytes into
+/// the local `ssh` process. We copy the remote shell's fd 0 to fd 3 before
+/// backgrounding and then explicitly redirect the child's fd 0 from fd 3,
+/// restoring the original stdin stream.
 pub(super) fn wrap_timed_remote_command(command: &str) -> String {
     format!(
-        "command -v setsid >/dev/null 2>&1 || {{ printf '%s\\n' 'Homeboy timed SSH execution requires remote setsid process authority.' >&2; exit 127; }}; setsid sh -c {} & __homeboy_remote_pid=$!; __homeboy_remote_cleanup() {{ kill -TERM -\"$__homeboy_remote_pid\" 2>/dev/null || true; __homeboy_remote_attempt=0; while kill -0 -\"$__homeboy_remote_pid\" 2>/dev/null && [ \"$__homeboy_remote_attempt\" -lt 10 ]; do sleep 0.01; __homeboy_remote_attempt=$((__homeboy_remote_attempt + 1)); done; kill -KILL -\"$__homeboy_remote_pid\" 2>/dev/null || true; }}; trap '__homeboy_remote_cleanup; exit 143' HUP INT TERM; wait \"$__homeboy_remote_pid\"; __homeboy_remote_status=$?; __homeboy_remote_cleanup; exit \"$__homeboy_remote_status\"",
+        "command -v setsid >/dev/null 2>&1 || {{ printf '%s\\n' 'Homeboy timed SSH execution requires remote setsid process authority.' >&2; exit 127; }}; exec 3<&0 || {{ printf '%s\\n' 'Homeboy timed SSH execution could not preserve remote stdin.' >&2; exit 1; }}; setsid sh -c {} <&3 & __homeboy_remote_pid=$!; exec 3<&-; __homeboy_remote_cleanup() {{ kill -TERM -\"$__homeboy_remote_pid\" 2>/dev/null || true; __homeboy_remote_attempt=0; while kill -0 -\"$__homeboy_remote_pid\" 2>/dev/null && [ \"$__homeboy_remote_attempt\" -lt 10 ]; do sleep 0.01; __homeboy_remote_attempt=$((__homeboy_remote_attempt + 1)); done; kill -KILL -\"$__homeboy_remote_pid\" 2>/dev/null || true; }}; trap '__homeboy_remote_cleanup; exit 143' HUP INT TERM; wait \"$__homeboy_remote_pid\"; __homeboy_remote_status=$?; __homeboy_remote_cleanup; exit \"$__homeboy_remote_status\"",
         shell::quote_arg(command)
     )
 }
