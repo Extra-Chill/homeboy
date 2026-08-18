@@ -151,6 +151,8 @@ fn timed_ssh_envelope_owns_remote_descendant_cleanup() {
     let envelope = wrap_timed_remote_command("sleep 30 & printf terminal-result");
 
     assert!(envelope.contains("setsid sh -c"));
+    assert!(envelope.contains("exec 3<&0"));
+    assert!(envelope.contains("<&3"));
     assert!(envelope.contains("kill -TERM -\"$__homeboy_remote_pid\""));
     assert!(envelope.contains("kill -KILL -\"$__homeboy_remote_pid\""));
     assert!(envelope.contains("exit \"$__homeboy_remote_status\""));
@@ -205,6 +207,100 @@ fn timed_piped_ssh_envelope_preserves_stdin_and_output_while_reaping_descendants
         "runner disconnect left its attributed pipe-holding descendant running"
     );
     let _ = std::fs::remove_file(descendant_pid_path);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn timed_remote_wrapper_preserves_piped_stdin() {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", &wrap_timed_remote_command("cat")])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
+
+    let input = tempfile::NamedTempFile::new().expect("piped stdin fixture");
+    std::fs::write(input.path(), "piped-input").expect("write piped stdin fixture");
+    let output = execute_command_with_stdin_source_timeout(
+        command,
+        StdinSource::Piped(std::fs::File::open(input.path()).expect("open piped stdin fixture")),
+        Duration::from_secs(5),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, "piped-input");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn timed_and_untimed_paths_preserve_identical_stdin_bytes() {
+    let payload = vec![0, 255, 1, b'\n', 0, 42, 128];
+    let untimed_target = tempfile::NamedTempFile::new().expect("untimed payload target");
+    let timed_target = tempfile::NamedTempFile::new().expect("timed payload target");
+
+    let untimed_output = run_command_with_stdin_source(
+        piped_command(&format!(
+            "cat > {}",
+            crate::engine::shell::quote_path(&untimed_target.path().to_string_lossy())
+        )),
+        StdinSource::Reader(Box::new(Cursor::new(payload.clone()))),
+    );
+
+    let mut timed = Command::new("sh");
+    timed
+        .args([
+            "-c",
+            &wrap_timed_remote_command(&format!(
+                "cat > {}",
+                crate::engine::shell::quote_path(&timed_target.path().to_string_lossy())
+            )),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut timed);
+    let timed_output = execute_command_with_stdin_source_timeout(
+        timed,
+        StdinSource::Reader(Box::new(Cursor::new(payload.clone()))),
+        Duration::from_secs(5),
+    );
+
+    assert!(untimed_output.success, "{}", untimed_output.stderr);
+    assert!(timed_output.success, "{}", timed_output.stderr);
+    assert_eq!(
+        std::fs::read(untimed_target.path()).expect("read untimed payload"),
+        payload
+    );
+    assert_eq!(
+        std::fs::read(timed_target.path()).expect("read timed payload"),
+        payload
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn timed_remote_wrapper_with_idle_pipe_and_fast_exit_is_bounded() {
+    let (reader, _producer) = idle_pipe();
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", &wrap_timed_remote_command("exit 0")])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
+    let started = Instant::now();
+
+    let output = execute_command_with_stdin_source_timeout(
+        command,
+        StdinSource::Piped(reader),
+        Duration::from_secs(5),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.exit_code, 0);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "fast exit with an idle pipe must not wait for the full timeout"
+    );
 }
 
 #[test]
