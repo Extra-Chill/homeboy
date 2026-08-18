@@ -425,6 +425,133 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
 }
 
 #[test]
+fn detached_cook_parent_status_projects_its_materializing_child_before_index_publication() {
+    with_temp_home(|| {
+        let cook_id = "cook-detached-status-parent";
+        let child_run_id = "cook-detached-status-parent-attempt-1";
+        agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+            .expect("record detached Cook parent");
+        agent_task_lifecycle::reserve_detached_cook_handoff_materialization(cook_id, child_run_id)
+            .expect("reserve detached Cook child");
+
+        let (reserved_status, _) = status(StatusArgs {
+            run_id: cook_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        })
+        .expect("reserved parent remains readable before child submission");
+        assert_eq!(reserved_status["run_id"], cook_id);
+
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(child_run_id))
+            .expect("materialize detached Cook child");
+        agent_task_lifecycle::rewrite_record_for_test(child_run_id, |record| {
+            record.metadata["provider_executions"] = json!([{
+                "key": "fixture-task:1",
+                "state": "running",
+            }]);
+        })
+        .expect("record provider boundary");
+        agent_task_lifecycle::record_cook_progress(
+            child_run_id,
+            "provider_start",
+            1,
+            Some("fixture provider"),
+        )
+        .expect("record provider start");
+
+        let (materializing_status, _) = status(StatusArgs {
+            run_id: cook_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        })
+        .expect("parent projects materializing child");
+        assert_eq!(materializing_status["run_id"], child_run_id);
+        assert_eq!(
+            materializing_status["tasks"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            materializing_status["metadata"]["cook_progress"]["phase"],
+            "provider_start"
+        );
+        assert_eq!(
+            materializing_status["liveness"]["provider_boundary"]["status"],
+            "recorded"
+        );
+        assert_eq!(
+            materializing_status["identity"]["requested_run_id"],
+            cook_id
+        );
+        assert_eq!(
+            materializing_status["identity"]["resolved_run_id"],
+            child_run_id
+        );
+        assert_eq!(
+            materializing_status["identity"]["resolution"],
+            "detached_materializing_attempt"
+        );
+
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, child_run_id)
+            .expect("publish Cook index");
+        let (published_status, _) = status(StatusArgs {
+            run_id: cook_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        })
+        .expect("published Cook index supersedes the materialization reservation");
+        assert_eq!(published_status["run_id"], child_run_id);
+        assert_eq!(published_status["identity"]["resolution"], "default");
+        assert_eq!(
+            published_status["identity"]["cook_alias"]["latest_attempt_run_id"],
+            child_run_id
+        );
+        let (exact_parent_status, _) = status(StatusArgs {
+            run_id: cook_id.to_string(),
+            exact: true,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        })
+        .expect("parent remains an immutable exact read after publication");
+        assert_eq!(exact_parent_status["run_id"], cook_id);
+        assert_eq!(
+            exact_parent_status["identity"]["resolution"],
+            "exact_record"
+        );
+        assert_eq!(
+            exact_parent_status["identity"]["cook_alias"]["latest_attempt_run_id"],
+            child_run_id
+        );
+    });
+}
+
+#[test]
 fn exact_status_inspects_initial_cook_record_after_alias_advances() {
     with_temp_home(|| {
         let cook_id = "cook-exact-initial-record";
