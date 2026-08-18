@@ -51,6 +51,24 @@ const COMPACT_PROMOTION_FILE_BYTE_LIMIT: usize = 256;
 const COMPACT_STATUS_BYTE_LIMIT: usize = 16 * 1024;
 const COMPACT_MANDATORY_SCALAR_BYTE_LIMIT: usize = 512;
 const STATUS_WATCH_CHANGE_LIMIT: usize = 12;
+const FULL_STATUS_BYTE_LIMIT: usize = 64 * 1024;
+
+const FULL_STATUS_COLLECTIONS: &[&str] = &[
+    "applied",
+    "artifact_bindings",
+    "artifact_lineage",
+    "artifact_refs",
+    "artifacts",
+    "candidates",
+    "child_runs",
+    "evidence_refs",
+    "events",
+    "failed",
+    "outcomes",
+    "registry_quarantines",
+    "skipped",
+    "worktrees",
+];
 
 /// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
 /// attempt readers, even when a newer Cook attempt produced no patch.
@@ -247,6 +265,9 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, run_id);
         preserve_controller_owner_placement(&mut value, run_id);
+        if !args.lossless {
+            value = bounded_full_status(value, run_id);
+        }
         let exit_code = subject_exit_code(&value, args.strict_subject_exit);
         return Ok((value, exit_code));
     }
@@ -813,6 +834,303 @@ fn attach_full_status_candidate(
             canonical_candidate_projection(canonical),
         );
         fields.insert("liveness".to_string(), liveness);
+    }
+}
+
+/// Keep `--full` useful in response-limited callers. The unbounded durable
+/// projection remains available through `--full --lossless --output <path>`.
+fn bounded_full_status(mut value: Value, run_id: &str) -> Value {
+    let outcome = json!({
+        "run_id": value.get("run_id"),
+        "state": value.get("state"),
+        "terminal_status": value.get("terminal_status"),
+        "stop_reason": bounded_value(value.pointer("/metadata/stop_reason").unwrap_or(&Value::Null)),
+        "candidate_state": value.pointer("/canonical_candidate/state").or_else(|| value.pointer("/candidate_selection/state")),
+        "notification_state": value.pointer("/notification_delivery/status"),
+        "next_action": value
+            .pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0"))
+            .map(|action| json!({
+                "kind": action.get("kind"),
+                "command": bounded_value(action.get("command").unwrap_or(&Value::Null)),
+                "label": bounded_value(action.get("label").unwrap_or(&Value::Null)),
+                "reason": bounded_value(action.get("reason").unwrap_or(&Value::Null)),
+            })),
+    });
+    let mut detail_locations = HashMap::new();
+    bound_full_status_collections(&mut value, run_id, "", &mut detail_locations);
+    if let Some(map) = value.as_object_mut() {
+        map.insert("outcome".to_string(), outcome);
+        map.insert(
+            "full_status_presentation".to_string(),
+            json!({
+                "presentation": "bounded_full_status",
+                "lossless_export_command": format!(
+                    "homeboy agent-task status {} --full --lossless --output <path>",
+                    quote_arg(run_id)
+                ),
+            }),
+        );
+    }
+    enforce_full_status_budget(value, run_id)
+}
+
+fn bound_full_status_collections(
+    value: &mut Value,
+    run_id: &str,
+    path: &str,
+    detail_locations: &mut HashMap<String, String>,
+) {
+    match value {
+        Value::Array(values) => {
+            for (index, item) in values.iter_mut().enumerate() {
+                bound_full_status_collections(
+                    item,
+                    run_id,
+                    &format!("{path}/{index}"),
+                    detail_locations,
+                );
+            }
+        }
+        Value::Object(map) => {
+            let keys = map.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                let field_path = format!("{path}/{key}");
+                let Some(field) = map.get_mut(&key) else {
+                    continue;
+                };
+                if FULL_STATUS_COLLECTIONS.contains(&key.as_str()) {
+                    let Some(values) = field.as_array_mut().map(std::mem::take) else {
+                        continue;
+                    };
+                    // Persisted rows can originate from parallel workers. Sorting the
+                    // serialized representation makes the bounded prefix stable.
+                    let mut values = values;
+                    values.sort_by_key(|item| serde_json::to_string(item).unwrap_or_default());
+                    let total = values.len();
+                    let command = format!("homeboy agent-task status {} --full", quote_arg(run_id));
+                    let export = format!(
+                        "homeboy agent-task status {} --full --lossless --output <path>",
+                        quote_arg(run_id)
+                    );
+                    let (bounded, budget) = budget_json_values(
+                        values,
+                        total,
+                        OutputBudget::COLLECTION,
+                        command,
+                        export,
+                    );
+                    let mut bounded = bounded;
+                    for (index, item) in bounded.iter_mut().enumerate() {
+                        bound_full_status_collections(
+                            item,
+                            run_id,
+                            &format!("{field_path}/{index}"),
+                            detail_locations,
+                        );
+                    }
+                    let bounded = bounded
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            if !matches!(key.as_str(), "artifacts" | "artifact_refs" | "evidence_refs") {
+                                return item;
+                            }
+                            let Some(identity) = item
+                                .get("id")
+                                .or_else(|| item.get("uri"))
+                                .and_then(Value::as_str)
+                            else {
+                                return item;
+                            };
+                            let location = format!("{field_path}/{index}");
+                            let identity = format!(
+                                "{}:{identity}",
+                                if matches!(key.as_str(), "artifacts" | "artifact_refs") {
+                                    "artifact"
+                                } else {
+                                    "evidence"
+                                }
+                            );
+                            if let Some(first_location) = detail_locations.get(&identity) {
+                                json!({
+                                    "ref": format!("homeboy://agent-task/{run_id}/status#{first_location}"),
+                                    "duplicate_of": first_location,
+                                })
+                            } else {
+                                detail_locations.insert(identity, location);
+                                item
+                            }
+                        })
+                        .collect();
+                    *field = Value::Array(bounded);
+                    map.insert(
+                        format!("{key}_output_budget"),
+                        json!({
+                            "ref": format!("homeboy://agent-task/{run_id}/status#{field_path}"),
+                            "truncation": budget,
+                        }),
+                    );
+                    continue;
+                }
+                bound_full_status_collections(field, run_id, &field_path, detail_locations);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn enforce_full_status_budget(mut value: Value, run_id: &str) -> Value {
+    if serialized_len(&value) <= FULL_STATUS_BYTE_LIMIT {
+        return value;
+    }
+    {
+        let Some(map) = value.as_object_mut() else {
+            return value;
+        };
+        let mut omitted = Vec::new();
+        for section in [
+            "aggregate",
+            "metadata",
+            "tasks",
+            "provider_runtime",
+            "artifact_refs",
+        ] {
+            if let Some(removed) = map.remove(section) {
+                omitted
+                    .push(json!({ "section": section, "count": compact_section_count(&removed) }));
+            }
+        }
+        if !omitted.is_empty() {
+            map.insert(
+                "full_status_output_budget".to_string(),
+                json!({
+                    "max_bytes": FULL_STATUS_BYTE_LIMIT,
+                    "truncated": true,
+                    "omitted_sections": omitted,
+                    "lossless_export_command": format!(
+                        "homeboy agent-task status {} --full --lossless --output <path>",
+                        quote_arg(run_id)
+                    ),
+                }),
+            );
+        }
+    }
+    if serialized_len(&value) <= FULL_STATUS_BYTE_LIMIT {
+        return value;
+    }
+    let omitted_sections = value
+        .as_object()
+        .map(|map| {
+            map.keys()
+                .filter(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "run_id"
+                            | "state"
+                            | "terminal_status"
+                            | "outcome"
+                            | "full_status_presentation"
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "run_id": value.get("run_id"),
+        "state": value.get("state"),
+        "terminal_status": value.get("terminal_status"),
+        "outcome": value.get("outcome"),
+        "full_status_presentation": value.get("full_status_presentation"),
+        "full_status_output_budget": {
+            "max_bytes": FULL_STATUS_BYTE_LIMIT,
+            "truncated": true,
+            "omitted_sections": omitted_sections,
+            "lossless_export_command": format!(
+                "homeboy agent-task status {} --full --lossless --output <path>",
+                quote_arg(run_id)
+            ),
+        },
+    })
+}
+
+#[cfg(test)]
+mod bounded_full_status_tests {
+    use super::*;
+
+    fn fixture(reverse: bool) -> Value {
+        let mut worktrees = (0..(OutputBudget::COLLECTION.max_items + 3))
+            .map(|index| {
+                json!({
+                    "worktree": format!("worktree-{index:02}"),
+                    "detail": "x".repeat(2_048),
+                })
+            })
+            .collect::<Vec<_>>();
+        if reverse {
+            worktrees.reverse();
+        }
+        json!({
+            "run_id": "run-1",
+            "state": "failed",
+            "terminal_status": "repair_required",
+            "canonical_candidate": { "state": "rejected" },
+            "notification_delivery": { "status": "delivered" },
+            "metadata": {
+                "stop_reason": "gate_failed",
+                "automatic_artifact_retention": { "worktrees": worktrees },
+            },
+            "aggregate": { "outcomes": [
+                { "task_id": "task-b", "artifacts": [{ "id": "patch-1", "kind": "patch" }] },
+                { "task_id": "task-a" },
+            ] },
+            "artifact_refs": [{ "id": "patch-1", "kind": "patch" }],
+        })
+    }
+
+    #[test]
+    fn full_status_bounds_retention_with_resolvable_deterministic_metadata() {
+        let first = bounded_full_status(fixture(false), "run-1");
+        let second = bounded_full_status(fixture(true), "run-1");
+        let worktrees = &first["metadata"]["automatic_artifact_retention"]["worktrees"];
+        let budget = &first["metadata"]["automatic_artifact_retention"]["worktrees_output_budget"];
+
+        assert_eq!(
+            serde_json::to_vec(&first).expect("serialized").len() <= FULL_STATUS_BYTE_LIMIT,
+            true
+        );
+        assert_eq!(first["outcome"]["state"], "failed");
+        assert_eq!(first["outcome"]["stop_reason"], "gate_failed");
+        assert_eq!(
+            worktrees.as_array().expect("worktrees").len(),
+            OutputBudget::COLLECTION.max_items
+        );
+        assert_eq!(
+            budget["truncation"]["total_items"],
+            OutputBudget::COLLECTION.max_items + 3
+        );
+        assert_eq!(budget["truncation"]["omitted_items"], 3);
+        assert_eq!(budget["truncation"]["truncated"], true);
+        assert_eq!(
+            budget["ref"],
+            "homeboy://agent-task/run-1/status#/metadata/automatic_artifact_retention/worktrees"
+        );
+        assert_eq!(
+            budget["truncation"]["export_command"],
+            "homeboy agent-task status run-1 --full --lossless --output <path>"
+        );
+        assert!(serde_json::to_string(&first)
+            .expect("serialized")
+            .contains("\"duplicate_of\""));
+        assert_eq!(
+            first["metadata"]["automatic_artifact_retention"]["worktrees"],
+            second["metadata"]["automatic_artifact_retention"]["worktrees"],
+        );
+        let mut oversized = fixture(false);
+        oversized["provider_runtime"] = json!("x".repeat(FULL_STATUS_BYTE_LIMIT * 2));
+        let oversized = bounded_full_status(oversized, "run-1");
+        assert!(serialized_len(&oversized) <= FULL_STATUS_BYTE_LIMIT);
+        assert_eq!(oversized["outcome"]["state"], "failed");
     }
 }
 
@@ -2250,6 +2568,7 @@ mod watch_tests {
             bridge: false,
             since_cursor: None,
             full: false,
+            lossless: false,
             strict_subject_exit: false,
             no_runner_probe: false,
             watch: true,
