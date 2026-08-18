@@ -46,9 +46,12 @@ pub use config::{
     VersionTarget,
 };
 pub use inventory::{
-    exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,
-    reconcile_standalone_registration, registered, registered_by_id, registered_by_local_path,
-    write_standalone_component_config, write_standalone_registration, ComponentReconcileReport,
+    exists, exists_in_root, extension_provides_artifact_pattern,
+    extension_provides_artifact_pattern_in_root, inventory, inventory_in_root, list, list_ids,
+    list_ids_in_root, list_in_root, load, load_in_root, reconcile_standalone_registration,
+    registered, registered_by_id, registered_by_id_in_root, registered_by_local_path,
+    registered_by_local_path_in_root, registered_in_root, write_standalone_component_config,
+    write_standalone_registration, ComponentReconcileReport,
 };
 pub use model::{Component, ComponentLifecycle, ComponentManagedExecution};
 pub use mutations::{delete_safe, merge, rename};
@@ -58,11 +61,14 @@ pub use portable::{
 };
 pub use relationships::{associated_projects, projects_using, rename_component, shared_components};
 pub use remote_path::{
-    auto_resolve_remote_path, resolve_remote_path, try_auto_resolve_remote_path,
+    auto_resolve_remote_path, auto_resolve_remote_path_in_root, resolve_remote_path,
+    resolve_remote_path_in_root, try_auto_resolve_remote_path,
+    try_auto_resolve_remote_path_in_root,
 };
 pub use resolution::{
     local_path_is_relative, normalize_component_local_path, normalize_component_local_path_against,
-    resolve, resolve_artifact, resolve_effective, resolve_registered_primary_path, resolve_target,
+    resolve, resolve_artifact, resolve_artifact_in_root, resolve_effective,
+    resolve_effective_in_root, resolve_in_root, resolve_registered_primary_path, resolve_target,
     resolve_target_from_component, validate_local_path, RegisteredPrimaryPathResolution,
     RegistryLookupPolicy, ResolvedTarget, TargetSpec,
 };

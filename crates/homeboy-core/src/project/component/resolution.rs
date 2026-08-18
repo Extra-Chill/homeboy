@@ -13,7 +13,60 @@ pub fn resolve_project_component(
     resolve_project_component_with_standalone_snapshot(project, component_id, None)
 }
 
+/// [`resolve_project_component`] against an already-resolved config root (#7505).
+pub fn resolve_project_component_in_root(
+    config_root: &Path,
+    project: &Project,
+    component_id: &str,
+) -> Result<crate::component::Component> {
+    resolve_project_component_with_standalone_snapshot_in_root(
+        config_root,
+        project,
+        component_id,
+        None,
+    )
+}
+
 pub fn resolve_project_component_with_standalone_snapshot(
+    project: &Project,
+    component_id: &str,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+) -> Result<crate::component::Component> {
+    resolve_project_component_core(None, project, component_id, standalone_snapshot)
+}
+
+/// [`resolve_project_component_with_standalone_snapshot`] against an
+/// already-resolved config root (#7505).
+///
+/// A supplied `standalone_snapshot` MUST have been produced by
+/// [`StandaloneComponentConfigSnapshot::load_in_root`] with the same
+/// `config_root`. Passing a snapshot read from a different home is the exact
+/// half-injected split this rooting exists to remove: the fallbacks would come
+/// from one home and everything else from another.
+pub fn resolve_project_component_with_standalone_snapshot_in_root(
+    config_root: &Path,
+    project: &Project,
+    component_id: &str,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+) -> Result<crate::component::Component> {
+    resolve_project_component_core(
+        Some(config_root),
+        project,
+        component_id,
+        standalone_snapshot,
+    )
+}
+
+/// The one project-component resolution, parameterized by the path boundary.
+///
+/// `config_root` is `None` for the ambient entry points and `Some(_)` for the
+/// rooted ones, and it governs every config-root-derived read this resolution
+/// makes (standalone fallbacks and extension-driven `remote_path` inference).
+/// The remaining reads — attachment validation, portable discovery, duplicate-id
+/// scanning, local_path normalization — are functions of the supplied project
+/// and the filesystem paths it names, and have no config root to resolve.
+fn resolve_project_component_core(
+    config_root: Option<&Path>,
     project: &Project,
     component_id: &str,
     standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
@@ -58,7 +111,8 @@ pub fn resolve_project_component_with_standalone_snapshot(
             ));
         };
 
-    let mut resolved = bind_materialized_component_to_project(
+    let mut resolved = bind_materialized_component_to_project_core(
+        config_root,
         component,
         project,
         standalone_snapshot,
@@ -94,9 +148,20 @@ pub fn resolve_project_component_with_standalone_snapshot(
     // Auto-resolve remote_path if still empty after all config layers.
     // Repo homeboy.json intentionally omits remote_path (it's deploy config),
     // so auto-detect it from source files when possible (#812).
-    crate::component::resolve_remote_path(&mut resolved);
+    resolve_remote_path_core(config_root, &mut resolved);
 
     Ok(resolved)
+}
+
+/// `remote_path` auto-resolution at the boundary this resolution is running on.
+fn resolve_remote_path_core(
+    config_root: Option<&Path>,
+    component: &mut crate::component::Component,
+) {
+    match config_root {
+        Some(config_root) => crate::component::resolve_remote_path_in_root(config_root, component),
+        None => crate::component::resolve_remote_path(component),
+    }
 }
 
 /// Apply the project-owned layers to component configuration discovered from a
@@ -104,6 +169,46 @@ pub fn resolve_project_component_with_standalone_snapshot(
 /// their source-owned fields come from the selected commit while attachment and
 /// fleet/project policy keeps its normal precedence.
 pub fn bind_materialized_component_to_project(
+    component: crate::component::Component,
+    project: &Project,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+    attachment_remote_path: Option<String>,
+    attachment_deployment_provider: Option<crate::component::DeploymentProviderAttachment>,
+) -> crate::component::Component {
+    bind_materialized_component_to_project_core(
+        None,
+        component,
+        project,
+        standalone_snapshot,
+        attachment_remote_path,
+        attachment_deployment_provider,
+    )
+}
+
+/// [`bind_materialized_component_to_project`] against an already-resolved config
+/// root (#7505). See
+/// [`resolve_project_component_with_standalone_snapshot_in_root`] for the
+/// snapshot-provenance requirement.
+pub fn bind_materialized_component_to_project_in_root(
+    config_root: &Path,
+    component: crate::component::Component,
+    project: &Project,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+    attachment_remote_path: Option<String>,
+    attachment_deployment_provider: Option<crate::component::DeploymentProviderAttachment>,
+) -> crate::component::Component {
+    bind_materialized_component_to_project_core(
+        Some(config_root),
+        component,
+        project,
+        standalone_snapshot,
+        attachment_remote_path,
+        attachment_deployment_provider,
+    )
+}
+
+fn bind_materialized_component_to_project_core(
+    config_root: Option<&Path>,
     mut component: crate::component::Component,
     project: &Project,
     standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
@@ -116,13 +221,31 @@ pub fn bind_materialized_component_to_project(
     if attachment_deployment_provider.is_some() {
         component.deployment_provider = attachment_deployment_provider;
     }
-    apply_standalone_component_fallbacks(&mut component, standalone_snapshot);
+    apply_standalone_component_fallbacks_core(config_root, &mut component, standalone_snapshot);
     apply_component_overrides(&component, project)
 }
 
 /// Reapply project-owned configuration after loading source-owned configuration
 /// from an alternate checkout of an attached component.
 pub fn bind_materialized_component_at_path(
+    component: crate::component::Component,
+    project: &Project,
+) -> Result<crate::component::Component> {
+    bind_materialized_component_at_path_core(None, component, project)
+}
+
+/// [`bind_materialized_component_at_path`] against an already-resolved config
+/// root (#7505).
+pub fn bind_materialized_component_at_path_in_root(
+    config_root: &Path,
+    component: crate::component::Component,
+    project: &Project,
+) -> Result<crate::component::Component> {
+    bind_materialized_component_at_path_core(Some(config_root), component, project)
+}
+
+fn bind_materialized_component_at_path_core(
+    config_root: Option<&Path>,
     component: crate::component::Component,
     project: &Project,
 ) -> Result<crate::component::Component> {
@@ -141,7 +264,8 @@ pub fn bind_materialized_component_at_path(
                 None,
             )
         })?;
-    let mut component = bind_materialized_component_to_project(
+    let mut component = bind_materialized_component_to_project_core(
+        config_root,
         component,
         project,
         None,
@@ -149,7 +273,7 @@ pub fn bind_materialized_component_at_path(
         attachment.deployment_provider.clone(),
     );
     inherit_project_extensions(&mut component, project);
-    crate::component::resolve_remote_path(&mut component);
+    resolve_remote_path_core(config_root, &mut component);
     Ok(component)
 }
 
@@ -157,9 +281,29 @@ pub(crate) fn apply_standalone_component_fallbacks(
     component: &mut crate::component::Component,
     standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
 ) {
+    apply_standalone_component_fallbacks_core(None, component, standalone_snapshot)
+}
+
+/// [`apply_standalone_component_fallbacks`] against an already-resolved config
+/// root (#7505). See
+/// [`resolve_project_component_with_standalone_snapshot_in_root`] for the
+/// snapshot-provenance requirement.
+pub(crate) fn apply_standalone_component_fallbacks_in_root(
+    config_root: &Path,
+    component: &mut crate::component::Component,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+) {
+    apply_standalone_component_fallbacks_core(Some(config_root), component, standalone_snapshot)
+}
+
+fn apply_standalone_component_fallbacks_core(
+    config_root: Option<&Path>,
+    component: &mut crate::component::Component,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+) {
     let standalone = match standalone_snapshot {
         Some(snapshot) => snapshot.get(&component.id).cloned(),
-        None => load_standalone_component_config(&component.id),
+        None => load_standalone_component_config_core(config_root, &component.id),
     };
     let Some(standalone) = standalone else {
         return;
@@ -196,10 +340,23 @@ pub struct StandaloneComponentConfigSnapshot {
 
 impl StandaloneComponentConfigSnapshot {
     pub fn load() -> Self {
-        let mut snapshot = Self::default();
         let Ok(dir) = crate::paths::components() else {
-            return snapshot;
+            return Self::default();
         };
+        Self::load_from_dir(&dir)
+    }
+
+    /// [`StandaloneComponentConfigSnapshot::load`] against an already-resolved
+    /// config root (#7505).
+    ///
+    /// A snapshot loaded here must only be paired with the `_in_root`
+    /// resolvers using the same `config_root`.
+    pub fn load_in_root(config_root: &Path) -> Self {
+        Self::load_from_dir(&crate::paths::components_in_root(config_root))
+    }
+
+    fn load_from_dir(dir: &Path) -> Self {
+        let mut snapshot = Self::default();
         let Ok(entries) = std::fs::read_dir(dir) else {
             return snapshot;
         };
@@ -231,8 +388,14 @@ impl StandaloneComponentConfigSnapshot {
     }
 }
 
-fn load_standalone_component_config(component_id: &str) -> Option<crate::component::Component> {
-    let dir = crate::paths::components().ok()?;
+fn load_standalone_component_config_core(
+    config_root: Option<&Path>,
+    component_id: &str,
+) -> Option<crate::component::Component> {
+    let dir = match config_root {
+        Some(config_root) => crate::paths::components_in_root(config_root),
+        None => crate::paths::components().ok()?,
+    };
     let path = dir.join(format!("{component_id}.json"));
     load_standalone_component_config_from_path(component_id, &path)
 }
@@ -261,6 +424,29 @@ pub fn resolve_project_components(project: &Project) -> Result<Vec<crate::compon
         .iter()
         .map(|component| {
             resolve_project_component_with_standalone_snapshot(
+                project,
+                &component.id,
+                Some(&standalone_snapshot),
+            )
+        })
+        .collect()
+}
+
+/// [`resolve_project_components`] against an already-resolved config root (#7505).
+///
+/// The snapshot is loaded from the same root it resolves against, so the
+/// fallbacks and the resolution can never describe two different homes.
+pub fn resolve_project_components_in_root(
+    config_root: &Path,
+    project: &Project,
+) -> Result<Vec<crate::component::Component>> {
+    let standalone_snapshot = StandaloneComponentConfigSnapshot::load_in_root(config_root);
+    project
+        .components
+        .iter()
+        .map(|component| {
+            resolve_project_component_with_standalone_snapshot_in_root(
+                config_root,
                 project,
                 &component.id,
                 Some(&standalone_snapshot),

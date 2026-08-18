@@ -15,7 +15,10 @@ pub use report::{
     BatchComponentAttachmentInput, BatchComponentAttachmentWorktreePolicy, ProjectComponentsOutput,
 };
 pub use resolution::{
-    bind_materialized_component_to_project, resolve_project_component,
-    resolve_project_component_with_standalone_snapshot, resolve_project_components,
-    StandaloneComponentConfigSnapshot,
+    bind_materialized_component_at_path, bind_materialized_component_at_path_in_root,
+    bind_materialized_component_to_project, bind_materialized_component_to_project_in_root,
+    resolve_project_component, resolve_project_component_in_root,
+    resolve_project_component_with_standalone_snapshot,
+    resolve_project_component_with_standalone_snapshot_in_root, resolve_project_components,
+    resolve_project_components_in_root, StandaloneComponentConfigSnapshot,
 };
