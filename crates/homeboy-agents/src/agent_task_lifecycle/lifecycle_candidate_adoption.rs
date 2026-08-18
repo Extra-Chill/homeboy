@@ -19,8 +19,8 @@ use super::*;
 /// the caller held explicit roots, this would have reported a parent adoption
 /// assembled from another home's attempts (#7505).
 ///
-/// There is no ambient wrapper: `status_with_options_inner` is the only caller,
-/// and it resolves one store for the whole read.
+/// There is no ambient wrapper: `status_in_store` is the only caller, and the
+/// store it hands down is the one its own caller injected.
 pub(crate) fn project_cook_alias_adoption_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
