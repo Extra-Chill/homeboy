@@ -2131,51 +2131,67 @@ fn rejection_allows_one_repair_and_restart_revalidates_before_finalization() {
     });
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). Every durable write here — the submission, both promotions, and the
+/// verdict — goes through a sibling that was handed `lifecycle_store`, so the
+/// candidate the drift guard compares and the acceptance record it rewrites are
+/// read back out of the same home they were written into.
+///
+/// The acceptance verifier registry stays process-global on purpose: it is
+/// configured trust material, not a lifecycle root, and
+/// `AcceptanceVerifierTestGuard` carries its own dedicated mutex, so dropping
+/// the hermetic-home mutex does not expose it.
 #[test]
 fn acceptance_invalidates_a_dirty_candidate_replacement_at_the_same_head() {
-    with_isolated_home(|_| {
-        let mut plan = test_plan();
-        plan.metadata = json!({
-            "acceptance": { "authority": "independent-review", "policy": "release-v1" },
-        });
-        let run_id = "acceptance-dirty-same-head";
-        submit_plan(&plan, Some(run_id)).expect("submitted");
-        record_promotion(
-            run_id,
-            applied_acceptance_promotion_with_fingerprint(
-                "unchanged-head",
-                "base-a",
-                "clean-sha256",
-                "clean-tree",
-            ),
-        )
-        .expect("clean promotion recorded");
-        let _verifier = AcceptanceVerifierTestGuard::install(Box::new(FixtureAcceptanceVerifier));
-        record_acceptance_verdict(
-            run_id,
-            AgentTaskAcceptanceVerdict::Accepted,
-            vec!["review://fixture/7".to_string()],
-            "fixture-token".to_string(),
-        )
-        .expect("clean candidate accepted");
-
-        let replaced = record_promotion(
-            run_id,
-            applied_acceptance_promotion_with_fingerprint(
-                "unchanged-head",
-                "base-a",
-                "dirty-replacement-sha256",
-                "dirty-replacement-tree",
-            ),
-        )
-        .expect("dirty replacement recorded");
-        let acceptance = replaced.acceptance.expect("acceptance record");
-        assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
-        assert_eq!(acceptance.candidate.head, "unchanged-head");
-        assert_eq!(acceptance.candidate.sha256, "dirty-replacement-sha256");
-        assert_eq!(acceptance.candidate.tree, "dirty-replacement-tree");
-        assert_eq!(acceptance.history.len(), 1);
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let mut plan = test_plan();
+    plan.metadata = json!({
+        "acceptance": { "authority": "independent-review", "policy": "release-v1" },
     });
+    let run_id = "acceptance-dirty-same-head";
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+        .expect("submitted");
+    record_promotion_in_store(
+        &lifecycle_store,
+        run_id,
+        applied_acceptance_promotion_with_fingerprint(
+            "unchanged-head",
+            "base-a",
+            "clean-sha256",
+            "clean-tree",
+        ),
+    )
+    .expect("clean promotion recorded");
+    let _verifier = AcceptanceVerifierTestGuard::install(Box::new(FixtureAcceptanceVerifier));
+    record_acceptance_verdict_in_store(
+        &lifecycle_store,
+        run_id,
+        AgentTaskAcceptanceVerdict::Accepted,
+        vec!["review://fixture/7".to_string()],
+        "fixture-token".to_string(),
+    )
+    .expect("clean candidate accepted");
+
+    let replaced = record_promotion_in_store(
+        &lifecycle_store,
+        run_id,
+        applied_acceptance_promotion_with_fingerprint(
+            "unchanged-head",
+            "base-a",
+            "dirty-replacement-sha256",
+            "dirty-replacement-tree",
+        ),
+    )
+    .expect("dirty replacement recorded");
+    let acceptance = replaced.acceptance.expect("acceptance record");
+    assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
+    assert_eq!(acceptance.candidate.head, "unchanged-head");
+    assert_eq!(acceptance.candidate.sha256, "dirty-replacement-sha256");
+    assert_eq!(acceptance.candidate.tree, "dirty-replacement-tree");
+    assert_eq!(acceptance.history.len(), 1);
 }
 
 #[test]
@@ -2686,22 +2702,33 @@ fn run_git(cwd: &std::path::Path, args: &[&str]) {
     );
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The reservation is made through the sibling that was handed
+/// `lifecycle_store` and read back through the same store, so the owner
+/// identity asserted below is the one this test actually wrote rather than
+/// whatever an ambient home happened to hold under the same run id.
 #[test]
 fn local_provider_reservation_persists_reusable_owner_identity_before_execution() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        submit_plan(&plan, Some("owner-identity")).expect("submitted");
-        reserve_provider_execution("owner-identity", &plan.tasks[0], 1).expect("reserved");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "owner-identity", |_| Ok(json!({})))
+        .expect("submitted");
+    reserve_provider_execution_in_store(&lifecycle_store, "owner-identity", &plan.tasks[0], 1)
+        .expect("reserved");
 
-        let record = store::read_record("owner-identity").expect("record");
-        let execution = &record.metadata["provider_executions"][0];
-        assert_eq!(execution["owner_pid"], json!(std::process::id()));
-        assert_eq!(
-            execution["owner_identity"],
-            json!("owner-identity:task-a:1")
-        );
-        assert_eq!(execution["state"], json!("running"));
-    });
+    let record = lifecycle_store
+        .read_record("owner-identity")
+        .expect("record");
+    let execution = &record.metadata["provider_executions"][0];
+    assert_eq!(execution["owner_pid"], json!(std::process::id()));
+    assert_eq!(
+        execution["owner_identity"],
+        json!("owner-identity:task-a:1")
+    );
+    assert_eq!(execution["state"], json!("running"));
 }
 
 #[test]
