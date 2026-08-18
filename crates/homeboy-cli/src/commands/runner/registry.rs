@@ -498,10 +498,14 @@ fn disconnect_status(
     report: &homeboy::runner::runners::RunnerDisconnectReport,
     local_recovery: bool,
 ) -> RunnerDisconnectStatus {
-    if report.partial && !report.disconnected {
+    if local_recovery {
+        if report.disconnected {
+            RunnerDisconnectStatus::LocalRecovery
+        } else {
+            RunnerDisconnectStatus::AlreadyDisconnected
+        }
+    } else if report.partial && !report.disconnected {
         RunnerDisconnectStatus::PartialFailure
-    } else if local_recovery {
-        RunnerDisconnectStatus::LocalRecovery
     } else if report.disconnected {
         RunnerDisconnectStatus::Disconnected
     } else {
@@ -535,13 +539,24 @@ mod tests {
     use super::*;
     use homeboy::runner::runners::RunnerDisconnectReport;
 
-    fn disconnect_report(disconnected: bool, partial: bool) -> RunnerDisconnectReport {
+    fn disconnect_report(
+        disconnected: bool,
+        partial: bool,
+        local_recovery: bool,
+    ) -> RunnerDisconnectReport {
         RunnerDisconnectReport {
             runner_id: "homeboy-lab".to_string(),
             disconnected,
             partial,
-            remote_error: partial.then(|| "SSH timeout".to_string()),
-            local_recovery_command: (partial && !disconnected)
+            remote_error: partial.then(|| {
+                if local_recovery && !disconnected {
+                    "no controller-local session was present; remote daemon was not contacted"
+                        .to_string()
+                } else {
+                    "SSH timeout".to_string()
+                }
+            }),
+            local_recovery_command: (partial && !disconnected && !local_recovery)
                 .then(|| "homeboy runner disconnect homeboy-lab --local-recovery".to_string()),
             session: None,
             session_path: "/tmp/homeboy-lab.json".to_string(),
@@ -568,6 +583,14 @@ mod tests {
                 0,
             ),
             (
+                "repeated local recovery",
+                false,
+                true,
+                true,
+                RunnerDisconnectStatus::AlreadyDisconnected,
+                0,
+            ),
+            (
                 "already disconnected",
                 false,
                 false,
@@ -586,7 +609,7 @@ mod tests {
         ] {
             let (output, exit_code) = disconnect_output(
                 "homeboy-lab",
-                disconnect_report(disconnected, partial),
+                disconnect_report(disconnected, partial, local_recovery),
                 local_recovery,
             );
             let serialized = serde_json::to_value(output).expect("serialize disconnect output");
@@ -623,6 +646,11 @@ mod tests {
                 assert_eq!(
                     envelope["data"]["connection"]["local_recovery_command"],
                     "homeboy runner disconnect homeboy-lab --local-recovery"
+                );
+            } else if name == "repeated local recovery" {
+                assert_eq!(
+                    envelope["data"]["connection"]["local_recovery_command"],
+                    serde_json::Value::Null
                 );
             }
         }
