@@ -25,7 +25,7 @@ use homeboy_core::notification_payload::{
     NotifyAction, NotifyEventKind, NotifyLink, NotifyPayload, NotifySubject,
 };
 use homeboy_core::notification_route::{self, NotificationRoute};
-use homeboy_core::notify::{NotifyDelivery, NotifyEvent, NotifyOutcome};
+use homeboy_core::notify::{terminal_rejection_result, NotifyDelivery, NotifyEvent, NotifyOutcome};
 use homeboy_core::notify_outbox::{self, NotifyOnceMarker, NotifyOutboxDisposition};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -139,7 +139,7 @@ fn terminal_outcome(
         "delivered"
     } else if matches!(disposition, NotifyOutboxDisposition::Queued { .. }) {
         "queued"
-    } else if matches!(disposition, NotifyOutboxDisposition::Rejected) {
+    } else if matches!(disposition, NotifyOutboxDisposition::Rejected { .. }) {
         "rejected"
     } else if matches!(outcome.delivery, NotifyDelivery::NotConfigured) {
         "not_configured"
@@ -147,7 +147,8 @@ fn terminal_outcome(
         "failed"
     };
     let outbox_entry_id = match disposition {
-        NotifyOutboxDisposition::Queued { entry_id } => Some(entry_id.clone()),
+        NotifyOutboxDisposition::Queued { entry_id }
+        | NotifyOutboxDisposition::Rejected { entry_id } => Some(entry_id.clone()),
         _ => None,
     };
     json!({
@@ -161,8 +162,8 @@ fn terminal_outcome(
         "error_class": error_class,
         "outbox_entry_id": outbox_entry_id,
         "transport_result": safe_transport_result(outcome.result.as_ref()),
-        "rejection_reason": safe_rejection_reason(outcome.result.as_ref()),
-        "validation_context": safe_validation_context(outcome.result.as_ref()),
+        "rejection_reason": terminal_rejection_result(outcome.result.as_ref()).map(|rejection| rejection.reason_code),
+        "validation_context": terminal_rejection_context(outcome.result.as_ref()),
     })
 }
 
@@ -200,22 +201,14 @@ fn safe_transport_result(result: Option<&Value>) -> Option<Value> {
     (!safe.is_empty()).then_some(Value::Object(safe))
 }
 
-fn safe_rejection_reason(result: Option<&Value>) -> Option<Value> {
-    safe_transport_result(result).and_then(|result| {
-        result
-            .get("reason_code")
-            .or_else(|| result.get("validation_code"))
-            .cloned()
-    })
-}
-
-fn safe_validation_context(result: Option<&Value>) -> Option<Value> {
-    let result = safe_transport_result(result)?;
+fn terminal_rejection_context(result: Option<&Value>) -> Option<Value> {
+    let rejection = terminal_rejection_result(result)?;
     let mut context = Map::new();
-    for key in ["validation_code", "validation_field", "route_kind"] {
-        if let Some(value) = result.get(key) {
-            context.insert(key.to_string(), value.clone());
-        }
+    if let Some(value) = rejection.validation_code {
+        context.insert("validation_code".to_string(), Value::String(value));
+    }
+    if let Some(value) = rejection.validation_field {
+        context.insert("validation_field".to_string(), Value::String(value));
     }
     (!context.is_empty()).then_some(Value::Object(context))
 }
@@ -483,7 +476,7 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
         // Nothing durable exists — no transport is configured, or the queue
         // could not be written. Release, exactly as before, so a later
         // terminal observer is eligible to try again.
-        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected => {
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
             let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim(
                 &report.cook_id,
             );
@@ -685,7 +678,7 @@ pub fn batch_terminal(
                 BATCH_TERMINAL_DELIVERED_BY,
             );
         }
-        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected => {
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
             let _ =
                 crate::agent_task_lifecycle::release_cook_terminal_notification_claim(subject_id);
         }
@@ -957,7 +950,7 @@ pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<
                 RUN_RECONCILED_DELIVERED_BY,
             );
         }
-        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected => {
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
             let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim(run_id);
         }
     }

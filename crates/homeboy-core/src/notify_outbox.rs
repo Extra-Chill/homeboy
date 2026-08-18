@@ -61,7 +61,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::notify::{self, NotifyDelivery, NotifyEvent, NotifyOutcome};
+use crate::notify::{self, NotifyDelivery, NotifyEvent, NotifyOutcome, NotifyTerminalRejection};
 
 /// Schema of a persisted outbox entry.
 pub const NOTIFY_OUTBOX_ENTRY_SCHEMA: &str = "homeboy/notification-outbox-entry/v1";
@@ -143,6 +143,9 @@ pub struct NotifyOutboxEntry {
     pub last_attempt_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Explicit terminal rejection retained as durable dead-letter evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_rejection: Option<NotifyTerminalRejection>,
     /// The producer-owned exactly-once claim this entry consumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub once_marker: Option<NotifyOnceMarker>,
@@ -164,7 +167,7 @@ pub enum NotifyOutboxDisposition {
     Queued { entry_id: String },
     /// The transport rejected the event before making its own delivery attempt
     /// and explicitly said retrying cannot succeed.
-    Rejected,
+    Rejected { entry_id: String },
     /// The inline attempt failed and nothing was queued. Either the failure is
     /// not retryable (no transport configured, or the named transport is not
     /// installed) or the queue itself could not be written. A producer holding
@@ -299,26 +302,16 @@ pub fn backoff_after(attempts_made: u32) -> Duration {
 /// that can only ever dead-letter. Producers already record that case as
 /// `not_configured` and leave the event eligible for a later observer, which
 /// stays the right behaviour.
+fn terminal_rejection(outcome: &NotifyOutcome) -> Option<NotifyTerminalRejection> {
+    (!outcome.delivered && matches!(outcome.delivery, NotifyDelivery::Transport { .. }))
+        .then(|| notify::terminal_rejection_result(outcome.result.as_ref()))
+        .flatten()
+}
+
 fn is_retryable(outcome: &NotifyOutcome) -> bool {
     !outcome.delivered
         && matches!(outcome.delivery, NotifyDelivery::Transport { .. })
-        && outcome
-            .result
-            .as_ref()
-            .and_then(|result| result.get("retryable"))
-            .and_then(serde_json::Value::as_bool)
-            != Some(false)
-}
-
-fn is_terminal_rejection(outcome: &NotifyOutcome) -> bool {
-    !outcome.delivered
-        && matches!(outcome.delivery, NotifyDelivery::Transport { .. })
-        && outcome
-            .result
-            .as_ref()
-            .and_then(|result| result.get("retryable"))
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
+        && terminal_rejection(outcome).is_none()
 }
 
 // ---------------------------------------------------------------------------
@@ -365,11 +358,14 @@ fn dispatch_with_outbox_inner(
         };
     }
     if !is_retryable(&outcome) {
-        let rejected = is_terminal_rejection(&outcome);
+        let rejected = terminal_rejection(&outcome);
         return NotifyOutboxDispatch {
             outcome,
-            disposition: if rejected {
-                NotifyOutboxDisposition::Rejected
+            disposition: if let Some(rejection) = rejected {
+                reject_after_attempt(config_root, event, once_marker, rejection)
+                    .map_or(NotifyOutboxDisposition::Dropped, |entry_id| {
+                        NotifyOutboxDisposition::Rejected { entry_id }
+                    })
             } else {
                 NotifyOutboxDisposition::Dropped
             },
@@ -402,7 +398,16 @@ pub fn enqueue_in_root(
     event: &NotifyEvent,
     once_marker: Option<NotifyOnceMarker>,
 ) -> Option<String> {
-    write_new_entry(config_root, event, once_marker, 0, Utc::now(), None)
+    write_new_entry(
+        config_root,
+        event,
+        once_marker,
+        0,
+        Utc::now(),
+        None,
+        None,
+        false,
+    )
 }
 
 fn enqueue_after_attempt(
@@ -414,7 +419,25 @@ fn enqueue_after_attempt(
     let now = Utc::now();
     let due = now
         + chrono::Duration::from_std(backoff_after(1)).unwrap_or_else(|_| chrono::Duration::zero());
-    write_new_entry(config_root, event, once_marker, 1, due, error)
+    write_new_entry(config_root, event, once_marker, 1, due, error, None, false)
+}
+
+fn reject_after_attempt(
+    config_root: Option<&Path>,
+    event: &NotifyEvent,
+    once_marker: Option<NotifyOnceMarker>,
+    rejection: NotifyTerminalRejection,
+) -> Option<String> {
+    write_new_entry(
+        config_root?,
+        event,
+        once_marker,
+        0,
+        Utc::now(),
+        None,
+        Some(rejection),
+        true,
+    )
 }
 
 fn write_new_entry(
@@ -424,6 +447,8 @@ fn write_new_entry(
     attempts: u32,
     next_attempt_at: DateTime<Utc>,
     last_error: Option<String>,
+    terminal_rejection: Option<NotifyTerminalRejection>,
+    dead_letter: bool,
 ) -> Option<String> {
     let now = Utc::now();
     let entry_id = format!(
@@ -440,9 +465,15 @@ fn write_new_entry(
         next_attempt_at: next_attempt_at.to_rfc3339(),
         last_attempt_at: (attempts > 0).then(|| now.to_rfc3339()),
         last_error,
+        terminal_rejection,
         once_marker,
     };
-    let path = pending_dir_in_root(config_root).join(format!("{entry_id}.json"));
+    let directory = if dead_letter {
+        dead_letter_dir_in_root(config_root)
+    } else {
+        pending_dir_in_root(config_root)
+    };
+    let path = directory.join(format!("{entry_id}.json"));
     write_entry(&path, &entry).then_some(entry_id)
 }
 
@@ -585,6 +616,22 @@ fn apply_attempt(
     }
 
     entry.last_error = outcome.error.clone();
+    if let Some(rejection) = terminal_rejection(&outcome) {
+        entry.terminal_rejection = Some(rejection);
+        report.dead_lettered += 1;
+        report.entries.push(NotifyOutboxDrainEntry {
+            entry_id: entry.entry_id.clone(),
+            attempts: entry.attempts,
+            outcome: "terminal_rejected",
+            next_attempt_at: None,
+            error: entry.last_error.clone(),
+        });
+        let path = dead_letter_dir_in_root(config_root).join(format!("{}.json", entry.entry_id));
+        if write_entry(&path, &entry) {
+            let _ = std::fs::remove_file(claimed);
+        }
+        return;
+    }
     // A now-unconfigured transport is retried like any other failure until the
     // budget runs out. Unlike the inline path there is no producer left to
     // record `not_configured` against, and an operator repairing the transport
@@ -836,16 +883,66 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             install_transport(
                 "outbox.rejected",
-                vec!["sh", "-c", "printf '%s\\n' '{\"status\":\"failed\",\"retryable\":false,\"reason_code\":\"invalid_route\",\"validation_field\":\"route\"}'; exit 1"],
+                vec!["sh", "-c", "printf '%s\\n' '{\"schema\":\"homeboy/notification-transport-result/v1\",\"status\":\"rejected\",\"attempts\":0,\"terminal_rejection\":{\"schema\":\"homeboy/notification-transport-rejection/v1\",\"reason_code\":\"invalid_route\",\"validation_field\":\"route\"}}'; exit 1"],
             );
             set_default_transport("outbox.rejected");
 
             let dispatch = dispatch_with_outbox(&event("run-rejected"), None);
             assert!(matches!(
                 dispatch.disposition,
-                NotifyOutboxDisposition::Rejected
+                NotifyOutboxDisposition::Rejected { .. }
             ));
             assert!(pending_entries().is_empty());
+            let dead = dead_letter_entries();
+            assert_eq!(dead.len(), 1);
+            assert_eq!(dead[0].attempts, 0);
+            assert_eq!(
+                dead[0]
+                    .terminal_rejection
+                    .as_ref()
+                    .map(|rejection| rejection.reason_code.as_str()),
+                Some("invalid_route")
+            );
+        });
+    }
+
+    #[test]
+    fn arbitrary_retryable_false_output_remains_retryable() {
+        crate::test_support::with_isolated_home(|_| {
+            install_transport(
+                "outbox.unversioned",
+                vec!["sh", "-c", "printf '%s\\n' '{\"retryable\":false}'; exit 1"],
+            );
+            set_default_transport("outbox.unversioned");
+
+            let dispatch = dispatch_with_outbox(&event("run-unversioned"), None);
+            assert!(matches!(
+                dispatch.disposition,
+                NotifyOutboxDisposition::Queued { .. }
+            ));
+            assert_eq!(pending_entries().len(), 1);
+            assert!(dead_letter_entries().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_redelivery_rejection_is_dead_lettered_with_attempt_history() {
+        crate::test_support::with_isolated_home(|_| {
+            install_transport("outbox.reject-later", vec!["false"]);
+            set_default_transport("outbox.reject-later");
+            dispatch_with_outbox(&event("run-reject-later"), None);
+            install_transport(
+                "outbox.reject-later",
+                vec!["sh", "-c", "printf '%s\\n' '{\"schema\":\"homeboy/notification-transport-result/v1\",\"status\":\"rejected\",\"attempts\":0,\"terminal_rejection\":{\"schema\":\"homeboy/notification-transport-rejection/v1\",\"reason_code\":\"invalid_route\"}}'; exit 1"],
+            );
+
+            let report = drain(Utc::now() + chrono::Duration::seconds(30));
+            assert_eq!(report.dead_lettered, 1);
+            assert_eq!(report.entries[0].outcome, "terminal_rejected");
+            let dead = dead_letter_entries();
+            assert_eq!(dead.len(), 1);
+            assert_eq!(dead[0].attempts, 2);
+            assert!(dead[0].terminal_rejection.is_some());
         });
     }
 
@@ -951,6 +1048,7 @@ mod tests {
                 next_attempt_at: Utc::now().to_rfc3339(),
                 last_attempt_at: None,
                 last_error: None,
+                terminal_rejection: None,
                 once_marker: None,
             };
             assert!(write_entry(&inflight.join("abandoned.json"), &entry));

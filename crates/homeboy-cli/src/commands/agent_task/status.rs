@@ -505,24 +505,32 @@ fn attach_cook_notification_delivery(
         return;
     };
     if outcome.get("status").and_then(Value::as_str) != Some("delivered") {
-        outcome["resend_command"] = Value::String(
-            agent_task_service_direct::cook_continue_command(None, cook_id, false, None),
-        );
+        let resend_command = Value::String(agent_task_service_direct::cook_continue_command(
+            None, cook_id, false, None,
+        ));
+        outcome["resend_command"] = resend_command.clone();
+        // Retain the original status contract for older consumers.
+        outcome["retry_command"] = resend_command;
         outcome["inspect_command"] =
             Value::String(format!("homeboy agent-task status {cook_id} --full"));
     }
-    if matches!(
-        outcome.get("status").and_then(Value::as_str),
-        Some("not_configured" | "rejected")
-    ) {
-        outcome["repair_command"] = Value::String(
-            "homeboy config set /notifications/default_transport '<installed-transport-id>'"
-                .to_string(),
-        );
+    if let Some(configuration_command) = notification_repair_command(&outcome) {
+        let configuration_command = Value::String(configuration_command);
+        outcome["repair_command"] = configuration_command.clone();
+        // Retain the original status contract for older consumers.
+        outcome["configuration_command"] = configuration_command;
     }
     if let Value::Object(fields) = value {
         fields.insert("notification_delivery".to_string(), outcome);
     }
+}
+
+fn notification_repair_command(outcome: &Value) -> Option<String> {
+    (outcome.get("status").and_then(Value::as_str) == Some("not_configured")
+        && outcome.get("route_classification").and_then(Value::as_str) != Some("explicit"))
+    .then(|| {
+        "homeboy config set /notifications/default_transport '<installed-transport-id>'".to_string()
+    })
 }
 
 /// A Cook owns the provider attempt's publication lifecycle. Once it records a
@@ -4377,6 +4385,8 @@ fn compact_status_summary_with_aggregate(
                 "inspect_command",
                 "repair_command",
                 "resend_command",
+                "retry_command",
+                "configuration_command",
             ],
         );
     }
@@ -6874,6 +6884,20 @@ mod tests {
         assert!(summary["notification_delivery"]
             .get("raw_destination")
             .is_none());
+    }
+
+    #[test]
+    fn explicit_notification_routes_do_not_suggest_changing_the_default_transport() {
+        assert!(notification_repair_command(&json!({
+            "status": "not_configured",
+            "route_classification": "explicit"
+        }))
+        .is_none());
+        assert!(notification_repair_command(&json!({
+            "status": "not_configured",
+            "route_classification": "default"
+        }))
+        .is_some());
     }
 
     #[test]
