@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.15] - 2026-08-18
+
+### Changed
+- stabilize archive fixtures
+
+### Fixed
+- preserve archive replay process contracts
+
 ## [0.350.14] - 2026-08-18
 
 ### Changed
