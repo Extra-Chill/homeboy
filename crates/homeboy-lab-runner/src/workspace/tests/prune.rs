@@ -59,7 +59,7 @@ fn prune_workspaces_previews_orphans_without_deleting_by_default() {
 
         assert_eq!(exit_code, 0);
         assert!(output.dry_run);
-        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.candidates.len(), 1, "{output:#?}");
         assert_eq!(output.total_candidate_count, 1);
         assert!(output.total_candidate_bytes > 0);
         assert_eq!(output.remaining_candidate_count, 0);
@@ -128,7 +128,7 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
 
         assert_eq!(exit_code, 0);
         assert!(!output.dry_run);
-        assert_eq!(output.removed.len(), 2);
+        assert_eq!(output.removed.len(), 2, "{output:#?}");
         assert_eq!(output.total_candidate_count, 2);
         assert!(output.total_candidate_bytes >= output.total_removed_bytes);
         assert_eq!(output.remaining_candidate_count, 0);
@@ -180,7 +180,7 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
             .expect("prune process-owned workspace");
             assert_eq!(exit_code, 0);
             assert!(output.candidates.is_empty());
-            assert_eq!(output.skipped_live_count, 1);
+            assert_eq!(output.skipped_live_count, 1, "{output:#?}");
             assert!(workspace.exists());
         }
         child.kill().expect("stop held process");
@@ -578,7 +578,7 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
         .expect("prune preview");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.candidates.len(), 1, "{output:#?}");
         assert_eq!(output.candidates[0].remote_path, synced.remote_path);
         assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
         assert!(Path::new(&synced.remote_path).exists());
@@ -622,7 +622,7 @@ fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
         .expect("prune stale materialized workspace");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output.removed.len(), 1);
+        assert_eq!(output.removed.len(), 1, "{output:#?}");
         assert_eq!(
             output.removed[0].reason,
             "stale_materialized_workspace_lifecycle"
@@ -669,7 +669,7 @@ fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing(
         .expect("prune stale materialized workspace with missing source");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output.removed.len(), 1);
+        assert_eq!(output.removed.len(), 1, "{output:#?}");
         assert_eq!(
             output.removed[0].reason,
             "stale_materialized_workspace_lifecycle"
@@ -745,7 +745,14 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
         )
         .expect("prune preview");
 
-        assert_eq!(preview.candidates[0].reason, "resource_ttl_expired");
+        assert_eq!(
+            preview
+                .candidates
+                .first()
+                .map(|candidate| candidate.reason.as_str()),
+            Some("resource_ttl_expired"),
+            "{preview:#?}"
+        );
         assert_eq!(preview.candidates[0].remote_path, synced.remote_path);
         assert!(Path::new(&synced.remote_path).exists());
 
@@ -1349,7 +1356,7 @@ fn unavailable_job_authority_fails_closed_despite_inactive_process_evidence() {
         let evidence =
             workspace_liveness_with_size_observation(&runner, &metadata, &workspace, false);
 
-        assert_eq!(evidence.state, "inactive");
+        assert_eq!(evidence.state, "inactive", "{evidence:#?}");
         assert_eq!(
             evidence.observations,
             vec!["workspace_size_measurement_unavailable"]
