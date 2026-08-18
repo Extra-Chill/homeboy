@@ -1048,15 +1048,35 @@ pub(crate) fn reconcile_run_services_on_owner(
     owner: Option<&Value>,
     reason: &str,
 ) -> Result<Value, String> {
+    let data_root = homeboy_core::paths::homeboy_data().map_err(|error| error.message)?;
+    reconcile_run_services_on_owner_at(&data_root, run_id, owner, reason)
+}
+
+/// Reconcile service ownership for one run below an explicit controller data
+/// root.
+///
+/// Only the *local* branch reads a root at all: the runner branch dispatches
+/// commands the runner interprets against its own HOME. Splitting them here is
+/// what lets a rooted cancellation prove its local service ledger was reaped in
+/// the same installation it wrote the terminal record into, instead of reaping
+/// whichever ledger the process environment happened to point at (#7505).
+pub(crate) fn reconcile_run_services_on_owner_at(
+    data_root: &Path,
+    run_id: &str,
+    owner: Option<&Value>,
+    reason: &str,
+) -> Result<Value, String> {
     let Some(owner) = owner else {
-        return Ok(
-            json!({ "transport": "local", "services": reconcile_run_services(run_id, reason)? }),
-        );
+        return Ok(json!({
+            "transport": "local",
+            "services": reconcile_run_services_at(data_root, run_id, reason)?,
+        }));
     };
     let Some(runner_id) = owner.get("runner_id").and_then(Value::as_str) else {
-        return Ok(
-            json!({ "transport": "local", "services": reconcile_run_services(run_id, reason)? }),
-        );
+        return Ok(json!({
+            "transport": "local",
+            "services": reconcile_run_services_at(data_root, run_id, reason)?,
+        }));
     };
     let command = |operation: &str| {
         vec![
