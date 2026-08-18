@@ -3841,9 +3841,16 @@ pub fn exact_status(run_id: &str) -> Result<AgentTaskRunRecord> {
 ///   `lifecycle_store.data_root()`, but pairing the two stores is the shape
 ///   `KNOWN_MIXED_STORE_FUNCTIONS` exists to make someone argue for.
 ///
-/// `homeboy_core::controller_runtime::admission_status` has no `_at` form at
-/// all; `cancel_admission_at` does, which is why the cancellation reconciler
-/// below could be rooted and this read could not.
+/// `homeboy_core::controller_runtime::admission_status` no longer lacks an
+/// `_at` form — `admission_status_at` now mirrors `cancel_admission_at`, so the
+/// reason the cancellation reconciler below could be rooted and this read could
+/// not has closed. The read is still spelled ambiently here only because this
+/// function is itself ambient: its store comes from
+/// `AgentTaskLifecycleStore::from_current_environment()`, so
+/// `admission_status_at(&lifecycle_store.data_root().join("controller-runtimes"), ..)`
+/// would resolve the identical path today. Switching it buys nothing until the
+/// four steps above are rooted, and belongs in the change that introduces
+/// `status_in_store`.
 ///
 /// Until those close there is deliberately **no** `status_in_store`. A rooted
 /// status that reconciled four of its steps in another installation would be
