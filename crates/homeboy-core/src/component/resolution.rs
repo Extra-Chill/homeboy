@@ -1,9 +1,64 @@
-use crate::component::{inventory, load, try_discover_from_portable, Component};
+use crate::component::{
+    inventory, inventory_in_root, load, load_in_root, try_discover_from_portable, Component,
+};
 use crate::error::{Error, Result};
 use crate::git::run_git;
 use homeboy_extension_contract::ExtensionCapability;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+
+// ============================================================================
+// Config-root boundary (#7505)
+// ============================================================================
+//
+// Component resolution mixes two kinds of input: facts about the invocation
+// (CWD, git roots, `--path`, portable `homeboy.json` manifests) which have no
+// config root to resolve, and reads of Homeboy's own registry (projects,
+// standalone registrations, installed extension manifests) which do. Only the
+// second kind flows through the helpers below.
+//
+// `config_root: None` means "this whole resolution is ambient"; `Some(root)`
+// means "this whole resolution is rooted". It is never a per-read choice.
+
+/// The registry inventory at the active boundary.
+fn inventory_at(config_root: Option<&Path>) -> Result<Vec<Component>> {
+    match config_root {
+        Some(config_root) => inventory_in_root(config_root),
+        None => inventory(),
+    }
+}
+
+/// Registered-component lookup at the active boundary.
+fn load_at(config_root: Option<&Path>, id: &str) -> Result<Component> {
+    match config_root {
+        Some(config_root) => load_in_root(config_root, id),
+        None => load(id),
+    }
+}
+
+/// Standalone machine-local fallbacks at the active boundary.
+fn apply_standalone_fallbacks_at(config_root: Option<&Path>, component: &mut Component) {
+    match config_root {
+        Some(config_root) => {
+            crate::project::component::resolution::apply_standalone_component_fallbacks_in_root(
+                config_root,
+                component,
+                None,
+            )
+        }
+        None => crate::project::component::resolution::apply_standalone_component_fallbacks(
+            component, None,
+        ),
+    }
+}
+
+/// Extension-driven `remote_path` inference at the active boundary.
+fn resolve_remote_path_at(config_root: Option<&Path>, component: &mut Component) {
+    match config_root {
+        Some(config_root) => crate::component::resolve_remote_path_in_root(config_root, component),
+        None => crate::component::resolve_remote_path(component),
+    }
+}
 
 /// Shared target-resolution input for component/path-oriented commands.
 ///
@@ -200,11 +255,30 @@ pub fn resolve_target_from_component(
 /// a component may reference an extension that is not installed locally, and
 /// callers that require one (deploy planning) validate that separately.
 pub fn resolve_artifact(component: &Component) -> Result<Option<String>> {
+    resolve_artifact_core(None, component)
+}
+
+/// [`resolve_artifact`] against an already-resolved config root (#7505).
+///
+/// Both the artifact-pattern survey and the ownership tiebreak read extension
+/// manifests from `config_root`, so a rooted caller cannot have its artifact
+/// decided by whichever extensions are installed in the ambient home.
+pub fn resolve_artifact_in_root(
+    config_root: &Path,
+    component: &Component,
+) -> Result<Option<String>> {
+    resolve_artifact_core(Some(config_root), component)
+}
+
+fn resolve_artifact_core(
+    config_root: Option<&Path>,
+    component: &Component,
+) -> Result<Option<String>> {
     if let Some(ref artifact) = component.build_artifact {
         return Ok(Some(artifact.clone()));
     }
 
-    let providers = artifact_pattern_providers(component);
+    let providers = artifact_pattern_providers_core(config_root, component);
     let distinct: BTreeSet<&str> = providers.values().map(String::as_str).collect();
 
     match distinct.len() {
@@ -212,11 +286,21 @@ pub fn resolve_artifact(component: &Component) -> Result<Option<String>> {
         1 => Ok(distinct.into_iter().next().map(ToOwned::to_owned)),
         _ => {
             let candidates: Vec<String> = providers.keys().cloned().collect();
-            let owner = crate::extension_execution::disambiguate_capability_owner(
-                component,
-                ExtensionCapability::Build,
-                &candidates,
-            )?;
+            let owner = match config_root {
+                Some(config_root) => {
+                    crate::extension_execution::disambiguate_capability_owner_in_root(
+                        config_root,
+                        component,
+                        ExtensionCapability::Build,
+                        &candidates,
+                    )?
+                }
+                None => crate::extension_execution::disambiguate_capability_owner(
+                    component,
+                    ExtensionCapability::Build,
+                    &candidates,
+                )?,
+            };
             Ok(providers.get(&owner).cloned())
         }
     }
@@ -228,7 +312,10 @@ pub fn resolve_artifact(component: &Component) -> Result<Option<String>> {
 /// Keyed by extension ID in a `BTreeMap` so the candidate list handed to
 /// ambiguity resolution — and the error message listing it — is stable across
 /// runs, unlike the component's own `HashMap` iteration order.
-fn artifact_pattern_providers(component: &Component) -> BTreeMap<String, String> {
+fn artifact_pattern_providers_core(
+    config_root: Option<&Path>,
+    component: &Component,
+) -> BTreeMap<String, String> {
     let mut providers = BTreeMap::new();
 
     let Some(extensions) = component.extensions.as_ref() else {
@@ -236,7 +323,9 @@ fn artifact_pattern_providers(component: &Component) -> BTreeMap<String, String>
     };
 
     for extension_id in extensions.keys() {
-        let Ok(manifest) = crate::extension_store::load_extension(extension_id) else {
+        let Ok(manifest) =
+            crate::extension_store::load_extension_in_optional_root(config_root, extension_id)
+        else {
             continue;
         };
         let Some(pattern) = manifest
@@ -347,9 +436,9 @@ pub fn local_path_is_relative(raw: &str) -> bool {
 }
 
 /// Detect component ID from current working directory.
-fn detect_from_cwd() -> Option<String> {
+fn detect_from_cwd(config_root: Option<&Path>) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
-    let components = inventory().ok()?;
+    let components = inventory_at(config_root).ok()?;
 
     for component in components {
         let expanded = shellexpand::tilde(&component.local_path);
@@ -368,7 +457,10 @@ fn detect_from_cwd() -> Option<String> {
 /// current directory (or git root) has a matching `id`. This means the user is
 /// standing inside a clone of this component and intends to operate on it,
 /// even if the registered `local_path` points elsewhere (#694).
-fn prefer_cwd_for_component(component_id: &str) -> Result<Option<Component>> {
+fn prefer_cwd_for_component(
+    config_root: Option<&Path>,
+    component_id: &str,
+) -> Result<Option<Component>> {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(_) => return Ok(None),
@@ -377,10 +469,7 @@ fn prefer_cwd_for_component(component_id: &str) -> Result<Option<Component>> {
     // Check CWD directly
     if let Some(mut discovered) = try_discover_from_portable(&cwd)? {
         if discovered.id == component_id {
-            crate::project::component::resolution::apply_standalone_component_fallbacks(
-                &mut discovered,
-                None,
-            );
+            apply_standalone_fallbacks_at(config_root, &mut discovered);
             return Ok(Some(discovered));
         }
     }
@@ -390,17 +479,14 @@ fn prefer_cwd_for_component(component_id: &str) -> Result<Option<Component>> {
         if git_root != cwd {
             if let Some(mut discovered) = try_discover_from_portable(&git_root)? {
                 if discovered.id == component_id {
-                    crate::project::component::resolution::apply_standalone_component_fallbacks(
-                        &mut discovered,
-                        None,
-                    );
+                    apply_standalone_fallbacks_at(config_root, &mut discovered);
                     return Ok(Some(discovered));
                 }
             }
         }
     }
 
-    let registered = match load(component_id) {
+    let registered = match load_at(config_root, component_id) {
         Ok(registered) => registered,
         Err(_) => return Ok(None),
     };
@@ -412,6 +498,7 @@ fn prefer_cwd_for_component(component_id: &str) -> Result<Option<Component>> {
     if same_git_common_dir(&registered_path, &cwd_git_root) {
         let checkout_path = rebase_registered_path_to_checkout(&registered_path, &cwd_git_root);
         return portable_component_for_checkout(
+            config_root,
             component_id,
             &checkout_path,
             &registered,
@@ -422,6 +509,7 @@ fn prefer_cwd_for_component(component_id: &str) -> Result<Option<Component>> {
 
     if is_named_component_worktree(component_id, &registered_path, &cwd_git_root) {
         return portable_component_for_checkout(
+            config_root,
             component_id,
             &cwd_git_root,
             &registered,
@@ -436,6 +524,7 @@ fn prefer_cwd_for_component(component_id: &str) -> Result<Option<Component>> {
 /// A matched worktree is a distinct checkout, so all portable component fields
 /// must come from its manifest rather than the registered primary checkout.
 fn portable_component_for_checkout(
+    config_root: Option<&Path>,
     component_id: &str,
     checkout_path: &Path,
     registered: &Component,
@@ -449,7 +538,7 @@ fn portable_component_for_checkout(
         if try_discover_from_portable(Path::new(&registered.local_path))?.is_none() {
             let mut component = registered.clone();
             component.local_path = fallback_path.to_string_lossy().to_string();
-            crate::component::resolve_remote_path(&mut component);
+            resolve_remote_path_at(config_root, &mut component);
             return Ok(component);
         }
         return Err(Error::validation_invalid_argument(
@@ -483,11 +572,8 @@ fn portable_component_for_checkout(
     }
 
     component.local_path = checkout_path.to_string_lossy().to_string();
-    crate::project::component::resolution::apply_standalone_component_fallbacks(
-        &mut component,
-        None,
-    );
-    crate::component::resolve_remote_path(&mut component);
+    apply_standalone_fallbacks_at(config_root, &mut component);
+    resolve_remote_path_at(config_root, &mut component);
     Ok(component)
 }
 
@@ -577,7 +663,7 @@ fn synthetic_component_for_path(path: &str) -> Component {
     }
 }
 
-fn resolve_path_override(path: &str) -> Result<Component> {
+fn resolve_path_override(config_root: Option<&Path>, path: &str) -> Result<Component> {
     if let Some(mut discovered) = try_discover_from_portable(Path::new(path))? {
         validate_duplicate_portable_component_ids(
             &discovered.id,
@@ -585,11 +671,8 @@ fn resolve_path_override(path: &str) -> Result<Component> {
             Some(Path::new(path)),
         )?;
         discovered.local_path = path.to_string();
-        crate::project::component::resolution::apply_standalone_component_fallbacks(
-            &mut discovered,
-            None,
-        );
-        crate::component::resolve_remote_path(&mut discovered);
+        apply_standalone_fallbacks_at(config_root, &mut discovered);
+        resolve_remote_path_at(config_root, &mut discovered);
         return Ok(discovered);
     }
 
@@ -599,11 +682,8 @@ fn resolve_path_override(path: &str) -> Result<Component> {
             if let Some(mut discovered) = try_discover_from_portable(&git_root)? {
                 validate_duplicate_portable_component_ids(&discovered.id, &git_root, None)?;
                 discovered.local_path = path.to_string();
-                crate::project::component::resolution::apply_standalone_component_fallbacks(
-                    &mut discovered,
-                    None,
-                );
-                crate::component::resolve_remote_path(&mut discovered);
+                apply_standalone_fallbacks_at(config_root, &mut discovered);
+                resolve_remote_path_at(config_root, &mut discovered);
                 return Ok(discovered);
             }
         }
@@ -615,7 +695,7 @@ fn resolve_path_override(path: &str) -> Result<Component> {
     // bare-path resolution (e.g. top-level `homeboy status` from the worktree)
     // resolves the same component `git status` does instead of a synthetic one
     // (#9895).
-    if let Some(component) = registered_component_for_worktree_path(dir, None)? {
+    if let Some(component) = registered_component_for_worktree_path(config_root, dir, None)? {
         return Ok(component);
     }
 
@@ -636,13 +716,14 @@ fn component_is_registered(component_id: &str) -> bool {
 /// worktree path. `None` when the path is not a worktree of any registered
 /// component (#9895).
 fn registered_component_for_worktree_path(
+    config_root: Option<&Path>,
     dir: &Path,
     expected_id: Option<&str>,
 ) -> Result<Option<Component>> {
     let Some(cwd_git_root) = detect_git_root(dir) else {
         return Ok(None);
     };
-    let components = crate::component::inventory()?;
+    let components = inventory_at(config_root)?;
     for registered in components {
         if expected_id.is_some_and(|id| id != registered.id) {
             continue;
@@ -661,6 +742,7 @@ fn registered_component_for_worktree_path(
         {
             let checkout_path = rebase_registered_path_to_checkout(&registered_path, &cwd_git_root);
             return portable_component_for_checkout(
+                config_root,
                 &registered.id,
                 &checkout_path,
                 &registered,
@@ -712,7 +794,12 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
         ));
     }
 
+    // `resolve_target` has no rooted sibling yet (#7505): its synthetic-target
+    // check reaches `component_is_registered`, and its callers all resolve
+    // ambiently today. It is therefore explicitly ambient here rather than
+    // accidentally so.
     let component = resolve_effective_inner(
+        None,
         spec.component_id,
         spec.path_override,
         spec.project,
@@ -794,12 +881,21 @@ pub fn detect_git_root(dir: &Path) -> Option<PathBuf> {
 
 /// Resolve a Component from an optional ID, with CWD auto-discovery fallback.
 pub fn resolve(id: Option<&str>) -> Result<Component> {
+    resolve_core(None, id)
+}
+
+/// [`resolve`] against an already-resolved config root (#7505).
+pub fn resolve_in_root(config_root: &Path, id: Option<&str>) -> Result<Component> {
+    resolve_core(Some(config_root), id)
+}
+
+fn resolve_core(config_root: Option<&Path>, id: Option<&str>) -> Result<Component> {
     if let Some(id) = id {
-        return load(id);
+        return load_at(config_root, id);
     }
 
-    if let Some(detected_id) = detect_from_cwd() {
-        return load(&detected_id);
+    if let Some(detected_id) = detect_from_cwd(config_root) {
+        return load_at(config_root, &detected_id);
     }
 
     let cwd = std::env::current_dir().map_err(|e| Error::internal_io(e.to_string(), None))?;
@@ -822,7 +918,7 @@ pub fn resolve(id: Option<&str>) -> Result<Component> {
         "Provide a component ID: homeboy <command> <component-id>".to_string(),
         "Or run from a directory containing homeboy.json".to_string(),
     ];
-    if detect_from_cwd().is_none() {
+    if detect_from_cwd(config_root).is_none() {
         hints.push("Initialize the repo: homeboy component create --local-path .".to_string());
         hints.push(
             "Or attach the repo to a project: homeboy project components attach-path <project> ."
@@ -845,6 +941,32 @@ pub fn resolve_effective(
     project: Option<&crate::project::Project>,
 ) -> Result<Component> {
     resolve_effective_inner(
+        None,
+        id,
+        path_override,
+        project,
+        true,
+        RegistryLookupPolicy::Allow,
+        true,
+    )
+}
+
+/// [`resolve_effective`] against an already-resolved config root (#7505).
+///
+/// Every registry read this resolution makes — the project attachment, the
+/// standalone registration fallbacks, the registered-component lookup, the
+/// worktree inventory scan, and extension-driven `remote_path` inference —
+/// resolves from `config_root`. A supplied `project` is the caller's value and
+/// is used as given; it is the caller's job to have loaded it from the same
+/// root (`project::load_in_root`).
+pub fn resolve_effective_in_root(
+    config_root: &Path,
+    id: Option<&str>,
+    path_override: Option<&str>,
+    project: Option<&crate::project::Project>,
+) -> Result<Component> {
+    resolve_effective_inner(
+        Some(config_root),
         id,
         path_override,
         project,
@@ -855,6 +977,7 @@ pub fn resolve_effective(
 }
 
 fn resolve_effective_inner(
+    config_root: Option<&Path>,
     id: Option<&str>,
     path_override: Option<&str>,
     project: Option<&crate::project::Project>,
@@ -871,13 +994,28 @@ fn resolve_effective_inner(
     let path_override = resolved_path_override.as_deref();
 
     if let (Some(project), Some(id)) = (project, id) {
-        let component = crate::project::resolve_project_component(project, id)?;
+        let component = match config_root {
+            Some(config_root) => {
+                crate::project::resolve_project_component_in_root(config_root, project, id)?
+            }
+            None => crate::project::resolve_project_component(project, id)?,
+        };
         if let Some(path) = path_override {
-            let component =
-                portable_component_for_checkout(id, Path::new(path), &component, Path::new(path))?;
-            return crate::project::component::resolution::bind_materialized_component_at_path(
-                component, project,
-            );
+            let component = portable_component_for_checkout(
+                config_root,
+                id,
+                Path::new(path),
+                &component,
+                Path::new(path),
+            )?;
+            return match config_root {
+                Some(config_root) => crate::project::bind_materialized_component_at_path_in_root(
+                    config_root,
+                    component,
+                    project,
+                ),
+                None => crate::project::bind_materialized_component_at_path(component, project),
+            };
         }
         return Ok(component);
     }
@@ -907,18 +1045,15 @@ fn resolve_effective_inner(
                     Some(Path::new(path)),
                 )?;
                 discovered.local_path = path.to_string();
-                crate::project::component::resolution::apply_standalone_component_fallbacks(
-                    &mut discovered,
-                    None,
-                );
-                crate::component::resolve_remote_path(&mut discovered);
+                apply_standalone_fallbacks_at(config_root, &mut discovered);
+                resolve_remote_path_at(config_root, &mut discovered);
                 Ok(discovered)
             } else {
                 // Fallback: create a synthetic component when --path is
                 // explicitly provided but the directory has no homeboy.json.
                 // This supports ad-hoc operations on unregistered projects.
                 if let Some(component) =
-                    registered_component_for_worktree_path(Path::new(path), Some(id))?
+                    registered_component_for_worktree_path(config_root, Path::new(path), Some(id))?
                 {
                     return Ok(component);
                 }
@@ -949,7 +1084,7 @@ fn resolve_effective_inner(
                         Some(id_path),
                     )?;
                     discovered.local_path = local_path;
-                    crate::component::resolve_remote_path(&mut discovered);
+                    resolve_remote_path_at(config_root, &mut discovered);
                     return Ok(discovered);
                 }
 
@@ -969,7 +1104,7 @@ fn resolve_effective_inner(
             // if the CWD (or its git root) is a checkout of this component.
             // This ensures `homeboy test foo` from a different clone of `foo`
             // operates on the current checkout, not the registered local_path (#694).
-            if let Some(cwd_component) = prefer_cwd_for_component(id)? {
+            if let Some(cwd_component) = prefer_cwd_for_component(config_root, id)? {
                 validate_duplicate_portable_component_ids(
                     id,
                     Path::new(&cwd_component.local_path),
@@ -992,14 +1127,14 @@ fn resolve_effective_inner(
                     ]),
                 ));
             }
-            load(id)
+            load_at(config_root, id)
         }
     } else {
         if let Some(path) = path_override {
-            return resolve_path_override(path);
+            return resolve_path_override(config_root, path);
         }
 
-        resolve(None)
+        resolve_core(config_root, None)
     }
 }
 
@@ -1570,7 +1705,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
 
         with_cwd(dir.path(), || {
-            assert_eq!(detect_from_cwd(), None);
+            assert_eq!(detect_from_cwd(None), None);
         });
     }
 

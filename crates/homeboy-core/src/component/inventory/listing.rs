@@ -4,6 +4,68 @@ use crate::project;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+// ============================================================================
+// Config-root boundary (#7505)
+// ============================================================================
+//
+// Every read below that derives from the Homeboy config root goes through one
+// of the four helpers in this section. `config_root: None` means "this whole
+// resolution is ambient"; `Some(root)` means "this whole resolution is rooted".
+// It is never a per-read choice — a resolution that read projects from an
+// injected root and standalone registrations from the ambient one would compose
+// an inventory that exists in neither home.
+
+/// The standalone component registration directory at the active boundary.
+fn components_dir(config_root: Option<&Path>) -> Result<PathBuf> {
+    match config_root {
+        Some(config_root) => Ok(crate::paths::components_in_root(config_root)),
+        None => crate::paths::components(),
+    }
+}
+
+/// Configured projects at the active boundary.
+fn projects_at(config_root: Option<&Path>) -> Result<Vec<project::Project>> {
+    match config_root {
+        Some(config_root) => project::list_in_root(config_root),
+        None => project::list(),
+    }
+}
+
+/// The standalone-config snapshot at the active boundary.
+///
+/// Loaded from the same root the resolution runs against, so the snapshot and
+/// the resolution it feeds can never describe two different homes.
+fn standalone_snapshot_at(
+    config_root: Option<&Path>,
+) -> project::StandaloneComponentConfigSnapshot {
+    match config_root {
+        Some(config_root) => project::StandaloneComponentConfigSnapshot::load_in_root(config_root),
+        None => project::StandaloneComponentConfigSnapshot::load(),
+    }
+}
+
+/// Project-component resolution at the active boundary.
+fn resolve_attachment(
+    config_root: Option<&Path>,
+    project: &project::Project,
+    component_id: &str,
+    snapshot: Option<&project::StandaloneComponentConfigSnapshot>,
+) -> Result<Component> {
+    match config_root {
+        Some(config_root) => project::resolve_project_component_with_standalone_snapshot_in_root(
+            config_root,
+            project,
+            component_id,
+            snapshot,
+        ),
+        None => project::resolve_project_component_with_standalone_snapshot(
+            project,
+            component_id,
+            snapshot,
+        ),
+    }
+}
+
 /// Derive a runtime component inventory from project attachments, standalone
 /// registrations, and portable components.
 ///
@@ -16,7 +78,19 @@ use std::path::{Path, PathBuf};
 /// precedence over a standalone file with the same ID, which in turn takes
 /// precedence over CWD discovery.
 pub fn inventory() -> Result<Vec<Component>> {
-    let mut components = registered()?;
+    inventory_core(None)
+}
+
+/// [`inventory`] against an already-resolved config root (#7505).
+///
+/// CWD portable discovery is unchanged: it is a fact about the invocation
+/// directory, not about a config root, and reads no Homeboy state.
+pub fn inventory_in_root(config_root: &Path) -> Result<Vec<Component>> {
+    inventory_core(Some(config_root))
+}
+
+fn inventory_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
+    let mut components = registered_core(config_root)?;
     let mut seen: HashSet<String> = components
         .iter()
         .map(|component| component.id.clone())
@@ -47,7 +121,16 @@ pub fn inventory() -> Result<Vec<Component>> {
 /// This excludes portable `homeboy.json` discovery from the caller's current
 /// directory, which is suitable for host-level operations such as cleanup.
 pub fn registered() -> Result<Vec<Component>> {
-    let projects = project::list().unwrap_or_default();
+    registered_core(None)
+}
+
+/// [`registered`] against an already-resolved config root (#7505).
+pub fn registered_in_root(config_root: &Path) -> Result<Vec<Component>> {
+    registered_core(Some(config_root))
+}
+
+fn registered_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
+    let projects = projects_at(config_root).unwrap_or_default();
     let mut components = Vec::new();
     let mut seen = HashSet::new();
     let mut add_component = |component: Component| {
@@ -57,10 +140,11 @@ pub fn registered() -> Result<Vec<Component>> {
     };
 
     // 1. Project-attached components (highest priority)
-    let standalone_snapshot = project::StandaloneComponentConfigSnapshot::load();
+    let standalone_snapshot = standalone_snapshot_at(config_root);
     for project in &projects {
         for attachment in &project.components {
-            if let Ok(component) = project::resolve_project_component_with_standalone_snapshot(
+            if let Ok(component) = resolve_attachment(
+                config_root,
                 project,
                 &attachment.id,
                 Some(&standalone_snapshot),
@@ -74,7 +158,7 @@ pub fn registered() -> Result<Vec<Component>> {
     //    These are components registered via `component create` or legacy config
     //    that aren't attached to any project. They're still valid for local-only
     //    operations like release, version bump, and changelog.
-    if let Ok(standalone) = load_standalone_components() {
+    if let Ok(standalone) = load_standalone_components_core(config_root) {
         for component in standalone {
             add_component(component);
         }
@@ -89,20 +173,27 @@ pub fn registered() -> Result<Vec<Component>> {
 /// Cook admission uses this for an explicit repository identity so stale,
 /// unrelated registrations cannot trigger portable Git enrichment.
 pub fn registered_by_id(id: &str) -> Result<Option<Component>> {
+    registered_by_id_core(None, id)
+}
+
+/// [`registered_by_id`] against an already-resolved config root (#7505).
+pub fn registered_by_id_in_root(config_root: &Path, id: &str) -> Result<Option<Component>> {
+    registered_by_id_core(Some(config_root), id)
+}
+
+fn registered_by_id_core(config_root: Option<&Path>, id: &str) -> Result<Option<Component>> {
     crate::engine::identifier::validate_component_id(id)?;
-    let projects = project::list().unwrap_or_default();
-    let standalone_snapshot = project::StandaloneComponentConfigSnapshot::load();
+    let projects = projects_at(config_root).unwrap_or_default();
+    let standalone_snapshot = standalone_snapshot_at(config_root);
     for project in &projects {
         if project
             .components
             .iter()
             .any(|attachment| attachment.id == id)
         {
-            if let Ok(component) = project::resolve_project_component_with_standalone_snapshot(
-                project,
-                id,
-                Some(&standalone_snapshot),
-            ) {
+            if let Ok(component) =
+                resolve_attachment(config_root, project, id, Some(&standalone_snapshot))
+            {
                 if component.id == id {
                     return Ok(Some(component));
                 }
@@ -110,17 +201,32 @@ pub fn registered_by_id(id: &str) -> Result<Option<Component>> {
         }
     }
 
-    load_standalone_component(id)
+    load_standalone_component_core(config_root, id)
 }
 
 /// Resolve one persisted component whose configured checkout is `path` without
 /// materializing unrelated component configurations.
 pub fn registered_by_local_path(path: &Path) -> Result<Option<Component>> {
+    registered_by_local_path_core(None, path)
+}
+
+/// [`registered_by_local_path`] against an already-resolved config root (#7505).
+pub fn registered_by_local_path_in_root(
+    config_root: &Path,
+    path: &Path,
+) -> Result<Option<Component>> {
+    registered_by_local_path_core(Some(config_root), path)
+}
+
+fn registered_by_local_path_core(
+    config_root: Option<&Path>,
+    path: &Path,
+) -> Result<Option<Component>> {
     let Ok(path) = std::fs::canonicalize(path) else {
         return Ok(None);
     };
-    let projects = project::list().unwrap_or_default();
-    let standalone_snapshot = project::StandaloneComponentConfigSnapshot::load();
+    let projects = projects_at(config_root).unwrap_or_default();
+    let standalone_snapshot = standalone_snapshot_at(config_root);
     for project in &projects {
         for attachment in &project.components {
             let attachment_path =
@@ -128,7 +234,8 @@ pub fn registered_by_local_path(path: &Path) -> Result<Option<Component>> {
             if std::fs::canonicalize(attachment_path).ok().as_ref() != Some(&path) {
                 continue;
             }
-            if let Ok(component) = project::resolve_project_component_with_standalone_snapshot(
+            if let Ok(component) = resolve_attachment(
+                config_root,
                 project,
                 &attachment.id,
                 Some(&standalone_snapshot),
@@ -138,7 +245,7 @@ pub fn registered_by_local_path(path: &Path) -> Result<Option<Component>> {
         }
     }
 
-    let dir = crate::paths::components()?;
+    let dir = components_dir(config_root)?;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(None);
     };
@@ -150,12 +257,12 @@ pub fn registered_by_local_path(path: &Path) -> Result<Option<Component>> {
         let Some(id) = registration.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        let Some(info) = read_standalone_file(id) else {
+        let Some(info) = read_standalone_file_core(config_root, id) else {
             continue;
         };
         let registered_path = PathBuf::from(shellexpand::tilde(&info.local_path).into_owned());
         if std::fs::canonicalize(registered_path).ok().as_ref() == Some(&path) {
-            return load_standalone_component(id);
+            return load_standalone_component_core(config_root, id);
         }
     }
 
@@ -170,8 +277,22 @@ pub fn registered_by_local_path(path: &Path) -> Result<Option<Component>> {
 /// If the standalone file has a `local_path` and that directory contains a
 /// `homeboy.json`, the portable config is merged on top (portable config is
 /// the source of truth for version_targets, changelog_target, etc.).
+/// Ambient sibling of [`load_standalone_components_in_root`], retained for the
+/// inventory tests that still resolve their root from the process.
+///
+/// `#[cfg(test)]` rather than deleted: the eight callers in this module's test
+/// file are the only ones left, so in a lib build it is dead code under
+/// `-D warnings`. Migrating those tests onto the rooted sibling is the honest
+/// follow-up; gating it keeps that a separate, reviewable change instead of a
+/// rider on the rooting slice (#7505).
+#[cfg(test)]
 pub(super) fn load_standalone_components() -> Result<Vec<Component>> {
-    let dir = crate::paths::components()?;
+    load_standalone_components_core(None)
+}
+
+/// [`load_standalone_components`] at the active config-root boundary.
+fn load_standalone_components_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
+    let dir = components_dir(config_root)?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -256,8 +377,11 @@ pub(super) fn load_standalone_components() -> Result<Vec<Component>> {
     Ok(components)
 }
 
-fn load_standalone_component(id: &str) -> Result<Option<Component>> {
-    let path = crate::paths::components()?.join(format!("{id}.json"));
+fn load_standalone_component_core(
+    config_root: Option<&Path>,
+    id: &str,
+) -> Result<Option<Component>> {
+    let path = components_dir(config_root)?.join(format!("{id}.json"));
     let Ok(content) = std::fs::read_to_string(path) else {
         return Ok(None);
     };
@@ -390,12 +514,28 @@ fn discover_sibling_portable_components(
 
 /// Check if any linked extension provides an artifact pattern.
 pub fn extension_provides_artifact_pattern(component: &Component) -> bool {
+    extension_provides_artifact_pattern_core(None, component)
+}
+
+/// [`extension_provides_artifact_pattern`] against an already-resolved config
+/// root (#7505).
+pub fn extension_provides_artifact_pattern_in_root(
+    config_root: &Path,
+    component: &Component,
+) -> bool {
+    extension_provides_artifact_pattern_core(Some(config_root), component)
+}
+
+fn extension_provides_artifact_pattern_core(
+    config_root: Option<&Path>,
+    component: &Component,
+) -> bool {
     component
         .extensions
         .as_ref()
         .map(|extensions| {
             extensions.keys().any(|extension_id| {
-                crate::extension_store::load_extension(extension_id)
+                crate::extension_store::load_extension_in_optional_root(config_root, extension_id)
                     .ok()
                     .and_then(|m| m.build)
                     .and_then(|b| b.artifact_pattern)
@@ -435,6 +575,11 @@ pub fn list() -> Result<Vec<Component>> {
     inventory()
 }
 
+/// [`list`] against an already-resolved config root (#7505).
+pub fn list_in_root(config_root: &Path) -> Result<Vec<Component>> {
+    inventory_in_root(config_root)
+}
+
 pub fn list_ids() -> Result<Vec<String>> {
     Ok(inventory()?
         .into_iter()
@@ -442,8 +587,29 @@ pub fn list_ids() -> Result<Vec<String>> {
         .collect())
 }
 
+/// [`list_ids`] against an already-resolved config root (#7505).
+pub fn list_ids_in_root(config_root: &Path) -> Result<Vec<String>> {
+    Ok(inventory_in_root(config_root)?
+        .into_iter()
+        .map(|component| component.id)
+        .collect())
+}
+
 pub fn load(id: &str) -> Result<Component> {
-    if let Some(component) = registered_by_id(id)? {
+    load_core(None, id)
+}
+
+/// [`load`] against an already-resolved config root (#7505).
+///
+/// The registry probe, the "not attached" diagnosis and the near-miss id
+/// suggestions all resolve from `config_root`, so a miss and the suggestions
+/// explaining it can never describe two different homes.
+pub fn load_in_root(config_root: &Path, id: &str) -> Result<Component> {
+    load_core(Some(config_root), id)
+}
+
+fn load_core(config_root: Option<&Path>, id: &str) -> Result<Component> {
+    if let Some(component) = registered_by_id_core(config_root, id)? {
         return Ok(component);
     }
 
@@ -469,8 +635,8 @@ pub fn load(id: &str) -> Result<Component> {
     // file exists — this means the component was created but isn't loaded
     // into inventory (e.g., local_path doesn't exist or portable config
     // is missing). Return a specific "not attached" error with guidance.
-    if let Some(standalone) = read_standalone_file(id) {
-        let project_suggestion = suggest_project_for_attachment();
+    if let Some(standalone) = read_standalone_file_core(config_root, id) {
+        let project_suggestion = suggest_project_for_attachment_core(config_root);
         return Err(Error::component_not_attached(
             id.to_string(),
             standalone.local_path,
@@ -478,15 +644,15 @@ pub fn load(id: &str) -> Result<Component> {
         ));
     }
 
-    let suggestions = registered_id_candidates();
+    let suggestions = registered_id_candidates_core(config_root);
     Err(Error::component_not_found(id.to_string(), suggestions))
 }
 
-fn registered_id_candidates() -> Vec<String> {
+fn registered_id_candidates_core(config_root: Option<&Path>) -> Vec<String> {
     // Suggestions describe configured candidates without resolving their
     // repositories. Resolution failures remain the selected command's concern.
     let mut ids = HashSet::new();
-    for project in project::list().unwrap_or_default() {
+    for project in projects_at(config_root).unwrap_or_default() {
         ids.extend(
             project
                 .components
@@ -494,7 +660,7 @@ fn registered_id_candidates() -> Vec<String> {
                 .map(|attachment| attachment.id),
         );
     }
-    if let Ok(entries) = crate::paths::components().and_then(|dir| {
+    if let Ok(entries) = components_dir(config_root).and_then(|dir| {
         std::fs::read_dir(&dir).map_err(|error| {
             Error::internal_io(error.to_string(), Some(format!("read {}", dir.display())))
         })
@@ -517,11 +683,16 @@ pub fn exists(id: &str) -> bool {
     load(id).is_ok()
 }
 
+/// [`exists`] against an already-resolved config root (#7505).
+pub fn exists_in_root(config_root: &Path, id: &str) -> bool {
+    load_in_root(config_root, id).is_ok()
+}
+
 /// Read a standalone registration file for a component ID without loading
 /// it into the full inventory. Returns a minimal struct with `local_path`
 /// for error messaging when the component exists on disk but isn't loadable.
-fn read_standalone_file(id: &str) -> Option<StandaloneFileInfo> {
-    let dir = match crate::paths::components() {
+fn read_standalone_file_core(config_root: Option<&Path>, id: &str) -> Option<StandaloneFileInfo> {
+    let dir = match components_dir(config_root) {
         Ok(d) if d.exists() => d,
         _ => return None,
     };
@@ -546,8 +717,8 @@ struct StandaloneFileInfo {
 }
 
 /// If exactly one project exists, return its ID for the attach hint.
-fn suggest_project_for_attachment() -> Option<String> {
-    let projects = project::list().unwrap_or_default();
+fn suggest_project_for_attachment_core(config_root: Option<&Path>) -> Option<String> {
+    let projects = projects_at(config_root).unwrap_or_default();
     if projects.len() == 1 {
         Some(projects[0].id.clone())
     } else {
