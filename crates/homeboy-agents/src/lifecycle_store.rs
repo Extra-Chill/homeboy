@@ -1465,13 +1465,15 @@ fn validate_cook_index_attempt_in_store(
     Ok(())
 }
 
-pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
-    default_store()?.read_records()
-}
-
-/// The store-rooted counterpart of [`read_records`], following the same bound
-/// and the same health projection but reading this store's own observation
-/// database instead of `paths::observation_db()`.
+/// The store-rooted body of [`AgentTaskLifecycleStore::read_records`], following
+/// the same bound and the same health projection but reading this store's own
+/// observation database instead of `paths::observation_db()`.
+///
+/// The ambient `read_records()` free shim that used to sit above this is gone.
+/// Its last caller was `reconcile_active_lab_runner_handoffs`, a queue scan that
+/// mutates every row it selects — expiring, terminalizing, and reconciling them
+/// — so it now scans the store it was handed rather than deciding from one
+/// installation's queue and committing into another (#7505).
 fn read_records_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<Vec<AgentTaskRunRecord>> {
