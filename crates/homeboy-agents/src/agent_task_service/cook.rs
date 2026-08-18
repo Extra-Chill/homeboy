@@ -40,9 +40,10 @@ use super::cook_budget::{
 };
 use super::cook_pre_execution::{
     materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores,
-    pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
-    record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
-    with_pre_execution_phase, CookExecutionPreparation,
+    materialize_initial_cook_attempt_with_stores_outcome, pre_execution_failure_details,
+    pre_execution_failure_phase, pre_execution_failure_report, record_pre_execution_failure,
+    retryable_pre_execution_failure, terminal_executor_matches, with_pre_execution_phase,
+    CookExecutionPreparation,
 };
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
@@ -4008,16 +4009,7 @@ where
             // Once the attempt exists, a controller-side validation failure has
             // not reached a provider and must retain the pre-execution contract.
             if let Ok(mut record) = lifecycle_store.read_record(&failure_options.initial_run_id) {
-                let owns_materialized_attempt = store
-                    .load_recipe(&failure_options.cook_id)
-                    .ok()
-                    .is_some_and(|recipe| {
-                        recipe.attempts.iter().any(|attempt| {
-                            attempt.run_id == failure_options.initial_run_id
-                                && attempt.plan == failure_options.initial_plan
-                        })
-                    });
-                if owns_materialized_attempt
+                if error.details["cook_materialized_by_invocation"] == true
                     && store.data_root() == lifecycle_store.data_root()
                     && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
                 {
@@ -4330,7 +4322,8 @@ where
     // Recipe persistence and lifecycle materialization are a recoverable saga.
     // Complete it before any capacity, workspace, or provider-facing work so a
     // controller interruption leaves a status-addressable, resumable attempt.
-    materialize_initial_cook_attempt_with_stores(store, lifecycle_store, &options)?;
+    let materialized_by_invocation =
+        materialize_initial_cook_attempt_with_stores_outcome(store, lifecycle_store, &options)?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -4341,7 +4334,10 @@ where
         && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
-        validate_cook_workspace(&options)?;
+        validate_cook_workspace(&options).map_err(|mut error| {
+            error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
+            error
+        })?;
     }
     validate_cook_candidate_group(&options.initial_plan)?;
     // Reserve the source tree's projected copy before the scheduler creates its
