@@ -148,8 +148,31 @@ fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) ->
 /// original POST returns the same job for its submission key, so this covers
 /// both controller crash boundaries without retaining secret values.
 pub fn reconcile_pending_runner_submission_intent(run_id: &str) -> Result<bool> {
+    reconcile_pending_runner_submission_intent_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
+/// The store-rooted counterpart of [`reconcile_pending_runner_submission_intent`].
+///
+/// The replay decision and its consequence must name one installation. This
+/// body reads the intent that authorises the replay, and on acceptance commits
+/// the accepted handoff through `record_detached_lab_run_in_store` — which
+/// takes the handoff lock on the same store's `run_dir`. Deciding from one
+/// home's intent and binding the acceptance into another's would let two
+/// controllers replay the same submission key while neither handoff lock
+/// excluded the other (#7505).
+///
+/// The broker transport stays process-global on purpose:
+/// `with_runner_continuation` resolves the configured provider registry, which
+/// is trust material and a subprocess contract, not a lifecycle root.
+pub(crate) fn reconcile_pending_runner_submission_intent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::read_record(&run_id)?;
+    let record = lifecycle_store.read_record(&run_id)?;
     if !has_pending_runner_submission_intent(&record) {
         return Ok(false);
     }
@@ -204,17 +227,20 @@ pub fn reconcile_pending_runner_submission_intent(run_id: &str) -> Result<bool> 
         provider.submit_reverse_broker_job(&runner_id, request)
     }) {
         Ok(job) => {
-            record_detached_lab_run(DetachedLabRunRecord {
-                run_id: &run_id,
-                runner_id: &runner_id,
-                runner_job_id: &job.id.to_string(),
-                remote_workspace: &cwd,
-                remote_command: &command,
-            })?;
+            record_detached_lab_run_in_store(
+                lifecycle_store,
+                DetachedLabRunRecord {
+                    run_id: &run_id,
+                    runner_id: &runner_id,
+                    runner_job_id: &job.id.to_string(),
+                    remote_workspace: &cwd,
+                    remote_command: &command,
+                },
+            )?;
             Ok(true)
         }
         Err(error) => {
-            let _ = store::mutate_record(&run_id, |record| {
+            let _ = lifecycle_store.mutate_record(&run_id, |record| {
                 let metadata = record.ensure_metadata_object();
                 metadata["runner_submission_intent"]["last_reconciliation_error"] = json!({
                     "code": error.code.as_str(),
@@ -461,7 +487,25 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
     Ok(true)
 }
 
-pub(crate) fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Result<()> {
+/// Project the runner daemon's view of an accepted job back onto the durable
+/// record below explicitly injected lifecycle roots.
+///
+/// There is deliberately no ambient wrapper. Both outcomes this dispatches to
+/// write: the snapshot branch commits a binding, a live-progress update, or a
+/// terminal aggregate, and the confirmed-absence branch replaces the record
+/// with a terminal pre-execution failure. Its only caller is `status_in_store`
+/// in `lifecycle_ops`, which already holds the store whose record it is
+/// reconciling. An ambient form would exist only to let a rooted status decide
+/// liveness against one installation's record and commit the result into
+/// another's (#7505).
+///
+/// The runner transport itself stays process-global: `with_runner_continuation`
+/// resolves a configured provider registry, which is trust material and a
+/// subprocess contract, not a lifecycle root.
+pub(crate) fn reconcile_runner_job_state_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+) -> Result<()> {
     if record.state != AgentTaskRunState::Running {
         return Ok(());
     }
@@ -475,11 +519,13 @@ pub(crate) fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Res
         p.reconcile_runner_job(&runner_id, &job_id)
     }) {
         super::runner_continuation::RunnerJobReconciliation::Snapshot(snapshot) => {
-            reconcile_runner_job_snapshot(record, &snapshot)
+            reconcile_runner_job_snapshot_in_store(lifecycle_store, record, &snapshot)
         }
         super::runner_continuation::RunnerJobReconciliation::ConfirmedAbsent {
             checked_generations,
-        } => terminalize_lost_accepted_lab_job(record, checked_generations),
+        } => {
+            terminalize_lost_accepted_lab_job_in_store(lifecycle_store, record, checked_generations)
+        }
         super::runner_continuation::RunnerJobReconciliation::UnconfirmedAbsence => {
             let disconnected = super::runner_continuation::with_runner_continuation(|p| {
                 !p.is_runner_connected(&runner_id)
@@ -492,14 +538,30 @@ pub(crate) fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Res
     }
 }
 
-fn terminalize_lost_accepted_lab_job(
+/// Terminalize an accepted Lab job the daemon can no longer account for, below
+/// explicitly injected lifecycle roots.
+///
+/// Every step here has to name the same installation. The controller plan it
+/// reads is the plan the terminal failure is shaped from; the managed-service
+/// ledger it reaps is the one this run wrote; the terminal record it commits
+/// replaces the record the caller is holding. Reading a plan from one home and
+/// reaping another home's service ledger would report a cleanup proof for
+/// services this run never started, which is the same failure class as the
+/// permission gate that failed open in #7505.
+///
+/// Only the *local* branch of `reconcile_run_services_on_owner_at` reads a root
+/// at all — the runner branch dispatches a command the runner interprets
+/// against its own HOME — so passing this store's data root is precise rather
+/// than merely conservative.
+fn terminalize_lost_accepted_lab_job_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     checked_generations: usize,
 ) -> Result<()> {
     if !record.has_accepted_lab_handoff() || !record.provider_handles.is_empty() {
         return Ok(());
     }
-    let plan = store::read_controller_plan(&record.run_id)?;
+    let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
     let run_id = record.run_id.clone();
     let runner_id = record.runner_id().unwrap_or_default().to_string();
     let runner_job_id = record.runner_job_id().unwrap_or_default().to_string();
@@ -512,13 +574,15 @@ fn terminalize_lost_accepted_lab_job(
     // a service supervisor. Resolve that owner before replacing the run record
     // with a terminal failure so the cleanup proof remains durable.
     let service_cleanup =
-        crate::agent_task_scheduler::managed_services::reconcile_run_services_on_owner(
+        crate::agent_task_scheduler::managed_services::reconcile_run_services_on_owner_at(
+            &lifecycle_store.data_root(),
             &run_id,
             record.metadata.get("managed_service_supervisor"),
             "accepted_lab_runner_job_lost",
         )
         .map_err(Error::internal_unexpected)?;
-    let mut terminal = crate::agent_task_lifecycle::record_pre_execution_failure(
+    let mut terminal = crate::agent_task_lifecycle::record_pre_execution_failure_in_store(
+        lifecycle_store,
         &run_id,
         &plan,
         "accepted_lab_runner_job_lost",
@@ -547,7 +611,7 @@ fn terminalize_lost_accepted_lab_job(
     if let Some(handoff) = metadata.get_mut("runner_handoff") {
         handoff["state"] = json!("lost");
     }
-    store::write_record(&terminal)?;
+    lifecycle_store.write_record(&terminal)?;
     *record = terminal;
     Ok(())
 }
