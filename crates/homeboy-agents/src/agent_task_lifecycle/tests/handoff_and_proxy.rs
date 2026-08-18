@@ -1554,67 +1554,86 @@ fn detached_runner_failure_transitions_parent_and_task_terminal() {
 
 #[test]
 fn terminal_reconciliation_rejects_conflicting_directly_imported_artifact() {
-    with_isolated_home(|home| {
-        let patch = b"patch bytes";
-        let conflicting = b"other bytes";
-        let source = home.path().join("conflicting.patch");
-        std::fs::write(&source, conflicting).expect("write conflicting patch");
-        let plan = test_plan();
-        let mut aggregate = succeeded_aggregate(&plan);
-        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
-            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: "patch".to_string(),
-            kind: "patch".to_string(),
-            name: None,
-            label: None,
-            role: Some("patch".to_string()),
-            semantic_key: None,
-            path: Some("/runner/private/patch.diff".to_string()),
-            url: None,
-            mime: Some("text/x-patch".to_string()),
-            size_bytes: Some(patch.len() as u64),
-            sha256: Some(format!("{:x}", sha2::Sha256::digest(patch))),
-            metadata: json!({ "executor_artifact_finalized": true }),
-        });
-        let submitted = submit_plan(&plan, Some("direct-import-conflict")).expect("submit");
-        record_runner_job_identity(&submitted.run_id, "homeboy-lab", "job-1")
-            .expect("runner identity");
-
-        let mut hash = sha2::Sha256::new();
-        sha2::Digest::update(&mut hash, submitted.run_id.as_bytes());
-        sha2::Digest::update(&mut hash, [0]);
-        sha2::Digest::update(&mut hash, aggregate.outcomes[0].task_id.as_bytes());
-        sha2::Digest::update(&mut hash, [0]);
-        sha2::Digest::update(&mut hash, b"patch");
-        let artifact_id = format!("agent-task-{:x}", hash.finalize());
-        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        store
-            .import_artifact(&homeboy_core::observation::ArtifactRecord {
-                id: artifact_id,
-                run_id: submitted.run_id.clone(),
-                kind: "patch".to_string(),
-                artifact_type: "file".to_string(),
-                path: source.display().to_string(),
-                url: None,
-                public_url: None,
-                viewer_url: None,
-                viewer_links: Vec::new(),
-                sha256: Some(format!("{:x}", sha2::Sha256::digest(conflicting))),
-                size_bytes: Some(conflicting.len() as i64),
-                mime: Some("text/x-patch".to_string()),
-                metadata_json: json!({ "name": "patch" }),
-                created_at: chrono::Utc::now().to_rfc3339(),
-            })
-            .expect("conflicting direct artifact import");
-
-        record_run_aggregate(&submitted.run_id, &plan, &aggregate)
-            .expect("terminal state is persisted");
-        let record = store::read_record(&submitted.run_id).expect("terminal record");
-        assert_eq!(record.metadata["artifact_projection"]["status"], "failed");
-        assert!(record.metadata["artifact_projection"]["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("conflicts with terminal artifact projection")));
+    // Rooted in an explicit store rather than a mutated process environment
+    // (#7505). The conflicting artifact is imported into, and the terminal
+    // projection is read back out of, this store's own observation database and
+    // artifact root — so the refusal asserted below is a property of one home.
+    // `test_plan()` carries no workspace root, so `record_aggregate_in_store`
+    // (reached through `record_run_aggregate_in_store`) skips the still-ambient
+    // automatic artifact-retention pass.
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let patch = b"patch bytes";
+    let conflicting = b"other bytes";
+    let source = context.root().join("conflicting.patch");
+    std::fs::write(&source, conflicting).expect("write conflicting patch");
+    let plan = test_plan();
+    let mut aggregate = succeeded_aggregate(&plan);
+    aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: "patch".to_string(),
+        kind: "patch".to_string(),
+        name: None,
+        label: None,
+        role: Some("patch".to_string()),
+        semantic_key: None,
+        path: Some("/runner/private/patch.diff".to_string()),
+        url: None,
+        mime: Some("text/x-patch".to_string()),
+        size_bytes: Some(patch.len() as u64),
+        sha256: Some(format!("{:x}", sha2::Sha256::digest(patch))),
+        metadata: json!({ "executor_artifact_finalized": true }),
     });
+    let submitted = lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "direct-import-conflict", |_| Ok(json!({})))
+        .expect("submit");
+    record_runner_job_identity_in_store(
+        &lifecycle_store,
+        &submitted.run_id,
+        "homeboy-lab",
+        "job-1",
+    )
+    .expect("runner identity");
+
+    let mut hash = sha2::Sha256::new();
+    sha2::Digest::update(&mut hash, submitted.run_id.as_bytes());
+    sha2::Digest::update(&mut hash, [0]);
+    sha2::Digest::update(&mut hash, aggregate.outcomes[0].task_id.as_bytes());
+    sha2::Digest::update(&mut hash, [0]);
+    sha2::Digest::update(&mut hash, b"patch");
+    let artifact_id = format!("agent-task-{:x}", hash.finalize());
+    let store = lifecycle_store
+        .open_observation_initialized()
+        .expect("store");
+    store
+        .import_artifact(&homeboy_core::observation::ArtifactRecord {
+            id: artifact_id,
+            run_id: submitted.run_id.clone(),
+            kind: "patch".to_string(),
+            artifact_type: "file".to_string(),
+            path: source.display().to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: Some(format!("{:x}", sha2::Sha256::digest(conflicting))),
+            size_bytes: Some(conflicting.len() as i64),
+            mime: Some("text/x-patch".to_string()),
+            metadata_json: json!({ "name": "patch" }),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .expect("conflicting direct artifact import");
+
+    record_run_aggregate_in_store(&lifecycle_store, &submitted.run_id, &plan, &aggregate)
+        .expect("terminal state is persisted");
+    let record = lifecycle_store
+        .read_record(&submitted.run_id)
+        .expect("terminal record");
+    assert_eq!(record.metadata["artifact_projection"]["status"], "failed");
+    assert!(record.metadata["artifact_projection"]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("conflicts with terminal artifact projection")));
 }
 
 #[test]
