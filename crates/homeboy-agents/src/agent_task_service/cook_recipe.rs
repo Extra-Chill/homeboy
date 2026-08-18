@@ -2611,49 +2611,49 @@ mod tests {
 
     #[test]
     fn continuation_reconstructs_persisted_retry_intent_and_resolved_budget() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut persisted = recipe();
-            persisted.attempts[0].plan.options.execution_budget =
-                crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 1, 1);
-            persisted.retry_budget["max_attempts"] = serde_json::json!(2);
-            persisted.retry_budget["execution_budget"] = serde_json::json!({
-                "version": 1,
-                "deadline_unix_ms": null,
-                "max_provider_executions": 3,
-                "max_same_provider_retries": 1,
-                "max_provider_rotations": 1,
-            });
-            persisted.retry_budget["policy"] = serde_json::json!({
-                "operator_intent": { "max_attempts": 2, "max_provider_executions": null, "max_same_provider_retries": null, "max_provider_rotations": null },
-                "resolved": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
-                "requested": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
-                "effective": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
-                "truncated": { "max_provider_rotations": 0 },
-            });
-            write_recipe(&persisted).unwrap();
-
-            let options = reconstruct_options(&load_recipe("cook").unwrap())
-                .expect("continuation reconstructs persisted policy");
-            assert_eq!(options.max_attempts, 2);
-            assert_eq!(
-                options
-                    .initial_plan
-                    .options
-                    .execution_budget
-                    .max_provider_executions,
-                3
-            );
-            assert_eq!(
-                load_recipe("cook").unwrap().retry_budget["policy"]["resolved"]
-                    ["max_provider_rotations"],
-                1
-            );
-            assert_eq!(
-                load_recipe("cook").unwrap().retry_budget["policy"]["truncated"]
-                    ["max_provider_rotations"],
-                0
-            );
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let mut persisted = recipe();
+        persisted.attempts[0].plan.options.execution_budget =
+            crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 1, 1);
+        persisted.retry_budget["max_attempts"] = serde_json::json!(2);
+        persisted.retry_budget["execution_budget"] = serde_json::json!({
+            "version": 1,
+            "deadline_unix_ms": null,
+            "max_provider_executions": 3,
+            "max_same_provider_retries": 1,
+            "max_provider_rotations": 1,
         });
+        persisted.retry_budget["policy"] = serde_json::json!({
+            "operator_intent": { "max_attempts": 2, "max_provider_executions": null, "max_same_provider_retries": null, "max_provider_rotations": null },
+            "resolved": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
+            "requested": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
+            "effective": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
+            "truncated": { "max_provider_rotations": 0 },
+        });
+        store.persist_recipe(&persisted).unwrap();
+
+        let options = reconstruct_options(&store.load_recipe("cook").unwrap())
+            .expect("continuation reconstructs persisted policy");
+        assert_eq!(options.max_attempts, 2);
+        assert_eq!(
+            options
+                .initial_plan
+                .options
+                .execution_budget
+                .max_provider_executions,
+            3
+        );
+        assert_eq!(
+            store.load_recipe("cook").unwrap().retry_budget["policy"]["resolved"]
+                ["max_provider_rotations"],
+            1
+        );
+        assert_eq!(
+            store.load_recipe("cook").unwrap().retry_budget["policy"]["truncated"]
+                ["max_provider_rotations"],
+            0
+        );
     }
 
     #[test]
@@ -2761,79 +2761,85 @@ mod tests {
 
     #[test]
     fn mismatched_targeted_continuation_fails_closed_without_consuming_other_cook() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut other = recipe();
-            other.cook_id = "other".to_string();
-            other.attempts[0].run_id = "other-run".to_string();
-            write_recipe(&recipe()).unwrap();
-            write_recipe(&other).unwrap();
-            enqueue_terminal_continuation("cook", "run").unwrap();
-            enqueue_terminal_continuation("other", "other-run").unwrap();
-
-            let key = "cook:run";
-            let hash = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
-            fs::write(
-                queue_root().unwrap().join(format!("{hash}.pending")),
-                serde_json::to_vec(&AgentTaskCookContinuation {
-                    schema: CONTINUATION_SCHEMA.to_string(),
-                    key: "other:other-run".to_string(),
-                    cook_id: "other".to_string(),
-                    run_id: "other-run".to_string(),
-                    retries: 0,
-                })
-                .unwrap(),
-            )
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let mut other = recipe();
+        other.cook_id = "other".to_string();
+        other.attempts[0].run_id = "other-run".to_string();
+        store.persist_recipe(&recipe()).unwrap();
+        store.persist_recipe(&other).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        store
+            .enqueue_terminal_continuation("other", "other-run")
             .unwrap();
 
-            let error = claim_continuation_for("cook", "run").unwrap_err();
-            assert!(error.message.contains("does not match"));
-            assert_eq!(
-                claim_continuation_for("other", "other-run")
-                    .unwrap()
-                    .expect("unrelated continuation remains pending")
-                    .continuation()
-                    .key,
-                "other:other-run"
-            );
-        });
+        let key = "cook:run";
+        let hash = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
+        fs::write(
+            store.queue_root().join(format!("{hash}.pending")),
+            serde_json::to_vec(&AgentTaskCookContinuation {
+                schema: CONTINUATION_SCHEMA.to_string(),
+                key: "other:other-run".to_string(),
+                cook_id: "other".to_string(),
+                run_id: "other-run".to_string(),
+                retries: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = store.claim_continuation_for("cook", "run").unwrap_err();
+        assert!(error.message.contains("does not match"));
+        assert_eq!(
+            store
+                .claim_continuation_for("other", "other-run")
+                .unwrap()
+                .expect("unrelated continuation remains pending")
+                .continuation()
+                .key,
+            "other:other-run"
+        );
     }
 
     #[test]
     fn targeted_claim_rejects_a_key_with_unrelated_cook_fields() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut other = recipe();
-            other.cook_id = "other".to_string();
-            other.attempts[0].run_id = "other-run".to_string();
-            write_recipe(&recipe()).unwrap();
-            write_recipe(&other).unwrap();
-            enqueue_terminal_continuation("other", "other-run").unwrap();
-
-            let key = "cook:run";
-            let hash = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
-            fs::write(
-                queue_root().unwrap().join(format!("{hash}.pending")),
-                serde_json::to_vec(&AgentTaskCookContinuation {
-                    schema: CONTINUATION_SCHEMA.to_string(),
-                    key: key.to_string(),
-                    cook_id: "other".to_string(),
-                    run_id: "other-run".to_string(),
-                    retries: 0,
-                })
-                .unwrap(),
-            )
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let mut other = recipe();
+        other.cook_id = "other".to_string();
+        other.attempts[0].run_id = "other-run".to_string();
+        store.persist_recipe(&recipe()).unwrap();
+        store.persist_recipe(&other).unwrap();
+        store
+            .enqueue_terminal_continuation("other", "other-run")
             .unwrap();
 
-            let error = claim_continuation_for("cook", "run").unwrap_err();
-            assert!(error.message.contains("does not match"));
-            assert_eq!(
-                claim_continuation_for("other", "other-run")
-                    .unwrap()
-                    .expect("unrelated continuation remains pending")
-                    .continuation()
-                    .key,
-                "other:other-run"
-            );
-        });
+        let key = "cook:run";
+        let hash = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
+        fs::write(
+            store.queue_root().join(format!("{hash}.pending")),
+            serde_json::to_vec(&AgentTaskCookContinuation {
+                schema: CONTINUATION_SCHEMA.to_string(),
+                key: key.to_string(),
+                cook_id: "other".to_string(),
+                run_id: "other-run".to_string(),
+                retries: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = store.claim_continuation_for("cook", "run").unwrap_err();
+        assert!(error.message.contains("does not match"));
+        assert_eq!(
+            store
+                .claim_continuation_for("other", "other-run")
+                .unwrap()
+                .expect("unrelated continuation remains pending")
+                .continuation()
+                .key,
+            "other:other-run"
+        );
     }
 
     #[test]
@@ -3252,25 +3258,33 @@ mod tests {
 
     #[test]
     fn retry_attempts_are_appended_idempotently_before_scheduling() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            write_recipe(&recipe()).unwrap();
-            let mut retry_plan = recipe().attempts[0].plan.clone();
-            retry_plan.plan_id = "retry-plan".to_string();
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        let mut retry_plan = recipe().attempts[0].plan.clone();
+        retry_plan.plan_id = "retry-plan".to_string();
 
-            record_recipe_attempt("cook", 2, "run-2", &retry_plan).unwrap();
-            record_recipe_attempt("cook", 2, "run-2", &retry_plan).unwrap();
+        store
+            .record_recipe_attempt("cook", 2, "run-2", &retry_plan)
+            .unwrap();
+        store
+            .record_recipe_attempt("cook", 2, "run-2", &retry_plan)
+            .unwrap();
 
-            let persisted = load_recipe("cook").unwrap();
-            assert_eq!(persisted.attempts.len(), 2);
-            assert_eq!(persisted.attempts[1].run_id, "run-2");
-            let resumed = reconstruct_options(&persisted).unwrap();
-            assert_eq!(persist_initial_recipe(&resumed).unwrap(), persisted);
-            assert!(enqueue_terminal_continuation("cook", "run-2").unwrap());
+        let persisted = store.load_recipe("cook").unwrap();
+        assert_eq!(persisted.attempts.len(), 2);
+        assert_eq!(persisted.attempts[1].run_id, "run-2");
+        let resumed = reconstruct_options(&persisted).unwrap();
+        assert_eq!(store.persist_initial_recipe(&resumed).unwrap(), persisted);
+        assert!(store
+            .enqueue_terminal_continuation("cook", "run-2")
+            .unwrap());
 
-            let mut conflicting = retry_plan;
-            conflicting.plan_id = "different".to_string();
-            assert!(record_recipe_attempt("cook", 2, "run-2", &conflicting).is_err());
-        });
+        let mut conflicting = retry_plan;
+        conflicting.plan_id = "different".to_string();
+        assert!(store
+            .record_recipe_attempt("cook", 2, "run-2", &conflicting)
+            .is_err());
     }
 
     #[test]

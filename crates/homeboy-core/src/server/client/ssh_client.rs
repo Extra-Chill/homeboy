@@ -822,6 +822,9 @@ pub(super) fn execute_command_with_stdin_source_timeout(
     source: StdinSource,
     timeout: Duration,
 ) -> CommandOutput {
+    // A caller supplies bytes specifically for this child. Command defaults to
+    // inheriting stdin, which leaves no ChildStdin for the pump to write.
+    cmd.stdin(std::process::Stdio::piped());
     let started = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(child) => child,

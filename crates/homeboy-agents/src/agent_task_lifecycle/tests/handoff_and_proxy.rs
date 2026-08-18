@@ -1554,67 +1554,86 @@ fn detached_runner_failure_transitions_parent_and_task_terminal() {
 
 #[test]
 fn terminal_reconciliation_rejects_conflicting_directly_imported_artifact() {
-    with_isolated_home(|home| {
-        let patch = b"patch bytes";
-        let conflicting = b"other bytes";
-        let source = home.path().join("conflicting.patch");
-        std::fs::write(&source, conflicting).expect("write conflicting patch");
-        let plan = test_plan();
-        let mut aggregate = succeeded_aggregate(&plan);
-        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
-            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: "patch".to_string(),
-            kind: "patch".to_string(),
-            name: None,
-            label: None,
-            role: Some("patch".to_string()),
-            semantic_key: None,
-            path: Some("/runner/private/patch.diff".to_string()),
-            url: None,
-            mime: Some("text/x-patch".to_string()),
-            size_bytes: Some(patch.len() as u64),
-            sha256: Some(format!("{:x}", sha2::Sha256::digest(patch))),
-            metadata: json!({ "executor_artifact_finalized": true }),
-        });
-        let submitted = submit_plan(&plan, Some("direct-import-conflict")).expect("submit");
-        record_runner_job_identity(&submitted.run_id, "homeboy-lab", "job-1")
-            .expect("runner identity");
-
-        let mut hash = sha2::Sha256::new();
-        sha2::Digest::update(&mut hash, submitted.run_id.as_bytes());
-        sha2::Digest::update(&mut hash, [0]);
-        sha2::Digest::update(&mut hash, aggregate.outcomes[0].task_id.as_bytes());
-        sha2::Digest::update(&mut hash, [0]);
-        sha2::Digest::update(&mut hash, b"patch");
-        let artifact_id = format!("agent-task-{:x}", hash.finalize());
-        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        store
-            .import_artifact(&homeboy_core::observation::ArtifactRecord {
-                id: artifact_id,
-                run_id: submitted.run_id.clone(),
-                kind: "patch".to_string(),
-                artifact_type: "file".to_string(),
-                path: source.display().to_string(),
-                url: None,
-                public_url: None,
-                viewer_url: None,
-                viewer_links: Vec::new(),
-                sha256: Some(format!("{:x}", sha2::Sha256::digest(conflicting))),
-                size_bytes: Some(conflicting.len() as i64),
-                mime: Some("text/x-patch".to_string()),
-                metadata_json: json!({ "name": "patch" }),
-                created_at: chrono::Utc::now().to_rfc3339(),
-            })
-            .expect("conflicting direct artifact import");
-
-        record_run_aggregate(&submitted.run_id, &plan, &aggregate)
-            .expect("terminal state is persisted");
-        let record = store::read_record(&submitted.run_id).expect("terminal record");
-        assert_eq!(record.metadata["artifact_projection"]["status"], "failed");
-        assert!(record.metadata["artifact_projection"]["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("conflicts with terminal artifact projection")));
+    // Rooted in an explicit store rather than a mutated process environment
+    // (#7505). The conflicting artifact is imported into, and the terminal
+    // projection is read back out of, this store's own observation database and
+    // artifact root — so the refusal asserted below is a property of one home.
+    // `test_plan()` carries no workspace root, so `record_aggregate_in_store`
+    // (reached through `record_run_aggregate_in_store`) skips the still-ambient
+    // automatic artifact-retention pass.
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let patch = b"patch bytes";
+    let conflicting = b"other bytes";
+    let source = context.root().join("conflicting.patch");
+    std::fs::write(&source, conflicting).expect("write conflicting patch");
+    let plan = test_plan();
+    let mut aggregate = succeeded_aggregate(&plan);
+    aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: "patch".to_string(),
+        kind: "patch".to_string(),
+        name: None,
+        label: None,
+        role: Some("patch".to_string()),
+        semantic_key: None,
+        path: Some("/runner/private/patch.diff".to_string()),
+        url: None,
+        mime: Some("text/x-patch".to_string()),
+        size_bytes: Some(patch.len() as u64),
+        sha256: Some(format!("{:x}", sha2::Sha256::digest(patch))),
+        metadata: json!({ "executor_artifact_finalized": true }),
     });
+    let submitted = lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "direct-import-conflict", |_| Ok(json!({})))
+        .expect("submit");
+    record_runner_job_identity_in_store(
+        &lifecycle_store,
+        &submitted.run_id,
+        "homeboy-lab",
+        "job-1",
+    )
+    .expect("runner identity");
+
+    let mut hash = sha2::Sha256::new();
+    sha2::Digest::update(&mut hash, submitted.run_id.as_bytes());
+    sha2::Digest::update(&mut hash, [0]);
+    sha2::Digest::update(&mut hash, aggregate.outcomes[0].task_id.as_bytes());
+    sha2::Digest::update(&mut hash, [0]);
+    sha2::Digest::update(&mut hash, b"patch");
+    let artifact_id = format!("agent-task-{:x}", hash.finalize());
+    let store = lifecycle_store
+        .open_observation_initialized()
+        .expect("store");
+    store
+        .import_artifact(&homeboy_core::observation::ArtifactRecord {
+            id: artifact_id,
+            run_id: submitted.run_id.clone(),
+            kind: "patch".to_string(),
+            artifact_type: "file".to_string(),
+            path: source.display().to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: Some(format!("{:x}", sha2::Sha256::digest(conflicting))),
+            size_bytes: Some(conflicting.len() as i64),
+            mime: Some("text/x-patch".to_string()),
+            metadata_json: json!({ "name": "patch" }),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .expect("conflicting direct artifact import");
+
+    record_run_aggregate_in_store(&lifecycle_store, &submitted.run_id, &plan, &aggregate)
+        .expect("terminal state is persisted");
+    let record = lifecycle_store
+        .read_record(&submitted.run_id)
+        .expect("terminal record");
+    assert_eq!(record.metadata["artifact_projection"]["status"], "failed");
+    assert!(record.metadata["artifact_projection"]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("conflicts with terminal artifact projection")));
 }
 
 #[test]
@@ -1658,28 +1677,53 @@ fn run_record_exists_resolves_a_cook_id_to_its_latest_run() {
     // would succeed, and the handoff silently fell through to ship an unrunnable
     // `agent-task retry <id>` to the runner. `run_record_exists_resolved` must
     // report present for a cook id that resolves to a real run.
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        let aggregate = succeeded_aggregate(&plan);
-        let run_id = cook_attempt_run_id("cook-issue-8390", 1);
-        record_completed_run(&plan, &aggregate, Some(&run_id)).expect("run recorded");
-        record_cook_attempt("cook-issue-8390", 1, &run_id).expect("cook indexed");
+    // Rooted in an explicit store rather than a mutated process environment
+    // (#7505). `record_completed_run` is spelled out as its own two rooted
+    // halves — submission then `record_aggregate_in_store` — which is exactly
+    // the body of `record_completed_run_in_store`. The difference is the
+    // admission: that sibling submits through `submit_plan_in_store`, which
+    // resolves the controller-runtime admission queue under
+    // `paths::controller_runtimes_store()`. That store is machine-global by
+    // design, so calling it from a test that no longer mutates HOME would
+    // enqueue against the real operator runtime store. `test_plan()` carries no
+    // workspace root, so `record_aggregate_in_store` skips the still-ambient
+    // automatic artifact-retention pass.
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let aggregate = succeeded_aggregate(&plan);
+    let run_id = cook_attempt_run_id("cook-issue-8390", 1);
+    let mut submitted = lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, &run_id, |_| Ok(json!({})))
+        .expect("run recorded");
+    record_aggregate_in_store(&lifecycle_store, &mut submitted, &plan, &aggregate)
+        .expect("run recorded");
+    record_cook_attempt_in_store(&lifecycle_store, "cook-issue-8390", 1, &run_id)
+        .expect("cook indexed");
 
-        // Exact match sees only the concrete run id, not the cook alias.
-        assert!(run_record_exists(&run_id).expect("exact run exists"));
-        assert!(!run_record_exists("cook-issue-8390").expect("cook id not an exact record"));
+    // Exact match sees only the concrete run id, not the cook alias.
+    assert!(run_record_exists_in_store(&lifecycle_store, &run_id).expect("exact run exists"));
+    assert!(
+        !run_record_exists_in_store(&lifecycle_store, "cook-issue-8390")
+            .expect("cook id not an exact record")
+    );
 
-        // Resolution-aware existence follows the same path `retry` uses.
-        assert!(run_record_exists_resolved(&run_id).expect("resolved run exists"));
-        assert!(
-            run_record_exists_resolved("cook-issue-8390").expect("cook id resolves"),
-            "a cook id must resolve to its latest run for the Lab retry handoff"
-        );
-        assert!(
-            !run_record_exists_resolved("cook-does-not-exist").expect("missing id"),
-            "a genuinely missing id must still report absent"
-        );
-    });
+    // Resolution-aware existence follows the same path `retry` uses.
+    assert!(
+        run_record_exists_resolved_in_store(&lifecycle_store, &run_id)
+            .expect("resolved run exists")
+    );
+    assert!(
+        run_record_exists_resolved_in_store(&lifecycle_store, "cook-issue-8390")
+            .expect("cook id resolves"),
+        "a cook id must resolve to its latest run for the Lab retry handoff"
+    );
+    assert!(
+        !run_record_exists_resolved_in_store(&lifecycle_store, "cook-does-not-exist")
+            .expect("missing id"),
+        "a genuinely missing id must still report absent"
+    );
 }
 
 #[test]
@@ -1972,115 +2016,158 @@ fn run_state_bridges_one_to_one_onto_execution_state() {
 
 #[test]
 fn failed_provider_run_exposes_workflow_evidence_refs() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        let aggregate = AgentTaskAggregate {
-            schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-            plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Failed,
-            totals: AgentTaskAggregateTotals {
-                queued: 1,
-                failed: 1,
-                ..AgentTaskAggregateTotals::default()
-            },
-            outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                task_id: "task-a".to_string(),
-                status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
-                summary: Some("provider task failed".to_string()),
-                failure_classification: Some(
-                    crate::agent_task::AgentTaskFailureClassification::ExecutionFailed,
-                ),
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: Some(AgentTaskWorkflowEvidence {
-                    schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
-                    id: "provider-run-123".to_string(),
-                    label: Some("provider workflow".to_string()),
-                    steps: vec![AgentTaskWorkflowStepEvidence {
-                        id: "runtime".to_string(),
-                        label: Some("runtime evidence".to_string()),
-                        status: AgentTaskWorkflowStepStatus::Failed,
-                        depends_on: Vec::new(),
-                        started_at: None,
-                        finished_at: None,
-                        duration_ms: None,
-                        metrics: Value::Null,
-                        artifact_refs: vec![AgentTaskEvidenceRef {
-                            kind: "provider-transcript".to_string(),
-                            uri: "provider://runs/provider-run-123/transcript".to_string(),
-                            label: Some("Provider transcript".to_string()),
-                        }],
-                        diagnostics: Vec::new(),
-                        suggestions: Vec::new(),
-                        metadata: Value::Null,
+    // Rooted in an explicit store rather than a mutated process environment
+    // (#7505). See `run_record_exists_resolves_a_cook_id_to_its_latest_run` for
+    // why `record_completed_run` is spelled out as its two rooted halves.
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let aggregate = AgentTaskAggregate {
+        schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        status: AgentTaskAggregateStatus::Failed,
+        totals: AgentTaskAggregateTotals {
+            queued: 1,
+            failed: 1,
+            ..AgentTaskAggregateTotals::default()
+        },
+        outcomes: vec![AgentTaskOutcome {
+            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: "task-a".to_string(),
+            status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
+            summary: Some("provider task failed".to_string()),
+            failure_classification: Some(
+                crate::agent_task::AgentTaskFailureClassification::ExecutionFailed,
+            ),
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: Some(AgentTaskWorkflowEvidence {
+                schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
+                id: "provider-run-123".to_string(),
+                label: Some("provider workflow".to_string()),
+                steps: vec![AgentTaskWorkflowStepEvidence {
+                    id: "runtime".to_string(),
+                    label: Some("runtime evidence".to_string()),
+                    status: AgentTaskWorkflowStepStatus::Failed,
+                    depends_on: Vec::new(),
+                    started_at: None,
+                    finished_at: None,
+                    duration_ms: None,
+                    metrics: Value::Null,
+                    artifact_refs: vec![AgentTaskEvidenceRef {
+                        kind: "provider-transcript".to_string(),
+                        uri: "provider://runs/provider-run-123/transcript".to_string(),
+                        label: Some("Provider transcript".to_string()),
                     }],
+                    diagnostics: Vec::new(),
+                    suggestions: Vec::new(),
                     metadata: Value::Null,
-                }),
-                follow_up: None,
+                }],
                 metadata: Value::Null,
-            }],
-            events: vec![AgentTaskProgressEvent {
-                task_id: "task-a".to_string(),
-                state: AgentTaskState::Failed,
-                attempt: 1,
-                message: Some("provider task failed".to_string()),
-            }],
-            artifact_lineage: Vec::new(),
-            child_runs: Vec::new(),
-            artifact_bindings: Vec::new(),
-            queue: Default::default(),
-        };
+            }),
+            follow_up: None,
+            metadata: Value::Null,
+        }],
+        events: vec![AgentTaskProgressEvent {
+            task_id: "task-a".to_string(),
+            state: AgentTaskState::Failed,
+            attempt: 1,
+            message: Some("provider task failed".to_string()),
+        }],
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: Default::default(),
+    };
 
-        let record =
-            record_completed_run(&plan, &aggregate, Some("run-provider-failed")).expect("recorded");
-        let durable_status = status(&record.run_id).expect("status");
-        let durable_artifacts = artifacts(&record.run_id).expect("artifacts");
+    let mut submitted = lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "run-provider-failed", |_| Ok(json!({})))
+        .expect("recorded");
+    let record = record_aggregate_in_store(&lifecycle_store, &mut submitted, &plan, &aggregate)
+        .expect("recorded");
+    let durable_status = status_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("status")
+    .record;
+    let durable_artifacts =
+        artifacts_in_store(&lifecycle_store, &record.run_id).expect("artifacts");
 
-        assert_eq!(durable_status.state, AgentTaskRunState::Failed);
-        assert_eq!(durable_status.artifact_refs.len(), 1);
-        assert_eq!(durable_status.artifact_refs[0].kind, "provider-transcript");
-        assert_eq!(durable_artifacts.evidence_refs.len(), 4);
-        assert_eq!(
-            durable_artifacts.evidence_refs[0].uri,
-            "provider://runs/provider-run-123/transcript"
-        );
-        assert!(durable_artifacts
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "executor-input"));
-    });
+    assert_eq!(durable_status.state, AgentTaskRunState::Failed);
+    assert_eq!(durable_status.artifact_refs.len(), 1);
+    assert_eq!(durable_status.artifact_refs[0].kind, "provider-transcript");
+    assert_eq!(durable_artifacts.evidence_refs.len(), 4);
+    assert_eq!(
+        durable_artifacts.evidence_refs[0].uri,
+        "provider://runs/provider-run-123/transcript"
+    );
+    assert!(durable_artifacts
+        .evidence_refs
+        .iter()
+        .any(|evidence| evidence.kind == "executor-input"));
 }
 
 #[test]
 fn status_marks_running_run_without_owner_as_stale() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        submit_plan(&plan, Some("run-stale-missing-owner")).expect("submitted");
-        let mut record = store::read_record("run-stale-missing-owner").expect("record");
-        record.state = AgentTaskRunState::Running;
-        store::write_record(&record).expect("stored running record");
+    // Rooted in an explicit store rather than a mutated process environment
+    // (#7505). The stub admission keeps submission off the machine-global
+    // controller-runtime queue; `status_in_store` reads its admission from this
+    // store's own controller-runtime root, so the staleness classification and
+    // the record it is persisted onto are projections of the same home.
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "run-stale-missing-owner", |_| Ok(json!({})))
+        .expect("submitted");
+    let mut record = lifecycle_store
+        .read_record("run-stale-missing-owner")
+        .expect("record");
+    record.state = AgentTaskRunState::Running;
+    lifecycle_store
+        .write_record(&record)
+        .expect("stored running record");
 
-        let loaded = status("run-stale-missing-owner").expect("status loaded");
+    let loaded = status_in_store(
+        &lifecycle_store,
+        "run-stale-missing-owner",
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("status loaded")
+    .record;
 
-        assert_eq!(loaded.state, AgentTaskRunState::Running);
-        assert_eq!(loaded.metadata["stale_running"], json!(true));
-        assert_eq!(
-            loaded.metadata["stale_running_reason"],
-            "missing_runner_pid"
-        );
-        assert_eq!(loaded.metadata["provider_boundary"]["status"], "absent");
+    assert_eq!(loaded.state, AgentTaskRunState::Running);
+    assert_eq!(loaded.metadata["stale_running"], json!(true));
+    assert_eq!(
+        loaded.metadata["stale_running_reason"],
+        "missing_runner_pid"
+    );
+    assert_eq!(loaded.metadata["provider_boundary"]["status"], "absent");
 
-        // Read-side reconciliation persists the classification, so repeated
-        // status reads converge instead of reviving a ghost run as active.
-        let persisted = store::read_record("run-stale-missing-owner").expect("persisted record");
-        assert_eq!(persisted.metadata["stale_running"], json!(true));
-        let repeated = status("run-stale-missing-owner").expect("repeated status loaded");
-        assert_eq!(repeated.metadata["stale_running"], json!(true));
-    });
+    // Read-side reconciliation persists the classification, so repeated
+    // status reads converge instead of reviving a ghost run as active.
+    let persisted = lifecycle_store
+        .read_record("run-stale-missing-owner")
+        .expect("persisted record");
+    assert_eq!(persisted.metadata["stale_running"], json!(true));
+    let repeated = status_in_store(
+        &lifecycle_store,
+        "run-stale-missing-owner",
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("repeated status loaded")
+    .record;
+    assert_eq!(repeated.metadata["stale_running"], json!(true));
 }
 
 #[test]
@@ -2197,33 +2284,42 @@ fn cancel_run_marks_queued_record_cancelled() {
 
 #[test]
 fn list_records_skips_malformed_observation_records() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        submit_plan(&plan, Some("good-run")).expect("submitted");
-        let store = homeboy_core::observation::ObservationStore::open_initialized()
-            .expect("observation store");
-        store
-            .upsert_imported_run(&homeboy_core::observation::RunRecord {
-                id: "bad-run".to_string(),
-                kind: "agent-task".to_string(),
-                component_id: None,
-                started_at: "2026-01-01T00:00:00Z".to_string(),
-                finished_at: None,
-                status: "running".to_string(),
-                command: None,
-                cwd: None,
-                homeboy_version: None,
-                git_sha: None,
-                rig_id: None,
-                metadata_json: json!({ "schema": "homeboy/agent-task-observation-record/v1" }),
-            })
-            .expect("bad record inserted");
+    // Rooted in an explicit store rather than a mutated process environment
+    // (#7505). The malformed row is inserted through this store's own
+    // observation database — the same one `list_records_in_store` scans — so the
+    // skip asserted below is a property of one home rather than of whichever
+    // observation DB the process environment happened to point at.
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "good-run", |_| Ok(json!({})))
+        .expect("submitted");
+    let store = lifecycle_store
+        .open_observation_initialized()
+        .expect("observation store");
+    store
+        .upsert_imported_run(&homeboy_core::observation::RunRecord {
+            id: "bad-run".to_string(),
+            kind: "agent-task".to_string(),
+            component_id: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: None,
+            status: "running".to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: json!({ "schema": "homeboy/agent-task-observation-record/v1" }),
+        })
+        .expect("bad record inserted");
 
-        let records = list_records().expect("records listed");
+    let records = list_records_in_store(&lifecycle_store).expect("records listed");
 
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].run_id, "good-run");
-    });
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].run_id, "good-run");
 }
 
 #[test]
@@ -2313,71 +2409,85 @@ fn artifact_refs_omit_evidence_refs_with_empty_uri() {
 
 #[test]
 fn status_filters_empty_uri_artifact_refs() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        let aggregate = AgentTaskAggregate {
-            schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-            plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
-            totals: AgentTaskAggregateTotals {
-                queued: 1,
-                succeeded: 1,
-                ..AgentTaskAggregateTotals::default()
-            },
-            outcomes: vec![outcome_with_refs(
-                "task-a",
-                vec![
-                    artifact_ref_artifact(
-                        "dir-empty",
-                        "sample-runtime-artifact-directory",
-                        Some(""),
-                        None,
-                    ),
-                    artifact_ref_artifact("patch", "patch", None, Some("/tmp/patch.diff")),
-                ],
-                vec![
-                    AgentTaskEvidenceRef {
-                        kind: "sample-runtime-command-log".to_string(),
-                        uri: "".to_string(),
-                        label: Some("command log".to_string()),
-                    },
-                    AgentTaskEvidenceRef {
-                        kind: "transcript".to_string(),
-                        uri: "file:///tmp/transcript.json".to_string(),
-                        label: Some("provider transcript".to_string()),
-                    },
-                ],
-            )],
-            events: vec![AgentTaskProgressEvent {
-                task_id: "task-a".to_string(),
-                state: AgentTaskState::Succeeded,
-                attempt: 1,
-                message: Some("ok".to_string()),
-            }],
-            artifact_lineage: Vec::new(),
-            child_runs: Vec::new(),
-            artifact_bindings: Vec::new(),
-            queue: Default::default(),
-        };
+    // Rooted in an explicit store rather than a mutated process environment
+    // (#7505). See `run_record_exists_resolves_a_cook_id_to_its_latest_run` for
+    // why `record_completed_run` is spelled out as its two rooted halves.
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let aggregate = AgentTaskAggregate {
+        schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        status: AgentTaskAggregateStatus::Succeeded,
+        totals: AgentTaskAggregateTotals {
+            queued: 1,
+            succeeded: 1,
+            ..AgentTaskAggregateTotals::default()
+        },
+        outcomes: vec![outcome_with_refs(
+            "task-a",
+            vec![
+                artifact_ref_artifact(
+                    "dir-empty",
+                    "sample-runtime-artifact-directory",
+                    Some(""),
+                    None,
+                ),
+                artifact_ref_artifact("patch", "patch", None, Some("/tmp/patch.diff")),
+            ],
+            vec![
+                AgentTaskEvidenceRef {
+                    kind: "sample-runtime-command-log".to_string(),
+                    uri: "".to_string(),
+                    label: Some("command log".to_string()),
+                },
+                AgentTaskEvidenceRef {
+                    kind: "transcript".to_string(),
+                    uri: "file:///tmp/transcript.json".to_string(),
+                    label: Some("provider transcript".to_string()),
+                },
+            ],
+        )],
+        events: vec![AgentTaskProgressEvent {
+            task_id: "task-a".to_string(),
+            state: AgentTaskState::Succeeded,
+            attempt: 1,
+            message: Some("ok".to_string()),
+        }],
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: Default::default(),
+    };
 
-        let record =
-            record_completed_run(&plan, &aggregate, Some("run-empty-refs")).expect("recorded");
-        let durable_status = status(&record.run_id).expect("status");
+    let mut submitted = lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "run-empty-refs", |_| Ok(json!({})))
+        .expect("recorded");
+    let record = record_aggregate_in_store(&lifecycle_store, &mut submitted, &plan, &aggregate)
+        .expect("recorded");
+    let durable_status = status_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )
+    .expect("status")
+    .record;
 
-        let uris: Vec<&str> = durable_status
-            .artifact_refs
-            .iter()
-            .map(|r| r.uri.as_str())
-            .collect();
-        assert!(
-            uris.iter().all(|uri| !uri.is_empty()),
-            "no empty-URI refs leak into status output: {uris:?}"
-        );
-        let kinds: Vec<&str> = durable_status
-            .artifact_refs
-            .iter()
-            .map(|r| r.kind.as_str())
-            .collect();
-        assert_eq!(kinds, vec!["patch", "transcript"]);
-    });
+    let uris: Vec<&str> = durable_status
+        .artifact_refs
+        .iter()
+        .map(|r| r.uri.as_str())
+        .collect();
+    assert!(
+        uris.iter().all(|uri| !uri.is_empty()),
+        "no empty-URI refs leak into status output: {uris:?}"
+    );
+    let kinds: Vec<&str> = durable_status
+        .artifact_refs
+        .iter()
+        .map(|r| r.kind.as_str())
+        .collect();
+    assert_eq!(kinds, vec!["patch", "transcript"]);
 }

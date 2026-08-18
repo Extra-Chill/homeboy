@@ -852,10 +852,12 @@ fn read_controller_plan_in_store(
 /// Controller lifecycle operations resolve the plan from their durable run
 /// identity. `AgentTaskRunRecord::plan_path` can be runner-local transport
 /// evidence after a Lab projection and is never controller execution authority.
-pub(super) fn read_controller_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
-    read_controller_plan_for_execution_in_store(&default_store()?, run_id)
-}
-
+///
+/// There is no ambient `store::` shim for this any more: the migration branch
+/// below rewrites `plan.json`, so the last caller —
+/// `load_plan_for_execution` — now resolves one store and hands it here rather
+/// than letting the Cook-alias resolution and the plan rewrite land in
+/// separately resolved homes (#7505).
 fn read_controller_plan_for_execution_in_store(
     store: &AgentTaskLifecycleStore,
     run_id: &str,

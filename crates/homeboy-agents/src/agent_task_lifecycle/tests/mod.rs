@@ -164,8 +164,9 @@ impl RunnerContinuationProvider for ConnectedRunnerProvider {
         _runner_id: &str,
         _job_id: &str,
     ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
-        // No live snapshot; `reconcile_runner_job_state` treats an error from a
-        // connected runner as "no new progress" and leaves the record running.
+        // No live snapshot; `reconcile_runner_job_state_in_store` treats an
+        // error from a connected runner as "no new progress" and leaves the
+        // record running.
         Err(Error::internal_unexpected(
             "no runner job log snapshot in test",
         ))

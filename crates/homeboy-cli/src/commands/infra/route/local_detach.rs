@@ -81,6 +81,18 @@ fn is_unsupervised_local_cook(cli: &Cli) -> bool {
         && !consume_local_cook_launch_token()
 }
 
+fn automatic_local_cook_needs_supervision(cli: &Cli, provider_placement: Option<&str>) -> bool {
+    cli.placement == homeboy::cli_surface::Placement::Auto
+        && provider_placement == Some("local")
+        && matches!(
+            &cli.command,
+            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
+            }) if !cook.preview
+        )
+        && !consume_local_cook_launch_token()
+}
+
 fn consume_local_cook_launch_token() -> bool {
     let (Some(token), Some(path)) = (
         std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_ENV),
@@ -171,7 +183,9 @@ pub(super) fn intercept_local_detached_cook(
     provider_placement: Option<&str>,
     provider_runner_id: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
-    if !is_unsupervised_local_cook(cli) {
+    if !is_unsupervised_local_cook(cli)
+        && !automatic_local_cook_needs_supervision(cli, provider_placement)
+    {
         return Ok(None);
     }
     // Diagnostics only: an attached local Cook shares this client's lifetime and
