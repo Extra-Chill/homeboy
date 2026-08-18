@@ -162,6 +162,9 @@ pub enum NotifyOutboxDisposition {
     /// redelivery, and leaving the claim releasable would let a second observer
     /// announce the same outcome alongside the retry.
     Queued { entry_id: String },
+    /// The transport rejected the event before making its own delivery attempt
+    /// and explicitly said retrying cannot succeed.
+    Rejected,
     /// The inline attempt failed and nothing was queued. Either the failure is
     /// not retryable (no transport configured, or the named transport is not
     /// installed) or the queue itself could not be written. A producer holding
@@ -297,7 +300,25 @@ pub fn backoff_after(attempts_made: u32) -> Duration {
 /// `not_configured` and leave the event eligible for a later observer, which
 /// stays the right behaviour.
 fn is_retryable(outcome: &NotifyOutcome) -> bool {
-    !outcome.delivered && matches!(outcome.delivery, NotifyDelivery::Transport { .. })
+    !outcome.delivered
+        && matches!(outcome.delivery, NotifyDelivery::Transport { .. })
+        && outcome
+            .result
+            .as_ref()
+            .and_then(|result| result.get("retryable"))
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+}
+
+fn is_terminal_rejection(outcome: &NotifyOutcome) -> bool {
+    !outcome.delivered
+        && matches!(outcome.delivery, NotifyDelivery::Transport { .. })
+        && outcome
+            .result
+            .as_ref()
+            .and_then(|result| result.get("retryable"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -344,9 +365,14 @@ fn dispatch_with_outbox_inner(
         };
     }
     if !is_retryable(&outcome) {
+        let rejected = is_terminal_rejection(&outcome);
         return NotifyOutboxDispatch {
             outcome,
-            disposition: NotifyOutboxDisposition::Dropped,
+            disposition: if rejected {
+                NotifyOutboxDisposition::Rejected
+            } else {
+                NotifyOutboxDisposition::Dropped
+            },
         };
     }
     let queued = config_root.and_then(|config_root| {
@@ -801,6 +827,24 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let dispatch = dispatch_with_outbox(&event("run-unconfigured"), None);
             assert_eq!(dispatch.disposition, NotifyOutboxDisposition::Dropped);
+            assert!(pending_entries().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_rejection_before_an_attempt_is_not_queued() {
+        crate::test_support::with_isolated_home(|_| {
+            install_transport(
+                "outbox.rejected",
+                vec!["sh", "-c", "printf '%s\\n' '{\"status\":\"failed\",\"retryable\":false,\"reason_code\":\"invalid_route\",\"validation_field\":\"route\"}'; exit 1"],
+            );
+            set_default_transport("outbox.rejected");
+
+            let dispatch = dispatch_with_outbox(&event("run-rejected"), None);
+            assert!(matches!(
+                dispatch.disposition,
+                NotifyOutboxDisposition::Rejected
+            ));
             assert!(pending_entries().is_empty());
         });
     }

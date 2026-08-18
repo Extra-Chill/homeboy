@@ -139,6 +139,8 @@ fn terminal_outcome(
         "delivered"
     } else if matches!(disposition, NotifyOutboxDisposition::Queued { .. }) {
         "queued"
+    } else if matches!(disposition, NotifyOutboxDisposition::Rejected) {
+        "rejected"
     } else if matches!(outcome.delivery, NotifyDelivery::NotConfigured) {
         "not_configured"
     } else {
@@ -159,6 +161,8 @@ fn terminal_outcome(
         "error_class": error_class,
         "outbox_entry_id": outbox_entry_id,
         "transport_result": safe_transport_result(outcome.result.as_ref()),
+        "rejection_reason": safe_rejection_reason(outcome.result.as_ref()),
+        "validation_context": safe_validation_context(outcome.result.as_ref()),
     })
 }
 
@@ -173,6 +177,9 @@ fn safe_transport_result(result: Option<&Value>) -> Option<Value> {
         "route_kind",
         "retryable",
         "truncated",
+        "reason_code",
+        "validation_code",
+        "validation_field",
     ];
     let object = result?.as_object()?;
     let mut safe = Map::new();
@@ -191,6 +198,26 @@ fn safe_transport_result(result: Option<&Value>) -> Option<Value> {
         }
     }
     (!safe.is_empty()).then_some(Value::Object(safe))
+}
+
+fn safe_rejection_reason(result: Option<&Value>) -> Option<Value> {
+    safe_transport_result(result).and_then(|result| {
+        result
+            .get("reason_code")
+            .or_else(|| result.get("validation_code"))
+            .cloned()
+    })
+}
+
+fn safe_validation_context(result: Option<&Value>) -> Option<Value> {
+    let result = safe_transport_result(result)?;
+    let mut context = Map::new();
+    for key in ["validation_code", "validation_field", "route_kind"] {
+        if let Some(value) = result.get(key) {
+            context.insert(key.to_string(), value.clone());
+        }
+    }
+    (!context.is_empty()).then_some(Value::Object(context))
 }
 
 fn cook_subject(cook_id: &str, run_id: &str, component: Option<&str>) -> NotifySubject {
@@ -456,7 +483,7 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
         // Nothing durable exists — no transport is configured, or the queue
         // could not be written. Release, exactly as before, so a later
         // terminal observer is eligible to try again.
-        NotifyOutboxDisposition::Dropped => {
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected => {
             let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim(
                 &report.cook_id,
             );
@@ -658,7 +685,7 @@ pub fn batch_terminal(
                 BATCH_TERMINAL_DELIVERED_BY,
             );
         }
-        NotifyOutboxDisposition::Dropped => {
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected => {
             let _ =
                 crate::agent_task_lifecycle::release_cook_terminal_notification_claim(subject_id);
         }
@@ -930,7 +957,7 @@ pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<
                 RUN_RECONCILED_DELIVERED_BY,
             );
         }
-        NotifyOutboxDisposition::Dropped => {
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected => {
             let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim(run_id);
         }
     }

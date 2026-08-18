@@ -505,12 +505,17 @@ fn attach_cook_notification_delivery(
         return;
     };
     if outcome.get("status").and_then(Value::as_str) != Some("delivered") {
-        outcome["retry_command"] = Value::String(agent_task_service_direct::cook_continue_command(
-            None, cook_id, false, None,
-        ));
+        outcome["resend_command"] = Value::String(
+            agent_task_service_direct::cook_continue_command(None, cook_id, false, None),
+        );
+        outcome["inspect_command"] =
+            Value::String(format!("homeboy agent-task status {cook_id} --full"));
     }
-    if outcome.get("status").and_then(Value::as_str) == Some("not_configured") {
-        outcome["configuration_command"] = Value::String(
+    if matches!(
+        outcome.get("status").and_then(Value::as_str),
+        Some("not_configured" | "rejected")
+    ) {
+        outcome["repair_command"] = Value::String(
             "homeboy config set /notifications/default_transport '<installed-transport-id>'"
                 .to_string(),
         );
@@ -1137,22 +1142,33 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
 
     if let Some(command) = value
         .get("notification_delivery")
-        .and_then(|delivery| delivery.get("retry_command"))
+        .and_then(|delivery| delivery.get("inspect_command"))
         .and_then(Value::as_str)
     {
         metadata.next_actions.push(
-            CommandNextAction::new("retry terminal notification", command)
+            CommandNextAction::new("inspect terminal notification", command)
+                .with_kind(CommandNextActionKind::Show),
+        );
+    }
+
+    if let Some(command) = value
+        .get("notification_delivery")
+        .and_then(|delivery| delivery.get("resend_command"))
+        .and_then(Value::as_str)
+    {
+        metadata.next_actions.push(
+            CommandNextAction::new("resend terminal notification", command)
                 .with_kind(CommandNextActionKind::Repair),
         );
     }
 
     if let Some(command) = value
         .get("notification_delivery")
-        .and_then(|delivery| delivery.get("configuration_command"))
+        .and_then(|delivery| delivery.get("repair_command"))
         .and_then(Value::as_str)
     {
         metadata.next_actions.push(
-            CommandNextAction::new("configure terminal notifications", command)
+            CommandNextAction::new("repair terminal notifications", command)
                 .with_kind(CommandNextActionKind::Repair),
         );
     }
@@ -4356,8 +4372,11 @@ fn compact_status_summary_with_aggregate(
                 "status",
                 "error_class",
                 "transport_result",
-                "retry_command",
-                "configuration_command",
+                "rejection_reason",
+                "validation_context",
+                "inspect_command",
+                "repair_command",
+                "resend_command",
             ],
         );
     }
@@ -6840,7 +6859,7 @@ mod tests {
                     "route_classification": "explicit",
                     "status": "failed",
                     "error_class": "transport_spawn_failed",
-                    "retry_command": "homeboy agent-task cook-continue cook-1",
+                    "resend_command": "homeboy agent-task cook-continue cook-1",
                     "raw_destination": "must-not-appear"
                 }
             }),
@@ -6849,7 +6868,7 @@ mod tests {
 
         assert_eq!(summary["notification_delivery"]["status"], "failed");
         assert_eq!(
-            summary["notification_delivery"]["retry_command"],
+            summary["notification_delivery"]["resend_command"],
             "homeboy agent-task cook-continue cook-1"
         );
         assert!(summary["notification_delivery"]
