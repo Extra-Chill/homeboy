@@ -1808,124 +1808,148 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
     });
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The completed run is written and read back through one injected
+/// store, so the executor evidence and the artifact report asserted below are
+/// projections of the same home.
+///
+/// `record_completed_run` is spelled out as its own two rooted halves —
+/// submission then `record_aggregate_in_store` — which is exactly the body of
+/// `record_completed_run_in_store`. The difference is the admission: that
+/// sibling submits through `submit_plan_in_store`, which resolves the
+/// controller-runtime admission queue under `paths::controller_runtimes_store()`.
+/// That store is machine-global by design, so calling it from a test that no
+/// longer mutates HOME would enqueue against the real operator runtime store and
+/// block on its cross-process lock. The stub admission is the same one every
+/// other rooted test in this crate passes.
+///
+/// The plan carries no workspace root, so `record_aggregate_in_store` skips the
+/// automatic artifact-retention pass — which is still ambient, and is why the
+/// sibling test that asserts on `automatic_artifact_retention` was left on
+/// `with_isolated_home`.
 #[test]
 fn completed_run_exposes_latest_executor_input_output_and_expectations() {
-    with_isolated_home(|_| {
-        let mut plan = test_plan();
-        let request = &mut plan.tasks[0];
-        request.executor.backend = "sandbox".to_string();
-        request.executor.model = Some("gpt-fixture".to_string());
-        request.component_contracts = vec![AgentTaskComponentContract {
-            slug: Some("runtime-engine".to_string()),
-            path: Some("/workspace/runtime-engine".to_string()),
-            extra: serde_json::Map::from_iter([
-                ("loadAs".to_string(), json!("plugin")),
-                ("activate".to_string(), json!(true)),
-            ]),
-        }];
-        request.metadata = json!({
-            "runtime_component_paths": ["/runtime/components/sandbox-host"]
-        });
-        request.expected_artifacts = vec!["patch".to_string()];
-        request.artifact_declarations = vec![AgentTaskArtifactDeclaration {
-            name: "proof_bundle".to_string(),
-            artifact_type: Some("bundle".to_string()),
-            artifact_schema: None,
-            path: None,
-            required: true,
-            description: None,
-            metadata: Value::Null,
-        }];
-
-        let mut aggregate = succeeded_aggregate(&plan);
-        aggregate.outcomes[0].metadata = json!({
-            "model": "openai/gpt-5.6-terra",
-            "provider_rotation": {
-                "attempts": [{
-                    "attempt": 1,
-                    "rotation_index": 0,
-                    "backend": "sandbox",
-                    "selector": "fixture",
-                    "model": "gpt-fixture",
-                    "requested_model": "gpt-fixture",
-                    "attempted_model": "gpt-fixture",
-                    "candidate_producing_model": "gpt-fixture",
-                    "status": "provider_error",
-                    "failure_classification": "provider"
-                }, {
-                    "attempt": 2,
-                    "rotation_index": 1,
-                    "backend": "opencode",
-                    "selector": "opencode.agent-task-executor",
-                    "model": "openai/gpt-5.6-terra",
-                    "requested_model": "gpt-fixture",
-                    "attempted_model": "openai/gpt-5.6-terra",
-                    "candidate_producing_model": "openai/gpt-5.6-terra",
-                    "status": "succeeded"
-                }]
-            }
-        });
-        aggregate.outcomes[0].outputs = json!({
-            "provider_run_result": {
-                "run_id": "provider-run-123",
-                "status": "succeeded"
-            }
-        });
-
-        let record =
-            record_completed_run(&plan, &aggregate, Some("run-evidence")).expect("recorded");
-        let evidence = record
-            .latest_executor_evidence
-            .as_ref()
-            .expect("latest executor evidence");
-        let artifact_report = artifacts("run-evidence").expect("artifacts loaded");
-
-        assert_eq!(evidence.task_id, "task-a");
-        assert_eq!(evidence.backend, "opencode");
-        assert_eq!(
-            evidence.selector.as_deref(),
-            Some("opencode.agent-task-executor")
-        );
-        assert_eq!(evidence.model.as_deref(), Some("openai/gpt-5.6-terra"));
-        assert_eq!(record.tasks[0].backend, "opencode");
-        assert_eq!(
-            record.tasks[0].model.as_deref(),
-            Some("openai/gpt-5.6-terra")
-        );
-        assert_eq!(
-            evidence.provider_run_id.as_deref(),
-            Some("provider-run-123")
-        );
-        assert_eq!(evidence.component_contracts.len(), 1);
-        assert_eq!(
-            evidence.runtime_component_paths,
-            vec![
-                "/runtime/components/sandbox-host".to_string(),
-                "/workspace/runtime-engine".to_string()
-            ]
-        );
-        assert_eq!(evidence.expected_artifacts, vec!["patch".to_string()]);
-        assert_eq!(
-            evidence.typed_artifact_expectations,
-            vec!["proof_bundle".to_string()]
-        );
-        assert_eq!(
-            record.metadata["latest_executor_evidence"]["input_ref"]["uri"],
-            "homeboy://agent-task/run/run-evidence/plan#task=task-a"
-        );
-        assert!(artifact_report
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "executor-input"));
-        assert!(artifact_report
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "executor-normalized-output"));
-        assert!(artifact_report
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "executor-outcome"));
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let mut plan = test_plan();
+    let request = &mut plan.tasks[0];
+    request.executor.backend = "sandbox".to_string();
+    request.executor.model = Some("gpt-fixture".to_string());
+    request.component_contracts = vec![AgentTaskComponentContract {
+        slug: Some("runtime-engine".to_string()),
+        path: Some("/workspace/runtime-engine".to_string()),
+        extra: serde_json::Map::from_iter([
+            ("loadAs".to_string(), json!("plugin")),
+            ("activate".to_string(), json!(true)),
+        ]),
+    }];
+    request.metadata = json!({
+        "runtime_component_paths": ["/runtime/components/sandbox-host"]
     });
+    request.expected_artifacts = vec!["patch".to_string()];
+    request.artifact_declarations = vec![AgentTaskArtifactDeclaration {
+        name: "proof_bundle".to_string(),
+        artifact_type: Some("bundle".to_string()),
+        artifact_schema: None,
+        path: None,
+        required: true,
+        description: None,
+        metadata: Value::Null,
+    }];
+
+    let mut aggregate = succeeded_aggregate(&plan);
+    aggregate.outcomes[0].metadata = json!({
+        "model": "openai/gpt-5.6-terra",
+        "provider_rotation": {
+            "attempts": [{
+                "attempt": 1,
+                "rotation_index": 0,
+                "backend": "sandbox",
+                "selector": "fixture",
+                "model": "gpt-fixture",
+                "requested_model": "gpt-fixture",
+                "attempted_model": "gpt-fixture",
+                "candidate_producing_model": "gpt-fixture",
+                "status": "provider_error",
+                "failure_classification": "provider"
+            }, {
+                "attempt": 2,
+                "rotation_index": 1,
+                "backend": "opencode",
+                "selector": "opencode.agent-task-executor",
+                "model": "openai/gpt-5.6-terra",
+                "requested_model": "gpt-fixture",
+                "attempted_model": "openai/gpt-5.6-terra",
+                "candidate_producing_model": "openai/gpt-5.6-terra",
+                "status": "succeeded"
+            }]
+        }
+    });
+    aggregate.outcomes[0].outputs = json!({
+        "provider_run_result": {
+            "run_id": "provider-run-123",
+            "status": "succeeded"
+        }
+    });
+
+    let mut submitted = lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "run-evidence", |_| Ok(json!({})))
+        .expect("submitted");
+    let record = record_aggregate_in_store(&lifecycle_store, &mut submitted, &plan, &aggregate)
+        .expect("recorded");
+    let evidence = record
+        .latest_executor_evidence
+        .as_ref()
+        .expect("latest executor evidence");
+    let artifact_report =
+        artifacts_in_store(&lifecycle_store, "run-evidence").expect("artifacts loaded");
+
+    assert_eq!(evidence.task_id, "task-a");
+    assert_eq!(evidence.backend, "opencode");
+    assert_eq!(
+        evidence.selector.as_deref(),
+        Some("opencode.agent-task-executor")
+    );
+    assert_eq!(evidence.model.as_deref(), Some("openai/gpt-5.6-terra"));
+    assert_eq!(record.tasks[0].backend, "opencode");
+    assert_eq!(
+        record.tasks[0].model.as_deref(),
+        Some("openai/gpt-5.6-terra")
+    );
+    assert_eq!(
+        evidence.provider_run_id.as_deref(),
+        Some("provider-run-123")
+    );
+    assert_eq!(evidence.component_contracts.len(), 1);
+    assert_eq!(
+        evidence.runtime_component_paths,
+        vec![
+            "/runtime/components/sandbox-host".to_string(),
+            "/workspace/runtime-engine".to_string()
+        ]
+    );
+    assert_eq!(evidence.expected_artifacts, vec!["patch".to_string()]);
+    assert_eq!(
+        evidence.typed_artifact_expectations,
+        vec!["proof_bundle".to_string()]
+    );
+    assert_eq!(
+        record.metadata["latest_executor_evidence"]["input_ref"]["uri"],
+        "homeboy://agent-task/run/run-evidence/plan#task=task-a"
+    );
+    assert!(artifact_report
+        .evidence_refs
+        .iter()
+        .any(|evidence| evidence.kind == "executor-input"));
+    assert!(artifact_report
+        .evidence_refs
+        .iter()
+        .any(|evidence| evidence.kind == "executor-normalized-output"));
+    assert!(artifact_report
+        .evidence_refs
+        .iter()
+        .any(|evidence| evidence.kind == "executor-outcome"));
 }
 
 #[test]
