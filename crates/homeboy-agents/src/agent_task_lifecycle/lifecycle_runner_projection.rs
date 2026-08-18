@@ -158,6 +158,43 @@ pub fn project_terminal_runner_result(
     run_id: &str,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<bool> {
+    project_terminal_runner_result_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        snapshot,
+    )
+}
+
+/// The store-rooted counterpart of [`project_terminal_runner_result`].
+///
+/// Every durable touch below follows the injected store, and this one has two
+/// distinct commit targets rather than one, which is why leaving any of it
+/// ambient would split it:
+///
+/// * the runner-exec branch finalizes an *observation* row through
+///   `project_terminal_runner_exec_result_in_store`;
+/// * the agent-task branch reads the lifecycle record, binds the pending Lab
+///   handoff (a durable write, through `record_detached_lab_run_in_store` and
+///   its handoff lock on this store's `run_dir`), reads the aggregate to decide
+///   idempotence, and then either projects the terminal lifecycle event or
+///   writes the transport-only terminal record.
+///
+/// The aggregate read is the decision, not a report: comparing against another
+/// home's aggregate would either re-project a result that is already durable
+/// here or skip projecting one because a *different* installation happened to
+/// hold a matching aggregate. This function is the daemon's pre-return
+/// projection for a foreground `runner exec --run-id`, so that mistake would
+/// surface as a terminal command returned over a still-active durable run
+/// (#7505).
+///
+/// The runner-exec branch is opened through `open_observation_maintained`, not
+/// the lifecycle opener, so its startup artifact maintenance is unchanged from
+/// the ambient path it replaced.
+pub fn project_terminal_runner_result_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) -> Result<bool> {
     if !matches!(
         snapshot.job.status,
         homeboy_core::api_jobs::JobStatus::Succeeded
@@ -169,11 +206,11 @@ pub fn project_terminal_runner_result(
 
     // Ad hoc runner-exec runs are observation records, not agent-task records.
     // Their daemon terminal result is complete without an inner task aggregate.
-    if project_terminal_runner_exec_result(run_id, snapshot)? {
+    if project_terminal_runner_exec_result_in_store(lifecycle_store, run_id, snapshot)? {
         return Ok(true);
     }
 
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     // Bind a still-pending controller handoff to this authoritative terminal
     // snapshot's daemon job before validating identity (issue #9240). An
     // accepted Lab job can reach a terminal daemon snapshot before the
@@ -181,21 +218,26 @@ pub fn project_terminal_runner_result(
     // establishes that identity from the same evidence rather than rejecting a
     // valid terminal snapshot against an empty controller job id. No-ops once
     // the run is already bound.
-    bind_pending_lab_handoff_snapshot(&mut record, snapshot)?;
+    bind_pending_lab_handoff_snapshot_in_store(lifecycle_store, &mut record, snapshot)?;
     validate_runner_job_snapshot(&record, snapshot)?;
     if let Some(event) = terminal_runner_lifecycle_event(&record, snapshot)? {
         let aggregate = projected_runner_aggregate(&record, &event.aggregate);
-        if store::read_aggregate(&record.run_id).ok().as_ref() == Some(&aggregate) {
+        if lifecycle_store.read_aggregate(&record.run_id).ok().as_ref() == Some(&aggregate) {
             return Ok(false);
         }
-        project_terminal_runner_lifecycle_event(&mut record, snapshot, &event)?;
+        project_terminal_runner_lifecycle_event_in_store(
+            lifecycle_store,
+            &mut record,
+            snapshot,
+            &event,
+        )?;
         return Ok(true);
     }
     if record.state.is_terminal() {
         return Ok(false);
     }
     project_terminal_runner_job_snapshot(&mut record, snapshot);
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(true)
 }
 
@@ -305,20 +347,15 @@ fn terminal_runner_lifecycle_event(
     ))
 }
 
-fn project_terminal_runner_lifecycle_event(
-    record: &mut AgentTaskRunRecord,
-    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
-    event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
-) -> Result<()> {
-    project_terminal_runner_lifecycle_event_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        record,
-        snapshot,
-        event,
-    )
-}
-
-/// The store-rooted counterpart of [`project_terminal_runner_lifecycle_event`].
+/// Project one terminal runner lifecycle event onto its durable record.
+///
+/// There is deliberately no ambient wrapper any more. Both callers —
+/// `reconcile_runner_job_snapshot_in_store` and
+/// `project_terminal_runner_result_in_store` — are rooted and already hold the
+/// store whose record they are projecting, and this body commits an aggregate,
+/// a record, and an artifact projection. An ambient form would exist only to let
+/// a rooted caller decide from one installation's evidence and commit into
+/// another's (#7505).
 ///
 /// Mirrors `project_persisted_terminal_runner_events_in_store` exactly: the
 /// aggregate path stamped onto the record, the combined aggregate-and-record
