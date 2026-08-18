@@ -1057,7 +1057,15 @@ fn mirror_job_run_request(
             .get_run(run_id)?
             .is_some_and(|existing| existing.metadata_json.get("agent_task_run").is_some())
         {
-            homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
+            let lifecycle_store = store
+                .roots()
+                .cloned()
+                .map(homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::new)
+                .map(Ok)
+                .unwrap_or_else(
+                    homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment,
+                )?;
+            lifecycle_store.record_detached_lab_run(
                 homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
                     run_id,
                     runner_id: &runner.id,

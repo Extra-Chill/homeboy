@@ -208,6 +208,27 @@ impl AgentTaskLifecycleStore {
         super::record_pre_execution_failure_in_store(self, run_id, plan, phase, error)
     }
 
+    pub fn record_lab_offload_planned(
+        &self,
+        input: super::LabOffloadProxyPlan<'_>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lab_offload::record_lab_offload_proxy_in_store(
+            self,
+            input.run_id,
+            input.runner_id,
+            input.remote_workspace,
+            input.remote_command,
+            input.durable_plan,
+        )
+    }
+
+    pub fn record_detached_lab_run(
+        &self,
+        input: super::DetachedLabRunRecord<'_>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lab_offload::record_detached_lab_run_in_store(self, input)
+    }
+
     pub(crate) fn mark_running(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         super::lifecycle_ops::mark_running_in_store(self, run_id)
     }

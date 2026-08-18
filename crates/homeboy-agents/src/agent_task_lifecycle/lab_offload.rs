@@ -514,6 +514,24 @@ fn record_lab_offload_proxy(
     remote_command: &[String],
     durable_plan: Option<&AgentTaskPlan>,
 ) -> Result<AgentTaskRunRecord> {
+    record_lab_offload_proxy_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        requested_run_id,
+        runner_id,
+        remote_workspace,
+        remote_command,
+        durable_plan,
+    )
+}
+
+pub(crate) fn record_lab_offload_proxy_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    requested_run_id: &str,
+    runner_id: &str,
+    remote_workspace: &str,
+    remote_command: &[String],
+    durable_plan: Option<&AgentTaskPlan>,
+) -> Result<AgentTaskRunRecord> {
     validate_lab_handoff_plan(durable_plan)?;
     let run_id = sanitize_run_id(requested_run_id);
     let input = DetachedLabRunRecord {
@@ -540,9 +558,6 @@ fn record_lab_offload_proxy(
     if let Some(metadata) = plan.metadata.as_object_mut() {
         metadata.remove("runner_job_id");
     }
-    // Ambient entry point: resolve one root here and use it for every durable
-    // touch below, rather than letting each `store::` shim resolve its own.
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     let mut record = match lifecycle_store.read_record(&run_id) {
         Ok(record) => record,
         Err(error)
@@ -550,13 +565,13 @@ fn record_lab_offload_proxy(
                 && lifecycle_store.record_lacks_typed_metadata(&run_id)? =>
         {
             submit_plan_in_store(
-                &lifecycle_store,
+                lifecycle_store,
                 durable_plan.unwrap_or(&plan),
                 Some(&run_id),
             )?
         }
         Err(error) if error.code == ErrorCode::ValidationInvalidArgument => submit_plan_in_store(
-            &lifecycle_store,
+            lifecycle_store,
             durable_plan.unwrap_or(&plan),
             Some(&run_id),
         )?,
@@ -599,7 +614,7 @@ fn record_lab_offload_proxy(
                 "durable attempt plan is unavailable during Lab handoff recovery",
                 Some(record.plan_path.clone()),
             );
-            fail_missing_lab_attempt_plan_in_store(&lifecycle_store, &mut record, &error)?;
+            fail_missing_lab_attempt_plan_in_store(lifecycle_store, &mut record, &error)?;
             return Err(error);
         }
     }
