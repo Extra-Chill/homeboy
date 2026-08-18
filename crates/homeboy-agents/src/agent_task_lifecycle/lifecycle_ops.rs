@@ -2971,13 +2971,34 @@ pub(crate) fn record_provider_execution_cleanup_elapsed_in_store(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub fn rewrite_record_for_test<F>(run_id: &str, mut rewrite: F) -> Result<AgentTaskRunRecord>
+pub fn rewrite_record_for_test<F>(run_id: &str, rewrite: F) -> Result<AgentTaskRunRecord>
 where
     F: FnMut(&mut AgentTaskRunRecord),
 {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    rewrite_record_for_test_in_store(&lifecycle_store, run_id, rewrite)
+}
+
+/// [`rewrite_record_for_test`] against explicitly injected durable lifecycle
+/// roots.
+///
+/// The read and the write are one read-modify-write, so they cannot be allowed
+/// to land in different homes: a rewrite that read the ambient record and
+/// committed it into the injected store would overwrite the fixture with a
+/// record built from somebody else's state, and every later read from the
+/// injected store would still succeed (#7505).
+#[cfg(any(test, feature = "test-support"))]
+pub fn rewrite_record_for_test_in_store<F>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    mut rewrite: F,
+) -> Result<AgentTaskRunRecord>
+where
+    F: FnMut(&mut AgentTaskRunRecord),
+{
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     rewrite(&mut record);
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -5294,7 +5315,25 @@ pub fn read_attempt_aggregate_in_store(
 }
 
 pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
-    let selected_run_id = match cook_index(run_id).and_then(|_| select_cook_candidate(run_id)) {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    aggregate_source_in_store(&lifecycle_store, run_id)
+}
+
+/// [`aggregate_source`] against explicitly injected durable lifecycle roots.
+///
+/// This reads like an accessor and is not one. Candidate selection consults the
+/// Cook index, and the `status_in_store` below it is the full reconciliation —
+/// two advisory locks and roughly twenty durable write sites. Selecting an
+/// attempt from one home's Cook index, reconciling it into another, and then
+/// serializing a third home's aggregate would answer with bytes no single
+/// installation ever held, without failing while it did (#7505).
+pub fn aggregate_source_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<(String, PathBuf)> {
+    let selected_run_id = match cook_index_in_store(lifecycle_store, run_id)
+        .and_then(|_| select_cook_candidate_in_store(lifecycle_store, run_id))
+    {
         Ok(selection) if selection.incomplete => {
             return Err(Error::validation_invalid_argument(
                 "cook_id",
@@ -5306,7 +5345,13 @@ pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
         Ok(selection) if !selection.run_id.is_empty() => selection.run_id,
         _ => run_id.to_string(),
     };
-    let record = status(&selected_run_id)?;
+    let record = status_in_store(
+        lifecycle_store,
+        &selected_run_id,
+        AgentTaskStatusOptions::default(),
+        false,
+    )?
+    .record;
     record.aggregate_path.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
@@ -5318,14 +5363,16 @@ pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
             None,
         )
     })?;
-    let aggregate = store::read_aggregate(&record.run_id)?;
+    // `record.run_id` is already resolved, so these are the store's own exact
+    // reads rather than the alias-resolving `lifecycle_ops` wrappers.
+    let aggregate = lifecycle_store.read_aggregate(&record.run_id)?;
     let raw = serde_json::to_string_pretty(&aggregate).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some(format!("serialize agent-task aggregate {}", record.run_id)),
         )
     })?;
-    let path = store::aggregate_path(&record.run_id)?;
+    let path = lifecycle_store.aggregate_path(&record.run_id);
     Ok((raw, path))
 }
 
