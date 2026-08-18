@@ -1151,6 +1151,14 @@ where
                         &mut outcome.artifacts,
                         running_task.candidate_artifacts,
                     );
+                    // A prior provider rotation may have captured a base-bound
+                    // patch before this terminal provider failure. Decide
+                    // recoverability after merging that retained evidence so the
+                    // controller can promote the canonical candidate through its
+                    // normal gates.
+                    AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(
+                        &mut outcome,
+                    );
                     // Captured before the loop consumes the vector; this is the
                     // same-provider retry count the budget diagnostic needs.
                     let same_provider_retries_used = running_task.retry_attempts.len();

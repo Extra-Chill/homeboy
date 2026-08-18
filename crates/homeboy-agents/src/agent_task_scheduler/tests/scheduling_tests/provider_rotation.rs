@@ -24,6 +24,12 @@ mod provider_rotation_tests {
         calls: AtomicUsize,
     }
 
+    struct DirtyCandidateThenTerminalExecutor {
+        calls: AtomicUsize,
+        terminal: AgentTaskOutcomeStatus,
+        terminal_outputs: Value,
+    }
+
     impl AgentTaskExecutorAdapter for ProviderReportedRotationExecutor {
         fn execute(
             &self,
@@ -45,6 +51,37 @@ mod provider_rotation_tests {
                 result.metadata = json!({ "model": "openai/gpt-5.6-actual" });
             }
             result
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for DirtyCandidateThenTerminalExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let root = request
+                .workspace
+                .root
+                .as_deref()
+                .expect("attempt workspace");
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                fs::write(
+                    std::path::Path::new(root).join("candidate.txt"),
+                    "candidate\n",
+                )
+                .expect("candidate edit");
+                let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Timeout);
+                outcome.failure_classification = Some(AgentTaskFailureClassification::Timeout);
+                return outcome;
+            }
+
+            let mut outcome = outcome(request.task_id, self.terminal);
+            outcome.outputs = self.terminal_outputs.clone();
+            if self.terminal == AgentTaskOutcomeStatus::ProviderError {
+                outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+            }
+            outcome
         }
     }
 
@@ -435,6 +472,90 @@ mod provider_rotation_tests {
             !roots[1].exists(),
             "clean succeeding attempt checkout is retired after its executor thread stops"
         );
+    }
+
+    #[test]
+    fn timeout_candidate_remains_recoverable_after_failed_rotation() {
+        retained_timeout_candidate_survives_terminal_rotation(
+            AgentTaskOutcomeStatus::ProviderError,
+            Value::Null,
+            "candidate_recoverable",
+        );
+    }
+
+    #[test]
+    fn timeout_candidate_remains_recoverable_after_empty_rotation() {
+        retained_timeout_candidate_survives_terminal_rotation(
+            AgentTaskOutcomeStatus::Succeeded,
+            json!({
+                "provider_run_result": {
+                    "completed": false,
+                    "reply": "",
+                    "messages": [],
+                    "tool_calls": []
+                }
+            }),
+            "candidate_recoverable",
+        );
+    }
+
+    fn retained_timeout_candidate_survives_terminal_rotation(
+        terminal: AgentTaskOutcomeStatus,
+        terminal_outputs: Value,
+        expected_terminal_status: &str,
+    ) {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let run_id = "timeout-candidate-terminal-rotation";
+        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
+        assert!(Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ])
+            .current_dir(&workspace)
+            .status()
+            .expect("configure repository identity")
+            .success());
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
+        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit run");
+        let aggregate = AgentTaskScheduler::new(DirtyCandidateThenTerminalExecutor {
+            calls: AtomicUsize::new(0),
+            terminal,
+            terminal_outputs,
+        })
+        .with_run_id(run_id)
+        .run(plan);
+
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::PartialRecoverable,
+            "the retained timeout candidate must remain eligible for controller promotion: {aggregate:#?}"
+        );
+        assert_eq!(aggregate.totals.candidate_recoverable, 1);
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::Provider)
+        );
+        assert!(outcome.artifacts.iter().any(|artifact| {
+            artifact.kind == "patch"
+                && artifact.metadata["producer_attempt"] == 1
+                && artifact.metadata["provider_rotation_index"] == 0
+        }));
+        let attempts = outcome.metadata["provider_rotation"]["attempts"]
+            .as_array()
+            .expect("rotation evidence");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0]["status"], "timeout");
+        assert_eq!(attempts[1]["status"], expected_terminal_status);
     }
 
     #[test]
