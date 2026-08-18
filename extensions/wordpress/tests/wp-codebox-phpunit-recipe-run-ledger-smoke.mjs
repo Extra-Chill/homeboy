@@ -56,7 +56,11 @@ if (typeof fixture.commandsLog === 'string') {
   fs.mkdirSync(path.join(runtime, 'logs'), { recursive: true });
   fs.writeFileSync(path.join(runtime, 'logs', 'commands.log'), fixture.commandsLog);
 }
-process.stdout.write(JSON.stringify({ success: false, executions: fixture.executions || [] }) + '\\n');
+const payload = JSON.stringify({ success: false, executions: fixture.executions || [] });
+const output = typeof fixture.rawStdout === 'string'
+  ? fixture.rawStdout
+  : (fixture.stdoutPrefix || '') + payload + (fixture.stdoutSuffix || '') + '\\n';
+process.stdout.write(output);
 process.exitCode = fixture.exitCode === undefined ? 1 : fixture.exitCode;
 `);
 await chmod(cli, 0o755);
@@ -104,6 +108,42 @@ try {
       },
     ],
   };
+
+  // The real CLI can print its progress/banner on stdout around the JSON
+  // summary. Recover the complete payload, but do not treat an incomplete
+  // object as evidence.
+  const mixedPayload = await runScenario('mixed-payload', {
+    executions: [
+      { command: 'wordpress.phpunit', status: 'completed', exitCode: 0, stdout: 'OK (2 tests, 2 assertions)\\n', stderr: '' },
+    ],
+    stdoutPrefix: 'Preparing recipe...\\n[wp-codebox] recipe-run\\n',
+    stdoutSuffix: '\\nrecipe-run complete\\n',
+    exitCode: 0,
+    testResults: {
+      schema: 'wp-codebox/test-results/v1',
+      status: 'passed',
+      summary: { total: 2, passed: 2, failed: 0, skipped: 0, unknown: 0 },
+      suites: [],
+    },
+  });
+  assert.equal(mixedPayload.run.status, 0, mixedPayload.run.stderr);
+  const mixedLedger = JSON.parse(await readFile(path.join(mixedPayload.publishedFiles, 'recipe-run-steps.json'), 'utf8'));
+  assert.equal(mixedLedger.parse_status, 'executions');
+  assert.deepEqual(mixedLedger.phpunit_step_indexes, [0]);
+  assert.equal(mixedLedger.parse_diagnostics, undefined);
+
+  const malformedPayload = await runScenario('malformed-payload', {
+    rawStdout: 'noise secret=fixture-ledger-secret {"success":false,"executions":[ truncated\\n',
+    secretValue: 'fixture-ledger-secret',
+  });
+  assert.equal(malformedPayload.run.status, 1, malformedPayload.run.stderr);
+  const malformedLedger = JSON.parse(await readFile(path.join(malformedPayload.publishedFiles, 'recipe-run-steps.json'), 'utf8'));
+  assert.equal(malformedLedger.parse_status, 'unparseable');
+  assert.equal(malformedLedger.phpunit_executed, false);
+  assert.equal(malformedLedger.parse_diagnostics.stdout.bytes > 0, true);
+  assert.equal(malformedLedger.parse_diagnostics.stdout.truncated, false);
+  assert.match(malformedLedger.parse_diagnostics.stdout.excerpt, /secret=\[REDACTED\]/);
+  assert.match(JSON.parse(await readFile(path.join(malformedPayload.publishedFiles, 'phpunit-execution-diagnosis.json'), 'utf8')).cause, /recipe_run_payload_unparseable/);
 
   const setupOnly = await runScenario('setup-only', setupOnlyFixture);
   assert.equal(setupOnly.run.status, 1, setupOnly.run.stderr);

@@ -1060,7 +1060,7 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
   // reaches the PHPUnit step still names the stage that stopped it.
   const recipeRun = execution.timedOut
     ? { ...recipeRunProjection(stdout), payload: null, phpunitIndexes: [], parse_status: 'bounded_timeout_projection' }
-    : parseRecipeRunPayload(stdout);
+    : parseRecipeRunPayload(stdout, stderr);
   const recipeRunSteps = buildRecipeRunStepsLedger(recipeRun);
   await writeFile(recipeRunStepsPath, `${JSON.stringify(recipeRunSteps, null, 2)}\n`);
   const timeoutEvidence = execution.timedOut ? wpCodeboxTimeoutDiagnostics({
@@ -1430,10 +1430,16 @@ function normalizedTestStatus(results, aggregate, executionStatus, validResults)
   }
   return results.status;
 }
-function parseRecipeRunPayload(stdout) {
-  const payload = json(stdout.trim(), null);
+function parseRecipeRunPayload(stdout, stderr = '') {
+  const payload = json(stdout.trim(), null) || extractRecipeRunJson(stdout);
   if (payload === null) {
-    return { payload: null, executions: [], phpunitIndexes: [], parse_status: 'unparseable' };
+    return {
+      payload: null,
+      executions: [],
+      phpunitIndexes: [],
+      parse_status: 'unparseable',
+      parse_diagnostics: recipeRunParseDiagnostics(stdout, stderr),
+    };
   }
   const executions = isObject(payload) && Array.isArray(payload.executions) ? payload.executions : [];
   const phpunitIndexes = [];
@@ -1443,6 +1449,58 @@ function parseRecipeRunPayload(stdout) {
     executions,
     phpunitIndexes,
     parse_status: executions.length > 0 ? 'executions' : 'no_executions',
+  };
+}
+function extractRecipeRunJson(stdout) {
+  const candidates = [];
+  for (let start = 0; start < stdout.length; start += 1) {
+    if (stdout[start] !== '{') {
+      continue;
+    }
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let end = start; end < stdout.length; end += 1) {
+      const character = stdout[end];
+      if (quoted) {
+        if (escaped) {
+          escaped = false;
+        } else if (character === '\\') {
+          escaped = true;
+        } else if (character === '"') {
+          quoted = false;
+        }
+        continue;
+      }
+      if (character === '"') {
+        quoted = true;
+      } else if (character === '{') {
+        depth += 1;
+      } else if (character === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          const candidate = json(stdout.slice(start, end + 1), null);
+          if (isObject(candidate)) {
+            candidates.push(candidate);
+          }
+          break;
+        }
+      }
+    }
+  }
+  return candidates.findLast((candidate) => Array.isArray(candidate.executions)) || candidates.at(-1) || null;
+}
+function recipeRunParseDiagnostics(stdout, stderr) {
+  const diagnostic = (value) => {
+    const redacted = redactSecrets(typeof value === 'string' ? value : '');
+    const bytes = Buffer.byteLength(redacted);
+    const excerpt = Buffer.from(redacted).subarray(0, 4096).toString('utf8');
+    return { bytes, truncated: bytes > 4096, excerpt };
+  };
+  return {
+    reason: 'recipe-run stdout did not contain a complete JSON object payload',
+    stdout: diagnostic(stdout),
+    stderr: diagnostic(stderr),
   };
 }
 // A PHPUnit invocation is identified by its recipe command name when the
@@ -1484,6 +1542,7 @@ function buildRecipeRunStepsLedger(recipeRun) {
     phpunit_executed: recipeRun.phpunitIndexes.length > 0,
     phpunit_step_indexes: recipeRun.phpunitIndexes,
     executions,
+    ...(recipeRun.parse_diagnostics ? { parse_diagnostics: recipeRun.parse_diagnostics } : {}),
   };
 }
 function recipeStepName(step) {
