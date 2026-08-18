@@ -167,9 +167,10 @@ fn test_cleanup_stale_child_records() {
 
         assert_eq!(cleaned, 1);
         assert_child_exits(&mut child);
-        assert!(!InvocationChildRecord::record_path("inv-stale", pid)
-            .unwrap()
-            .exists());
+        let config_root = crate::paths::homeboy().expect("config root");
+        assert!(
+            !InvocationChildRecord::record_path_in_root(&config_root, "inv-stale", pid).exists()
+        );
     });
 }
 
@@ -224,7 +225,8 @@ fn spawn_isolated_sleep() -> std::process::Child {
 
 #[cfg(unix)]
 fn write_test_child_record(invocation_id: &str, owner_pid: u32, root_pid: u32, pgid: Option<i32>) {
-    let dir = InvocationChildRecord::children_dir(invocation_id).expect("child dir");
+    let config_root = crate::paths::homeboy().expect("config root");
+    let dir = InvocationChildRecord::children_dir_in_root(&config_root, invocation_id);
     std::fs::create_dir_all(&dir).expect("create child dir");
     let record = InvocationChildRecord {
         invocation_id: invocation_id.to_string(),
@@ -240,7 +242,7 @@ fn write_test_child_record(invocation_id: &str, owner_pid: u32, root_pid: u32, p
     };
     let json = serde_json::to_string_pretty(&record).expect("serialize child record");
     std::fs::write(
-        InvocationChildRecord::record_path(invocation_id, root_pid).expect("record path"),
+        InvocationChildRecord::record_path_in_root(&config_root, invocation_id, root_pid),
         json,
     )
     .expect("write child record");

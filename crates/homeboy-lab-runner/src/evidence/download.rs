@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use reqwest::blocking::Client;
@@ -55,7 +55,15 @@ pub fn download_remote_artifact_with_intent(
     intent: RunnerDownloadIntent,
 ) -> Result<RemoteArtifactDownload> {
     let token = RemoteArtifactToken::parse(path)?;
-    if let Some(download) = download_direct_runner_artifact(&token, output.clone(), intent)? {
+    // One resolution for both transports. The direct-SSH attempt and the relay
+    // fallback below have to place bytes in the same cache, or `runs artifact
+    // get` reports a path from one home while the tag lands in another (#7505).
+    let artifact_root = paths::PathRoots::from_environment()?
+        .artifacts()
+        .to_path_buf();
+    if let Some(download) =
+        download_direct_runner_artifact(&artifact_root, &token, output.clone(), intent)?
+    {
         return Ok(download);
     }
 
@@ -87,7 +95,7 @@ pub fn download_remote_artifact_with_intent(
     // The remote controls `filename` outright, and `token.runner_id` /
     // `token.run_id` are percent-decoded copies of remote-supplied strings.
     // Nothing below is joined until this has proven all three (#10586).
-    let placement = resolve_placement(&token, output, remote_file_name)?;
+    let placement = resolve_placement(&artifact_root, &token, output, remote_file_name)?;
     let output_path = placement.output_path;
     if let Some(parent) = output_path
         .parent()
@@ -154,7 +162,11 @@ pub(super) struct DownloadPlacement {
     pub(super) file_name: String,
 }
 
+/// Decide where one download's bytes go, against an explicitly injected
+/// artifact root. Containment is checked against that same root, so a caller
+/// cannot validate one home and write into another.
 pub(super) fn resolve_placement(
+    artifact_root: &Path,
     token: &RemoteArtifactToken,
     output: Option<PathBuf>,
     remote_file_name: Option<&str>,
@@ -172,13 +184,13 @@ pub(super) fn resolve_placement(
             file_name,
         });
     }
-    // Fail closed. This used to be `.unwrap_or_else(|_| PathBuf::from("."))`,
-    // which silently relocated the whole cache into the process working
-    // directory — neither contained nor predictable — whenever the artifact
-    // root could not be resolved.
-    let artifact_root = paths::artifact_root()?;
+    // Fail closed. The root used to be resolved here as
+    // `paths::artifact_root()?`, itself replacing an
+    // `.unwrap_or_else(|_| PathBuf::from("."))` that silently relocated the
+    // whole cache into the process working directory. It is now supplied by the
+    // caller, which resolves it once for both transports.
     let target = resolve_runner_download_target(
-        &artifact_root,
+        artifact_root,
         &token.runner_id,
         &token.run_id,
         remote_file_name,
@@ -192,6 +204,7 @@ pub(super) fn resolve_placement(
 }
 
 fn download_direct_runner_artifact(
+    artifact_root: &Path,
     token: &RemoteArtifactToken,
     output: Option<PathBuf>,
     intent: RunnerDownloadIntent,
@@ -252,7 +265,7 @@ fn download_direct_runner_artifact(
     // `Content-Disposition` is parsed by splitting on `;` and trimming quotes,
     // so the value reaching here is whatever the daemon sent, `../` included.
     let remote_file_name = content_disposition_filename(&headers).filter(|name| !name.is_empty());
-    let placement = resolve_placement(token, output, remote_file_name.as_deref())?;
+    let placement = resolve_placement(artifact_root, token, output, remote_file_name.as_deref())?;
     let output_path = placement.output_path;
     if let Some(parent) = output_path
         .parent()

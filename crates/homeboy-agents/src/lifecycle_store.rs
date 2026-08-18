@@ -76,8 +76,12 @@ impl AgentTaskLifecycleStore {
             .join("index.json")
     }
 
+    /// The observation database below these roots.
+    ///
+    /// Delegates to `paths` so this can never name a different file than the
+    /// path `ObservationStore::*_in_roots` opens for the same roots.
     pub fn observation_db_path(&self) -> PathBuf {
-        self.roots.data().join("homeboy.sqlite")
+        paths::observation_db_in_root(self.roots.data())
     }
 
     pub(crate) fn data_root(&self) -> PathBuf {
@@ -100,6 +104,17 @@ impl AgentTaskLifecycleStore {
         &self,
     ) -> homeboy_core::workspace_claim::WorkspaceClaimStore {
         super::workspace_claims::workspace_claim_store_at(self.data_root())
+    }
+
+    /// Terminal workspace authority bound to this store's own roots.
+    ///
+    /// Authority receipts and their release markers are a permission gate over
+    /// a retained runner workspace, so they must be read and written in the
+    /// same installation the record lives in (#7505).
+    pub(crate) fn workspace_terminal_authority_store(
+        &self,
+    ) -> super::workspace_authority::WorkspaceTerminalAuthorityStore {
+        super::workspace_authority::WorkspaceTerminalAuthorityStore::from_roots(&self.roots)
     }
 
     /// Submit an exact run identity using this store's durable lifecycle roots.
@@ -162,14 +177,17 @@ impl AgentTaskLifecycleStore {
     }
 
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
-        ObservationStore::open_initialized_for_lifecycle_at_roots(
-            self.observation_db_path(),
-            self.artifact_root(),
-        )
+        ObservationStore::open_initialized_for_lifecycle_in_roots(&self.roots)
     }
 
+    /// Read the observation store through this store's own roots.
+    ///
+    /// This previously injected only the database path and left artifact
+    /// resolution ambient, so a reader opened from injected roots reported
+    /// artifacts against a different root than the database it read them from
+    /// (#7505).
     pub fn open_observation_readonly(&self) -> Result<ObservationStore> {
-        ObservationStore::open_readonly_at(self.observation_db_path())
+        ObservationStore::open_readonly_in_roots(&self.roots)
     }
 
     pub fn with_config_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -578,6 +596,38 @@ impl AgentTaskLifecycleStore {
             .is_some())
     }
 
+    /// Check this store for one exact durable run identity without creating its
+    /// observation database, running migrations, or triggering startup repair.
+    pub fn record_exists_readonly(&self, run_id: &str) -> Result<bool> {
+        Ok(self.open_observation_readonly()?.get_run(run_id)?.is_some())
+    }
+
+    /// Read this store's bounded durable registry snapshot with the health
+    /// summary of the records that could not be parsed.
+    pub fn read_records_with_health(
+        &self,
+    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+        self.read_records_with_health_bounded(1000)
+    }
+
+    pub fn read_records_with_health_bounded(
+        &self,
+        limit: usize,
+    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+        records_with_health(observation_runs_bounded_in_store(self, limit)?)
+    }
+
+    /// Read every durable registry record in this store without a display bound.
+    pub fn read_all_records_with_health(
+        &self,
+    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+        let store = self.open_observation_readonly()?;
+        records_with_health(store.list_runs_all(RunListFilter {
+            kind: Some("agent-task".to_string()),
+            ..Default::default()
+        })?)
+    }
+
     /// Register a Cook attempt using this store's record, lock, index, and
     /// terminal-projection roots.
     pub fn record_cook_attempt(
@@ -659,17 +709,14 @@ impl AgentTaskLifecycleStore {
     /// receipt first, then the workspace owner lease.
     pub(crate) fn project_terminal_record_after_unlock(&self, run_id: &str) -> Result<()> {
         let record = self.read_record(run_id)?;
-        super::workspace_authority::WorkspaceTerminalAuthorityStore::new(
-            self.data_root(),
-            self.roots.config().to_path_buf(),
-        )
-        .persist_terminal_from_record(&record)
-        .and_then(|_| {
-            super::workspace_claims::release_terminal_record_workspace_owner_in_store(
-                &super::workspace_claims::workspace_claim_store_at(self.data_root()),
-                &record,
-            )
-        })
+        self.workspace_terminal_authority_store()
+            .persist_terminal_from_record(&record)
+            .and_then(|_| {
+                super::workspace_claims::release_terminal_record_workspace_owner_in_store(
+                    &super::workspace_claims::workspace_claim_store_at(self.data_root()),
+                    &record,
+                )
+            })
     }
 
     pub fn write_aggregate_and_record(
@@ -1364,9 +1411,7 @@ pub(super) fn record_exists(run_id: &str) -> Result<bool> {
 /// Check an existing observation store without creating its directory, running
 /// migrations, or triggering startup repair work.
 pub(super) fn record_exists_readonly(run_id: &str) -> Result<bool> {
-    Ok(ObservationStore::open_readonly()?
-        .get_run(run_id)?
-        .is_some())
+    default_store()?.record_exists_readonly(run_id)
 }
 
 pub(super) fn validate_cook_index_attempt(cook_id: &str, attempt: u32, run_id: &str) -> Result<()> {
@@ -1416,7 +1461,7 @@ pub(super) fn record_lacks_typed_metadata(run_id: &str) -> Result<bool> {
 }
 
 pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
-    Ok(read_records_with_health()?.0)
+    default_store()?.read_records()
 }
 
 /// The store-rooted counterpart of [`read_records`], following the same bound
@@ -1468,22 +1513,18 @@ fn read_retry_successors_in_store(
 
 pub(super) fn read_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    read_records_with_health_bounded(1000)
+    default_store()?.read_records_with_health()
 }
 
 pub(super) fn read_records_with_health_bounded(
     limit: usize,
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    records_with_health(observation_runs_bounded(limit)?)
+    default_store()?.read_records_with_health_bounded(limit)
 }
 
 pub(super) fn read_all_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-    let store = ObservationStore::open_readonly()?;
-    records_with_health(store.list_runs_all(RunListFilter {
-        kind: Some("agent-task".to_string()),
-        ..Default::default()
-    })?)
+    default_store()?.read_all_records_with_health()
 }
 
 fn records_with_health(

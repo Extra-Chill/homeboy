@@ -400,17 +400,23 @@ pub fn run_multi(
         }
     );
 
+    // One resolution for the whole run. Every checkpoint read and write below
+    // addresses this data root, so a resumed run cannot read its checkpoint
+    // from one home and then record target outcomes into another (#7505). The
+    // observation store admitted alongside it still resolves its own roots
+    // inside `homeboy-core`, which is not reachable from here.
+    let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let identity = lifecycle_identity(project_ids, component_ids, config);
     let mut lifecycle_run = if config.dry_run || config.check {
         None
     } else if let Some(id) = config.resume_run_id.as_deref() {
-        let mut run = lifecycle::load(id)?;
+        let mut run = lifecycle::load_in_roots(roots.data(), id)?;
         run.resume(&identity)?;
-        lifecycle::save(&run)?;
+        lifecycle::save_in_roots(roots.data(), &run)?;
         Some(run)
     } else {
         let run = lifecycle::DeployLifecycleRun::new(Uuid::new_v4().to_string(), identity.clone());
-        lifecycle::save(&run)?;
+        lifecycle::save_in_roots(roots.data(), &run)?;
         Some(run)
     };
     let checkpoint_run_id = lifecycle_run.as_ref().map(|run| run.id.clone());
@@ -506,7 +512,7 @@ pub fn run_multi(
                 None,
                 None,
             );
-            lifecycle::save(run)?;
+            lifecycle::save_in_roots(roots.data(), run)?;
         }
         let mut timer = PhaseTimer::new();
         let result = timer.time("resolve_source", || {
@@ -549,7 +555,7 @@ pub fn run_multi(
                             project_results.last().and_then(|entry| entry.error.clone()),
                             Some(timings.clone()),
                         );
-                        lifecycle::save(run)?;
+                        lifecycle::save_in_roots(roots.data(), run)?;
                     }
                     failed += 1;
                 } else if is_planned {
@@ -580,7 +586,7 @@ pub fn run_multi(
                             None,
                             Some(timings.clone()),
                         );
-                        lifecycle::save(run)?;
+                        lifecycle::save_in_roots(roots.data(), run)?;
                     }
                     succeeded += 1;
                 }
@@ -618,7 +624,7 @@ pub fn run_multi(
                         Some(e.to_string()),
                         Some(timings),
                     );
-                    lifecycle::save(run)?;
+                    lifecycle::save_in_roots(roots.data(), run)?;
                 }
                 failed += 1;
             }

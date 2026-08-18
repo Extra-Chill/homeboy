@@ -1117,7 +1117,12 @@ pub(crate) fn resolve_adoption_target_with_attempt(
     )
 }
 
-fn resolve_adoption_target_with_attempt_in_stores(
+/// Visible to the rest of `agent_task_service` so Cook's tests can resolve an
+/// adoption target through explicit roots. The ambient wrapper above is the
+/// only production caller; widening this to `pub(super)` keeps the rooted seam
+/// reachable without giving tests a second, ambient-resolving entry point
+/// (#7505).
+pub(super) fn resolve_adoption_target_with_attempt_in_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     cook_or_run_id: &str,

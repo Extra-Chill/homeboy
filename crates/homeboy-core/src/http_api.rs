@@ -16,7 +16,7 @@ use crate::observation::{
     RunListFilter, RunRecord, RunStatus, MAX_RUN_PAGE_LIMIT,
     OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES,
 };
-use crate::{activity, component, git, paths};
+use crate::{activity, component, git};
 
 mod analysis_job_runner;
 mod sandbox_tools;
@@ -560,7 +560,12 @@ fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
     crate::artifacts::index_remote_published_artifact_refs_for_run(&store, run_id)?;
     let decoded_artifact_id = crate::execution_contract::decode_uri_component(artifact_id);
     let Some(artifact) = store.get_artifact_for_run_token(run_id, &decoded_artifact_id)? else {
-        return artifact_store_content(run_id, artifact_id, &decoded_artifact_id);
+        return artifact_store_content(
+            &store.artifact_root()?,
+            run_id,
+            artifact_id,
+            &decoded_artifact_id,
+        );
     };
     if artifact.artifact_type != "file" {
         if artifact.artifact_type == "remote_file"
@@ -653,6 +658,7 @@ fn artifact_content_response(
 }
 
 fn artifact_store_content(
+    artifact_root: &std::path::Path,
     run_id: &str,
     artifact_id: &str,
     decoded_artifact_id: &str,
@@ -668,7 +674,7 @@ fn artifact_store_content(
             None,
         )
     })?;
-    let path = safe_artifact_store_path(&locator)?;
+    let path = safe_artifact_store_path_in_root(artifact_root, &locator)?;
     let content = std::fs::read(&path).map_err(|err| {
         Error::internal_io(
             err.to_string(),
@@ -704,7 +710,10 @@ fn inline_content_retrieval() -> Value {
     })
 }
 
-fn safe_artifact_store_path(locator: &str) -> Result<std::path::PathBuf> {
+fn safe_artifact_store_path_in_root(
+    artifact_root: &std::path::Path,
+    locator: &str,
+) -> Result<std::path::PathBuf> {
     let locator_path = std::path::PathBuf::from(locator);
     if locator_path.is_absolute()
         || locator_path
@@ -718,7 +727,7 @@ fn safe_artifact_store_path(locator: &str) -> Result<std::path::PathBuf> {
             None,
         ));
     }
-    Ok(paths::artifact_root()?.join(locator_path))
+    Ok(artifact_root.join(locator_path))
 }
 
 fn path_segments(path: &str) -> Vec<String> {

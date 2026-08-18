@@ -180,9 +180,14 @@ fn hydrate_lab_workspace_dependencies_with_policy(
         ));
     }
     if offline_only {
-        if let Some(package) =
-            super::dependency_package::prepare(std::path::Path::new(local_path), &plan)?
-        {
+        // Resolved inside the offline branch only: online hydration never
+        // touches the controller package cache, so it keeps resolving nothing
+        // it does not use.
+        if let Some(package) = super::dependency_package::prepare_in_roots(
+            homeboy_core::paths::PathRoots::from_environment()?.data(),
+            std::path::Path::new(local_path),
+            &plan,
+        )? {
             restore_controller_dependency_package(runner_id, remote_path, &package)?;
             return Ok(LabWorkspaceHydrationOutput {
                 schema: HYDRATION_SCHEMA,

@@ -44,6 +44,38 @@ pub(crate) fn run_package(
     component_local_path: &str,
     request: PackageRequest<'_>,
 ) -> Result<ReleaseStepResult> {
+    run_package_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        extensions,
+        state,
+        component,
+        component_id,
+        component_local_path,
+        request,
+    )
+}
+
+/// [`run_package`] against explicitly injected roots.
+///
+/// Both halves of this step are Homeboy state and both are injected together,
+/// on purpose. The durable artifact copies land under `roots.artifacts()` and
+/// the failed-attempt ownership record lands under `roots.data()`; the ambient
+/// form resolved each independently, so a repoint between them could leave the
+/// bytes in one home and the record describing them in another (#7505).
+///
+/// What is deliberately NOT rooted here: `build_declared_component_artifact`
+/// and `run_package_action_with_retry` hand work to a *subprocess* — the
+/// component's own build script and the extension's `release.package` action.
+/// Those children read their own environment by design and must keep doing so.
+pub(crate) fn run_package_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    extensions: &[ExtensionManifest],
+    state: &mut ReleaseState,
+    component: &Component,
+    component_id: &str,
+    component_local_path: &str,
+    request: PackageRequest<'_>,
+) -> Result<ReleaseStepResult> {
     let PackageRequest {
         component_source_path,
         declared_build_artifact,
@@ -60,7 +92,8 @@ pub(crate) fn run_package(
             build_declared_component_artifact(component, declared_build_artifact)?;
         let declared_artifact_built = component_build.is_some();
         if declared_artifact_built {
-            collect_declared_build_artifact(
+            collect_declared_build_artifact_in_roots(
+                roots.artifacts(),
                 state,
                 declared_build_artifact,
                 component_id,
@@ -114,8 +147,14 @@ pub(crate) fn run_package(
                 artifact.phase = "final".to_string();
                 artifact.producer = format!("extension:{}", extension.id);
             }
-            persist_package_artifacts(state, artifact_start, component_id, component_local_path)
-                .map_err(|err| package_provider_error(&extension.id, err))?;
+            persist_package_artifacts_in_roots(
+                roots.artifacts(),
+                state,
+                artifact_start,
+                component_id,
+                component_local_path,
+            )
+            .map_err(|err| package_provider_error(&extension.id, err))?;
             responses.push(serde_json::json!({
                 "extension": extension.id,
                 "response": response,
@@ -123,7 +162,8 @@ pub(crate) fn run_package(
         }
 
         if !declared_artifact_built {
-            collect_declared_build_artifact(
+            collect_declared_build_artifact_in_roots(
+                roots.artifacts(),
                 state,
                 declared_build_artifact,
                 component_id,
@@ -156,7 +196,7 @@ pub(crate) fn run_package(
     })();
 
     if result.is_err() {
-        record_failed_package_owned_paths(component, &cleanup_before)?;
+        record_failed_package_owned_paths_in_roots(roots.data(), component, &cleanup_before)?;
     }
 
     result
@@ -179,7 +219,8 @@ struct OwnedPackagePath {
 /// Persist the exact outputs left by a failed package attempt outside the
 /// checkout. A later successful release can clean them only if the same
 /// component, checkout revision, and output bytes are still present.
-fn record_failed_package_owned_paths(
+fn record_failed_package_owned_paths_in_roots(
+    data_root: &Path,
     component: &Component,
     before: &BTreeSet<String>,
 ) -> Result<()> {
@@ -205,11 +246,20 @@ fn record_failed_package_owned_paths(
         head_commit: homeboy_core::git::get_head_commit(&component.local_path).ok(),
         paths,
     };
-    write_failed_package_ownership(&record)
+    write_failed_package_ownership_in_roots(data_root, &record)
 }
 
-pub(crate) fn failed_package_owned_paths(component: &Component) -> Result<Vec<String>> {
-    let Some(record) = read_failed_package_ownership(&component.id)? else {
+/// The ownership record left by a failed package attempt, below an explicitly
+/// injected data root.
+///
+/// Rooted rather than wrapped: the only caller is `run_cleanup`, which reads
+/// this record and then acknowledges it, and both halves must name the same
+/// home or cleanup would forget paths it just removed.
+pub(crate) fn failed_package_owned_paths_in_roots(
+    data_root: &Path,
+    component: &Component,
+) -> Result<Vec<String>> {
+    let Some(record) = read_failed_package_ownership_in_roots(data_root, &component.id)? else {
         return Ok(Vec::new());
     };
     if record.component_path != canonical_component_path(&component.local_path)
@@ -229,14 +279,15 @@ pub(crate) fn failed_package_owned_paths(component: &Component) -> Result<Vec<St
         .collect())
 }
 
-pub(crate) fn acknowledge_failed_package_owned_paths(
+pub(crate) fn acknowledge_failed_package_owned_paths_in_roots(
+    data_root: &Path,
     component: &Component,
     removed_paths: &[String],
 ) -> Result<()> {
     if removed_paths.is_empty() {
         return Ok(());
     }
-    let Some(mut record) = read_failed_package_ownership(&component.id)? else {
+    let Some(mut record) = read_failed_package_ownership_in_roots(data_root, &component.id)? else {
         return Ok(());
     };
     if record.component_path != canonical_component_path(&component.local_path) {
@@ -246,27 +297,28 @@ pub(crate) fn acknowledge_failed_package_owned_paths(
         .paths
         .retain(|owned| !removed_paths.contains(&owned.path));
     if record.paths.is_empty() {
-        let path = failed_package_ownership_path(&component.id)?;
+        let path = failed_package_ownership_path_in_roots(data_root, &component.id);
         if path.exists() {
             fs::remove_file(path).map_err(|error| Error::internal_io(error.to_string(), None))?;
         }
     } else {
-        write_failed_package_ownership(&record)?;
+        write_failed_package_ownership_in_roots(data_root, &record)?;
     }
     Ok(())
 }
 
-fn failed_package_ownership_path(component_id: &str) -> Result<PathBuf> {
-    Ok(homeboy_core::paths::homeboy_data()?
-        .join("release-package-ownership")
-        .join(format!(
-            "{}.json",
-            homeboy_core::paths::sanitize_path_segment(component_id)
-        )))
+fn failed_package_ownership_path_in_roots(data_root: &Path, component_id: &str) -> PathBuf {
+    data_root.join("release-package-ownership").join(format!(
+        "{}.json",
+        homeboy_core::paths::sanitize_path_segment(component_id)
+    ))
 }
 
-fn read_failed_package_ownership(component_id: &str) -> Result<Option<FailedPackageOwnership>> {
-    let path = failed_package_ownership_path(component_id)?;
+fn read_failed_package_ownership_in_roots(
+    data_root: &Path,
+    component_id: &str,
+) -> Result<Option<FailedPackageOwnership>> {
+    let path = failed_package_ownership_path_in_roots(data_root, component_id);
     if !path.exists() {
         return Ok(None);
     }
@@ -279,8 +331,11 @@ fn read_failed_package_ownership(component_id: &str) -> Result<Option<FailedPack
     .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
 }
 
-fn write_failed_package_ownership(record: &FailedPackageOwnership) -> Result<()> {
-    let path = failed_package_ownership_path(&record.component_id)?;
+fn write_failed_package_ownership_in_roots(
+    data_root: &Path,
+    record: &FailedPackageOwnership,
+) -> Result<()> {
+    let path = failed_package_ownership_path_in_roots(data_root, &record.component_id);
     fs::create_dir_all(path.parent().expect("ownership parent"))
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     let temporary = path.with_extension("json.tmp");
@@ -519,7 +574,8 @@ mod build_failure_tests {
 
 /// Add a component-owned deploy artifact even when its packaging provider also
 /// emits unrelated release artifacts (for example, a registry tarball).
-fn collect_declared_build_artifact(
+fn collect_declared_build_artifact_in_roots(
+    artifact_root: &Path,
     state: &mut ReleaseState,
     declared_build_artifact: Option<&str>,
     component_id: &str,
@@ -572,7 +628,13 @@ fn collect_declared_build_artifact(
         sha256: None,
         publication_authority: false,
     });
-    persist_package_artifacts(state, artifact_start, component_id, component_local_path)
+    persist_package_artifacts_in_roots(
+        artifact_root,
+        state,
+        artifact_start,
+        component_id,
+        component_local_path,
+    )
 }
 
 /// Execute a `release.package` action with a bounded retry for transient
@@ -867,13 +929,20 @@ pub(super) fn store_artifacts_from_output(
     Ok(())
 }
 
-fn persist_package_artifacts(
+/// Copy the newly emitted artifacts into the durable release cache below an
+/// explicitly injected artifact root.
+///
+/// The `source.starts_with(artifact_root)` short-circuit below is why this must
+/// be the *same* root the copies are written under: judging "already durable"
+/// against one home while copying into another would re-copy every artifact, or
+/// worse, declare a foreign path durable.
+fn persist_package_artifacts_in_roots(
+    artifact_root: &Path,
     state: &mut ReleaseState,
     artifact_start: usize,
     component_id: &str,
     component_local_path: &str,
 ) -> Result<()> {
-    let artifact_root = homeboy_core::paths::artifact_root()?;
     let version = state
         .version
         .as_deref()
@@ -890,7 +959,7 @@ fn persist_package_artifacts(
             continue;
         }
 
-        if source.starts_with(&artifact_root) {
+        if source.starts_with(artifact_root) {
             artifact.durable_path = Some(source.display().to_string());
             continue;
         }

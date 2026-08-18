@@ -1148,27 +1148,59 @@ fn retryable_workspace_metadata_transport_failure_builds_transient_outcome() {
     assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The retry runs through `retry_with_runtime_admission_in_store` with
+/// `force = false` and `enforce_lineage_reservation = false` — the exact
+/// arguments `retry_in_store` passes — and a stub admission, because controller
+/// admission is machine-global by design and would otherwise reach the real
+/// operator runtime store once the home is no longer mutated. That is the same
+/// shape `submit_and_persist.rs:1490` already uses.
 #[test]
 fn retry_uses_controller_plan_when_runner_projection_replaces_plan_path() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        let record =
-            submit_plan(&plan, Some("runner-projected-retry")).expect("controller plan submitted");
-        let mut projected = store::read_record(&record.run_id).expect("source record");
-        projected.plan_path =
-            "/home/chubes/.local/share/homeboy/agent-task-runs/runner-projected-retry/plan.json"
-                .to_string();
-        store::write_record(&projected).expect("runner projection mirrored");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let record = lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "runner-projected-retry", |_| Ok(json!({})))
+        .expect("controller plan submitted");
+    let mut projected = lifecycle_store
+        .read_record(&record.run_id)
+        .expect("source record");
+    projected.plan_path =
+        "/home/chubes/.local/share/homeboy/agent-task-runs/runner-projected-retry/plan.json"
+            .to_string();
+    lifecycle_store
+        .write_record(&projected)
+        .expect("runner projection mirrored");
 
-        let retry_record = retry(&record.run_id, Some("runner-projected-retry-local"))
-            .expect("local retry uses controller plan");
-        assert_eq!(load_plan(&retry_record.run_id).expect("retry plan"), plan);
+    let retry_record = retry_with_runtime_admission_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        Some("runner-projected-retry-local"),
+        false,
+        false,
+        None,
+        |_| Ok(json!({})),
+    )
+    .expect("local retry uses controller plan");
+    assert_eq!(
+        load_plan_in_store(&lifecycle_store, &retry_record.run_id).expect("retry plan"),
+        plan
+    );
 
-        std::fs::remove_file(record.plan_path).expect("remove authoritative controller plan");
-        let error = retry(&record.run_id, Some("missing-controller-plan"))
-            .expect_err("missing controller plan fails closed");
-        assert_eq!(error.code, ErrorCode::InternalIoError);
-    });
+    std::fs::remove_file(record.plan_path).expect("remove authoritative controller plan");
+    let error = retry_with_runtime_admission_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        Some("missing-controller-plan"),
+        false,
+        false,
+        None,
+        |_| Ok(json!({})),
+    )
+    .expect_err("missing controller plan fails closed");
+    assert_eq!(error.code, ErrorCode::InternalIoError);
 }
 
 /// Persisting a terminal Lab-bound record from inside a config-lock section is
@@ -1794,57 +1826,66 @@ fn duplicate_runner_artifact_ids_fail_closed_before_projection() {
     });
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). Both promotion writes and the record they are read back from are
+/// the injected store's, so `latest_promotion` and the promotion history length
+/// asserted below describe one home rather than a mixture of two.
 #[test]
 fn corrected_promotion_replaces_gate_failed_latest_proof() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        let run_id = "run-corrected-promotion";
-        submit_plan(&plan, Some(run_id)).expect("submitted");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let run_id = "run-corrected-promotion";
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+        .expect("submitted");
 
-        let gate_failed = json!({
-            "schema": "homeboy/agent-task-promotion-report/v1",
-            "status": "gate_failed",
-            "source": { "kind": "aggregate", "task_id": "task-a", "run_id": run_id },
-            "to_worktree": "homeboy@fix-8307",
-            "target": { "worktree": "homeboy@fix-8307", "path": "/repo" },
-            "patch_artifact": { "id": "first.patch", "kind": "patch", "path": "first.patch" },
-            "changed_files": ["src/lib.rs"],
-            "gate_results": [{ "id": "test", "name": "cargo test", "kind": "command", "status": "failed" }],
-            "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v1", "target_path": "/repo", "head": "base", "base": "base", "changed_files": ["src/lib.rs"], "sha256": "first" } } },
-            "operator_notification": { "status": "blocked", "message": "gates failed" }
-        });
-        let corrected = json!({
-            "schema": "homeboy/agent-task-promotion-report/v1",
-            "status": "applied",
-            "source": { "kind": "aggregate", "task_id": "task-a", "run_id": run_id },
-            "to_worktree": "homeboy@fix-8307",
-            "target": { "worktree": "homeboy@fix-8307", "path": "/repo" },
-            "patch_artifact": { "id": "corrected.patch", "kind": "patch", "path": "corrected.patch" },
-            "changed_files": ["src/lib.rs"],
-            "gate_results": [{ "id": "test", "name": "cargo test", "kind": "command", "status": "passed" }],
-            "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v1", "target_path": "/repo", "head": "base", "base": "base", "changed_files": ["src/lib.rs"], "sha256": "corrected" } } },
-            "operator_notification": { "status": "completed", "message": "gates passed" }
-        });
-
-        record_promotion(run_id, gate_failed).expect("gate failure recorded");
-        let updated = record_promotion(run_id, corrected.clone()).expect("correction recorded");
-
-        let latest: crate::agent_task_promotion::AgentTaskPromotionReport =
-            serde_json::from_value(updated.metadata["latest_promotion"].clone())
-                .expect("latest promotion is finalization proof");
-        assert_eq!(
-            latest.status,
-            crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
-        );
-        assert_eq!(latest.patch_artifact.id, "corrected.patch");
-        assert_eq!(
-            updated.metadata["promotions"]
-                .as_array()
-                .expect("history")
-                .len(),
-            2
-        );
+    let gate_failed = json!({
+        "schema": "homeboy/agent-task-promotion-report/v1",
+        "status": "gate_failed",
+        "source": { "kind": "aggregate", "task_id": "task-a", "run_id": run_id },
+        "to_worktree": "homeboy@fix-8307",
+        "target": { "worktree": "homeboy@fix-8307", "path": "/repo" },
+        "patch_artifact": { "id": "first.patch", "kind": "patch", "path": "first.patch" },
+        "changed_files": ["src/lib.rs"],
+        "gate_results": [{ "id": "test", "name": "cargo test", "kind": "command", "status": "failed" }],
+        "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v1", "target_path": "/repo", "head": "base", "base": "base", "changed_files": ["src/lib.rs"], "sha256": "first" } } },
+        "operator_notification": { "status": "blocked", "message": "gates failed" }
     });
+    let corrected = json!({
+        "schema": "homeboy/agent-task-promotion-report/v1",
+        "status": "applied",
+        "source": { "kind": "aggregate", "task_id": "task-a", "run_id": run_id },
+        "to_worktree": "homeboy@fix-8307",
+        "target": { "worktree": "homeboy@fix-8307", "path": "/repo" },
+        "patch_artifact": { "id": "corrected.patch", "kind": "patch", "path": "corrected.patch" },
+        "changed_files": ["src/lib.rs"],
+        "gate_results": [{ "id": "test", "name": "cargo test", "kind": "command", "status": "passed" }],
+        "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v1", "target_path": "/repo", "head": "base", "base": "base", "changed_files": ["src/lib.rs"], "sha256": "corrected" } } },
+        "operator_notification": { "status": "completed", "message": "gates passed" }
+    });
+
+    record_promotion_in_store(&lifecycle_store, run_id, gate_failed)
+        .expect("gate failure recorded");
+    let updated = record_promotion_in_store(&lifecycle_store, run_id, corrected.clone())
+        .expect("correction recorded");
+
+    let latest: crate::agent_task_promotion::AgentTaskPromotionReport =
+        serde_json::from_value(updated.metadata["latest_promotion"].clone())
+            .expect("latest promotion is finalization proof");
+    assert_eq!(
+        latest.status,
+        crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+    );
+    assert_eq!(latest.patch_artifact.id, "corrected.patch");
+    assert_eq!(
+        updated.metadata["promotions"]
+            .as_array()
+            .expect("history")
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -2021,48 +2062,79 @@ fn lifecycle_store_round_trips_record_log_artifacts_and_lifecycle_contract() {
     });
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The successor identity, the inherited notification route, and the
+/// plan read back for it all follow the injected root, so the retry lineage
+/// asserted below is the one this store recorded. The admission is stubbed for
+/// the same reason as `retry_uses_controller_plan_when_runner_projection_replaces_plan_path`.
 #[test]
 fn retry_submits_new_run_from_existing_plan() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        submit_plan(&plan, Some("run-original")).expect("submitted");
-        let mut source = store::read_record("run-original").expect("source");
-        source.metadata["notification_route"] = json!({
-            "transport": "extension",
-            "route": "opaque-origin"
-        });
-        store::write_record(&source).expect("route persisted");
-
-        let record = retry("run-original", Some("run-retry")).expect("retry submitted");
-        let loaded_plan = load_plan("run-retry").expect("retry plan loaded");
-
-        assert_eq!(record.run_id, "run-retry");
-        assert_eq!(record.state, AgentTaskRunState::Queued);
-        assert_eq!(record.metadata["retry_of"], json!("run-original"));
-        assert_eq!(
-            record.metadata["notification_route"]["route"],
-            "opaque-origin"
-        );
-        assert_eq!(loaded_plan.plan_id, "plan-a");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "run-original", |_| Ok(json!({})))
+        .expect("submitted");
+    let mut source = lifecycle_store.read_record("run-original").expect("source");
+    source.metadata["notification_route"] = json!({
+        "transport": "extension",
+        "route": "opaque-origin"
     });
+    lifecycle_store
+        .write_record(&source)
+        .expect("route persisted");
+
+    let record = retry_with_runtime_admission_in_store(
+        &lifecycle_store,
+        "run-original",
+        Some("run-retry"),
+        false,
+        false,
+        None,
+        |_| Ok(json!({})),
+    )
+    .expect("retry submitted");
+    let loaded_plan = load_plan_in_store(&lifecycle_store, "run-retry").expect("retry plan loaded");
+
+    assert_eq!(record.run_id, "run-retry");
+    assert_eq!(record.state, AgentTaskRunState::Queued);
+    assert_eq!(record.metadata["retry_of"], json!("run-original"));
+    assert_eq!(
+        record.metadata["notification_route"]["route"],
+        "opaque-origin"
+    );
+    assert_eq!(loaded_plan.plan_id, "plan-a");
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The stale record is seeded and reclaimed through the same injected
+/// store, so the reclaim evidence asserted below cannot have been produced by
+/// another home holding this run id.
 #[test]
 fn mark_running_reclaims_stale_running_record() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        submit_plan(&plan, Some("run-stale-dead-owner")).expect("submitted");
-        let mut record = store::read_record("run-stale-dead-owner").expect("record");
-        record.state = AgentTaskRunState::Running;
-        record.metadata = json!({ "runner_pid": u32::MAX });
-        store::write_record(&record).expect("stored stale record");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "run-stale-dead-owner", |_| Ok(json!({})))
+        .expect("submitted");
+    let mut record = lifecycle_store
+        .read_record("run-stale-dead-owner")
+        .expect("record");
+    record.state = AgentTaskRunState::Running;
+    record.metadata = json!({ "runner_pid": u32::MAX });
+    lifecycle_store
+        .write_record(&record)
+        .expect("stored stale record");
 
-        let running = mark_running("run-stale-dead-owner").expect("reclaimed");
+    let running =
+        mark_running_in_store(&lifecycle_store, "run-stale-dead-owner").expect("reclaimed");
 
-        assert_eq!(running.state, AgentTaskRunState::Running);
-        assert_eq!(running.metadata["reclaimed_stale_running"], json!(true));
-        assert_eq!(running.metadata["runner_pid"], json!(std::process::id()));
-    });
+    assert_eq!(running.state, AgentTaskRunState::Running);
+    assert_eq!(running.metadata["reclaimed_stale_running"], json!(true));
+    assert_eq!(running.metadata["runner_pid"], json!(std::process::id()));
 }
 
 #[cfg(unix)]
@@ -2509,29 +2581,42 @@ fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe(
     });
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The oversized fixture is written at the path the injected store
+/// itself names and read back through the sibling handed the same store, so the
+/// partial-read evidence asserted below is about this home's aggregate file.
+///
+/// `store::DURABLE_AGGREGATE_MAX_BYTES` is the one surviving `store::` token in
+/// this body. It is a `pub(super)` byte-count constant, not a root resolution —
+/// there is no other path to it — so it reaches no ambient state.
 #[test]
 fn durable_aggregate_read_rejects_an_oversized_file_before_deserializing_it() {
-    with_isolated_home(|_| {
-        let record =
-            submit_plan(&test_plan(), Some("oversized-durable-aggregate")).expect("durable record");
-        let path = store::aggregate_path(&record.run_id).expect("aggregate path");
-        std::fs::write(
-            &path,
-            vec![b'x'; (store::DURABLE_AGGREGATE_MAX_BYTES + 1) as usize],
-        )
-        .expect("oversized aggregate fixture");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let record = lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), "oversized-durable-aggregate", |_| {
+            Ok(json!({}))
+        })
+        .expect("durable record");
+    let path = lifecycle_store.aggregate_path(&record.run_id);
+    std::fs::write(
+        &path,
+        vec![b'x'; (store::DURABLE_AGGREGATE_MAX_BYTES + 1) as usize],
+    )
+    .expect("oversized aggregate fixture");
 
-        let snapshot = durable_local_read(&record.run_id).expect("partial durable read");
+    let snapshot = durable_local_read_in_store(&lifecycle_store, &record.run_id)
+        .expect("partial durable read");
 
-        assert_eq!(snapshot.record.run_id, record.run_id);
-        assert!(snapshot.aggregate.is_none());
-        assert_eq!(snapshot.unavailable_sources.len(), 1);
-        assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
-        assert_eq!(
-            snapshot.unavailable_sources[0].reason_code,
-            "durable_read.oversized"
-        );
-    });
+    assert_eq!(snapshot.record.run_id, record.run_id);
+    assert!(snapshot.aggregate.is_none());
+    assert_eq!(snapshot.unavailable_sources.len(), 1);
+    assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
+    assert_eq!(
+        snapshot.unavailable_sources[0].reason_code,
+        "durable_read.oversized"
+    );
 }
 
 #[test]

@@ -69,10 +69,15 @@ pub fn run(args: DeferredWorkloadArgs) -> CmdResult<serde_json::Value> {
             ))
         }
         DeferredWorkloadCommand::Status => {
+            // One resolution for the whole command: the worker status file and
+            // the record store are two files under the same root, and reading
+            // them from two independently resolved roots is how a status report
+            // ends up describing two different Homeboy installations.
+            let config_root = homeboy::core::paths::homeboy()?;
             let output = DeferredWorkloadStatusOutput {
                 schema: "homeboy/deferred-workload-status/v1",
-                worker: deferred_workload::worker_status()?,
-                records: deferred_workload::records()?
+                worker: deferred_workload::worker_status_in_roots(&config_root)?,
+                records: deferred_workload::records_in_roots(&config_root)?
                     .iter()
                     .map(redacted_record)
                     .collect(),
@@ -125,12 +130,19 @@ struct DeferredWorkloadOrphan {
 /// prove from its own environment, so a foreign process that happens to share
 /// the command name is never signaled on that basis (#12081).
 fn reconcile_workers(dry_run: bool) -> homeboy::core::Result<DeferredWorkloadReconcileOutput> {
+    reconcile_workers_in_roots(&homeboy::core::paths::homeboy()?, dry_run)
+}
+
+fn reconcile_workers_in_roots(
+    config_root: &Path,
+    dry_run: bool,
+) -> homeboy::core::Result<DeferredWorkloadReconcileOutput> {
     let deadline = Instant::now() + RECONCILE_BUDGET;
-    let status = deferred_workload::worker_status()?;
+    let status = deferred_workload::worker_status_in_roots(config_root)?;
     let owner_is_live = status
         .as_ref()
-        .is_some_and(deferred_workload::worker_is_live);
-    let pending_work = deferred_workload::has_pending_work()?;
+        .is_some_and(|status| deferred_workload::worker_is_live_in_roots(config_root, status));
+    let pending_work = deferred_workload::has_pending_work_in_roots(config_root)?;
     let processes = deferred_workload::worker_processes()?;
     let scanned = processes.len();
     let mut retained = Vec::new();
@@ -171,7 +183,9 @@ fn reconcile_workers(dry_run: bool) -> homeboy::core::Result<DeferredWorkloadRec
         // Release before signaling: a killed worker cannot hand its claim back,
         // and the record would otherwise sit out the full lease.
         let released_workload_ids = match process.startup_token.as_deref() {
-            Some(token) => deferred_workload::release_claims_for_owner(token)?,
+            Some(token) => {
+                deferred_workload::release_claims_for_owner_in_roots(config_root, token)?
+            }
             None => Vec::new(),
         };
         let (terminated, error) = match homeboy::core::process::terminate_process_tree_with_grace(
@@ -190,10 +204,13 @@ fn reconcile_workers(dry_run: bool) -> homeboy::core::Result<DeferredWorkloadRec
             Err(error) => (false, Some(error.message)),
         };
         if terminated {
-            let _ = deferred_workload::append_worker_log(format!(
-                "reconcile terminated worker pid={} reason={reason}",
-                process.pid
-            ));
+            let _ = deferred_workload::append_worker_log_in_roots(
+                config_root,
+                format!(
+                    "reconcile terminated worker pid={} reason={reason}",
+                    process.pid
+                ),
+            );
         }
         orphaned.push(DeferredWorkloadOrphan {
             process,
@@ -221,88 +238,121 @@ fn reconcile_workers(dry_run: bool) -> homeboy::core::Result<DeferredWorkloadRec
 }
 
 pub fn ensure_worker() -> homeboy::core::Result<()> {
-    let _start_lock = deferred_workload::acquire_worker_start_lock()?;
-    ensure_worker_with(deferred_workload::worker_is_live, || {
-        let executable = std::env::current_exe().map_err(|error| {
-            homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some("resolve deferred worker executable".to_string()),
-            )
-        })?;
-        let mut command = Command::new(executable);
-        let startup_token = uuid::Uuid::new_v4().to_string();
-        command.args([
-            "deferred-workload",
-            "worker",
-            "--startup-token",
-            &startup_token,
-        ]);
-        // The ownership probe reads `/proc/<pid>/environ`, which the kernel
-        // populates at execve. The marker must therefore be set on the child
-        // command, not by the child once it is running (#12081).
-        command.env(deferred_workload::WORKER_OWNER_ENV, &startup_token);
-        // A singleton that outlives this command must not hold its working
-        // directory open. Inheriting it left workers pinned to worktrees that
-        // were finalized and deleted underneath them.
-        command.current_dir(deferred_workload::worker_root()?);
-        // A detached worker must not keep an invoking client's capture pipes
-        // open after the foreground command exits.
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::setsid() == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        command.spawn().map_err(|error| {
-            homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some("spawn deferred workload worker".to_string()),
-            )
-        })?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
-            if deferred_workload::worker_status()?
-                .as_ref()
-                .is_some_and(deferred_workload::worker_is_live)
+    ensure_worker_in_roots(&homeboy::core::paths::homeboy()?)
+}
+
+/// Spawn the singleton worker against an already-resolved config root.
+///
+/// The start lock, the liveness probe, the worker's working directory, the
+/// readiness poll, and the pending-record check are five reads of the same
+/// Homeboy installation. Resolving them independently let a five-second poll
+/// re-resolve the root up to 250 times, and left the spawned worker free to
+/// disagree with the probe that was waiting on it.
+fn ensure_worker_in_roots(config_root: &Path) -> homeboy::core::Result<()> {
+    let _start_lock = deferred_workload::acquire_worker_start_lock_in_roots(config_root)?;
+    ensure_worker_with(
+        config_root,
+        |status: &deferred_workload::DeferredWorkloadWorkerStatus| {
+            deferred_workload::worker_is_live_in_roots(config_root, status)
+        },
+        || {
+            let executable = std::env::current_exe().map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("resolve deferred worker executable".to_string()),
+                )
+            })?;
+            let mut command = Command::new(executable);
+            let startup_token = uuid::Uuid::new_v4().to_string();
+            command.args([
+                "deferred-workload",
+                "worker",
+                "--startup-token",
+                &startup_token,
+            ]);
+            // The ownership probe reads `/proc/<pid>/environ`, which the kernel
+            // populates at execve. The marker must therefore be set on the child
+            // command, not by the child once it is running (#12081).
+            command.env(deferred_workload::WORKER_OWNER_ENV, &startup_token);
+            // A singleton that outlives this command must not hold its working
+            // directory open. Inheriting it left workers pinned to worktrees that
+            // were finalized and deleted underneath them.
+            command.current_dir(deferred_workload::worker_root_in_roots(config_root)?);
+            // A detached worker must not keep an invoking client's capture pipes
+            // open after the foreground command exits.
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(unix)]
             {
-                return Ok(());
+                use std::os::unix::process::CommandExt;
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
             }
-            thread::sleep(Duration::from_millis(20));
-        }
-        if deferred_workload::records()?.iter().any(|record| {
-            matches!(
-                record.state,
-                deferred_workload::DeferredWorkloadState::Deferred
-                    | deferred_workload::DeferredWorkloadState::Claimed
-            )
-        }) {
-            return Err(homeboy::core::Error::internal_unexpected(
-                "deferred workload worker did not publish live ownership within 5 seconds",
-            ));
-        }
-        Ok(())
-    })
+            command.spawn().map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("spawn deferred workload worker".to_string()),
+                )
+            })?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if deferred_workload::worker_status_in_roots(config_root)?
+                    .as_ref()
+                    .is_some_and(|status| {
+                        deferred_workload::worker_is_live_in_roots(config_root, status)
+                    })
+                {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            if deferred_workload::records_in_roots(config_root)?
+                .iter()
+                .any(|record| {
+                    matches!(
+                        record.state,
+                        deferred_workload::DeferredWorkloadState::Deferred
+                            | deferred_workload::DeferredWorkloadState::Claimed
+                    )
+                })
+            {
+                return Err(homeboy::core::Error::internal_unexpected(
+                    "deferred workload worker did not publish live ownership within 5 seconds",
+                ));
+            }
+            Ok(())
+        },
+    )
 }
 
 pub fn restart_worker_if_pending() -> homeboy::core::Result<()> {
-    restart_worker_if_pending_with(deferred_workload::worker_is_live, ensure_worker)
+    restart_worker_if_pending_in_roots(&homeboy::core::paths::homeboy()?)
+}
+
+fn restart_worker_if_pending_in_roots(config_root: &Path) -> homeboy::core::Result<()> {
+    restart_worker_if_pending_with_in_roots(
+        config_root,
+        |status: &deferred_workload::DeferredWorkloadWorkerStatus| {
+            deferred_workload::worker_is_live_in_roots(config_root, status)
+        },
+        || ensure_worker_in_roots(config_root),
+    )
 }
 
 fn ensure_worker_with(
+    config_root: &Path,
     is_live: impl Fn(&deferred_workload::DeferredWorkloadWorkerStatus) -> bool,
     spawn: impl FnOnce() -> homeboy::core::Result<()>,
 ) -> homeboy::core::Result<()> {
-    if deferred_workload::worker_status()?
+    if deferred_workload::worker_status_in_roots(config_root)?
         .as_ref()
         .is_some_and(is_live)
     {
@@ -315,14 +365,25 @@ fn restart_worker_if_pending_with(
     is_live: impl Fn(&deferred_workload::DeferredWorkloadWorkerStatus) -> bool,
     spawn: impl FnOnce() -> homeboy::core::Result<()>,
 ) -> homeboy::core::Result<()> {
-    if deferred_workload::records()?.iter().any(|record| {
-        matches!(
-            record.state,
-            deferred_workload::DeferredWorkloadState::Deferred
-                | deferred_workload::DeferredWorkloadState::Claimed
-        )
-    }) {
-        ensure_worker_with(is_live, spawn)?;
+    restart_worker_if_pending_with_in_roots(&homeboy::core::paths::homeboy()?, is_live, spawn)
+}
+
+fn restart_worker_if_pending_with_in_roots(
+    config_root: &Path,
+    is_live: impl Fn(&deferred_workload::DeferredWorkloadWorkerStatus) -> bool,
+    spawn: impl FnOnce() -> homeboy::core::Result<()>,
+) -> homeboy::core::Result<()> {
+    if deferred_workload::records_in_roots(config_root)?
+        .iter()
+        .any(|record| {
+            matches!(
+                record.state,
+                deferred_workload::DeferredWorkloadState::Deferred
+                    | deferred_workload::DeferredWorkloadState::Claimed
+            )
+        })
+    {
+        ensure_worker_with(config_root, is_live, spawn)?;
     }
     Ok(())
 }
@@ -331,13 +392,28 @@ fn run_worker(startup_token: &str) -> homeboy::core::Result<()> {
     if std::env::var(deferred_workload::WORKER_OWNER_ENV).as_deref() != Ok(startup_token) {
         return reexec_with_owner_marker(startup_token);
     }
-    let Some(lock) = deferred_workload::try_acquire_worker_lock()? else {
+    // The worker process resolves its installation once and then never again.
+    // Everything below — the singleton lock, the status file, the log, the
+    // claim/terminalize protocol, and the dispatch heartbeat — is the same
+    // durable store, and an unbounded loop that re-resolved it per iteration
+    // could drift onto a different one mid-lease.
+    let config_root = homeboy::core::paths::homeboy()?;
+    let Some(lock) = deferred_workload::try_acquire_worker_lock_in_roots(&config_root)? else {
         return Ok(());
     };
     let owner = startup_token.to_string();
-    deferred_workload::write_worker_status(&owner, "starting", "probing runner readiness")?;
-    deferred_workload::append_worker_log(format!("worker started owner={owner}"))?;
+    deferred_workload::write_worker_status_in_roots(
+        &config_root,
+        &owner,
+        "starting",
+        "probing runner readiness",
+    )?;
+    deferred_workload::append_worker_log_in_roots(
+        &config_root,
+        format!("worker started owner={owner}"),
+    )?;
     run_worker_while_holding_lock(
+        &config_root,
         &lock,
         &owner,
         || {
@@ -357,7 +433,12 @@ fn run_worker(startup_token: &str) -> homeboy::core::Result<()> {
                 })
             })
         },
-        dispatch_record,
+        // A bare `dispatch_record` reference would keep heartbeating against
+        // its own ambient resolution while the loop around it used the injected
+        // root — the split-home shape this campaign exists to remove.
+        |record: &deferred_workload::DeferredWorkload, runner_id: &str, owner: &str| {
+            dispatch_record(config_root.as_path(), record, runner_id, owner)
+        },
         deferred_workload_now_ms,
         thread::sleep,
     )
@@ -406,6 +487,7 @@ fn reexec_with_owner_marker(startup_token: &str) -> homeboy::core::Result<()> {
 }
 
 fn run_worker_while_holding_lock(
+    config_root: &Path,
     _lock: &deferred_workload::DeferredWorkloadWorkerLock,
     owner: &str,
     readiness: impl FnMut() -> homeboy::core::Result<Option<RunnerCapabilityInventory>>,
@@ -417,10 +499,35 @@ fn run_worker_while_holding_lock(
     now: impl Fn() -> u64,
     sleep: impl FnMut(Duration),
 ) -> homeboy::core::Result<()> {
-    run_worker_with(owner, readiness, dispatch, now, sleep)
+    run_worker_with_in_roots(config_root, owner, readiness, dispatch, now, sleep)
 }
 
+/// Ambient entry point for the worker loop, retained for callers that own no
+/// resolved root (the hermetic tests). Production runs
+/// [`run_worker_with_in_roots`] from the single resolution `run_worker` makes.
 pub(crate) fn run_worker_with(
+    owner: &str,
+    readiness: impl FnMut() -> homeboy::core::Result<Option<RunnerCapabilityInventory>>,
+    dispatch: impl FnMut(
+        &deferred_workload::DeferredWorkload,
+        &str,
+        &str,
+    ) -> homeboy::core::Result<bool>,
+    now: impl Fn() -> u64,
+    sleep: impl FnMut(Duration),
+) -> homeboy::core::Result<()> {
+    run_worker_with_in_roots(
+        &homeboy::core::paths::homeboy()?,
+        owner,
+        readiness,
+        dispatch,
+        now,
+        sleep,
+    )
+}
+
+pub(crate) fn run_worker_with_in_roots(
+    config_root: &Path,
     owner: &str,
     mut readiness: impl FnMut() -> homeboy::core::Result<Option<RunnerCapabilityInventory>>,
     mut dispatch: impl FnMut(
@@ -432,21 +539,29 @@ pub(crate) fn run_worker_with(
     mut sleep: impl FnMut(Duration),
 ) -> homeboy::core::Result<()> {
     loop {
-        let pending = deferred_workload::records()?.into_iter().any(|record| {
-            matches!(
-                record.state,
-                deferred_workload::DeferredWorkloadState::Deferred
-                    | deferred_workload::DeferredWorkloadState::Claimed
-            )
-        });
+        let pending = deferred_workload::records_in_roots(config_root)?
+            .into_iter()
+            .any(|record| {
+                matches!(
+                    record.state,
+                    deferred_workload::DeferredWorkloadState::Deferred
+                        | deferred_workload::DeferredWorkloadState::Claimed
+                )
+            });
         if !pending {
-            deferred_workload::write_worker_status(owner, "idle", "no deferred workloads")?;
+            deferred_workload::write_worker_status_in_roots(
+                config_root,
+                owner,
+                "idle",
+                "no deferred workloads",
+            )?;
             return Ok(());
         }
         let inventory = match readiness() {
             Ok(Some(inventory)) => inventory,
             Ok(None) => {
-                deferred_workload::write_worker_status(
+                deferred_workload::write_worker_status_in_roots(
+                    config_root,
                     owner,
                     "waiting_for_runner",
                     "no ready runner",
@@ -455,19 +570,26 @@ pub(crate) fn run_worker_with(
                 continue;
             }
             Err(error) => {
-                deferred_workload::write_worker_status(owner, "waiting_for_runner", error.message)?;
+                deferred_workload::write_worker_status_in_roots(
+                    config_root,
+                    owner,
+                    "waiting_for_runner",
+                    error.message,
+                )?;
                 sleep(POLL_INTERVAL);
                 continue;
             }
         };
-        let Some(record) = deferred_workload::claim_next_matching_at(
+        let Some(record) = deferred_workload::claim_next_matching_at_in_roots(
+            config_root,
             &inventory.runner_id,
             owner,
             now(),
             |candidate| runner_satisfies_requirements(candidate, &inventory),
         )?
         else {
-            deferred_workload::write_worker_status(
+            deferred_workload::write_worker_status_in_roots(
+                config_root,
                 owner,
                 "waiting_for_runner",
                 "no claimable workload for selected runner",
@@ -479,37 +601,47 @@ pub(crate) fn run_worker_with(
         // Replaying it from wherever the worker happens to stand would sync the
         // wrong source tree, so the record fails here instead (#12081).
         if let Some(missing) = missing_source_directory(&record) {
-            deferred_workload::terminalize(&record.id, false)?;
-            deferred_workload::append_worker_log(format!(
-                "failed {} source worktree {missing} no longer exists",
-                record.id
-            ))?;
+            deferred_workload::terminalize_in_roots(config_root, &record.id, false)?;
+            deferred_workload::append_worker_log_in_roots(
+                config_root,
+                format!(
+                    "failed {} source worktree {missing} no longer exists",
+                    record.id
+                ),
+            )?;
             continue;
         }
         let runner_id = &inventory.runner_id;
-        deferred_workload::write_worker_status(
+        deferred_workload::write_worker_status_in_roots(
+            config_root,
             owner,
             "dispatching",
             format!("{} via {runner_id}", record.id),
         )?;
-        deferred_workload::append_worker_log(format!("claimed {} via {runner_id}", record.id))?;
+        deferred_workload::append_worker_log_in_roots(
+            config_root,
+            format!("claimed {} via {runner_id}", record.id),
+        )?;
         let success = match dispatch(&record, runner_id, owner) {
             Ok(success) => success,
             Err(error) if error.message == CAPABILITY_MISMATCH_ERROR => {
-                deferred_workload::defer_claim(&record.id, owner)?;
-                deferred_workload::append_worker_log(format!(
-                    "deferred {} after runner capability preflight mismatch",
-                    record.id
-                ))?;
+                deferred_workload::defer_claim_in_roots(config_root, &record.id, owner)?;
+                deferred_workload::append_worker_log_in_roots(
+                    config_root,
+                    format!(
+                        "deferred {} after runner capability preflight mismatch",
+                        record.id
+                    ),
+                )?;
                 continue;
             }
             Err(error) => return Err(error),
         };
-        deferred_workload::terminalize(&record.id, success)?;
-        deferred_workload::append_worker_log(format!(
-            "terminalized {} success={success}",
-            record.id
-        ))?;
+        deferred_workload::terminalize_in_roots(config_root, &record.id, success)?;
+        deferred_workload::append_worker_log_in_roots(
+            config_root,
+            format!("terminalized {} success={success}", record.id),
+        )?;
     }
 }
 
@@ -535,7 +667,14 @@ fn deferred_workload_now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Dispatch a claimed record and heartbeat its lease under the caller's root.
+///
+/// The heartbeat writes the same store the claim came from, so the root is
+/// injected rather than re-resolved: a dispatch that renewed a lease in one
+/// installation while the loop had claimed it in another would silently let the
+/// claim expire under the worker.
 fn dispatch_record(
+    config_root: &Path,
     record: &deferred_workload::DeferredWorkload,
     runner_id: &str,
     owner: &str,
@@ -582,7 +721,7 @@ fn dispatch_record(
             }
             return Ok(status.success());
         }
-        if !deferred_workload::heartbeat(&record.id, owner)? {
+        if !deferred_workload::heartbeat_in_roots(config_root, &record.id, owner)? {
             return Ok(false);
         }
         thread::sleep(Duration::from_secs(1));

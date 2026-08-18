@@ -912,7 +912,14 @@ pub(crate) fn terminal_provider_model_reconciliation_needed(
 /// promotion evidence, gates, totals, and artifact projections are preserved:
 /// `set_run_state` re-asserts the existing terminal state and only the
 /// model-bearing lifecycle projection is rebuilt from the record's own tasks.
-pub(crate) fn reconcile_terminal_provider_model(
+///
+/// The persist at the end is the whole point of taking a store: it is the only
+/// durable effect, so a reconciliation driven from injected roots must land its
+/// repaired model in the same installation the record and aggregate were read
+/// from. There is no ambient wrapper — `status_with_options_inner` is the only
+/// caller, and it resolves one store for the whole read.
+pub(crate) fn reconcile_terminal_provider_model_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
@@ -938,7 +945,7 @@ pub(crate) fn reconcile_terminal_provider_model(
     persist_provider_handle_models(&mut record.provider_handles, plan);
     update_lifecycle_from_record(record, plan);
     record.updated_at = Some(now_timestamp());
-    store::write_record(record)
+    lifecycle_store.write_record(record)
 }
 
 /// Recover the runner identity for canonical legacy patch artifacts. Diagnostic
@@ -1024,6 +1031,43 @@ pub(crate) fn terminal_artifact_projection_is_verified(
     record: &AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> Result<bool> {
+    terminal_artifact_projection_is_verified_with(record, aggregate, || {
+        homeboy_core::observation::ObservationStore::open_initialized()
+    })
+}
+
+/// [`terminal_artifact_projection_is_verified`] against an explicitly injected
+/// durable lifecycle root.
+///
+/// `open_observation_initialized` binds this store's observation database *and*
+/// the artifact root it carries, and the second binding is the reason this
+/// sibling has to exist. `PathRoots` keeps `artifacts` separate from `data`, and
+/// `ObservationStore::open_initialized` resolves both from the process — so a
+/// projection verified ambiently looks for controller-owned bytes under
+/// whichever artifact root the environment names, and reports an
+/// otherwise-complete candidate as unprojected purely because it was asked from
+/// the wrong home (#7505, #12618, #12619).
+pub(crate) fn terminal_artifact_projection_is_verified_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> Result<bool> {
+    terminal_artifact_projection_is_verified_with(record, aggregate, || {
+        lifecycle_store.open_observation_initialized()
+    })
+}
+
+/// The shared body of both forms above.
+///
+/// `open_observations` is invoked at exactly the point the ambient form used to
+/// open its store — lazily, inside the loop, only once an artifact actually
+/// requires a durable projection — so neither form initializes an observation
+/// database it would not have touched before.
+fn terminal_artifact_projection_is_verified_with(
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+    mut open_observations: impl FnMut() -> Result<homeboy_core::observation::ObservationStore>,
+) -> Result<bool> {
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
             if requires_durable_lab_projection(artifact) {
@@ -1033,7 +1077,8 @@ pub(crate) fn terminal_artifact_projection_is_verified(
                 {
                     return Ok(false);
                 }
-                if verified_controller_artifact_projection_path(
+                if verified_controller_artifact_projection_path_in_store(
+                    &open_observations()?,
                     &record.run_id,
                     &outcome.task_id,
                     artifact,
@@ -1060,6 +1105,35 @@ pub fn terminal_artifact_projection_readiness(run_id: &str) -> Result<Option<Str
     )
 }
 
+/// [`terminal_artifact_projection_readiness`] against an explicitly injected
+/// durable lifecycle root.
+///
+/// All three reads follow the injected store, and the third is the one that
+/// matters: the projection check opens an observation database *and* resolves
+/// an artifact root, which `PathRoots` carries separately from `data`. Answered
+/// ambiently, an otherwise-complete candidate is reported as unprojected purely
+/// because the controller-owned bytes were looked for under the wrong home
+/// (#7505, #12618, #12619) — and here that verdict is not merely cosmetic: the
+/// caller turns it into a `cook_continuation_scheduler` status that suppresses
+/// the terminal continuation enqueue.
+///
+/// This is the initializing counterpart of
+/// [`terminal_artifact_projection_readiness_bounded_in_store`]; it opens the
+/// same stores the ambient form opens rather than the read-only ones.
+pub fn terminal_artifact_projection_readiness_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let record = lifecycle_store.read_record(&super::sanitize_run_id(run_id))?;
+    terminal_artifact_projection_readiness_for_record_with(
+        &record,
+        lifecycle_store.read_aggregate(&record.run_id),
+        |record, aggregate| {
+            terminal_artifact_projection_is_verified_in_store(lifecycle_store, record, aggregate)
+        },
+    )
+}
+
 /// Bounded read-only counterpart used by fanout status while coordinators are
 /// writing observations. It intentionally leaves reconciliation to `resume`.
 pub fn terminal_artifact_projection_readiness_bounded(run_id: &str) -> Result<Option<String>> {
@@ -1070,14 +1144,54 @@ pub fn terminal_artifact_projection_readiness_bounded(run_id: &str) -> Result<Op
     )
 }
 
+/// [`terminal_artifact_projection_readiness_bounded`] against an explicitly
+/// injected durable lifecycle root.
+///
+/// All three reads follow the injected store. The `store::` shims above are
+/// exactly `default_store()?.read_record_bounded` and
+/// `read_aggregate_bounded_in_store(&default_store()?, ..)`, and
+/// `default_store()` is `AgentTaskLifecycleStore::from_current_environment()`,
+/// so an ambient caller reaches byte-identical state through either form. The
+/// third is the projection check itself: it opens an observation store and
+/// resolves an artifact root, which `PathRoots` carries separately from `data` —
+/// see `terminal_artifact_projection_is_verified_in_store`.
+pub fn terminal_artifact_projection_readiness_bounded_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let record = lifecycle_store.read_record_bounded(&super::sanitize_run_id(run_id))?;
+    terminal_artifact_projection_readiness_for_record_with(
+        &record,
+        lifecycle_store.read_aggregate_bounded(&record.run_id),
+        |record, aggregate| {
+            terminal_artifact_projection_is_verified_in_store(lifecycle_store, record, aggregate)
+        },
+    )
+}
+
 fn terminal_artifact_projection_readiness_for_record(
     record: &AgentTaskRunRecord,
     aggregate: Result<AgentTaskAggregate>,
 ) -> Result<Option<String>> {
+    terminal_artifact_projection_readiness_for_record_with(
+        record,
+        aggregate,
+        terminal_artifact_projection_is_verified,
+    )
+}
+
+/// The shared body of both readiness forms. `verified` decides which durable
+/// roots the projection check itself is answered against; everything else here
+/// is derived from the record and aggregate already in hand.
+fn terminal_artifact_projection_readiness_for_record_with(
+    record: &AgentTaskRunRecord,
+    aggregate: Result<AgentTaskAggregate>,
+    verified: impl FnOnce(&AgentTaskRunRecord, &AgentTaskAggregate) -> Result<bool>,
+) -> Result<Option<String>> {
     let Ok(aggregate) = aggregate else {
         return Ok(None);
     };
-    if terminal_artifact_projection_is_verified(&record, &aggregate)? {
+    if verified(record, &aggregate)? {
         return Ok(None);
     }
     Ok(Some(

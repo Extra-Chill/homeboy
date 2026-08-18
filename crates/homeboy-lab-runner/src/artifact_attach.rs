@@ -34,6 +34,25 @@ pub fn copy_runner_artifact_source(
     runner: &Runner,
     path: &str,
 ) -> homeboy_core::Result<RunnerAttachSource> {
+    copy_runner_artifact_source_in_roots(
+        homeboy_core::paths::PathRoots::from_environment()?.artifacts(),
+        runner,
+        path,
+    )
+}
+
+/// [`copy_runner_artifact_source`] against an explicitly injected artifact root.
+///
+/// Only the download destination is rooted, because only the download
+/// destination is Homeboy state: the artifact type probe and the transfer both
+/// address the *runner* filesystem through an SSH client. The one remaining
+/// ambient reach on this path is `server::load`, which resolves the config root
+/// inside `homeboy-core` and is out of this crate's reach (#7505).
+pub fn copy_runner_artifact_source_in_roots(
+    artifact_root: &Path,
+    runner: &Runner,
+    path: &str,
+) -> homeboy_core::Result<RunnerAttachSource> {
     match runner.kind {
         RunnerKind::Local => {
             let source = PathBuf::from(path);
@@ -67,7 +86,7 @@ pub fn copy_runner_artifact_source(
                     None,
                 )
             })?;
-            let temp_path = attach_download_path(&runner.id, path)?;
+            let temp_path = attach_download_path_in_roots(artifact_root, &runner.id, path);
             if let Some(parent) = temp_path.parent() {
                 fs::create_dir_all(parent).map_err(|err| {
                     Error::internal_io(
@@ -161,14 +180,14 @@ fn remote_runner_artifact_type(
     ))
 }
 
-fn attach_download_path(runner_id: &str, path: &str) -> homeboy_core::Result<PathBuf> {
+fn attach_download_path_in_roots(artifact_root: &Path, runner_id: &str, path: &str) -> PathBuf {
     let file_name = Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("artifact");
-    Ok(homeboy_core::artifact_root()?
+    artifact_root
         .join("runner-attach")
         .join(runner_id)
-        .join(format!("{}-{file_name}", uuid::Uuid::new_v4())))
+        .join(format!("{}-{file_name}", uuid::Uuid::new_v4()))
 }

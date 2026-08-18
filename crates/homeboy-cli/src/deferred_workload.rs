@@ -127,7 +127,24 @@ pub struct DeferredWorkloadWorkerStartLock {
     _file: File,
 }
 
+/// Resolve the ambient Homeboy config root this store lives under.
+///
+/// Every `_in_roots` entry point below takes that root as a parameter instead.
+/// The ambient wrappers exist so external callers keep their signatures; a
+/// caller that already holds a resolved root must use the rooted variant so a
+/// single command does not mix an injected root with an ambient one.
+fn ambient_config_root() -> Result<PathBuf> {
+    homeboy_core::paths::homeboy()
+}
+
 pub fn defer(input: DeferredWorkloadInput) -> Result<DeferredWorkload> {
+    defer_in_roots(&ambient_config_root()?, input)
+}
+
+pub fn defer_in_roots(
+    config_root: &Path,
+    input: DeferredWorkloadInput,
+) -> Result<DeferredWorkload> {
     if input
         .job_overrides
         .secret_env_names
@@ -144,7 +161,7 @@ pub fn defer(input: DeferredWorkloadInput) -> Result<DeferredWorkload> {
             ]),
         ));
     }
-    update(|records| {
+    update_in_roots(config_root, |records| {
         let fingerprint = fingerprint(&input)?;
         if let Some(existing) = records.iter().find(|record| {
             record.fingerprint == fingerprint
@@ -188,7 +205,16 @@ pub fn claim(
     runner_id: &str,
     owner: &str,
 ) -> Result<Option<DeferredWorkload>> {
-    update(|records| {
+    claim_in_roots(&ambient_config_root()?, input, runner_id, owner)
+}
+
+pub fn claim_in_roots(
+    config_root: &Path,
+    input: &DeferredWorkloadInput,
+    runner_id: &str,
+    owner: &str,
+) -> Result<Option<DeferredWorkload>> {
+    update_in_roots(config_root, |records| {
         let fingerprint = fingerprint(input)?;
         let now = now_ms();
         for record in records
@@ -241,7 +267,17 @@ pub fn claim_next_matching_at(
     now: u64,
     accepts: impl Fn(&DeferredWorkload) -> bool,
 ) -> Result<Option<DeferredWorkload>> {
-    update(|records| {
+    claim_next_matching_at_in_roots(&ambient_config_root()?, runner_id, owner, now, accepts)
+}
+
+pub fn claim_next_matching_at_in_roots(
+    config_root: &Path,
+    runner_id: &str,
+    owner: &str,
+    now: u64,
+    accepts: impl Fn(&DeferredWorkload) -> bool,
+) -> Result<Option<DeferredWorkload>> {
+    update_in_roots(config_root, |records| {
         for record in records.iter_mut() {
             if record.state == DeferredWorkloadState::Claimed
                 && record
@@ -271,7 +307,11 @@ pub fn claim_next_matching_at(
 }
 
 pub fn heartbeat(id: &str, owner: &str) -> Result<bool> {
-    update(|records| {
+    heartbeat_in_roots(&ambient_config_root()?, id, owner)
+}
+
+pub fn heartbeat_in_roots(config_root: &Path, id: &str, owner: &str) -> Result<bool> {
+    update_in_roots(config_root, |records| {
         let Some(record) = records.iter_mut().find(|record| record.id == id) else {
             return Ok(false);
         };
@@ -288,7 +328,11 @@ pub fn heartbeat(id: &str, owner: &str) -> Result<bool> {
 }
 
 pub fn terminalize(id: &str, succeeded: bool) -> Result<()> {
-    update(|records| {
+    terminalize_in_roots(&ambient_config_root()?, id, succeeded)
+}
+
+pub fn terminalize_in_roots(config_root: &Path, id: &str, succeeded: bool) -> Result<()> {
+    update_in_roots(config_root, |records| {
         if let Some(record) = records.iter_mut().find(|record| record.id == id) {
             record.state = if succeeded {
                 DeferredWorkloadState::Dispatched
@@ -306,7 +350,11 @@ pub fn terminalize(id: &str, succeeded: bool) -> Result<()> {
 /// Return a claimed workload to the queue when runner preflight discovers that
 /// the selected runner no longer satisfies its persisted contract.
 pub fn defer_claim(id: &str, owner: &str) -> Result<()> {
-    update(|records| {
+    defer_claim_in_roots(&ambient_config_root()?, id, owner)
+}
+
+pub fn defer_claim_in_roots(config_root: &Path, id: &str, owner: &str) -> Result<()> {
+    update_in_roots(config_root, |records| {
         if let Some(record) = records.iter_mut().find(|record| record.id == id) {
             if record.state == DeferredWorkloadState::Claimed
                 && record.claim_owner.as_deref() == Some(owner)
@@ -328,7 +376,11 @@ pub fn defer_claim(id: &str, owner: &str) -> Result<()> {
 /// its claims must not sit out the full lease before another worker may take
 /// them. Returns the ids that were released.
 pub fn release_claims_for_owner(owner: &str) -> Result<Vec<String>> {
-    update(|records| {
+    release_claims_for_owner_in_roots(&ambient_config_root()?, owner)
+}
+
+pub fn release_claims_for_owner_in_roots(config_root: &Path, owner: &str) -> Result<Vec<String>> {
+    update_in_roots(config_root, |records| {
         let now = now_ms();
         let mut released = Vec::new();
         for record in records.iter_mut() {
@@ -349,12 +401,20 @@ pub fn release_claims_for_owner(owner: &str) -> Result<Vec<String>> {
 }
 
 pub fn records() -> Result<Vec<DeferredWorkload>> {
-    read_store(&store_path()?)
+    records_in_roots(&ambient_config_root()?)
+}
+
+pub fn records_in_roots(config_root: &Path) -> Result<Vec<DeferredWorkload>> {
+    read_store(&store_path_in_roots(config_root))
 }
 
 /// Whether any record still needs a worker.
 pub fn has_pending_work() -> Result<bool> {
-    Ok(records()?.iter().any(|record| {
+    has_pending_work_in_roots(&ambient_config_root()?)
+}
+
+pub fn has_pending_work_in_roots(config_root: &Path) -> Result<bool> {
+    Ok(records_in_roots(config_root)?.iter().any(|record| {
         matches!(
             record.state,
             DeferredWorkloadState::Deferred | DeferredWorkloadState::Claimed
@@ -369,7 +429,11 @@ pub fn has_pending_work() -> Result<bool> {
 /// ephemeral worktree open, because worktree cleanup then leaves the process
 /// anchored to a deleted directory (#12081).
 pub fn worker_root() -> Result<PathBuf> {
-    let root = homeboy_core::paths::homeboy()?;
+    worker_root_in_roots(&ambient_config_root()?)
+}
+
+pub fn worker_root_in_roots(config_root: &Path) -> Result<PathBuf> {
+    let root = config_root.to_path_buf();
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -388,7 +452,13 @@ pub fn worker_root() -> Result<PathBuf> {
 }
 
 pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
-    let root = worker_root()?;
+    try_acquire_worker_lock_in_roots(&ambient_config_root()?)
+}
+
+pub fn try_acquire_worker_lock_in_roots(
+    config_root: &Path,
+) -> Result<Option<DeferredWorkloadWorkerLock>> {
+    let root = worker_root_in_roots(config_root)?;
     let file = File::open(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -409,7 +479,13 @@ pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
 }
 
 pub fn acquire_worker_start_lock() -> Result<DeferredWorkloadWorkerStartLock> {
-    let root = homeboy_core::paths::homeboy()?;
+    acquire_worker_start_lock_in_roots(&ambient_config_root()?)
+}
+
+pub fn acquire_worker_start_lock_in_roots(
+    config_root: &Path,
+) -> Result<DeferredWorkloadWorkerStartLock> {
+    let root = config_root.to_path_buf();
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -440,7 +516,11 @@ pub fn acquire_worker_start_lock() -> Result<DeferredWorkloadWorkerStartLock> {
 }
 
 pub fn worker_status() -> Result<Option<DeferredWorkloadWorkerStatus>> {
-    let path = store_path()?.with_extension("worker-status.json");
+    worker_status_in_roots(&ambient_config_root()?)
+}
+
+pub fn worker_status_in_roots(config_root: &Path) -> Result<Option<DeferredWorkloadWorkerStatus>> {
+    let path = store_path_in_roots(config_root).with_extension("worker-status.json");
     if !path.exists() {
         return Ok(None);
     }
@@ -453,13 +533,22 @@ pub fn worker_status() -> Result<Option<DeferredWorkloadWorkerStatus>> {
 }
 
 pub fn worker_is_live(status: &DeferredWorkloadWorkerStatus) -> bool {
+    // An unresolvable root is indistinguishable from an unacquirable lock here:
+    // both mean this process cannot prove the singleton is alive.
+    let Ok(config_root) = ambient_config_root() else {
+        return false;
+    };
+    worker_is_live_in_roots(&config_root, status)
+}
+
+pub fn worker_is_live_in_roots(config_root: &Path, status: &DeferredWorkloadWorkerStatus) -> bool {
     if matches!(status.state.as_str(), "idle" | "stopped") {
         return false;
     }
     if status.owner_token.is_empty() {
         return false;
     }
-    let Ok(lock) = try_acquire_worker_lock() else {
+    let Ok(lock) = try_acquire_worker_lock_in_roots(config_root) else {
         return false;
     };
     // A status file is advisory. The singleton lock is the authority.
@@ -716,7 +805,16 @@ pub fn write_worker_status(
     state: &str,
     detail: impl Into<String>,
 ) -> Result<()> {
-    let path = store_path()?.with_extension("worker-status.json");
+    write_worker_status_in_roots(&ambient_config_root()?, owner_token, state, detail)
+}
+
+pub fn write_worker_status_in_roots(
+    config_root: &Path,
+    owner_token: &str,
+    state: &str,
+    detail: impl Into<String>,
+) -> Result<()> {
+    let path = store_path_in_roots(config_root).with_extension("worker-status.json");
     let value = DeferredWorkloadWorkerStatus {
         schema: "homeboy/deferred-workload-worker-status/v1".to_string(),
         pid: std::process::id(),
@@ -740,7 +838,11 @@ pub fn write_worker_status(
 }
 
 pub fn append_worker_log(message: impl AsRef<str>) -> Result<()> {
-    let path = store_path()?.with_extension("worker.log");
+    append_worker_log_in_roots(&ambient_config_root()?, message)
+}
+
+pub fn append_worker_log_in_roots(config_root: &Path, message: impl AsRef<str>) -> Result<()> {
+    let path = store_path_in_roots(config_root).with_extension("worker.log");
     let line = format!("{} {}\n", now_ms(), message.as_ref());
     use std::io::Write;
     OpenOptions::new()
@@ -777,12 +879,30 @@ fn fingerprint(input: &DeferredWorkloadInput) -> Result<String> {
     Ok(sha256_hex(&value))
 }
 
+/// Ambient store path. No production caller resolves here any more: every
+/// public entry point either takes a root or resolves one exactly once and
+/// delegates to [`store_path_in_roots`]. Retained for the hermetic tests, which
+/// assert against the store the isolated home owns.
+#[cfg(test)]
 fn store_path() -> Result<PathBuf> {
-    Ok(homeboy_core::paths::homeboy()?.join("deferred-workloads.json"))
+    Ok(store_path_in_roots(&ambient_config_root()?))
 }
 
+fn store_path_in_roots(config_root: &Path) -> PathBuf {
+    config_root.join("deferred-workloads.json")
+}
+
+/// Ambient mutation. Test-only for the same reason as [`store_path`].
+#[cfg(test)]
 fn update<T>(mutate: impl FnOnce(&mut Vec<DeferredWorkload>) -> Result<T>) -> Result<T> {
-    let path = store_path()?;
+    update_in_roots(&ambient_config_root()?, mutate)
+}
+
+fn update_in_roots<T>(
+    config_root: &Path,
+    mutate: impl FnOnce(&mut Vec<DeferredWorkload>) -> Result<T>,
+) -> Result<T> {
+    let path = store_path_in_roots(config_root);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(

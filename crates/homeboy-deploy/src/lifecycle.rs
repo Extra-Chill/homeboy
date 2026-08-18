@@ -1,14 +1,13 @@
 //! Durable, versioned lifecycle records for resumable multi-target deploys.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
-use homeboy_core::paths;
 use homeboy_core::phase_timing::PhaseTimingReport;
 
 const SCHEMA_VERSION: u32 = 1;
@@ -258,14 +257,20 @@ impl DeployLifecycleRun {
     }
 }
 
-pub(super) fn lifecycle_path(id: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
-        .join("deploy-runs")
-        .join(format!("{id}.json")))
+/// The deploy lifecycle checkpoint below an explicitly injected data root.
+///
+/// Rooted rather than wrapped: `run_multi` resolves once and every checkpoint
+/// read and write in that run addresses the same home. The ambient form
+/// resolved the data root independently on each of the seven calls a multi
+/// target deploy makes, so a repoint mid-run could have resumed from one home's
+/// checkpoint and then recorded target outcomes into another's — the resumed
+/// run would silently redo targets it had already succeeded (#7505).
+fn lifecycle_path_in_roots(data_root: &Path, id: &str) -> PathBuf {
+    data_root.join("deploy-runs").join(format!("{id}.json"))
 }
 
-pub(super) fn load(id: &str) -> Result<DeployLifecycleRun> {
-    let path = lifecycle_path(id)?;
+pub(super) fn load_in_roots(data_root: &Path, id: &str) -> Result<DeployLifecycleRun> {
+    let path = lifecycle_path_in_roots(data_root, id);
     let contents = fs::read_to_string(&path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -280,8 +285,8 @@ pub(super) fn load(id: &str) -> Result<DeployLifecycleRun> {
     })
 }
 
-pub(super) fn save(run: &DeployLifecycleRun) -> Result<()> {
-    let path = lifecycle_path(&run.id)?;
+pub(super) fn save_in_roots(data_root: &Path, run: &DeployLifecycleRun) -> Result<()> {
+    let path = lifecycle_path_in_roots(data_root, &run.id);
     let parent = path.parent().expect("deploy lifecycle path has parent");
     fs::create_dir_all(parent).map_err(|error| {
         Error::internal_io(
@@ -359,6 +364,7 @@ mod tests {
     #[test]
     fn durable_record_round_trips_target_state_and_partial_timing_evidence() {
         with_isolated_home(|_| {
+            let roots = homeboy_core::paths::PathRoots::from_environment().expect("path roots");
             let mut run = DeployLifecycleRun::new("run".to_string(), identity());
             let mut timer = homeboy_core::phase_timing::PhaseTimer::new();
             timer.record_failed("transfer", std::time::Duration::from_millis(1));
@@ -368,9 +374,9 @@ mod tests {
                 Some("connection lost".to_string()),
                 Some(timer.into_report()),
             );
-            save(&run).expect("persist run before retryable remote work");
+            save_in_roots(roots.data(), &run).expect("persist run before retryable remote work");
 
-            let restored = load("run").expect("read durable run");
+            let restored = load_in_roots(roots.data(), "run").expect("read durable run");
             assert_eq!(restored.schema_version, SCHEMA_VERSION);
             assert_eq!(restored.targets[1].status, DeployTargetStatus::Failed);
             assert_eq!(

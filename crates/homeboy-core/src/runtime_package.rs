@@ -85,20 +85,38 @@ pub fn refresh(
     source: &str,
     revision: Option<&str>,
 ) -> Result<RuntimePackageRefreshResult> {
-    config::with_config_lock(|| refresh_locked(runtime_id, source, revision))
+    let config_root = paths::homeboy()?;
+    refresh_in_root(&config_root, runtime_id, source, revision)
 }
 
-fn refresh_locked(
+/// [`refresh`] against an explicitly injected config root.
+///
+/// The root is resolved once and the config lock is taken under that same
+/// root. `with_config_lock` would have resolved it a second time, so a refresh
+/// could have serialized on one installation's `config.lock` while publishing
+/// generations into another's.
+pub fn refresh_in_root(
+    config_root: &Path,
+    runtime_id: &str,
+    source: &str,
+    revision: Option<&str>,
+) -> Result<RuntimePackageRefreshResult> {
+    config::with_config_lock_at(config_root, || {
+        refresh_locked_in_root(config_root, runtime_id, source, revision)
+    })
+}
+
+fn refresh_locked_in_root(
+    config_root: &Path,
     runtime_id: &str,
     source: &str,
     revision: Option<&str>,
 ) -> Result<RuntimePackageRefreshResult> {
     let runtime_id = identifier::slugify_id(runtime_id, "runtime_id")?;
-    let config_root = paths::homeboy()?;
     let store = config_root.join(GENERATIONS);
     fs::create_dir_all(store.join("staging")).map_err(io("prepare runtime generation store"))?;
     recover(&store)?;
-    bootstrap_stable_runtime_boundary(&config_root, &store)?;
+    bootstrap_stable_runtime_boundary(config_root, &store)?;
     crash_after_boundary_bootstrap()?;
 
     let source_stage = store.join(format!("source-{}-{}", runtime_id, nonce()));
@@ -132,7 +150,7 @@ fn refresh_locked(
     let generation_name = format!("{}-{}", runtime_id, nonce());
     let stage = store.join("staging").join(&generation_name);
     remove_if_exists(&stage, "clean runtime generation stage")?;
-    seed_generation(&config_root, &store, &stage)?;
+    seed_generation(config_root, &store, &stage)?;
     let dependencies = materialize_declared_assets(manifest_root, &stage, &runtime_id)?;
 
     let staged_package = stage.join("agent-runtimes").join(&runtime_id);
@@ -148,7 +166,9 @@ fn refresh_locked(
     validate_local_module_closure(&stage, &staged_package)?;
     sync_tree(&stage)?;
 
-    let replaced_existing = paths::agent_runtimes()?.join(&runtime_id).exists();
+    let replaced_existing = paths::agent_runtimes_in_root(config_root)
+        .join(&runtime_id)
+        .exists();
     write_journal(
         &store,
         &RefreshJournal {
@@ -173,7 +193,7 @@ fn refresh_locked(
     sync_dir(&store)?;
     remove_if_exists(&source_stage, "clean runtime refresh source")?;
 
-    let path = paths::agent_runtimes()?.join(&runtime_id);
+    let path = paths::agent_runtimes_in_root(config_root).join(&runtime_id);
     Ok(RuntimePackageRefreshResult {
         runtime_id: runtime_id.clone(),
         source: source.to_string(),
@@ -187,22 +207,32 @@ fn refresh_locked(
 /// Snapshot root-manifest runtime assets into a new generation. Linked extension
 /// installs call this instead of writing through the stable runtime boundary.
 pub fn refresh_shared_assets(source_root: &Path) -> Result<()> {
-    config::with_config_lock(|| refresh_shared_assets_locked(source_root))
+    let config_root = paths::homeboy()?;
+    refresh_shared_assets_in_root(&config_root, source_root)
 }
 
-fn refresh_shared_assets_locked(source_root: &Path) -> Result<()> {
-    let config_root = paths::homeboy()?;
+/// [`refresh_shared_assets`] against an explicitly injected config root.
+///
+/// As with [`refresh_in_root`], the lock and the generation store are taken
+/// under one resolution rather than two.
+pub fn refresh_shared_assets_in_root(config_root: &Path, source_root: &Path) -> Result<()> {
+    config::with_config_lock_at(config_root, || {
+        refresh_shared_assets_locked_in_root(config_root, source_root)
+    })
+}
+
+fn refresh_shared_assets_locked_in_root(config_root: &Path, source_root: &Path) -> Result<()> {
     let store = config_root.join(GENERATIONS);
     fs::create_dir_all(store.join("staging")).map_err(io("prepare runtime generation store"))?;
     recover(&store)?;
-    bootstrap_stable_runtime_boundary(&config_root, &store)?;
+    bootstrap_stable_runtime_boundary(config_root, &store)?;
     crash_after_boundary_bootstrap()?;
     let source_root =
         canonical_contained_directory(source_root, source_root, "resolve linked runtime source")?;
     let generation_name = format!("extension-assets-{}", nonce());
     let stage = store.join("staging").join(&generation_name);
     remove_if_exists(&stage, "clean linked runtime generation stage")?;
-    seed_generation(&config_root, &store, &stage)?;
+    seed_generation(config_root, &store, &stage)?;
     materialize_all_declared_runtime_assets(&source_root, &stage)?;
     sync_tree(&stage)?;
     write_journal(
@@ -243,7 +273,11 @@ fn seed_generation(config_root: &Path, store: &Path, stage: &Path) -> Result<()>
 fn seed_legacy_generation(config_root: &Path, stage: &Path) -> Result<()> {
     // First activation migrates the runtime surface only; all unrelated Homeboy
     // configuration remains in place and is never renamed or copied.
-    let legacy = paths::legacy_agent_runtimes()?;
+    //
+    // The shared-asset loop below already joins `config_root`; resolving the
+    // legacy runtime directory ambiently would seed a generation from one
+    // installation's runtimes and another's shared assets.
+    let legacy = paths::legacy_agent_runtimes_in_root(config_root);
     if legacy.is_dir() {
         reject_symlink_tree_except_root(&legacy)?;
         copy_regular_tree(
@@ -638,7 +672,11 @@ fn switch_current(store: &Path, generation: &str) -> Result<()> {
 }
 
 fn ensure_stable_runtime_boundary(config_root: &Path) -> Result<()> {
-    let boundary = paths::legacy_agent_runtimes()?;
+    // Derived from the injected root, never re-resolved: the backup and
+    // temporary siblings below are already `config_root`-relative, so an
+    // ambient `legacy_agent_runtimes()` here would rename a boundary in one
+    // installation into a backup name recorded in another.
+    let boundary = paths::legacy_agent_runtimes_in_root(config_root);
     let expected = Path::new(GENERATIONS).join(CURRENT).join("agent-runtimes");
     if fs::read_link(&boundary).ok().as_deref() == Some(expected.as_path()) {
         return Ok(());
@@ -766,7 +804,11 @@ fn recover_boundary_migration(config_root: &Path) -> Result<()> {
         &migration.temporary,
         "runtime_boundary",
     )?);
-    let boundary = paths::legacy_agent_runtimes()?;
+    // `recover` derives `config_root` from the generation store's parent, so
+    // this recovery already runs against one specific installation. Resolving
+    // the boundary ambiently could restore a backup recorded here over an
+    // unrelated installation's live boundary.
+    let boundary = paths::legacy_agent_runtimes_in_root(config_root);
     let expected = Path::new(GENERATIONS).join(CURRENT).join("agent-runtimes");
 
     if fs::read_link(&boundary).ok().as_deref() != Some(expected.as_path()) {

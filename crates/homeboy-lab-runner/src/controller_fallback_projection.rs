@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
@@ -120,7 +120,20 @@ impl ControllerFallbackProjectionStore {
     /// Shared controller ledger survives daemon restarts independently of the
     /// runner-owned staging store.
     pub fn open_default() -> Result<Self> {
-        Self::open(homeboy_core::paths::homeboy_data()?.join("controller-fallback-projection.json"))
+        Self::open_in_roots(homeboy_core::paths::PathRoots::from_environment()?.data())
+    }
+
+    /// [`open_default`](Self::open_default) against an explicitly injected data
+    /// root.
+    ///
+    /// The store owns exactly one file below the data root and every later
+    /// operation derives from `self.path` (including the sibling `.lock`), so
+    /// nothing on this type can reach back into ambient state once it is
+    /// constructed. The reconciliation *callbacks* are a separate matter: they
+    /// are supplied by the caller and are ambient in the production wiring —
+    /// see [`reconcile_on_controller_startup`].
+    pub fn open_in_roots(data_root: &Path) -> Result<Self> {
+        Self::open(data_root.join("controller-fallback-projection.json"))
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
@@ -465,6 +478,12 @@ impl ControllerFallbackProjectionStore {
 
 /// Production startup reconciliation for deferred runner staging. It reads at
 /// most eight runner jobs so ordinary CLI startup remains bounded by work count.
+///
+/// Deliberately has no injected sibling. Both reconciliation callbacks below
+/// are bare ambient function references — `crate::runner_job_log_snapshot`
+/// resolves runner session state and `project_terminal_runner_result` resolves
+/// the durable lifecycle root — so an injected data root here would project a
+/// ledger from one home against lifecycle state from another (#7505).
 pub fn reconcile_on_controller_startup() -> Result<usize> {
     Ok(ControllerFallbackProjectionStore::open_default()?
         .reconcile_after_controller_restart_with(

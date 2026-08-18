@@ -298,6 +298,23 @@ fn project_terminal_runner_lifecycle_event(
 pub(crate) fn project_persisted_terminal_runner_events(
     record: &mut AgentTaskRunRecord,
 ) -> Result<bool> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    project_persisted_terminal_runner_events_in_store(&lifecycle_store, record)
+}
+
+/// The store-rooted counterpart of [`project_persisted_terminal_runner_events`].
+///
+/// Every durable touch below follows the injected store: the aggregate
+/// idempotence read, the aggregate path stamped onto the record, the combined
+/// aggregate-and-record commit, and the terminal artifact projection. The last
+/// is why this cannot be left half-rooted — the projection registers
+/// controller-owned bytes under an artifact root that `PathRoots` carries
+/// separately from `data`, which is exactly the cross-home artifact write
+/// #12618 found (#7505).
+pub(crate) fn project_persisted_terminal_runner_events_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+) -> Result<bool> {
     let terminal_status = record
         .metadata
         .get("runner_job_status")
@@ -339,21 +356,26 @@ pub(crate) fn project_persisted_terminal_runner_events(
     };
     validate_terminal_child_event_identity(record, &event)?;
     let aggregate = projected_runner_aggregate(record, &event.aggregate);
-    if store::read_aggregate(&record.run_id).ok().as_ref() == Some(&aggregate) {
+    if lifecycle_store.read_aggregate(&record.run_id).ok().as_ref() == Some(&aggregate) {
         return Ok(false);
     }
     let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
-    let aggregate_path = store::aggregate_path(&record.run_id)
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "aggregate.json".to_string());
+    let aggregate_path = lifecycle_store
+        .aggregate_path(&record.run_id)
+        .display()
+        .to_string();
     apply_aggregate_to_record(record, &projection_plan, &aggregate, aggregate_path);
     record_verified_lab_placement_outcome(record)?;
     record.ensure_metadata_object().insert(
         "terminal_transport_recovery".to_string(),
         json!("persisted_runner_job_events"),
     );
-    store::write_aggregate_and_record(record, &aggregate)?;
-    crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &aggregate)?;
+    lifecycle_store.write_aggregate_and_record(record, &aggregate)?;
+    crate::agent_task_lifecycle::record_terminal_artifact_projection_in_store(
+        lifecycle_store,
+        record,
+        &aggregate,
+    )?;
     Ok(true)
 }
 
