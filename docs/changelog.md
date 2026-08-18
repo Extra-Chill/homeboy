@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.11] - 2026-08-18
+
+### Changed
+- give the extension and component stores rooted siblings
+- root the notify outbox, invocation lease, and child records
+- root the ConfigEntity hooks and the mutating CRUD
+
 ## [0.350.10] - 2026-08-17
 
 ### Changed
