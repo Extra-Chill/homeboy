@@ -322,8 +322,12 @@ impl ConfigEntity for Server {
     fn aliases(&self) -> &[String] {
         &self.aliases
     }
-    fn dependents(id: &str) -> Result<Vec<String>> {
-        let projects = project::list().unwrap_or_default();
+    /// Projects are listed from the *same* root the delete would happen in.
+    /// Listing the process root instead would make this gate fail open: it
+    /// would report "no dependents" for a server that is still referenced by a
+    /// project in the installation being deleted from.
+    fn dependents_in_root(config_root: &std::path::Path, id: &str) -> Result<Vec<String>> {
+        let projects = project::list_in_root(config_root).unwrap_or_default();
         Ok(projects
             .iter()
             .filter(|p| p.server_id.as_deref() == Some(id))
@@ -331,7 +335,9 @@ impl ConfigEntity for Server {
             .collect())
     }
 
-    fn validate(&self) -> Result<()> {
+    /// Reads no other entity, so `_config_root` is unused — but the hook is
+    /// rooted-only by design, so this cannot drift into an ambient override.
+    fn validate_in_root(&self, _config_root: &std::path::Path) -> Result<()> {
         if let Some(auth) = self.auth.as_ref() {
             if matches!(
                 auth.mode,
@@ -452,6 +458,14 @@ pub fn set_identity_file(id: &str, identity_file: Option<String>) -> Result<Serv
 mod tests {
     use super::*;
 
+    /// `Server::validate_in_root` reads no other entity, so the root it is
+    /// handed is never touched. Naming that keeps it explicit at each call
+    /// site — and keeps these pure-validation tests free of any dependence on
+    /// where the process thinks its config lives.
+    fn unused_root() -> &'static std::path::Path {
+        std::path::Path::new("/unused-config-root")
+    }
+
     fn managed_server(persist: Option<&str>) -> Server {
         Server {
             id: "sandbox".to_string(),
@@ -477,18 +491,22 @@ mod tests {
 
     #[test]
     fn managed_session_requires_explicit_persist_for_new_configurations() {
-        assert!(managed_server(None).validate().is_err());
-        assert!(managed_server(Some("30m")).validate().is_ok());
+        assert!(managed_server(None)
+            .validate_in_root(unused_root())
+            .is_err());
+        assert!(managed_server(Some("30m"))
+            .validate_in_root(unused_root())
+            .is_ok());
     }
 
     #[test]
     fn key_controlmaster_requires_an_explicit_persist_lifetime() {
         let mut server = managed_server(Some("4h"));
         server.auth.as_mut().expect("auth").mode = ServerAuthMode::KeyControlmaster;
-        assert!(server.validate().is_ok());
+        assert!(server.validate_in_root(unused_root()).is_ok());
 
         server.auth.as_mut().expect("auth").session.persist = None;
-        assert!(server.validate().is_err());
+        assert!(server.validate_in_root(unused_root()).is_err());
     }
 
     #[test]
@@ -526,7 +544,7 @@ mod tests {
         server.post_load("{}");
 
         server
-            .validate()
+            .validate_in_root(unused_root())
             .expect("legacy configuration remains valid");
         let session = ManagedSshSession::from_auth(server.auth.as_ref().expect("auth"));
         assert_eq!(session.persist, session::LEGACY_DEFAULT_PERSIST);
