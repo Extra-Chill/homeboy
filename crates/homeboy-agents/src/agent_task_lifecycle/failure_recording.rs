@@ -912,7 +912,14 @@ pub(crate) fn terminal_provider_model_reconciliation_needed(
 /// promotion evidence, gates, totals, and artifact projections are preserved:
 /// `set_run_state` re-asserts the existing terminal state and only the
 /// model-bearing lifecycle projection is rebuilt from the record's own tasks.
-pub(crate) fn reconcile_terminal_provider_model(
+///
+/// The persist at the end is the whole point of taking a store: it is the only
+/// durable effect, so a reconciliation driven from injected roots must land its
+/// repaired model in the same installation the record and aggregate were read
+/// from. There is no ambient wrapper — `status_with_options_inner` is the only
+/// caller, and it resolves one store for the whole read.
+pub(crate) fn reconcile_terminal_provider_model_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
@@ -938,7 +945,7 @@ pub(crate) fn reconcile_terminal_provider_model(
     persist_provider_handle_models(&mut record.provider_handles, plan);
     update_lifecycle_from_record(record, plan);
     record.updated_at = Some(now_timestamp());
-    store::write_record(record)
+    lifecycle_store.write_record(record)
 }
 
 /// Recover the runner identity for canonical legacy patch artifacts. Diagnostic
@@ -1095,6 +1102,35 @@ pub fn terminal_artifact_projection_readiness(run_id: &str) -> Result<Option<Str
     terminal_artifact_projection_readiness_for_record(
         &record,
         store::read_aggregate(&record.run_id),
+    )
+}
+
+/// [`terminal_artifact_projection_readiness`] against an explicitly injected
+/// durable lifecycle root.
+///
+/// All three reads follow the injected store, and the third is the one that
+/// matters: the projection check opens an observation database *and* resolves
+/// an artifact root, which `PathRoots` carries separately from `data`. Answered
+/// ambiently, an otherwise-complete candidate is reported as unprojected purely
+/// because the controller-owned bytes were looked for under the wrong home
+/// (#7505, #12618, #12619) — and here that verdict is not merely cosmetic: the
+/// caller turns it into a `cook_continuation_scheduler` status that suppresses
+/// the terminal continuation enqueue.
+///
+/// This is the initializing counterpart of
+/// [`terminal_artifact_projection_readiness_bounded_in_store`]; it opens the
+/// same stores the ambient form opens rather than the read-only ones.
+pub fn terminal_artifact_projection_readiness_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let record = lifecycle_store.read_record(&super::sanitize_run_id(run_id))?;
+    terminal_artifact_projection_readiness_for_record_with(
+        &record,
+        lifecycle_store.read_aggregate(&record.run_id),
+        |record, aggregate| {
+            terminal_artifact_projection_is_verified_in_store(lifecycle_store, record, aggregate)
+        },
     )
 }
 
