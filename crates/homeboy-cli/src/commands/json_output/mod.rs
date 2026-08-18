@@ -719,7 +719,7 @@ mod tests {
                 bridge: false,
                 since_cursor: None,
                 full: false,
-                lossless: false,
+                bounded: false,
                 no_runner_probe: false,
                 strict_subject_exit: false,
                 watch: false,

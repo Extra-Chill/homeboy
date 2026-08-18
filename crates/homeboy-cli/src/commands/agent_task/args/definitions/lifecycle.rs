@@ -70,13 +70,9 @@ pub struct StatusArgs {
     pub since_cursor: Option<u64>,
     #[arg(long, conflicts_with = "bridge")]
     pub full: bool,
-    /// Emit the unbounded durable record for a machine export.
-    ///
-    /// Pair with the global `--output <path>` flag. Ordinary `--full` retains
-    /// an outcome-first, bounded presentation so it remains usable by callers
-    /// with finite response limits.
+    /// Present `--full` as a bounded, outcome-first summary with drill-down refs.
     #[arg(long, requires = "full", conflicts_with = "bridge")]
-    pub lossless: bool,
+    pub bounded: bool,
     /// Exit nonzero when the inspected Cook needs follow-up action.
     ///
     /// Normal status reads report their own success independently from the
