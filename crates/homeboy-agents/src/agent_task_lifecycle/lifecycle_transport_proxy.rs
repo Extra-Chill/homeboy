@@ -244,6 +244,25 @@ pub(crate) fn bind_pending_lab_handoff_snapshot(
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
+    bind_pending_lab_handoff_snapshot_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        record,
+        snapshot,
+    )
+}
+
+/// The store-rooted counterpart of [`bind_pending_lab_handoff_snapshot`].
+///
+/// Binding is a durable write — it replaces `record` with whatever
+/// acceptance persisted — so the installation it commits into has to be the one
+/// its caller is reconciling. A binding written to another home would leave the
+/// caller's own record permanently unbound while snapshot validation kept
+/// rejecting a perfectly valid runner job (#7505).
+pub(crate) fn bind_pending_lab_handoff_snapshot_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) -> Result<()> {
     if record.runner_job_id().is_some() {
         return Ok(());
     }
@@ -296,17 +315,24 @@ pub(crate) fn bind_pending_lab_handoff_snapshot(
         // The runner can finish and mirror its aggregate before the controller
         // projects the daemon snapshot. Preserve that terminal outcome while
         // attaching the authoritative job identity needed for validation.
-        *record =
-            record_runner_job_identity(&record.run_id, &runner_id, &snapshot.job.id.to_string())?;
+        *record = record_runner_job_identity_in_store(
+            lifecycle_store,
+            &record.run_id,
+            &runner_id,
+            &snapshot.job.id.to_string(),
+        )?;
         return Ok(());
     }
-    *record = record_detached_lab_run(DetachedLabRunRecord {
-        run_id: &record.run_id,
-        runner_id: &runner_id,
-        runner_job_id: &snapshot.job.id.to_string(),
-        remote_workspace: &remote_workspace,
-        remote_command: &remote_command,
-    })?;
+    *record = record_detached_lab_run_in_store(
+        lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: &record.run_id,
+            runner_id: &runner_id,
+            runner_job_id: &snapshot.job.id.to_string(),
+            remote_workspace: &remote_workspace,
+            remote_command: &remote_command,
+        },
+    )?;
     Ok(())
 }
 

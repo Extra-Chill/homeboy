@@ -232,11 +232,27 @@ pub(crate) struct LabHandoffLock {
 }
 
 impl LabHandoffLock {
-    pub(crate) fn lock(run_id: &str) -> Result<Self> {
-        let lock_path = paths::homeboy_data()?
-            .join("agent-task-runs")
-            .join(run_id)
-            .join("lab-handoff.lock");
+    /// Take the Lab handoff acceptance lock inside an explicitly rooted store.
+    ///
+    /// There is deliberately no ambient constructor. This lock serializes
+    /// acceptance against expiry for one run, and every state it guards — the
+    /// record, its submission intent, its aggregate — is read and written
+    /// through a lifecycle store. A lock file resolved from
+    /// `paths::homeboy_data()` while those reads and writes followed an
+    /// injected store would sit in a different installation than the state it
+    /// protects, and a lock taken in the wrong home excludes nobody: expiry and
+    /// acceptance would both believe they held it (#7505). Requiring the store
+    /// in the signature is what makes that divergence unrepresentable.
+    ///
+    /// Deriving the path from `run_dir` also sanitizes the run id, which the
+    /// ambient form did not, so the lock now names a path that agrees with the
+    /// run's own record and aggregate — the same correction
+    /// `reconcile_deferred_candidate_in_store` made for its per-run lock.
+    pub(crate) fn lock_in_store(
+        lifecycle_store: &AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<Self> {
+        let lock_path = lifecycle_store.run_dir(run_id).join("lab-handoff.lock");
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| Error::internal_io(error.to_string(), None))?;
@@ -3823,18 +3839,22 @@ pub fn exact_status(run_id: &str) -> Result<AgentTaskRunRecord> {
 /// of those shims resolved `AgentTaskLifecycleStore::from_current_environment()`
 /// too — but the read is now one store away from being rootable.
 ///
-/// Four steps still resolve their own roots, and each is its own remaining
+/// `expire_unaccepted_lab_handoff` used to head this list. It is rooted now:
+/// the cancellation slice moved `LabHandoffLock` onto the injected store's own
+/// `run_dir` in the same change that rooted the `cancel_run` spine underneath
+/// it, because a lock resolved from `paths::homeboy_data()` while the
+/// cancellation it guards followed an injected store would be held where nobody
+/// contends for it. Both had to move together or neither could.
+///
+/// Three steps still resolve their own roots, and each is its own remaining
 /// slice rather than an oversight:
 ///
-/// * `reconcile_pending_runner_submission_intent` and
-///   `expire_unaccepted_lab_handoff` — the latter calls the alias-resolving
-///   `cancel_run` spine (~400 lines, a dozen record writes,
-///   `controller_scratch::finalize_run`, managed-service reconciliation) and
-///   takes `LabHandoffLock`, whose lock path is built from `paths::homeboy_data()`
-///   directly. A lock taken in the wrong home excludes nobody, so that lock has
-///   to move with the store in the same change that roots the spine.
-/// * `reconcile_runner_job_state` — reaches `terminalize_lost_accepted_lab_job`
-///   and `reconcile_runner_job_snapshot`, both of which write aggregates.
+/// * `reconcile_pending_runner_submission_intent` — replays a durable
+///   broker submission. Its transport half is provider-registry work, but it
+///   reads the intent and records the acceptance through `store::` shims.
+/// * `reconcile_runner_job_state` — `reconcile_runner_job_snapshot_in_store`
+///   now exists, but its sibling `terminalize_lost_accepted_lab_job` still
+///   reads the controller plan and writes its terminal failure ambiently.
 /// * the Cook recipe family (`load_recipe`, `load_recipe_for_attempt`,
 ///   `validate_recipe_attempt_record`, `enqueue_terminal_continuation`) — a
 ///   `CookRecipeStore`, not a lifecycle store. It is derivable from
@@ -3853,7 +3873,7 @@ pub fn exact_status(run_id: &str) -> Result<AgentTaskRunRecord> {
 /// `status_in_store`.
 ///
 /// Until those close there is deliberately **no** `status_in_store`. A rooted
-/// status that reconciled four of its steps in another installation would be
+/// status that reconciled three of its steps in another installation would be
 /// strictly worse than the uniform ambience it replaced.
 fn status_with_options_inner(
     run_id: &str,
@@ -3880,7 +3900,7 @@ fn status_with_options_inner(
         record = lifecycle_store.read_record(&resolved_run_id)?;
     }
     if has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
-        let _ = expire_unaccepted_lab_handoff(&resolved_run_id)?;
+        let _ = expire_unaccepted_lab_handoff_in_store(&lifecycle_store, &resolved_run_id)?;
         record = lifecycle_store.read_record(&resolved_run_id)?;
     }
     // A daemon can evict a completed job from its active store before a restarted

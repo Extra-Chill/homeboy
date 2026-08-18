@@ -587,6 +587,19 @@ impl AgentTaskLifecycleStore {
         super::lifecycle_ops::record_run_aggregate_in_store(self, run_id, plan, aggregate)
     }
 
+    /// Whether this store's observation record predates typed agent-task
+    /// metadata, so a legacy row can be resubmitted rather than rejected.
+    ///
+    /// The answer is a property of one observation database, so it has to be
+    /// read from the same roots the caller is about to write the replacement
+    /// record into (#7505).
+    pub(crate) fn record_lacks_typed_metadata(&self, run_id: &str) -> Result<bool> {
+        Ok(self
+            .open_observation_initialized()?
+            .get_run(run_id)?
+            .is_some_and(|run| run.metadata_json.get("agent_task_run").is_none()))
+    }
+
     /// Check this store for one exact durable run identity without Cook alias
     /// resolution.
     pub fn record_exists(&self, run_id: &str) -> Result<bool> {
@@ -813,10 +826,6 @@ fn read_controller_plan_in_store(
     validate_execution_budget(&plan)?;
     validate_managed_services(&plan)?;
     Ok(plan)
-}
-
-pub(super) fn controller_plan_path(run_id: &str) -> Result<PathBuf> {
-    Ok(default_store()?.controller_plan_path(run_id))
 }
 
 /// Controller lifecycle operations resolve the plan from their durable run
@@ -1452,12 +1461,6 @@ fn validate_cook_index_attempt_in_store(
         ));
     }
     Ok(())
-}
-
-pub(super) fn record_lacks_typed_metadata(run_id: &str) -> Result<bool> {
-    Ok(ObservationStore::open_initialized_for_lifecycle()?
-        .get_run(run_id)?
-        .is_some_and(|run| run.metadata_json.get("agent_task_run").is_none()))
 }
 
 pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {

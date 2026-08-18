@@ -737,14 +737,12 @@ pub(crate) fn record_aggregate_in_store(
     Ok(record.clone())
 }
 
-pub(crate) fn record_terminal_artifact_projection(
-    record: &mut AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_terminal_artifact_projection_in_store(&lifecycle_store, record, aggregate)
-}
-
+/// Register a terminal run's artifacts into its own store's projection root.
+///
+/// There is no ambient wrapper: the last caller that resolved its own root was
+/// `project_terminal_runner_lifecycle_event`, and it now takes a store (#7505).
+/// Leaving an unused ambient form behind would only be a new way to reach the
+/// process artifact root by accident.
 pub(crate) fn record_terminal_artifact_projection_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,

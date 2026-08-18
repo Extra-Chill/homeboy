@@ -231,9 +231,18 @@ pub fn reconcile_pending_runner_submission_intent(run_id: &str) -> Result<bool> 
 /// Resolve a possibly accepted submission without replaying it. This is used
 /// only after the acceptance deadline or an operator cancellation request:
 /// those paths must never create new runner work.
-pub(crate) fn bind_pending_runner_submission_if_accepted(run_id: &str) -> Result<bool> {
+///
+/// There is deliberately no ambient wrapper. Both callers — expiry and
+/// cancellation — are destructive, and each already holds the store whose
+/// record it is about to terminalize. An ambient form would exist only to let a
+/// future caller decide acceptance from one installation's intent and bind the
+/// acceptance into another's (#7505).
+pub(crate) fn bind_pending_runner_submission_if_accepted_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::read_record(&run_id)?;
+    let record = lifecycle_store.read_record(&run_id)?;
     if record.runner_job_id().is_some()
         || record
             .metadata
@@ -285,13 +294,16 @@ pub(crate) fn bind_pending_runner_submission_if_accepted(run_id: &str) -> Result
     });
     match lookup {
         Ok(homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Accepted { job }) => {
-            record_detached_lab_run(DetachedLabRunRecord {
-                run_id: &run_id,
-                runner_id: &runner_id,
-                runner_job_id: &job.id.to_string(),
-                remote_workspace: request.cwd.as_deref().unwrap_or_default(),
-                remote_command: &request.command,
-            })?;
+            record_detached_lab_run_in_store(
+                lifecycle_store,
+                DetachedLabRunRecord {
+                    run_id: &run_id,
+                    runner_id: &runner_id,
+                    runner_job_id: &job.id.to_string(),
+                    remote_workspace: request.cwd.as_deref().unwrap_or_default(),
+                    remote_command: &request.command,
+                },
+            )?;
             Ok(true)
         }
         Ok(
@@ -299,14 +311,16 @@ pub(crate) fn bind_pending_runner_submission_if_accepted(run_id: &str) -> Result
             | homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Expired { .. },
         ) => Ok(false),
         Err(error) => {
-            let _ = store::mutate_record(&run_id, |record| {
-                record.ensure_metadata_object()["runner_submission_intent"]["last_lookup_error"] = json!({
-                    "code": error.code.as_str(),
-                    "message": error.message.clone(),
-                    "retryable": true,
-                });
-                true
-            })?;
+            let _ =
+                lifecycle_store.mutate_record(&run_id, |record| {
+                    record.ensure_metadata_object()["runner_submission_intent"]
+                        ["last_lookup_error"] = json!({
+                        "code": error.code.as_str(),
+                        "message": error.message.clone(),
+                        "retryable": true,
+                    });
+                    true
+                })?;
             Err(error)
         }
     }
@@ -365,20 +379,41 @@ pub(crate) fn is_accepted_runner_handoff(record: &AgentTaskRunRecord) -> bool {
 /// their aggregate-free legacy shape; preacceptance failures retain their
 /// canonical failure aggregate and its synthetic runtime projection.
 pub(crate) fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
+    expire_unaccepted_lab_handoff_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
+/// The store-rooted counterpart of [`expire_unaccepted_lab_handoff`].
+///
+/// This is the operation the handoff lock exists for: expiry and acceptance
+/// race for the same run, and only one may win. That is why the lock and the
+/// cancellation spine had to be rooted in the same change (#7505) — a lock
+/// resolved from `paths::homeboy_data()` while the acceptance check, the
+/// cancellation, and the terminal record write all followed an injected store
+/// would be held in an installation nobody else contends in. Acceptance and
+/// expiry would each believe they were exclusive, and expiry would terminalize
+/// a run a runner had just accepted.
+pub(crate) fn expire_unaccepted_lab_handoff_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
     // An expired pending request may have been accepted immediately before its
     // response was lost. Querying its key is read-only; never replay here.
-    if bind_pending_runner_submission_if_accepted(run_id)? {
+    if bind_pending_runner_submission_if_accepted_in_store(lifecycle_store, run_id)? {
         return Ok(true);
     }
-    let _lock = LabHandoffLock::lock(run_id)?;
+    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, run_id)?;
     // Re-read while holding the handoff lock: an accepted job is runner-owned
     // and must never be terminalized by controller deadline recovery.
-    let record = store::read_record(run_id)?;
+    let record = lifecycle_store.read_record(run_id)?;
     if !has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
         return Ok(false);
     }
 
-    let mut record = cancel_run(run_id, Some(EXPIRED_LAB_HANDOFF_REASON))?;
+    let mut record =
+        cancel_run_in_store(lifecycle_store, run_id, Some(EXPIRED_LAB_HANDOFF_REASON))?;
     let expired_at = now_timestamp();
     let record_run_id = record.run_id.clone();
     let runner_id = record.runner_id().unwrap_or_default().to_string();
@@ -422,7 +457,7 @@ pub(crate) fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
         )
         .unwrap_or(Value::Null),
     );
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(true)
 }
 

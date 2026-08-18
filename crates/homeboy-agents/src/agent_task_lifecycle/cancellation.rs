@@ -20,8 +20,28 @@ fn run_after_initial_cancellation_for_test() {
 }
 
 pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
+    cancel_run_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+        reason,
+    )
+}
+
+/// The store-rooted counterpart of [`cancel_run`].
+///
+/// Alias resolution and cancellation are one loop: this re-resolves the Cook
+/// alias after each pass and cancels whatever became authoritative. Resolving
+/// the alias in one installation and cancelling in another would follow an
+/// index that names attempts the cancelled store has never heard of — and would
+/// terminate the loop on an equality between two different homes' answers
+/// (#7505).
+pub(crate) fn cancel_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    reason: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
     let requested_run_id = sanitize_run_id(run_id);
-    let mut resolved_run_id = resolve_run_id(&requested_run_id)?;
+    let mut resolved_run_id = resolve_run_id_in_store(lifecycle_store, &requested_run_id)?;
     // Index publication is independent from parent cancellation. Re-resolve
     // after each mutation until the Cook alias is stable, so every attempt that
     // became authoritative during this operation receives cancellation too.
@@ -30,20 +50,24 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         // finished. Keep exact-run cancellation strict: an operator targeting
         // that literal terminal attempt still receives the terminal-state error.
         if resolved_run_id != requested_run_id {
-            let resolved_record = store::read_record(&resolved_run_id)?;
+            let resolved_record = lifecycle_store.read_record(&resolved_run_id)?;
             if resolved_record.state.is_terminal() {
                 return Ok(resolved_record);
             }
         }
-        let record = cancel_resolved_run(&resolved_run_id, reason)?;
+        let record = cancel_resolved_run_in_store(lifecycle_store, &resolved_run_id, reason)?;
         // A first child can have been submitted after reservation but before
         // index publication. Cancel it through the reservation link so it
         // cannot remain an unindexed queued record.
-        cancel_reserved_detached_cook_handoff_attempt_if_cancelled(&requested_run_id)?;
+        cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
+            lifecycle_store,
+            &requested_run_id,
+        )?;
         if pass == 0 {
             run_after_initial_cancellation_for_test();
         }
-        let resolved_after_cancellation = resolve_run_id(&requested_run_id)?;
+        let resolved_after_cancellation =
+            resolve_run_id_in_store(lifecycle_store, &requested_run_id)?;
         if resolved_after_cancellation == resolved_run_id {
             return Ok(record);
         }
@@ -61,7 +85,11 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
 /// selected every parent/attempt record to mutate. Alias-aware cancellation is
 /// intentionally broader because it follows an advancing Cook index.
 pub fn cancel_exact_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
-    cancel_resolved_run(&sanitize_run_id(run_id), reason)
+    cancel_resolved_run_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        &sanitize_run_id(run_id),
+        reason,
+    )
 }
 
 /// Cancel one literal run through an explicitly selected lifecycle store.
@@ -304,11 +332,28 @@ fn successful_provider_execution_is_pending_import(record: &AgentTaskRunRecord) 
             })
 }
 
-fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
+/// Cancel one already-resolved durable run inside an explicitly rooted store.
+///
+/// Cancellation is destructive and it is not one write: it terminalizes the
+/// record, reaps the run's managed services, cancels a controller staging job,
+/// projects a runner-job cancellation, finalizes controller scratch, and
+/// releases the controller-runtime admission. Every one of those is keyed on
+/// the run and every one of them was ambient. A cancel that read state from one
+/// home and wrote its terminal record to another is the worst shape in this
+/// bug class — it would leave the *observed* run running with its services and
+/// admission intact while reporting success (#7505).
+///
+/// There is no ambient wrapper: both entry points ([`cancel_run_in_store`] and
+/// [`cancel_exact_run`]) resolve exactly one store for the whole operation.
+fn cancel_resolved_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    reason: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
     // Cook IDs are stable aliases. Match status and logs by following an
     // materialized attempt once one exists; before then the handoff parent is
     // the direct record and remains cancellable.
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     let detached_child = record
         .metadata
         .get("detached_cook_handoff")
@@ -348,7 +393,7 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
                         "killed_pids": termination.killed_pids,
                     }),
                 );
-                store::write_record(&record)?;
+                lifecycle_store.write_record(&record)?;
             }
             homeboy_core::process::ProcessIdentityState::Dead => {}
             homeboy_core::process::ProcessIdentityState::IdentityMismatch
@@ -366,7 +411,8 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
     // durable ledger before terminalizing so an interrupted controller cannot
     // leave a runner-local preview alive after its run is cancelled.
     let service_cleanup =
-        crate::agent_task_scheduler::managed_services::reconcile_run_services_on_owner(
+        crate::agent_task_scheduler::managed_services::reconcile_run_services_on_owner_at(
+            &lifecycle_store.data_root(),
             &record.run_id,
             record.metadata.get("managed_service_supervisor"),
             reason.unwrap_or("cancelled"),
@@ -376,7 +422,7 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
         record
             .ensure_metadata_object()
             .insert("managed_service_cleanup".to_string(), service_cleanup);
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
     }
     if record
         .candidate_adoption
@@ -405,7 +451,7 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
             json!(now),
         );
         record.updated_at = Some(now);
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
 
         if let Some(process_group) = process_group {
             if homeboy_core::process::isolated_process_group_is_running(process_group).map_err(
@@ -440,7 +486,7 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
         attempt.updated_at = now.clone();
         attempt.heartbeat_at = now.clone();
         record.updated_at = Some(now);
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
         return Ok(record);
     }
     // A pending POST may have been accepted despite a lost response. Resolve
@@ -450,10 +496,11 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
     if matches!(
         record.state,
         AgentTaskRunState::Queued | AgentTaskRunState::Running
-    ) && super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted(
+    ) && super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted_in_store(
+        lifecycle_store,
         &record.run_id,
     )? {
-        record = store::read_record(&record.run_id)?;
+        record = lifecycle_store.read_record(&record.run_id)?;
     }
     if record.state == AgentTaskRunState::Cancelled {
         let cancelled_at = record
@@ -463,8 +510,12 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
             .unwrap_or_else(|| record.updated_at.as_deref().unwrap_or("unknown"))
             .to_string();
         terminalize_running_provider_executions(record.ensure_metadata_object(), &cancelled_at);
-        store::write_record(&record)?;
-        crate::controller_scratch::finalize_run(&record.run_id)?;
+        lifecycle_store.write_record(&record)?;
+        crate::controller_scratch::finalize_run_at_explicit_roots(
+            &lifecycle_store.data_root(),
+            &lifecycle_store.artifact_root(),
+            &record.run_id,
+        )?;
         return Ok(record);
     }
 
@@ -505,7 +556,7 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
             "cancellation_deferred_for_terminal_provider".to_string(),
             json!({ "requested_at": now, "reason": reason.unwrap_or("cancel requested") }),
         );
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
         return Ok(record);
     }
 
@@ -530,7 +581,7 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
                 "requested_at": now_timestamp(),
             }),
         );
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
         // The controller owns every child admitted during staging, including the
         // final runner job. Never bypass it merely because that child identity
         // was already projected onto the parent.
@@ -547,7 +598,7 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
                 "requested_at": now_timestamp(),
             }),
         );
-        store::write_record(&record)?;
+        lifecycle_store.write_record(&record)?;
         if controller_job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
             return Ok(record);
         }
@@ -578,7 +629,8 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
     // overwriting completed work with a controller-only cancellation.
     if let LiveCancellationOutcome::RunnerJobCancelled { job, events } = &cancellation {
         if job.status.is_terminal() && job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
-            reconcile_runner_job_snapshot(
+            reconcile_runner_job_snapshot_in_store(
+                lifecycle_store,
                 &mut record,
                 &homeboy_core::api_jobs::RunnerJobLogSnapshot {
                     job: *job.clone(),
@@ -595,7 +647,7 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
     // above. Make the final decision under the record mutation lock so a late
     // success is either observed here or cancellation wins before it can be
     // imported; never overwrite an already durable success.
-    let record = store::mutate_record(&record.run_id, |record| {
+    let record = lifecycle_store.mutate_record(&record.run_id, |record| {
         // An aggregate or runner projection may have finished after the live
         // cancellation transport returned. Its terminal state is authoritative.
         if record.state.is_terminal() {
@@ -695,10 +747,21 @@ fn cancel_resolved_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRu
         metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
         true
     })?
-    .unwrap_or(store::read_record(&record.run_id)?);
+    .unwrap_or(lifecycle_store.read_record(&record.run_id)?);
     if record.state == AgentTaskRunState::Cancelled {
-        crate::controller_scratch::finalize_run(&record.run_id)?;
-        homeboy_core::controller_runtime::cancel_admission(&record.run_id)?;
+        // The same two rooted side effects `cancel_exact_run_in_store` already
+        // uses: scratch finalization needs both the data and artifact roots,
+        // and admission release needs the controller-runtime store below this
+        // store's data root.
+        crate::controller_scratch::finalize_run_at_explicit_roots(
+            &lifecycle_store.data_root(),
+            &lifecycle_store.artifact_root(),
+            &record.run_id,
+        )?;
+        homeboy_core::controller_runtime::cancel_admission_at(
+            &lifecycle_store.data_root().join("controller-runtimes"),
+            &record.run_id,
+        )?;
     }
     Ok(record)
 }
