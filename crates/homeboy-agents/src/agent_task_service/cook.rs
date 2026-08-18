@@ -942,6 +942,53 @@ fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookSe
     }
 }
 
+/// Make the controller/provider verification boundary explicit before the
+/// immutable Cook recipe is persisted. This keeps a provider attempt focused
+/// on a patch instead of duplicating the final gate population in its isolated
+/// workspace. Private gate programs deliberately remain undisclosed.
+fn project_controller_owned_gate_contract(options: &mut AgentTaskCookServiceOptions) {
+    let public_gates = options
+        .gates
+        .verify
+        .iter()
+        .map(|command| format!("`{command}`"))
+        .collect::<Vec<_>>();
+    let private_gate_count = options.gates.private_verify.len();
+    if public_gates.is_empty() && private_gate_count == 0 {
+        return;
+    }
+
+    let mut instructions = vec![
+        "Declared deterministic gates are controller-owned. Homeboy runs them after it harvests your candidate, so use this attempt for the source change and a focused check only when it directly reduces uncertainty.".to_string(),
+    ];
+    if !public_gates.is_empty() {
+        instructions.push(format!(
+            "Controller-owned final gates: {}.",
+            public_gates.join(", ")
+        ));
+    }
+    if private_gate_count > 0 {
+        instructions.push(format!(
+            "Homeboy also owns {private_gate_count} private deterministic gate(s); their programs are intentionally withheld from this attempt."
+        ));
+    }
+    instructions.push(
+        "Report any focused command you run and its result in the reviewer-facing verification evidence; Homeboy records the authoritative final gate evidence separately."
+            .to_string(),
+    );
+    let contract = instructions.join("\n");
+
+    for request in &mut options.initial_plan.tasks {
+        if !request
+            .instructions
+            .contains("Declared deterministic gates are controller-owned.")
+        {
+            request.instructions.push_str("\n\n");
+            request.instructions.push_str(&contract);
+        }
+    }
+}
+
 /// Executes one provider attempt while cook retains ownership of promotion,
 /// gates, retries, and finalization.
 pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
@@ -4119,6 +4166,7 @@ where
             &options.initial_plan.options.execution_budget,
         )?;
     }
+    project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
@@ -4245,41 +4293,7 @@ where
         && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
-        if let Err(error) = validate_cook_workspace(&options) {
-            let error = with_pre_execution_phase(error, "workspace_validation");
-            record_pre_execution_failure(
-                lifecycle_store,
-                &options.initial_plan,
-                &options.initial_run_id,
-                &error,
-                "workspace_validation",
-            )?;
-            let record = lifecycle_store.read_record(&options.initial_run_id).ok();
-            let attempts = record
-                .as_ref()
-                .map(|record| AgentTaskCookAttemptReport {
-                    attempt: recipe
-                        .attempts
-                        .iter()
-                        .find(|attempt| attempt.run_id == options.initial_run_id)
-                        .map(|attempt| attempt.attempt)
-                        .unwrap_or(1),
-                    run_id: options.initial_run_id.clone(),
-                    run_state: format!("{:?}", record.state),
-                    aggregate_path: record.aggregate_path.clone(),
-                    promotion: None,
-                    feedback: None,
-                })
-                .into_iter()
-                .collect();
-            return Ok(pre_execution_failure_report(
-                options.cook_id.clone(),
-                attempts,
-                pre_execution_failure_details(record.as_ref(), &error),
-                error,
-                Some(&options.initial_run_id),
-            ));
-        }
+        validate_cook_workspace(&options)?;
     }
     validate_cook_candidate_group(&options.initial_plan)?;
     // Reserve the source tree's projected copy before the scheduler creates its
@@ -4513,34 +4527,13 @@ where
         ));
     }
     if let Some(latest_attempt) = recipe.attempts.last() {
-        if let Err(error) = materialize_cook_attempt_with_stores(
+        materialize_cook_attempt_with_stores(
             store,
             lifecycle_store,
             &recipe.cook_id,
             &latest_attempt.run_id,
             &latest_attempt.plan,
-        ) {
-            let record = lifecycle_store.read_record(&latest_attempt.run_id).ok();
-            let attempts = record
-                .as_ref()
-                .map(|record| AgentTaskCookAttemptReport {
-                    attempt: latest_attempt.attempt,
-                    run_id: latest_attempt.run_id.clone(),
-                    run_state: format!("{:?}", record.state),
-                    aggregate_path: record.aggregate_path.clone(),
-                    promotion: None,
-                    feedback: None,
-                })
-                .into_iter()
-                .collect();
-            return Ok(pre_execution_failure_report(
-                options.cook_id.clone(),
-                attempts,
-                pre_execution_failure_details(record.as_ref(), &error),
-                error,
-                Some(&options.initial_run_id),
-            ));
-        }
+        )?;
     }
     // The recipe alone is resumable input, not a status-addressable run. Publish
     // the run identity only after initial materialization and a lifecycle read
@@ -4572,21 +4565,7 @@ where
                     dispatcher.pre_execution_failure_phase(),
                     &error,
                 )?;
-                if error.retryable == Some(true) {
-                    return Err(error);
-                }
-                return Ok(pre_execution_failure_report(
-                    options.cook_id.clone(),
-                    Vec::new(),
-                    pre_execution_failure_details(
-                        agent_task_lifecycle::exact_record(&options.initial_run_id)
-                            .ok()
-                            .as_ref(),
-                        &error,
-                    ),
-                    error,
-                    Some(&options.initial_run_id),
-                ));
+                return Err(error);
             }
         }
     }

@@ -70,24 +70,22 @@ fn generated_reference_covers_every_visible_top_level_command() {
 /// fail in CI before it can drift into `self doctor`.
 #[test]
 fn generated_command_docs_match_the_live_clap_tree() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        assert_eq!(
-            generated_reference_docs(),
-            live_generated_reference_docs(),
-            "docs/reference/cli/command-surface.json is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
-        );
-        assert_eq!(
-            CliReference::new(live_generated_reference_docs()),
-            homeboy_command_contract::cli_reference::checked_in_cli_reference(),
-            "the checked-in CLI reference contract is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace_root().join("docs/commands/commands-index.md"))
-                .expect("read generated command index"),
-            generated_command_index(),
-            "docs/commands/commands-index.md is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
-        );
-    });
+    assert_eq!(
+        generated_reference_docs(),
+        live_generated_reference_docs(),
+        "docs/reference/cli/command-surface.json is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
+    );
+    assert_eq!(
+        CliReference::new(live_generated_reference_docs()),
+        homeboy_command_contract::cli_reference::checked_in_cli_reference(),
+        "the checked-in CLI reference contract is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace_root().join("docs/commands/commands-index.md"))
+            .expect("read generated command index"),
+        generated_command_index(),
+        "docs/commands/commands-index.md is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
+    );
 }
 
 /// A command with no clap `about` is invisible in `--help`, in the generated
