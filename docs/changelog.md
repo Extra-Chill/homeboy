@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.12] - 2026-08-18
+
+### Changed
+- root the status read's reconciliation leaves on one store
+- root the injectable half of the evidence mirror tests
+- root the completed-run evidence test in an explicit store
+- root Cook's adoption-target tests on explicit stores
+- root the store tests instead of mutating the process home
+- root five status_and_recovery tests in an explicit store
+- root two terminal_and_reconcile tests in an explicit store
+
 ## [0.350.11] - 2026-08-18
 
 ### Changed
