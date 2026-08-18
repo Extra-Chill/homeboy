@@ -10,7 +10,8 @@ use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runn
 use super::super::{CmdResult, DynamicSetArgs};
 use super::cli::RunnerKindArg;
 use super::types::{
-    RunnerConnectionOutput, RunnerExtra, RunnerOutput, RunnerTruncation, REDACTED_ENV_VALUE,
+    RunnerConnectionOutput, RunnerDisconnectStatus, RunnerExtra, RunnerOutput, RunnerTruncation,
+    REDACTED_ENV_VALUE,
 };
 
 pub(super) struct RunnerAddInput {
@@ -464,24 +465,48 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
 }
 
 pub(super) fn disconnect(id: &str, local_recovery: bool) -> CmdResult<RunnerOutput> {
-    Ok((
+    let report = if local_recovery {
+        runner::disconnect_local_recovery(id)?
+    } else {
+        runner::disconnect(id)?
+    };
+    Ok(disconnect_output(id, report, local_recovery))
+}
+
+fn disconnect_output(
+    id: &str,
+    report: homeboy::runner::runners::RunnerDisconnectReport,
+    local_recovery: bool,
+) -> (RunnerOutput, i32) {
+    let status = disconnect_status(&report, local_recovery);
+    (
         RunnerOutput {
             command: "runner.disconnect".to_string(),
             id: Some(id.to_string()),
             extra: RunnerExtra {
-                connection: Some(RunnerConnectionOutput::Disconnect(Box::new(
-                    if local_recovery {
-                        runner::disconnect_local_recovery(id)?
-                    } else {
-                        runner::disconnect(id)?
-                    },
-                ))),
+                connection: Some(RunnerConnectionOutput::Disconnect(Box::new(report))),
+                disconnect_status: Some(status),
                 ..Default::default()
             },
             ..Default::default()
         },
-        0,
-    ))
+        (status == RunnerDisconnectStatus::PartialFailure) as i32,
+    )
+}
+
+fn disconnect_status(
+    report: &homeboy::runner::runners::RunnerDisconnectReport,
+    local_recovery: bool,
+) -> RunnerDisconnectStatus {
+    if report.partial && !report.disconnected {
+        RunnerDisconnectStatus::PartialFailure
+    } else if local_recovery {
+        RunnerDisconnectStatus::LocalRecovery
+    } else if report.disconnected {
+        RunnerDisconnectStatus::Disconnected
+    } else {
+        RunnerDisconnectStatus::AlreadyDisconnected
+    }
 }
 
 pub(super) fn redact_runner_output_env(output: &mut RunnerOutput) {
@@ -507,6 +532,102 @@ fn redact_runner_env(runner: &mut Runner) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use homeboy::runner::runners::RunnerDisconnectReport;
+
+    fn disconnect_report(disconnected: bool, partial: bool) -> RunnerDisconnectReport {
+        RunnerDisconnectReport {
+            runner_id: "homeboy-lab".to_string(),
+            disconnected,
+            partial,
+            remote_error: partial.then(|| "SSH timeout".to_string()),
+            local_recovery_command: (partial && !disconnected)
+                .then(|| "homeboy runner disconnect homeboy-lab --local-recovery".to_string()),
+            session: None,
+            session_path: "/tmp/homeboy-lab.json".to_string(),
+        }
+    }
+
+    #[test]
+    fn disconnect_outcomes_keep_exit_status_and_typed_state_truthful() {
+        for (name, disconnected, partial, local_recovery, expected_status, expected_exit) in [
+            (
+                "remote timeout",
+                false,
+                true,
+                false,
+                RunnerDisconnectStatus::PartialFailure,
+                1,
+            ),
+            (
+                "local recovery",
+                true,
+                true,
+                true,
+                RunnerDisconnectStatus::LocalRecovery,
+                0,
+            ),
+            (
+                "already disconnected",
+                false,
+                false,
+                false,
+                RunnerDisconnectStatus::AlreadyDisconnected,
+                0,
+            ),
+            (
+                "remote disconnect completed",
+                true,
+                false,
+                false,
+                RunnerDisconnectStatus::Disconnected,
+                0,
+            ),
+        ] {
+            let (output, exit_code) = disconnect_output(
+                "homeboy-lab",
+                disconnect_report(disconnected, partial),
+                local_recovery,
+            );
+            let serialized = serde_json::to_value(output).expect("serialize disconnect output");
+            let envelope =
+                crate::commands::utils::response::cli_response_for_json_result_for_identity(
+                    &Ok(serialized),
+                    exit_code,
+                    &crate::commands::utils::response::CommandIdentity::with_operation(
+                        "runner",
+                        "disconnect",
+                    ),
+                    None,
+                );
+            let envelope = serde_json::to_value(envelope).expect("serialize command envelope");
+
+            assert_eq!(envelope["success"], expected_exit == 0, "{name}");
+            assert_eq!(envelope["exit_code"], expected_exit, "{name}");
+            assert_eq!(
+                envelope["status"],
+                if expected_exit == 0 {
+                    serde_json::json!("succeeded")
+                } else {
+                    serde_json::to_value(expected_status).expect("serialize expected status")
+                },
+                "{name}"
+            );
+            assert_eq!(
+                envelope["data"]["status"],
+                serde_json::to_value(expected_status).expect("serialize expected status"),
+                "{name}"
+            );
+            if name == "remote timeout" {
+                assert_eq!(envelope["data"]["connection"]["action"], "disconnect");
+                assert_eq!(
+                    envelope["data"]["connection"]["local_recovery_command"],
+                    "homeboy runner disconnect homeboy-lab --local-recovery"
+                );
+            }
+        }
+    }
+
     /// `runner list` must default to the compact view and keep the diagnostic
     /// mass behind `--full` (#9487).
     mod list_output_shape {

@@ -35,6 +35,10 @@ pub struct RunnerExtra {
     pub managed_followups: Vec<LabFollowup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<RunnerConnectionOutput>,
+    /// Terminal outcome of `runner disconnect`. This makes bounded remote
+    /// ambiguity machine-readable without changing other runner commands.
+    #[serde(rename = "status", skip_serializing_if = "Option::is_none")]
+    pub disconnect_status: Option<RunnerDisconnectStatus>,
     /// The compact authoritative "ready now / safe to rotate" answer. Leads the
     /// status output; the full generation inventory below is detail behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +81,7 @@ impl Default for RunnerExtra {
             selected_lab_runner: None,
             managed_followups: Vec::new(),
             connection: None,
+            disconnect_status: None,
             reconciliation: None,
             admission_summary: None,
             inspection: None,
@@ -384,6 +389,16 @@ pub enum RunnerConnectionOutput {
     Connect(Box<RunnerConnectReport>),
     Status(Box<RunnerStatusReport>),
     Disconnect(Box<RunnerDisconnectReport>),
+}
+
+/// The postcondition reached by `runner disconnect`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerDisconnectStatus {
+    Disconnected,
+    LocalRecovery,
+    AlreadyDisconnected,
+    PartialFailure,
 }
 
 pub type RunnerOutput = EntityCrudOutput<Runner, RunnerExtra>;
