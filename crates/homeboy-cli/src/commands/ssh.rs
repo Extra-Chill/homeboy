@@ -158,7 +158,8 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
                 })?;
                 let timeout = command_timeout(args.timeout)?;
                 ssh_phase("command-start");
-                let output = execute_non_interactive(&client, cmd, timeout);
+                let output =
+                    execute_non_interactive(&client, cmd, timeout, std::io::stdin().is_terminal());
                 ssh_phase("command-finished");
                 ssh_phase("cleanup-finished");
 
@@ -292,7 +293,7 @@ pub(super) fn execute_raw_command(args: &SshArgs) -> homeboy::core::Result<(Stri
     })?;
     let timeout = command_timeout(args.timeout)?;
     ssh_phase("command-start");
-    let output = execute_non_interactive(&client, cmd, timeout);
+    let output = execute_non_interactive(&client, cmd, timeout, std::io::stdin().is_terminal());
     ssh_phase("command-finished");
     ssh_phase("cleanup-finished");
     Ok((output.stdout, output.stderr, output.exit_code))
@@ -302,8 +303,9 @@ fn execute_non_interactive(
     client: &SshClient,
     command: &str,
     timeout: Option<Duration>,
+    stdin_is_terminal: bool,
 ) -> homeboy::core::server::CommandOutput {
-    match (timeout, std::io::stdin().is_terminal()) {
+    match (timeout, stdin_is_terminal) {
         (Some(timeout), true) => client.execute_with_timeout(command, timeout),
         (Some(timeout), false) => client.execute_with_piped_stdin_and_timeout(command, timeout),
         (None, false) => client.execute_with_piped_stdin(command),
@@ -600,5 +602,61 @@ mod tests {
             Some(Duration::from_secs(2))
         );
         assert!(command_timeout(Some(0)).is_err());
+    }
+
+    fn localhost_client() -> SshClient {
+        SshClient {
+            host: "localhost".to_string(),
+            user: "tester".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: true,
+            env: std::collections::HashMap::new(),
+        }
+    }
+
+    /// The non-interactive SSH dispatcher must select the timed piped-stdin path
+    /// when `--timeout` is present and controller stdin is not a terminal, so
+    /// the fix for timed SSH stdin forwarding is actually exercised from the CLI.
+    #[test]
+    fn non_interactive_dispatch_selects_timed_piped_stdin_for_non_terminal_timeout() {
+        let client = localhost_client();
+
+        let output = execute_non_interactive(
+            &client,
+            "printf timed-piped",
+            Some(Duration::from_secs(5)),
+            false,
+        );
+
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(output.stdout, "timed-piped");
+    }
+
+    /// Each of the four dispatch quadrants must route to the expected execution
+    /// path. These use local execution so the test is deterministic and does not
+    /// require an SSH server.
+    #[test]
+    fn non_interactive_dispatch_routes_all_stdin_timeout_combinations() {
+        let client = localhost_client();
+
+        let timed_terminal =
+            execute_non_interactive(&client, "printf tt", Some(Duration::from_secs(5)), true);
+        assert!(timed_terminal.success);
+        assert_eq!(timed_terminal.stdout, "tt");
+
+        let timed_piped =
+            execute_non_interactive(&client, "printf tp", Some(Duration::from_secs(5)), false);
+        assert!(timed_piped.success);
+        assert_eq!(timed_piped.stdout, "tp");
+
+        let untimed_piped = execute_non_interactive(&client, "printf up", None, false);
+        assert!(untimed_piped.success);
+        assert_eq!(untimed_piped.stdout, "up");
+
+        let untimed_terminal = execute_non_interactive(&client, "printf ut", None, true);
+        assert!(untimed_terminal.success);
+        assert_eq!(untimed_terminal.stdout, "ut");
     }
 }

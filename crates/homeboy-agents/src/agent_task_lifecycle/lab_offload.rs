@@ -266,19 +266,35 @@ fn record_lab_offload_phase_metadata(
 }
 
 pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentTaskRunRecord> {
+    record_detached_lab_run_in_store(&AgentTaskLifecycleStore::from_current_environment()?, input)
+}
+
+/// The store-rooted counterpart of [`record_detached_lab_run`].
+///
+/// Lab acceptance is the single durable transfer of a run to a runner daemon:
+/// it takes the handoff lock, reads (or resubmits) the record, validates the
+/// accepted identity against what is already persisted, and writes the accepted
+/// handoff back. Every one of those steps has to name the same installation —
+/// an acceptance validated against one home's record and committed into
+/// another's would silently permit two different runners to own the same run,
+/// and the handoff lock would not have excluded either of them (#7505).
+pub(crate) fn record_detached_lab_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    input: DetachedLabRunRecord<'_>,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(input.run_id);
-    let _lock = LabHandoffLock::lock(&run_id)?;
+    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
     let plan = detached_lab_plan(&run_id, &input);
-    let mut record = match store::read_record(&run_id) {
+    let mut record = match lifecycle_store.read_record(&run_id) {
         Ok(record) => record,
         Err(error)
             if error.code == ErrorCode::InternalJsonError
-                && store::record_lacks_typed_metadata(&run_id)? =>
+                && lifecycle_store.record_lacks_typed_metadata(&run_id)? =>
         {
-            submit_plan(&plan, Some(&run_id))?
+            submit_plan_in_store(lifecycle_store, &plan, Some(&run_id))?
         }
         Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
-            submit_plan(&plan, Some(&run_id))?
+            submit_plan_in_store(lifecycle_store, &plan, Some(&run_id))?
         }
         Err(error) => return Err(error),
     };
@@ -292,8 +308,10 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
     }
     // The accepted handoff is the controller-side attachment authority. Capture
     // the exact durable run binding here so later attachment writes cannot be
-    // authorized by a substituted workspace claim.
-    require_record_workspace_owner(&record)?;
+    // authorized by a substituted workspace claim. The claim ledger is a
+    // permission gate over the retained workspace, so it is read from this
+    // store's own roots rather than the process environment's (#7505).
+    require_record_workspace_owner_in_store(&lifecycle_store.workspace_claim_store(), &record)?;
     if let Some(accepted) = record.lab_handoff.as_ref().filter(|handoff| {
         handoff.state == AgentTaskLabHandoffState::Accepted
             && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
@@ -386,8 +404,8 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
             None,
         ));
     }
-    if let Err(error) = store::read_controller_plan(&run_id) {
-        fail_missing_lab_attempt_plan(&mut record, &error)?;
+    if let Err(error) = lifecycle_store.read_controller_plan(&run_id) {
+        fail_missing_lab_attempt_plan_in_store(lifecycle_store, &mut record, &error)?;
         return Err(Error::internal_io(
             format!(
                 "cannot bind Lab runner job because durable attempt plan is unavailable: {}",
@@ -485,7 +503,7 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.remove(METADATA_KEY_STALE_RUNNING);
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -522,17 +540,26 @@ fn record_lab_offload_proxy(
     if let Some(metadata) = plan.metadata.as_object_mut() {
         metadata.remove("runner_job_id");
     }
-    let mut record = match store::read_record(&run_id) {
+    // Ambient entry point: resolve one root here and use it for every durable
+    // touch below, rather than letting each `store::` shim resolve its own.
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let mut record = match lifecycle_store.read_record(&run_id) {
         Ok(record) => record,
         Err(error)
             if error.code == ErrorCode::InternalJsonError
-                && store::record_lacks_typed_metadata(&run_id)? =>
+                && lifecycle_store.record_lacks_typed_metadata(&run_id)? =>
         {
-            submit_plan(durable_plan.unwrap_or(&plan), Some(&run_id))?
+            submit_plan_in_store(
+                &lifecycle_store,
+                durable_plan.unwrap_or(&plan),
+                Some(&run_id),
+            )?
         }
-        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
-            submit_plan(durable_plan.unwrap_or(&plan), Some(&run_id))?
-        }
+        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => submit_plan_in_store(
+            &lifecycle_store,
+            durable_plan.unwrap_or(&plan),
+            Some(&run_id),
+        )?,
         Err(error) => return Err(error),
     };
     if let Some(problem) = record.lab_handoff_validation_error() {
@@ -563,20 +590,23 @@ fn record_lab_offload_proxy(
     // A previous interruption may have committed the record but not its plan.
     // Repair from the controller-compiled plan before exposing another handoff
     // phase; without it the runner would later create a fake running attempt.
-    if store::read_controller_plan(&run_id).is_err() {
+    if lifecycle_store.read_controller_plan(&run_id).is_err() {
         if let Some(durable_plan) = durable_plan {
-            let plan_path = store::write_plan(&run_id, durable_plan)?;
+            let plan_path = lifecycle_store.write_controller_plan(&run_id, durable_plan)?;
             record.plan_path = plan_path.display().to_string();
         } else {
             let error = Error::internal_io(
                 "durable attempt plan is unavailable during Lab handoff recovery",
                 Some(record.plan_path.clone()),
             );
-            fail_missing_lab_attempt_plan(&mut record, &error)?;
+            fail_missing_lab_attempt_plan_in_store(&lifecycle_store, &mut record, &error)?;
             return Err(error);
         }
     }
-    record.plan_path = store::controller_plan_path(&run_id)?.display().to_string();
+    record.plan_path = lifecycle_store
+        .controller_plan_path(&run_id)
+        .display()
+        .to_string();
     if record.state.is_terminal() {
         return Ok(record);
     }
@@ -620,7 +650,7 @@ fn record_lab_offload_proxy(
         )
         .unwrap_or(Value::Null),
     );
-    store::write_record(&record)?;
+    lifecycle_store.write_record(&record)?;
     Ok(record)
 }
 
@@ -669,7 +699,17 @@ mod admission_tests {
     }
 }
 
-fn fail_missing_lab_attempt_plan(record: &mut AgentTaskRunRecord, error: &Error) -> Result<()> {
+/// Terminalize a Lab attempt whose durable plan is unrecoverable.
+///
+/// The failure is decided from a plan read out of one store, so it is written
+/// back to that same store: a terminal failure recorded in a different
+/// installation than the one that was missing the plan would be evidence about
+/// a run nobody asked about (#7505).
+fn fail_missing_lab_attempt_plan_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+    error: &Error,
+) -> Result<()> {
     record.updated_at = Some(now_timestamp());
     set_run_state(record, AgentTaskRunState::Failed);
     for task in &mut record.tasks {
@@ -686,7 +726,7 @@ fn fail_missing_lab_attempt_plan(record: &mut AgentTaskRunRecord, error: &Error)
         }),
     );
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
-    store::write_record(record)
+    lifecycle_store.write_record(record)
 }
 
 fn detached_lab_plan(run_id: &str, input: &DetachedLabRunRecord<'_>) -> AgentTaskPlan {

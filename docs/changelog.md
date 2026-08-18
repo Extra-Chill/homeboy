@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.13] - 2026-08-18
+
+### Changed
+- clarify controller-owned gates
+- root the cancel_run spine and LabHandoffLock together
+- give admission_status a rooted _at sibling
+
+### Fixed
+- preserve stdin through timed commands
+- keep local recovery idempotent
+- report partial disconnect failures
+
 ## [0.350.12] - 2026-08-18
 
 ### Changed
