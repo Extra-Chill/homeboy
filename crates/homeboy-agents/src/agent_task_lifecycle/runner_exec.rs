@@ -58,7 +58,24 @@ pub fn recorded_runner_job_identity(run_id: &str) -> Result<Option<(String, Stri
 pub fn accepted_lab_runner_job_identity(
     run_id: &str,
 ) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
-    let record = store::read_record(&sanitize_run_id(run_id))?;
+    accepted_lab_runner_job_identity_in_store(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
+/// The store-rooted counterpart of [`accepted_lab_runner_job_identity`].
+///
+/// This is the read half of Lab acceptance, and `record_detached_lab_run_in_store`
+/// is the write half. An acceptance committed into one installation and then
+/// verified against another's record would report "not accepted" for a run that
+/// is already bound — the mirror image of the double-acceptance the write side
+/// refuses — so both halves have to name the same store (#7505).
+pub(crate) fn accepted_lab_runner_job_identity_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
+    let record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     Ok(accepted_lab_runner_job_identity_from_record(&record))
 }
 
