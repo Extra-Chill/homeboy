@@ -281,40 +281,42 @@ fn test_runner_artifact_token_round_trips_escaped_segments() {
 /// wherever the daemon asked. It is now reduced to one component in the cache.
 #[test]
 fn test_download_placement_sanitizes_a_traversal_filename() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let token = RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1")
-            .expect("parse token");
-        let artifact_root = homeboy_core::paths::artifact_root().expect("artifact root");
-        let cache = artifact_root.join("runner").join("lab").join("run-1");
+    // `resolve_placement` already takes its artifact root as a parameter, so
+    // the root can simply be injected rather than resolved out of the process
+    // environment (#7505).
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let token =
+        RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1").expect("parse token");
+    let artifact_root = context.artifact_dir();
+    let cache = artifact_root.join("runner").join("lab").join("run-1");
 
-        for hostile in [
-            "../../../../../../root/.ssh/authorized_keys",
-            "/root/.ssh/authorized_keys",
-            "..",
-            "../../etc/passwd",
-        ] {
-            let placement = resolve_placement(&artifact_root, &token, None, Some(hostile))
-                .expect("placement resolves");
-            assert_eq!(
-                placement.output_path.parent(),
-                Some(cache.as_path()),
-                "{hostile} escaped to {}",
-                placement.output_path.display()
-            );
-            assert_eq!(placement.cache_dir.as_deref(), Some(cache.as_path()));
-            assert!(!placement.file_name.contains('/'));
-            // The reported artifact-ref name is the name on disk, never the
-            // remote's, so no downstream consumer can rebuild the escape.
-            assert_eq!(
-                placement
-                    .output_path
-                    .file_name()
-                    .expect("file name")
-                    .to_string_lossy(),
-                placement.file_name.as_str()
-            );
-        }
-    });
+    for hostile in [
+        "../../../../../../root/.ssh/authorized_keys",
+        "/root/.ssh/authorized_keys",
+        "..",
+        "../../etc/passwd",
+    ] {
+        let placement = resolve_placement(&artifact_root, &token, None, Some(hostile))
+            .expect("placement resolves");
+        assert_eq!(
+            placement.output_path.parent(),
+            Some(cache.as_path()),
+            "{hostile} escaped to {}",
+            placement.output_path.display()
+        );
+        assert_eq!(placement.cache_dir.as_deref(), Some(cache.as_path()));
+        assert!(!placement.file_name.contains('/'));
+        // The reported artifact-ref name is the name on disk, never the
+        // remote's, so no downstream consumer can rebuild the escape.
+        assert_eq!(
+            placement
+                .output_path
+                .file_name()
+                .expect("file name")
+                .to_string_lossy(),
+            placement.file_name.as_str()
+        );
+    }
 }
 
 /// The same defect through the token instead of the body.
@@ -326,59 +328,57 @@ fn test_download_placement_sanitizes_a_traversal_filename() {
 /// silently rewriting one would put bytes somewhere unpredictable.
 #[test]
 fn test_download_placement_rejects_a_percent_encoded_traversal_token() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        // The root is injected and never consulted: both identifiers are
-        // refused before anything is joined onto it.
-        let artifact_root = home.path().join("artifacts");
-        let token = RemoteArtifactToken::parse(
-            "runner-artifact://lab/%2E%2E%2F%2E%2E%2F%2E%2E%2Froot%2F.ssh/authorized_keys",
-        )
-        .expect("token still parses; that is the point");
-        // The parser hands the writer an already-decoded traversal.
-        assert_eq!(token.run_id, "../../../root/.ssh");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    // The root is injected and never consulted: both identifiers are
+    // refused before anything is joined onto it.
+    let artifact_root = context.root().join("artifacts");
+    let token = RemoteArtifactToken::parse(
+        "runner-artifact://lab/%2E%2E%2F%2E%2E%2F%2E%2E%2Froot%2F.ssh/authorized_keys",
+    )
+    .expect("token still parses; that is the point");
+    // The parser hands the writer an already-decoded traversal.
+    assert_eq!(token.run_id, "../../../root/.ssh");
 
-        let error = resolve_placement(&artifact_root, &token, None, Some("authorized_keys"))
-            .expect_err("the writer must refuse it");
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(
-            error.message.contains("single path component"),
-            "{}",
-            error.message
-        );
+    let error = resolve_placement(&artifact_root, &token, None, Some("authorized_keys"))
+        .expect_err("the writer must refuse it");
+    assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    assert!(
+        error.message.contains("single path component"),
+        "{}",
+        error.message
+    );
 
-        // And through the runner id, which reaches the same join.
-        let runner_token =
-            RemoteArtifactToken::parse("runner-artifact://%2E%2E%2F%2E%2E%2Fetc/run-1/artifact-1")
-                .expect("parse token");
-        assert_eq!(runner_token.runner_id, "../../etc");
-        let error = resolve_placement(&artifact_root, &runner_token, None, Some("passwd"))
-            .expect_err("the writer must refuse it");
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-    });
+    // And through the runner id, which reaches the same join.
+    let runner_token =
+        RemoteArtifactToken::parse("runner-artifact://%2E%2E%2F%2E%2E%2Fetc/run-1/artifact-1")
+            .expect("parse token");
+    assert_eq!(runner_token.runner_id, "../../etc");
+    let error = resolve_placement(&artifact_root, &runner_token, None, Some("passwd"))
+        .expect_err("the writer must refuse it");
+    assert_eq!(error.code.as_str(), "validation.invalid_argument");
 }
 
 /// An explicit `--output` is the caller's own path and is not relocated into
 /// the cache — and it is not tagged, because homeboy does not reclaim it.
 #[test]
 fn test_download_placement_honours_an_explicit_output_without_tagging_it() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let token = RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1")
-            .expect("parse token");
-        let explicit = home.path().join("elsewhere").join("report.json");
-        let artifact_root = home.path().join("artifacts");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let token =
+        RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1").expect("parse token");
+    let explicit = context.root().join("elsewhere").join("report.json");
+    let artifact_root = context.root().join("artifacts");
 
-        let placement = resolve_placement(
-            &artifact_root,
-            &token,
-            Some(explicit.clone()),
-            Some("../../evil"),
-        )
-        .expect("resolve");
+    let placement = resolve_placement(
+        &artifact_root,
+        &token,
+        Some(explicit.clone()),
+        Some("../../evil"),
+    )
+    .expect("resolve");
 
-        assert_eq!(placement.output_path, explicit);
-        assert!(placement.cache_dir.is_none());
-        assert_eq!(placement.file_name, "report.json");
-    });
+    assert_eq!(placement.output_path, explicit);
+    assert!(placement.cache_dir.is_none());
+    assert_eq!(placement.file_name, "report.json");
 }
 
 #[test]
@@ -401,145 +401,143 @@ fn test_content_disposition_filename_parses_quoted_attachment_name() {
 /// the writer, and this asserts both halves of that split (#10586).
 #[test]
 fn test_content_disposition_traversal_is_neutralized_by_the_writer() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::CONTENT_DISPOSITION,
-            header::HeaderValue::from_static("attachment; filename=\"../../../../etc/cron.d/x\""),
-        );
-        let parsed = content_disposition_filename(&headers).expect("filename");
-        assert_eq!(parsed, "../../../../etc/cron.d/x");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::from_static("attachment; filename=\"../../../../etc/cron.d/x\""),
+    );
+    let parsed = content_disposition_filename(&headers).expect("filename");
+    assert_eq!(parsed, "../../../../etc/cron.d/x");
 
-        let token = RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1")
-            .expect("parse token");
-        let artifact_root = homeboy_core::paths::artifact_root().expect("artifact root");
-        let placement =
-            resolve_placement(&artifact_root, &token, None, Some(&parsed)).expect("resolve");
-        let cache = artifact_root.join("runner").join("lab").join("run-1");
-        assert_eq!(placement.output_path.parent(), Some(cache.as_path()));
-        assert_eq!(placement.file_name, "etc_cron.d_x");
-    });
+    let token =
+        RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1").expect("parse token");
+    let artifact_root = context.artifact_dir();
+    let placement =
+        resolve_placement(&artifact_root, &token, None, Some(&parsed)).expect("resolve");
+    let cache = artifact_root.join("runner").join("lab").join("run-1");
+    assert_eq!(placement.output_path.parent(), Some(cache.as_path()));
+    assert_eq!(placement.file_name, "etc_cron.d_x");
 }
 
 #[test]
 fn test_reportable_artifact_evidence_requires_local_or_retrievable_path() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let local = home.path().join("artifact.json");
-        fs::write(&local, b"{}").expect("artifact");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let local = context.root().join("artifact.json");
+    fs::write(&local, b"{}").expect("artifact");
 
-        assert!(is_reportable_artifact_evidence_path(
-            &local.to_string_lossy()
-        ));
-        assert!(is_reportable_artifact_evidence_path(
-            "runner-artifact://lab/run-1/artifact-1"
-        ));
-        assert!(is_reportable_artifact_evidence_path(
-            "metadata-only:trace.zip"
-        ));
-        assert!(is_reportable_artifact_evidence_path(
-            "artifacts/relative-trace.zip"
-        ));
-        assert!(!is_reportable_artifact_evidence_path(
-            "/srv/remote-only/trace.zip"
-        ));
-        assert!(!is_retrievable_runner_artifact(
-            "runner-artifact://missing-segments"
-        ));
-    });
+    assert!(is_reportable_artifact_evidence_path(
+        &local.to_string_lossy()
+    ));
+    assert!(is_reportable_artifact_evidence_path(
+        "runner-artifact://lab/run-1/artifact-1"
+    ));
+    assert!(is_reportable_artifact_evidence_path(
+        "metadata-only:trace.zip"
+    ));
+    assert!(is_reportable_artifact_evidence_path(
+        "artifacts/relative-trace.zip"
+    ));
+    assert!(!is_reportable_artifact_evidence_path(
+        "/srv/remote-only/trace.zip"
+    ));
+    assert!(!is_retrievable_runner_artifact(
+        "runner-artifact://missing-segments"
+    ));
 }
 
 #[test]
 fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let job_id = Uuid::new_v4();
-        let job = Job {
-            id: job_id,
-            operation: "exec".to_string(),
-            status: JobStatus::Succeeded,
-            created_at_ms: 1_700_000_000_000,
-            updated_at_ms: 1_700_000_001_000,
-            started_at_ms: Some(1_700_000_000_000),
-            finished_at_ms: Some(1_700_000_001_000),
-            event_count: 0,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            stale_reason: None,
-            daemon_lease_id: None,
-            target_runner_id: None,
-            target_project_id: None,
-            claim_id: None,
-            claimed_by_runner_id: None,
-            claimed_at_ms: None,
-            claim_expires_at_ms: None,
-            artifacts: Vec::new(),
-            runner_job_projection: None,
-        };
-        let lifecycle_event = json!({
-            "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
-            "identity": {
-                "runner_id": "lab",
-                "runner_job_id": job_id.to_string(),
-                "run_id": "run-typed"
-            },
-            "aggregate": {
-                "schema": "homeboy/agent-task-aggregate/v1",
-                "plan_id": "plan-from-result",
-                "status": "succeeded",
-                "totals": {"skipped": 0, "succeeded": 1, "failed": 0},
-                "outcomes": []
-            }
-        });
-        let events = vec![JobEvent {
-            sequence: 1,
-            job_id,
-            kind: JobEventKind::Result,
-            timestamp_ms: 1_700_000_001_000,
-            message: None,
-            data: Some(json!({
-                "data": {
-                    "agent_task_lifecycle_event": lifecycle_event
-                }
-            })),
-        }];
-        let run = mirror_job_run(
-            &store,
-            &ssh_runner(),
-            "/srv/homeboy/project",
-            &["homeboy".to_string(), "bench".to_string()],
-            &job,
-            &events,
-            &json!({"exit_code":0,"output":{"command":"bench"}}),
-            None,
-            Some(
-                &homeboy_core::notification_route::NotificationRoute::new(
-                    "extension",
-                    "opaque-origin-route",
-                )
-                .expect("route"),
-            ),
-        )
-        .expect("mirror job");
-        assert_eq!(run.kind, "runner-exec");
-        assert_eq!(run.status, "pass");
-        assert_eq!(run.cwd.as_deref(), Some("/srv/homeboy/project"));
-        assert_eq!(
-            run.metadata_json["lab"]["runner"]["id"].as_str(),
-            Some("lab")
-        );
-        assert_eq!(
-            run.metadata_json["lab"]["remote_job"]["id"].as_str(),
-            Some(job_id.to_string().as_str())
-        );
-        assert_eq!(
-            run.metadata_json["lab"]["agent_task_lifecycle_event"]["aggregate"]["plan_id"].as_str(),
-            Some("plan-from-result")
-        );
-        assert_eq!(
-            run.metadata_json["notification_route"]["route"],
-            "opaque-origin-route"
-        );
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let job_id = Uuid::new_v4();
+    let job = Job {
+        id: job_id,
+        operation: "exec".to_string(),
+        status: JobStatus::Succeeded,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: Some(1_700_000_001_000),
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        daemon_lease_id: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+        runner_job_projection: None,
+    };
+    let lifecycle_event = json!({
+        "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+        "identity": {
+            "runner_id": "lab",
+            "runner_job_id": job_id.to_string(),
+            "run_id": "run-typed"
+        },
+        "aggregate": {
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "plan-from-result",
+            "status": "succeeded",
+            "totals": {"skipped": 0, "succeeded": 1, "failed": 0},
+            "outcomes": []
+        }
     });
+    let events = vec![JobEvent {
+        sequence: 1,
+        job_id,
+        kind: JobEventKind::Result,
+        timestamp_ms: 1_700_000_001_000,
+        message: None,
+        data: Some(json!({
+            "data": {
+                "agent_task_lifecycle_event": lifecycle_event
+            }
+        })),
+    }];
+    let run = mirror_job_run(
+        &store,
+        &ssh_runner(),
+        "/srv/homeboy/project",
+        &["homeboy".to_string(), "bench".to_string()],
+        &job,
+        &events,
+        &json!({"exit_code":0,"output":{"command":"bench"}}),
+        None,
+        Some(
+            &homeboy_core::notification_route::NotificationRoute::new(
+                "extension",
+                "opaque-origin-route",
+            )
+            .expect("route"),
+        ),
+    )
+    .expect("mirror job");
+    assert_eq!(run.kind, "runner-exec");
+    assert_eq!(run.status, "pass");
+    assert_eq!(run.cwd.as_deref(), Some("/srv/homeboy/project"));
+    assert_eq!(
+        run.metadata_json["lab"]["runner"]["id"].as_str(),
+        Some("lab")
+    );
+    assert_eq!(
+        run.metadata_json["lab"]["remote_job"]["id"].as_str(),
+        Some(job_id.to_string().as_str())
+    );
+    assert_eq!(
+        run.metadata_json["lab"]["agent_task_lifecycle_event"]["aggregate"]["plan_id"].as_str(),
+        Some("plan-from-result")
+    );
+    assert_eq!(
+        run.metadata_json["notification_route"]["route"],
+        "opaque-origin-route"
+    );
 }
 
 #[test]
@@ -640,169 +638,169 @@ fn explicit_generic_runner_exec_run_skips_missing_remote_run_projection() {
 
 #[test]
 fn failed_job_without_terminal_exit_code_projects_root_failure_fallback() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let mut job = terminal_runner_job();
-        job.status = JobStatus::Failed;
-        let run = mirror_job_run(
-            &store,
-            &ssh_runner(),
-            "/runner/project",
-            &["homeboy".to_string(), "bench".to_string()],
-            &job,
-            &[],
-            &json!({ "stderr": "failed before result" }),
-            None,
-            None,
-        )
-        .expect("mirror failed job");
-        assert_eq!(run.metadata_json["exit_code"], 1);
-        assert_eq!(run.metadata_json["lab"]["failure"]["exit_code"], 1);
-    });
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let mut job = terminal_runner_job();
+    job.status = JobStatus::Failed;
+    let run = mirror_job_run(
+        &store,
+        &ssh_runner(),
+        "/runner/project",
+        &["homeboy".to_string(), "bench".to_string()],
+        &job,
+        &[],
+        &json!({ "stderr": "failed before result" }),
+        None,
+        None,
+    )
+    .expect("mirror failed job");
+    assert_eq!(run.metadata_json["exit_code"], 1);
+    assert_eq!(run.metadata_json["lab"]["failure"]["exit_code"], 1);
 }
 
 #[test]
 fn synthetic_runner_run_identity_is_stable_across_repeated_progress_mirrors() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let runner = ssh_runner();
-        let job = terminal_runner_job();
-        let command = vec!["homeboy".to_string(), "test".to_string()];
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let runner = ssh_runner();
+    let job = terminal_runner_job();
+    let command = vec!["homeboy".to_string(), "test".to_string()];
 
-        let first = mirror_job_run(
-            &store,
-            &runner,
-            "/runner/project",
-            &command,
-            &job,
-            &[],
-            &json!({}),
-            None,
-            None,
-        )
-        .expect("first progress mirror");
-        let second = mirror_job_run(
-            &store,
-            &runner,
-            "/runner/project",
-            &command,
-            &job,
-            &[],
-            &json!({}),
-            None,
-            None,
-        )
-        .expect("repeated progress mirror");
+    let first = mirror_job_run(
+        &store,
+        &runner,
+        "/runner/project",
+        &command,
+        &job,
+        &[],
+        &json!({}),
+        None,
+        None,
+    )
+    .expect("first progress mirror");
+    let second = mirror_job_run(
+        &store,
+        &runner,
+        "/runner/project",
+        &command,
+        &job,
+        &[],
+        &json!({}),
+        None,
+        None,
+    )
+    .expect("repeated progress mirror");
 
-        assert_eq!(first.id, second.id);
-        assert_eq!(store.list_artifacts(&first.id).expect("artifacts").len(), 0);
-    });
+    assert_eq!(first.id, second.id);
+    assert_eq!(store.list_artifacts(&first.id).expect("artifacts").len(), 0);
 }
 
 #[test]
 fn synthetic_progress_mirror_is_upserted_to_terminal_failure_after_restart() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let runner = ssh_runner();
-        let command = vec!["homeboy".to_string(), "bench".to_string()];
-        let mut progress = terminal_runner_job();
-        progress.status = JobStatus::Running;
-        progress.finished_at_ms = None;
-        let running = mirror_job_run(
-            &store,
-            &runner,
-            "/runner/project",
-            &command,
-            &progress,
-            &[],
-            &json!({}),
-            None,
-            None,
-        )
-        .expect("progress mirror");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let runner = ssh_runner();
+    let command = vec!["homeboy".to_string(), "bench".to_string()];
+    let mut progress = terminal_runner_job();
+    progress.status = JobStatus::Running;
+    progress.finished_at_ms = None;
+    let running = mirror_job_run(
+        &store,
+        &runner,
+        "/runner/project",
+        &command,
+        &progress,
+        &[],
+        &json!({}),
+        None,
+        None,
+    )
+    .expect("progress mirror");
 
-        let mut terminal = progress.clone();
-        terminal.status = JobStatus::Failed;
-        terminal.finished_at_ms = Some(terminal.updated_at_ms);
-        let failed = mirror_job_run(
-            &store,
-            &runner,
-            "/runner/project",
-            &command,
-            &terminal,
-            &[],
-            &json!({ "exit_code": 2, "stderr": "token=secret" }),
-            None,
-            None,
-        )
-        .expect("terminal mirror after restart");
+    let mut terminal = progress.clone();
+    terminal.status = JobStatus::Failed;
+    terminal.finished_at_ms = Some(terminal.updated_at_ms);
+    let failed = mirror_job_run(
+        &store,
+        &runner,
+        "/runner/project",
+        &command,
+        &terminal,
+        &[],
+        &json!({ "exit_code": 2, "stderr": "token=secret" }),
+        None,
+        None,
+    )
+    .expect("terminal mirror after restart");
 
-        assert_eq!(running.id, failed.id);
-        assert_eq!(failed.status, "fail");
-        assert_eq!(failed.metadata_json["lab"]["failure"]["exit_code"], 2);
-        assert_eq!(
-            failed.metadata_json["lab"]["failure"]["stderr_tail"],
-            "token=[REDACTED]"
-        );
-    });
+    assert_eq!(running.id, failed.id);
+    assert_eq!(failed.status, "fail");
+    assert_eq!(failed.metadata_json["lab"]["failure"]["exit_code"], 2);
+    assert_eq!(
+        failed.metadata_json["lab"]["failure"]["stderr_tail"],
+        "token=[REDACTED]"
+    );
 }
 
 #[test]
 fn runner_exec_matrix_summary_run_names_come_from_command_domain() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let job_id = Uuid::new_v4();
-        let job = Job {
-            id: job_id,
-            operation: "exec".to_string(),
-            status: JobStatus::Succeeded,
-            created_at_ms: 1_700_000_000_000,
-            updated_at_ms: 1_700_000_001_000,
-            started_at_ms: Some(1_700_000_000_000),
-            finished_at_ms: Some(1_700_000_001_000),
-            event_count: 0,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            stale_reason: None,
-            daemon_lease_id: None,
-            target_runner_id: None,
-            target_project_id: None,
-            claim_id: None,
-            claimed_by_runner_id: None,
-            claimed_at_ms: None,
-            claim_expires_at_ms: None,
-            artifacts: Vec::new(),
-            runner_job_projection: None,
-        };
-        let command = [
-            "homeboy".to_string(),
-            "trace".to_string(),
-            "matrix".to_string(),
-            "summary".to_string(),
-            "--json".to_string(),
-        ];
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let job_id = Uuid::new_v4();
+    let job = Job {
+        id: job_id,
+        operation: "exec".to_string(),
+        status: JobStatus::Succeeded,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: Some(1_700_000_001_000),
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        daemon_lease_id: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+        runner_job_projection: None,
+    };
+    let command = [
+        "homeboy".to_string(),
+        "trace".to_string(),
+        "matrix".to_string(),
+        "summary".to_string(),
+        "--json".to_string(),
+    ];
 
-        let run = mirror_job_run(
-            &store,
-            &ssh_runner(),
-            "/srv/homeboy/static-site-importer",
-            &command,
-            &job,
-            &[],
-            &json!({"exit_code":0}),
-            None,
-            None,
-        )
-        .expect("mirror job");
+    let run = mirror_job_run(
+        &store,
+        &ssh_runner(),
+        "/srv/homeboy/static-site-importer",
+        &command,
+        &job,
+        &[],
+        &json!({"exit_code":0}),
+        None,
+        None,
+    )
+    .expect("mirror job");
 
-        assert_eq!(runner_exec_run_label(&command), "trace-matrix-summary");
-        assert!(run.id.starts_with("runner-exec-trace-matrix-summary-lab-"));
-        assert!(!run.id.contains("woo-db-api-rest-query-profile"));
-        assert_eq!(
-            run.metadata_json["lab"]["run_label"].as_str(),
-            Some("trace-matrix-summary")
-        );
-    });
+    assert_eq!(runner_exec_run_label(&command), "trace-matrix-summary");
+    assert!(run.id.starts_with("runner-exec-trace-matrix-summary-lab-"));
+    assert!(!run.id.contains("woo-db-api-rest-query-profile"));
+    assert_eq!(
+        run.metadata_json["lab"]["run_label"].as_str(),
+        Some("trace-matrix-summary")
+    );
 }
 
 #[test]
@@ -832,261 +830,261 @@ fn mirrored_remote_events_keep_lifecycle_summary_without_stream_payloads() {
 
 #[test]
 fn runner_exec_explicit_run_id_overrides_inferred_name() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let job_id = Uuid::new_v4();
-        let job = Job {
-            id: job_id,
-            operation: "exec".to_string(),
-            status: JobStatus::Running,
-            created_at_ms: 1_700_000_000_000,
-            updated_at_ms: 1_700_000_001_000,
-            started_at_ms: Some(1_700_000_000_000),
-            finished_at_ms: None,
-            event_count: 0,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            stale_reason: None,
-            daemon_lease_id: None,
-            target_runner_id: None,
-            target_project_id: None,
-            claim_id: None,
-            claimed_by_runner_id: None,
-            claimed_at_ms: None,
-            claim_expires_at_ms: None,
-            artifacts: Vec::new(),
-            runner_job_projection: None,
-        };
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let job_id = Uuid::new_v4();
+    let job = Job {
+        id: job_id,
+        operation: "exec".to_string(),
+        status: JobStatus::Running,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: None,
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        daemon_lease_id: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+        runner_job_projection: None,
+    };
 
-        let run = mirror_job_run(
-            &store,
-            &ssh_runner(),
-            "/srv/homeboy/static-site-importer",
-            &[
-                "homeboy".to_string(),
-                "runs".to_string(),
-                "list".to_string(),
-            ],
-            &job,
-            &[],
-            &json!({}),
-            Some("ssi-fixture-matrix-summary"),
-            None,
-        )
-        .expect("mirror job");
+    let run = mirror_job_run(
+        &store,
+        &ssh_runner(),
+        "/srv/homeboy/static-site-importer",
+        &[
+            "homeboy".to_string(),
+            "runs".to_string(),
+            "list".to_string(),
+        ],
+        &job,
+        &[],
+        &json!({}),
+        Some("ssi-fixture-matrix-summary"),
+        None,
+    )
+    .expect("mirror job");
 
-        assert_eq!(run.id, "ssi-fixture-matrix-summary");
-        assert_eq!(
-            run.metadata_json["lab"]["explicit_run_id"].as_str(),
-            Some("ssi-fixture-matrix-summary")
-        );
-    });
+    assert_eq!(run.id, "ssi-fixture-matrix-summary");
+    assert_eq!(
+        run.metadata_json["lab"]["explicit_run_id"].as_str(),
+        Some("ssi-fixture-matrix-summary")
+    );
 }
 
 #[test]
 fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let command = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-        ];
-        homeboy_agents::agent_task_lifecycle::record_lab_offload_planned(
-            homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
-                run_id: "agent-task-lab-mirror",
-                runner_id: "lab",
-                remote_workspace: "/srv/homeboy/project",
-                remote_command: &command,
-                durable_plan: None,
-            },
-        )
-        .expect("planned controller proxy");
-        let job_id = Uuid::new_v4();
-        let job = Job {
-            id: job_id,
-            operation: "exec".to_string(),
-            status: JobStatus::Running,
-            created_at_ms: 1_700_000_000_000,
-            updated_at_ms: 1_700_000_001_000,
-            started_at_ms: Some(1_700_000_000_000),
-            finished_at_ms: None,
-            event_count: 0,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            stale_reason: None,
-            daemon_lease_id: None,
-            target_runner_id: None,
-            target_project_id: None,
-            claim_id: None,
-            claimed_by_runner_id: None,
-            claimed_at_ms: None,
-            claim_expires_at_ms: None,
-            artifacts: Vec::new(),
-            runner_job_projection: None,
-        };
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let command = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+    ];
+    homeboy_agents::agent_task_lifecycle::record_lab_offload_planned(
+        homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
+            run_id: "agent-task-lab-mirror",
+            runner_id: "lab",
+            remote_workspace: "/srv/homeboy/project",
+            remote_command: &command,
+            durable_plan: None,
+        },
+    )
+    .expect("planned controller proxy");
+    let job_id = Uuid::new_v4();
+    let job = Job {
+        id: job_id,
+        operation: "exec".to_string(),
+        status: JobStatus::Running,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: None,
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        daemon_lease_id: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+        runner_job_projection: None,
+    };
 
-        mirror_job_run(
-            &store,
-            &ssh_runner(),
-            "/srv/homeboy/project",
-            &command,
-            &job,
-            &[],
-            &json!({}),
-            Some("agent-task-lab-mirror"),
-            None,
-        )
-        .expect("mirror Lab job");
-        let terminal_job = Job {
-            status: JobStatus::Succeeded,
-            finished_at_ms: Some(1_700_000_002_000),
-            ..job.clone()
-        };
-        let run = mirror_job_run(
-            &store,
-            &ssh_runner(),
-            "/srv/homeboy/project",
-            &command,
-            &terminal_job,
-            &[],
-            &json!({"exit_code": 0}),
-            Some("agent-task-lab-mirror"),
-            None,
-        )
-        .expect("mirror terminal Lab job");
-        let lifecycle = homeboy_agents::agent_task_lifecycle::status("agent-task-lab-mirror")
-            .expect("typed lifecycle remains readable");
+    mirror_job_run(
+        &store,
+        &ssh_runner(),
+        "/srv/homeboy/project",
+        &command,
+        &job,
+        &[],
+        &json!({}),
+        Some("agent-task-lab-mirror"),
+        None,
+    )
+    .expect("mirror Lab job");
+    let terminal_job = Job {
+        status: JobStatus::Succeeded,
+        finished_at_ms: Some(1_700_000_002_000),
+        ..job.clone()
+    };
+    let run = mirror_job_run(
+        &store,
+        &ssh_runner(),
+        "/srv/homeboy/project",
+        &command,
+        &terminal_job,
+        &[],
+        &json!({"exit_code": 0}),
+        Some("agent-task-lab-mirror"),
+        None,
+    )
+    .expect("mirror terminal Lab job");
+    let lifecycle = homeboy_agents::agent_task_lifecycle::status("agent-task-lab-mirror")
+        .expect("typed lifecycle remains readable");
 
-        assert_eq!(run.kind, "agent-task");
-        assert!(run.metadata_json.get("agent_task_run").is_some());
-        assert_eq!(lifecycle.metadata["runner_id"], "lab");
-        assert_eq!(lifecycle.metadata["runner_job_id"], job_id.to_string());
-        assert_eq!(
-            run.metadata_json["lab"]["remote_job"]["id"],
-            job_id.to_string()
-        );
-    });
+    assert_eq!(run.kind, "agent-task");
+    assert!(run.metadata_json.get("agent_task_run").is_some());
+    assert_eq!(lifecycle.metadata["runner_id"], "lab");
+    assert_eq!(lifecycle.metadata["runner_job_id"], job_id.to_string());
+    assert_eq!(
+        run.metadata_json["lab"]["remote_job"]["id"],
+        job_id.to_string()
+    );
 }
 
 #[test]
 fn test_mirrored_patch_result_reports_accessible_artifact_token() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let runner = ssh_runner();
-        let job_id = Uuid::new_v4();
-        let mut job = Job {
-            id: job_id,
-            operation: "exec".to_string(),
-            status: JobStatus::Succeeded,
-            created_at_ms: 1_700_000_000_000,
-            updated_at_ms: 1_700_000_001_000,
-            started_at_ms: Some(1_700_000_000_000),
-            finished_at_ms: Some(1_700_000_001_000),
-            event_count: 0,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            stale_reason: None,
-            daemon_lease_id: None,
-            target_runner_id: None,
-            target_project_id: None,
-            claim_id: None,
-            claimed_by_runner_id: None,
-            claimed_at_ms: None,
-            claim_expires_at_ms: None,
-            artifacts: Vec::new(),
-            runner_job_projection: None,
-        };
-        let artifact_id = format!("runner-fix-patch-{job_id}");
-        job.artifacts.push(JobArtifactMetadata {
-            id: artifact_id.clone(),
-            name: Some("patch.diff".to_string()),
-            path: None,
-            url: None,
-            mime: Some("text/x-diff".to_string()),
-            size_bytes: Some(12),
-            sha256: None,
-            content_base64: None,
-            metadata: None,
-        });
-        let run = mirror_job_run(
-            &store,
-            &runner,
-            "/srv/project",
-            &[
-                "homeboy".to_string(),
-                "runner".to_string(),
-                "exec".to_string(),
-            ],
-            &job,
-            &[],
-            &json!({}),
-            None,
-            None,
-        )
-        .expect("mirror job");
-        let source = home.path().join("patch.diff");
-        fs::write(&source, b"patch bytes!!").expect("patch bytes");
-        store
-            .record_artifact_with_id(&run.id, "lab_fix_patch", &source, &artifact_id, json!({}))
-            .expect("record controller artifact");
-
-        let patch = json!({
-            "patch_artifact_id": artifact_id,
-            "patch_artifact_path": "/srv/homeboy/.homeboy/artifacts/remote.diff",
-        });
-
-        let mirrored = mirrored_patch_result(&store, &runner, &job, Some(&patch))
-            .expect("mirror patch")
-            .expect("patch");
-
-        assert!(mirrored["patch_artifact_path"]
-            .as_str()
-            .is_some_and(|path| path.ends_with("patch.diff")));
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let runner = ssh_runner();
+    let job_id = Uuid::new_v4();
+    let mut job = Job {
+        id: job_id,
+        operation: "exec".to_string(),
+        status: JobStatus::Succeeded,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: Some(1_700_000_001_000),
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        daemon_lease_id: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+        runner_job_projection: None,
+    };
+    let artifact_id = format!("runner-fix-patch-{job_id}");
+    job.artifacts.push(JobArtifactMetadata {
+        id: artifact_id.clone(),
+        name: Some("patch.diff".to_string()),
+        path: None,
+        url: None,
+        mime: Some("text/x-diff".to_string()),
+        size_bytes: Some(12),
+        sha256: None,
+        content_base64: None,
+        metadata: None,
     });
+    let run = mirror_job_run(
+        &store,
+        &runner,
+        "/srv/project",
+        &[
+            "homeboy".to_string(),
+            "runner".to_string(),
+            "exec".to_string(),
+        ],
+        &job,
+        &[],
+        &json!({}),
+        None,
+        None,
+    )
+    .expect("mirror job");
+    let source = context.root().join("patch.diff");
+    fs::write(&source, b"patch bytes!!").expect("patch bytes");
+    store
+        .record_artifact_with_id(&run.id, "lab_fix_patch", &source, &artifact_id, json!({}))
+        .expect("record controller artifact");
+
+    let patch = json!({
+        "patch_artifact_id": artifact_id,
+        "patch_artifact_path": "/srv/homeboy/.homeboy/artifacts/remote.diff",
+    });
+
+    let mirrored = mirrored_patch_result(&store, &runner, &job, Some(&patch))
+        .expect("mirror patch")
+        .expect("patch");
+
+    assert!(mirrored["patch_artifact_path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("patch.diff")));
 }
 
 #[test]
 fn test_mirrored_patch_result_fails_when_patch_artifact_was_not_mirrored() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let runner = ssh_runner();
-        let job_id = Uuid::new_v4();
-        let job = Job {
-            id: job_id,
-            operation: "exec".to_string(),
-            status: JobStatus::Succeeded,
-            created_at_ms: 1_700_000_000_000,
-            updated_at_ms: 1_700_000_001_000,
-            started_at_ms: Some(1_700_000_000_000),
-            finished_at_ms: Some(1_700_000_001_000),
-            event_count: 0,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            stale_reason: None,
-            daemon_lease_id: None,
-            target_runner_id: None,
-            target_project_id: None,
-            claim_id: None,
-            claimed_by_runner_id: None,
-            claimed_at_ms: None,
-            claim_expires_at_ms: None,
-            artifacts: Vec::new(),
-            runner_job_projection: None,
-        };
-        let artifact_id = format!("runner-fix-patch-{job_id}");
-        let patch = json!({
-            "patch_artifact_id": artifact_id,
-            "patch_artifact_path": "/srv/homeboy/.homeboy/artifacts/remote.diff",
-        });
-
-        let err = mirrored_patch_result(&store, &runner, &job, Some(&patch))
-            .expect_err("missing mirror should fail");
-
-        assert!(err
-            .message
-            .contains("no controller-owned artifact record is available"));
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let runner = ssh_runner();
+    let job_id = Uuid::new_v4();
+    let job = Job {
+        id: job_id,
+        operation: "exec".to_string(),
+        status: JobStatus::Succeeded,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: Some(1_700_000_001_000),
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        daemon_lease_id: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+        runner_job_projection: None,
+    };
+    let artifact_id = format!("runner-fix-patch-{job_id}");
+    let patch = json!({
+        "patch_artifact_id": artifact_id,
+        "patch_artifact_path": "/srv/homeboy/.homeboy/artifacts/remote.diff",
     });
+
+    let err = mirrored_patch_result(&store, &runner, &job, Some(&patch))
+        .expect_err("missing mirror should fail");
+
+    assert!(err
+        .message
+        .contains("no controller-owned artifact record is available"));
 }
 
 #[test]
@@ -1113,79 +1111,79 @@ fn test_remote_file_artifacts_are_indexed_as_runner_tokens() {
 
 #[test]
 fn test_remote_fuzz_artifacts_become_controller_owned_before_runner_cleanup() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = RunRecord {
-            id: "requested-fuzz-run".to_string(),
-            kind: "fuzz".to_string(),
-            component_id: Some("component-a".to_string()),
-            started_at: "2026-05-16T00:00:00Z".to_string(),
-            finished_at: Some("2026-05-16T00:00:01Z".to_string()),
-            status: "pass".to_string(),
-            command: Some("homeboy fuzz run component-a".to_string()),
-            cwd: Some("/srv/component-a".to_string()),
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
-            metadata_json: json!({}),
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let run = RunRecord {
+        id: "requested-fuzz-run".to_string(),
+        kind: "fuzz".to_string(),
+        component_id: Some("component-a".to_string()),
+        started_at: "2026-05-16T00:00:00Z".to_string(),
+        finished_at: Some("2026-05-16T00:00:01Z".to_string()),
+        status: "pass".to_string(),
+        command: Some("homeboy fuzz run component-a".to_string()),
+        cwd: Some("/srv/component-a".to_string()),
+        homeboy_version: None,
+        git_sha: None,
+        rig_id: None,
+        metadata_json: json!({}),
+    };
+    store.import_run(&run).expect("import fuzz run");
+
+    let fixtures = [
+        ("fuzz-results", "fuzz_results", b"results".as_slice()),
+        (
+            "execution-request",
+            "fuzz_execution_request",
+            b"request".as_slice(),
+        ),
+        (
+            "result-envelope",
+            "fuzz_result_envelope",
+            b"envelope".as_slice(),
+        ),
+        ("coverage", "fuzz_coverage", b"coverage".as_slice()),
+    ];
+    let source_root = context.root().join("runner-artifacts");
+    fs::create_dir_all(&source_root).expect("create runner artifact root");
+
+    for (id, kind, bytes) in fixtures {
+        let source = source_root.join(id);
+        fs::write(&source, bytes).expect("write runner artifact");
+        let artifact = ArtifactRecord {
+            id: id.to_string(),
+            run_id: run.id.clone(),
+            kind: kind.to_string(),
+            artifact_type: "remote_file".to_string(),
+            path: runner_artifact_token("lab", "remote-fuzz-run", id),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: Some(format!("{:x}", Sha256::digest(bytes))),
+            size_bytes: Some(i64::try_from(bytes.len()).expect("fixture size")),
+            mime: None,
+            metadata_json: json!({ "runner_id": "lab" }),
+            created_at: "2026-05-16T00:00:01Z".to_string(),
         };
-        store.import_run(&run).expect("import fuzz run");
+        import_mirrored_artifact_with_downloader(&store, &artifact, |_| Ok(source.clone()))
+            .expect("mirror runner artifact bytes");
+    }
 
-        let fixtures = [
-            ("fuzz-results", "fuzz_results", b"results".as_slice()),
-            (
-                "execution-request",
-                "fuzz_execution_request",
-                b"request".as_slice(),
-            ),
-            (
-                "result-envelope",
-                "fuzz_result_envelope",
-                b"envelope".as_slice(),
-            ),
-            ("coverage", "fuzz_coverage", b"coverage".as_slice()),
-        ];
-        let source_root = home.path().join("runner-artifacts");
-        fs::create_dir_all(&source_root).expect("create runner artifact root");
-
-        for (id, kind, bytes) in fixtures {
-            let source = source_root.join(id);
-            fs::write(&source, bytes).expect("write runner artifact");
-            let artifact = ArtifactRecord {
-                id: id.to_string(),
-                run_id: run.id.clone(),
-                kind: kind.to_string(),
-                artifact_type: "remote_file".to_string(),
-                path: runner_artifact_token("lab", "remote-fuzz-run", id),
-                url: None,
-                public_url: None,
-                viewer_url: None,
-                viewer_links: Vec::new(),
-                sha256: Some(format!("{:x}", Sha256::digest(bytes))),
-                size_bytes: Some(i64::try_from(bytes.len()).expect("fixture size")),
-                mime: None,
-                metadata_json: json!({ "runner_id": "lab" }),
-                created_at: "2026-05-16T00:00:01Z".to_string(),
-            };
-            import_mirrored_artifact_with_downloader(&store, &artifact, |_| Ok(source.clone()))
-                .expect("mirror runner artifact bytes");
-        }
-
-        fs::remove_dir_all(&source_root).expect("simulate runner cleanup");
-        for (id, _, bytes) in fixtures {
-            let artifact = store
-                .get_artifact(id)
-                .expect("artifact lookup")
-                .expect("controller-owned artifact");
-            assert_eq!(artifact.artifact_type, "file");
-            assert_eq!(fs::read(&artifact.path).expect("durable bytes"), bytes);
-            assert_eq!(artifact.size_bytes, Some(bytes.len() as i64));
-            assert_eq!(
-                artifact.sha256.as_deref(),
-                Some(format!("{:x}", Sha256::digest(bytes)).as_str())
-            );
-        }
-    });
+    fs::remove_dir_all(&source_root).expect("simulate runner cleanup");
+    for (id, _, bytes) in fixtures {
+        let artifact = store
+            .get_artifact(id)
+            .expect("artifact lookup")
+            .expect("controller-owned artifact");
+        assert_eq!(artifact.artifact_type, "file");
+        assert_eq!(fs::read(&artifact.path).expect("durable bytes"), bytes);
+        assert_eq!(artifact.size_bytes, Some(bytes.len() as i64));
+        assert_eq!(
+            artifact.sha256.as_deref(),
+            Some(format!("{:x}", Sha256::digest(bytes)).as_str())
+        );
+    }
 }
 
 #[test]
@@ -1421,77 +1419,81 @@ fn terminal_mirroring_imports_only_the_submitted_overlapping_job_run_and_artifac
         (&first, "first-run", "second-run", "first-result"),
         (&second, "second-run", "first-run", "second-result"),
     ] {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let store = ObservationStore::open_initialized().expect("store");
-            let runner = ssh_runner();
-            let details = std::collections::HashMap::from([
-                (
-                    "first-run",
-                    json!({
-                        "id": "first-run",
-                        "kind": "fuzz",
-                        "started_at": "2023-11-14T22:13:20Z",
-                        "finished_at": "2023-11-14T22:13:21Z",
-                        "status": "pass",
-                        "artifacts": [{"id": "first-result", "kind": "fuzz_results", "type": "file", "size_bytes": 1, "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}]
-                    }),
-                ),
-                (
-                    "second-run",
-                    json!({
-                        "id": "second-run",
-                        "kind": "fuzz",
-                        "started_at": "2023-11-14T22:13:20Z",
-                        "finished_at": "2023-11-14T22:13:21Z",
-                        "status": "fail",
-                        "artifacts": [{"id": "second-result", "kind": "fuzz_results", "type": "file", "size_bytes": 1, "sha256": "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"}]
-                    }),
-                ),
-            ]);
+        // A fresh context per iteration, so the second job cannot see the
+        // first job's mirrored rows — the same per-iteration isolation the
+        // per-iteration `with_isolated_home` gave, without touching the
+        // process environment (#7505).
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+        let runner = ssh_runner();
+        let details = std::collections::HashMap::from([
+            (
+                "first-run",
+                json!({
+                    "id": "first-run",
+                    "kind": "fuzz",
+                    "started_at": "2023-11-14T22:13:20Z",
+                    "finished_at": "2023-11-14T22:13:21Z",
+                    "status": "pass",
+                    "artifacts": [{"id": "first-result", "kind": "fuzz_results", "type": "file", "size_bytes": 1, "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}]
+                }),
+            ),
+            (
+                "second-run",
+                json!({
+                    "id": "second-run",
+                    "kind": "fuzz",
+                    "started_at": "2023-11-14T22:13:20Z",
+                    "finished_at": "2023-11-14T22:13:21Z",
+                    "status": "fail",
+                    "artifacts": [{"id": "second-result", "kind": "fuzz_results", "type": "file", "size_bytes": 1, "sha256": "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"}]
+                }),
+            ),
+        ]);
 
-            let run_ids = explicit_observation_run_ids(&json!({}), job);
-            let downloaded = tempfile::tempdir().expect("download directory");
-            let mirrored = mirror_remote_observation_runs_by_id_with_downloader(
-                &store,
-                &runner,
-                job,
-                &run_ids,
-                None,
-                |run_id| Ok(details.get(run_id).cloned()),
-                |artifact_path| {
-                    let path = downloaded
-                        .path()
-                        .join(artifact_path.rsplit('/').next().expect("artifact id"));
-                    let bytes = if artifact_path.ends_with("first-result") {
-                        b"a".as_slice()
-                    } else {
-                        b"b".as_slice()
-                    };
-                    fs::write(&path, bytes).expect("artifact bytes");
-                    Ok(path)
-                },
-            )
-            .expect("mirror submitted terminal run");
+        let run_ids = explicit_observation_run_ids(&json!({}), job);
+        let downloaded = tempfile::tempdir().expect("download directory");
+        let mirrored = mirror_remote_observation_runs_by_id_with_downloader(
+            &store,
+            &runner,
+            job,
+            &run_ids,
+            None,
+            |run_id| Ok(details.get(run_id).cloned()),
+            |artifact_path| {
+                let path = downloaded
+                    .path()
+                    .join(artifact_path.rsplit('/').next().expect("artifact id"));
+                let bytes = if artifact_path.ends_with("first-result") {
+                    b"a".as_slice()
+                } else {
+                    b"b".as_slice()
+                };
+                fs::write(&path, bytes).expect("artifact bytes");
+                Ok(path)
+            },
+        )
+        .expect("mirror submitted terminal run");
 
-            assert_eq!(mirrored.len(), 1);
-            assert_eq!(mirrored[0].id, expected_run);
-            assert_eq!(
-                mirrored[0].metadata_json["lab"]["remote_job_id"],
-                job.id.to_string()
-            );
-            assert!(store
-                .get_run(other_run)
-                .expect("other run lookup")
-                .is_none());
-            assert_eq!(
-                store
-                    .get_artifact(artifact_id)
-                    .expect("artifact lookup")
-                    .expect("mirrored artifact")
-                    .run_id,
-                expected_run
-            );
-        });
+        assert_eq!(mirrored.len(), 1);
+        assert_eq!(mirrored[0].id, expected_run);
+        assert_eq!(
+            mirrored[0].metadata_json["lab"]["remote_job_id"],
+            job.id.to_string()
+        );
+        assert!(store
+            .get_run(other_run)
+            .expect("other run lookup")
+            .is_none());
+        assert_eq!(
+            store
+                .get_artifact(artifact_id)
+                .expect("artifact lookup")
+                .expect("mirrored artifact")
+                .run_id,
+            expected_run
+        );
     }
 }
 
@@ -1533,229 +1535,227 @@ fn terminal_mirroring_withholds_output_when_declared_run_projection_is_missing()
 
 #[test]
 fn terminal_mirroring_persists_declared_run_and_artifact_for_controller_review() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("controller store");
-        let run_id = "bench-controller-review".to_string();
-        let bytes = b"reviewable visual evidence";
-        let digest = format!("{:x}", Sha256::digest(bytes));
-        let download_dir = tempfile::tempdir().expect("download directory");
-        let download_path = download_dir.path().join("diff.png");
-        let job = terminal_runner_job();
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("controller store");
+    let run_id = "bench-controller-review".to_string();
+    let bytes = b"reviewable visual evidence";
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    let download_dir = tempfile::tempdir().expect("download directory");
+    let download_path = download_dir.path().join("diff.png");
+    let job = terminal_runner_job();
 
-        let mirrored = mirror_remote_observation_runs_by_id_with_downloader(
-            &store,
-            &ssh_runner(),
-            &job,
-            std::slice::from_ref(&run_id),
-            None,
-            |requested| {
-                assert_eq!(requested, run_id);
-                Ok(Some(json!({
-                    "id": run_id,
-                    "kind": "bench",
-                    "started_at": "2023-11-14T22:13:20Z",
-                    "finished_at": "2023-11-14T22:13:21Z",
-                    "status": "fail",
-                    "artifacts": [{
-                        "id": "visual-diff",
-                        "kind": "visual_compare",
-                        "type": "file",
-                        "size_bytes": bytes.len(),
-                        "sha256": digest,
-                        "mime": "image/png"
-                    }]
-                })))
-            },
-            |_| {
-                fs::write(&download_path, bytes).expect("write downloaded artifact");
-                Ok(download_path.clone())
-            },
-        )
-        .expect("terminal runner evidence projects to the controller");
+    let mirrored = mirror_remote_observation_runs_by_id_with_downloader(
+        &store,
+        &ssh_runner(),
+        &job,
+        std::slice::from_ref(&run_id),
+        None,
+        |requested| {
+            assert_eq!(requested, run_id);
+            Ok(Some(json!({
+                "id": run_id,
+                "kind": "bench",
+                "started_at": "2023-11-14T22:13:20Z",
+                "finished_at": "2023-11-14T22:13:21Z",
+                "status": "fail",
+                "artifacts": [{
+                    "id": "visual-diff",
+                    "kind": "visual_compare",
+                    "type": "file",
+                    "size_bytes": bytes.len(),
+                    "sha256": digest,
+                    "mime": "image/png"
+                }]
+            })))
+        },
+        |_| {
+            fs::write(&download_path, bytes).expect("write downloaded artifact");
+            Ok(download_path.clone())
+        },
+    )
+    .expect("terminal runner evidence projects to the controller");
 
-        assert_eq!(mirrored[0].id, run_id);
-        assert_eq!(
-            store
-                .get_run(&run_id)
-                .expect("controller run lookup")
-                .expect("controller run"),
-            mirrored[0]
-        );
-        let artifact = store
-            .get_artifact("visual-diff")
-            .expect("controller artifact lookup")
-            .expect("controller artifact");
-        assert_eq!(artifact.run_id, run_id);
-        assert_eq!(artifact.artifact_type, "file");
-        assert_eq!(
-            fs::read(&artifact.path).expect("reviewer reads artifact"),
-            bytes
-        );
-    });
+    assert_eq!(mirrored[0].id, run_id);
+    assert_eq!(
+        store
+            .get_run(&run_id)
+            .expect("controller run lookup")
+            .expect("controller run"),
+        mirrored[0]
+    );
+    let artifact = store
+        .get_artifact("visual-diff")
+        .expect("controller artifact lookup")
+        .expect("controller artifact");
+    assert_eq!(artifact.run_id, run_id);
+    assert_eq!(artifact.artifact_type, "file");
+    assert_eq!(
+        fs::read(&artifact.path).expect("reviewer reads artifact"),
+        bytes
+    );
 }
 
 #[test]
 fn terminal_mirroring_keeps_every_declared_visual_artifact_after_runner_cleanup() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("controller store");
-        let run_id = "bench-visual-review".to_string();
-        let workspace = tempfile::tempdir().expect("runner workspace");
-        let artifacts = (0..21)
-            .map(|index| {
-                let id = format!("visual-{index:02}");
-                let bytes = format!("png-{index}").into_bytes();
-                let path = workspace.path().join(format!("{id}.png"));
-                fs::write(&path, &bytes).expect("runner artifact");
-                json!({
-                    "id": id,
-                    "kind": "visual_compare",
-                    "type": "file",
-                    "size_bytes": bytes.len(),
-                    "sha256": format!("{:x}", Sha256::digest(&bytes)),
-                    "mime": "image/png"
-                })
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("controller store");
+    let run_id = "bench-visual-review".to_string();
+    let workspace = tempfile::tempdir().expect("runner workspace");
+    let artifacts = (0..21)
+        .map(|index| {
+            let id = format!("visual-{index:02}");
+            let bytes = format!("png-{index}").into_bytes();
+            let path = workspace.path().join(format!("{id}.png"));
+            fs::write(&path, &bytes).expect("runner artifact");
+            json!({
+                "id": id,
+                "kind": "visual_compare",
+                "type": "file",
+                "size_bytes": bytes.len(),
+                "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                "mime": "image/png"
             })
-            .collect::<Vec<_>>();
-        let job = terminal_runner_job();
+        })
+        .collect::<Vec<_>>();
+    let job = terminal_runner_job();
 
-        mirror_remote_observation_runs_by_id_with_downloader(
-            &store,
-            &ssh_runner(),
-            &job,
-            std::slice::from_ref(&run_id),
-            None,
-            |_| {
-                Ok(Some(json!({
-                    "id": run_id,
-                    "kind": "bench",
-                    "started_at": "2023-11-14T22:13:20Z",
-                    "finished_at": "2023-11-14T22:13:21Z",
-                    "status": "pass",
-                    "artifacts": artifacts,
-                })))
-            },
-            |artifact_path| {
-                let id = artifact_path.rsplit('/').next().expect("artifact id");
-                Ok(workspace.path().join(format!("{id}.png")))
-            },
-        )
-        .expect("all declared visual artifacts are durably mirrored");
+    mirror_remote_observation_runs_by_id_with_downloader(
+        &store,
+        &ssh_runner(),
+        &job,
+        std::slice::from_ref(&run_id),
+        None,
+        |_| {
+            Ok(Some(json!({
+                "id": run_id,
+                "kind": "bench",
+                "started_at": "2023-11-14T22:13:20Z",
+                "finished_at": "2023-11-14T22:13:21Z",
+                "status": "pass",
+                "artifacts": artifacts,
+            })))
+        },
+        |artifact_path| {
+            let id = artifact_path.rsplit('/').next().expect("artifact id");
+            Ok(workspace.path().join(format!("{id}.png")))
+        },
+    )
+    .expect("all declared visual artifacts are durably mirrored");
 
-        workspace.close().expect("runner workspace cleanup");
-        drop(store);
+    workspace.close().expect("runner workspace cleanup");
+    drop(store);
 
-        // A reviewer opens the controller store after the runner is gone and
-        // retrieves bytes by the stable run/artifact reference alone.
-        let reader = ObservationStore::open_initialized().expect("reviewer store");
-        let persisted = reader.list_artifacts(&run_id).expect("persisted artifacts");
-        assert_eq!(persisted.len(), 21);
-        for artifact in persisted {
-            assert_eq!(artifact.artifact_type, "file");
-            assert!(artifact.sha256.is_some());
-            assert!(!fs::read(&artifact.path)
-                .expect("controller artifact")
-                .is_empty());
-        }
-        let artifact = runs_service::resolve_artifact_for_run(&reader, &run_id, "visual-00")
-            .expect("reviewer resolves durable artifact");
-        let reviewer_copy = tempfile::NamedTempFile::new().expect("reviewer output");
-        let outcome = runs_service::copy_local_file_artifact(
-            artifact,
-            Some(reviewer_copy.path().to_path_buf()),
-        )
-        .expect("reviewer retrieves durable artifact");
-        assert_eq!(outcome.run_id, run_id);
-        assert_eq!(outcome.artifact_id, "visual-00");
-        assert_eq!(
-            fs::read(reviewer_copy.path()).expect("reviewer bytes"),
-            b"png-0"
-        );
-    });
+    // A reviewer opens the controller store after the runner is gone and
+    // retrieves bytes by the stable run/artifact reference alone.
+    let reader = ObservationStore::open_initialized_in_roots(&roots).expect("reviewer store");
+    let persisted = reader.list_artifacts(&run_id).expect("persisted artifacts");
+    assert_eq!(persisted.len(), 21);
+    for artifact in persisted {
+        assert_eq!(artifact.artifact_type, "file");
+        assert!(artifact.sha256.is_some());
+        assert!(!fs::read(&artifact.path)
+            .expect("controller artifact")
+            .is_empty());
+    }
+    let artifact = runs_service::resolve_artifact_for_run(&reader, &run_id, "visual-00")
+        .expect("reviewer resolves durable artifact");
+    let reviewer_copy = tempfile::NamedTempFile::new().expect("reviewer output");
+    let outcome =
+        runs_service::copy_local_file_artifact(artifact, Some(reviewer_copy.path().to_path_buf()))
+            .expect("reviewer retrieves durable artifact");
+    assert_eq!(outcome.run_id, run_id);
+    assert_eq!(outcome.artifact_id, "visual-00");
+    assert_eq!(
+        fs::read(reviewer_copy.path()).expect("reviewer bytes"),
+        b"png-0"
+    );
 }
 
 #[test]
 fn terminal_mirroring_copies_declared_directory_with_tree_hash() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("controller store");
-        let run_id = "bench-directory-review".to_string();
-        let workspace = tempfile::tempdir().expect("runner workspace");
-        let directory = workspace.path().join("visuals");
-        fs::create_dir_all(directory.join("nested")).expect("directory");
-        fs::write(directory.join("baseline.png"), b"baseline").expect("baseline");
-        fs::write(directory.join("nested/diff.png"), b"diff").expect("diff");
-        let tree_sha256 =
-            homeboy_core::observation::directory_tree_sha256(&directory).expect("tree hash");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("controller store");
+    let run_id = "bench-directory-review".to_string();
+    let workspace = tempfile::tempdir().expect("runner workspace");
+    let directory = workspace.path().join("visuals");
+    fs::create_dir_all(directory.join("nested")).expect("directory");
+    fs::write(directory.join("baseline.png"), b"baseline").expect("baseline");
+    fs::write(directory.join("nested/diff.png"), b"diff").expect("diff");
+    let tree_sha256 =
+        homeboy_core::observation::directory_tree_sha256(&directory).expect("tree hash");
 
-        mirror_remote_observation_runs_by_id_with_downloader(
-            &store,
-            &ssh_runner(),
-            &terminal_runner_job(),
-            std::slice::from_ref(&run_id),
-            None,
-            |_| {
-                Ok(Some(json!({
-                    "id": run_id,
-                    "kind": "bench",
-                    "started_at": "2023-11-14T22:13:20Z",
-                    "finished_at": "2023-11-14T22:13:21Z",
-                    "status": "pass",
-                    "artifacts": [{
-                        "id": "visual-directory",
-                        "kind": "visual_compare",
-                        "type": "directory",
-                        "path": "runner-artifact://lab/bench-directory-review/visual-directory",
-                        "sha256": tree_sha256.clone()
-                    }]
-                })))
-            },
-            |_| Ok(directory.clone()),
-        )
-        .expect("directory is durably mirrored");
+    mirror_remote_observation_runs_by_id_with_downloader(
+        &store,
+        &ssh_runner(),
+        &terminal_runner_job(),
+        std::slice::from_ref(&run_id),
+        None,
+        |_| {
+            Ok(Some(json!({
+                "id": run_id,
+                "kind": "bench",
+                "started_at": "2023-11-14T22:13:20Z",
+                "finished_at": "2023-11-14T22:13:21Z",
+                "status": "pass",
+                "artifacts": [{
+                    "id": "visual-directory",
+                    "kind": "visual_compare",
+                    "type": "directory",
+                    "path": "runner-artifact://lab/bench-directory-review/visual-directory",
+                    "sha256": tree_sha256.clone()
+                }]
+            })))
+        },
+        |_| Ok(directory.clone()),
+    )
+    .expect("directory is durably mirrored");
 
-        workspace.close().expect("runner workspace cleanup");
-        let artifact = store
-            .get_artifact("visual-directory")
-            .expect("artifact lookup")
-            .expect("artifact");
-        assert_eq!(artifact.artifact_type, "directory");
-        assert_eq!(artifact.sha256.as_deref(), Some(tree_sha256.as_str()));
-        assert!(std::path::Path::new(&artifact.path).is_dir());
-    });
+    workspace.close().expect("runner workspace cleanup");
+    let artifact = store
+        .get_artifact("visual-directory")
+        .expect("artifact lookup")
+        .expect("artifact");
+    assert_eq!(artifact.artifact_type, "directory");
+    assert_eq!(artifact.sha256.as_deref(), Some(tree_sha256.as_str()));
+    assert!(std::path::Path::new(&artifact.path).is_dir());
 }
 
 #[test]
 fn terminal_mirroring_rejects_url_only_declared_artifacts() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("controller store");
-        let run_id = "bench-expired-tunnel".to_string();
-        let error = mirror_remote_observation_runs_by_id_with_downloader(
-            &store,
-            &ssh_runner(),
-            &terminal_runner_job(),
-            std::slice::from_ref(&run_id),
-            None,
-            |_| {
-                Ok(Some(json!({
-                    "id": run_id,
-                    "kind": "bench",
-                    "started_at": "2023-11-14T22:13:20Z",
-                    "finished_at": "2023-11-14T22:13:21Z",
-                    "status": "pass",
-                    "artifacts": [{
-                        "id": "expired-tunnel",
-                        "kind": "visual_compare",
-                        "type": "url",
-                        "url": "https://expired.example/visual.png"
-                    }]
-                })))
-            },
-            |_| unreachable!("URL artifacts must not be downloaded as terminal evidence"),
-        )
-        .expect_err("URL-only artifact must fail terminal projection");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("controller store");
+    let run_id = "bench-expired-tunnel".to_string();
+    let error = mirror_remote_observation_runs_by_id_with_downloader(
+        &store,
+        &ssh_runner(),
+        &terminal_runner_job(),
+        std::slice::from_ref(&run_id),
+        None,
+        |_| {
+            Ok(Some(json!({
+                "id": run_id,
+                "kind": "bench",
+                "started_at": "2023-11-14T22:13:20Z",
+                "finished_at": "2023-11-14T22:13:21Z",
+                "status": "pass",
+                "artifacts": [{
+                    "id": "expired-tunnel",
+                    "kind": "visual_compare",
+                    "type": "url",
+                    "url": "https://expired.example/visual.png"
+                }]
+            })))
+        },
+        |_| unreachable!("URL artifacts must not be downloaded as terminal evidence"),
+    )
+    .expect_err("URL-only artifact must fail terminal projection");
 
-        assert!(error.message.contains("durably project all artifacts"));
-        assert!(store.get_run(&run_id).expect("run lookup").is_none());
-    });
+    assert!(error.message.contains("durably project all artifacts"));
+    assert!(store.get_run(&run_id).expect("run lookup").is_none());
 }
 
 #[test]
@@ -2100,211 +2100,174 @@ fn legacy_terminal_artifacts_use_the_controller_runner_run_and_survive_runner_di
 
 #[test]
 fn terminal_artifacts_missing_integrity_are_permanent_provenance_errors() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let mut job = terminal_runner_job();
-        job.artifacts = vec![JobArtifactMetadata {
-            id: "missing-digest".to_string(),
-            name: None,
-            path: None,
-            url: None,
-            mime: None,
-            size_bytes: Some(1),
-            sha256: None,
-            content_base64: None,
-            metadata: None,
-        }];
-        let run = mirror_job_run(
-            &store,
-            &ssh_runner(),
-            "/runner",
-            &[],
-            &job,
-            &[],
-            &json!({}),
-            None,
-            None,
-        )
-        .expect("synthetic run");
-        let error =
-            mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |_| Ok(vec![1]))
-                .expect_err("missing provenance is not retryable");
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert!(!error.retryable.unwrap_or(true));
-        assert!(store.list_artifacts(&run.id).expect("artifacts").is_empty());
-    });
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let mut job = terminal_runner_job();
+    job.artifacts = vec![JobArtifactMetadata {
+        id: "missing-digest".to_string(),
+        name: None,
+        path: None,
+        url: None,
+        mime: None,
+        size_bytes: Some(1),
+        sha256: None,
+        content_base64: None,
+        metadata: None,
+    }];
+    let run = mirror_job_run(
+        &store,
+        &ssh_runner(),
+        "/runner",
+        &[],
+        &job,
+        &[],
+        &json!({}),
+        None,
+        None,
+    )
+    .expect("synthetic run");
+    let error =
+        mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |_| Ok(vec![1]))
+            .expect_err("missing provenance is not retryable");
+    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+    assert!(!error.retryable.unwrap_or(true));
+    assert!(store.list_artifacts(&run.id).expect("artifacts").is_empty());
 }
 
 #[test]
 fn terminal_artifact_missing_mime_is_a_permanent_provenance_error() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let mut job = terminal_runner_job();
-        let bytes = b"typed terminal artifact";
-        job.artifacts = vec![JobArtifactMetadata {
-            id: "missing-mime".to_string(),
-            name: Some("artifact.unknown".to_string()),
-            path: Some("/runner/artifact.unknown".to_string()),
-            url: None,
-            mime: None,
-            size_bytes: Some(bytes.len() as u64),
-            sha256: Some(format!("{:x}", Sha256::digest(bytes))),
-            content_base64: None,
-            metadata: None,
-        }];
-        let run = mirror_job_run(
-            &store,
-            &ssh_runner(),
-            "/runner",
-            &[],
-            &job,
-            &[],
-            &json!({}),
-            None,
-            None,
-        )
-        .expect("synthetic run");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let mut job = terminal_runner_job();
+    let bytes = b"typed terminal artifact";
+    job.artifacts = vec![JobArtifactMetadata {
+        id: "missing-mime".to_string(),
+        name: Some("artifact.unknown".to_string()),
+        path: Some("/runner/artifact.unknown".to_string()),
+        url: None,
+        mime: None,
+        size_bytes: Some(bytes.len() as u64),
+        sha256: Some(format!("{:x}", Sha256::digest(bytes))),
+        content_base64: None,
+        metadata: None,
+    }];
+    let run = mirror_job_run(
+        &store,
+        &ssh_runner(),
+        "/runner",
+        &[],
+        &job,
+        &[],
+        &json!({}),
+        None,
+        None,
+    )
+    .expect("synthetic run");
 
-        let error = mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |_| {
-            Ok(bytes.to_vec())
-        })
-        .expect_err("missing media type is rejected");
+    let error = mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |_| {
+        Ok(bytes.to_vec())
+    })
+    .expect_err("missing media type is rejected");
 
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(
-            error.details["source_error"]["details"]["field"],
-            "artifact.mime"
-        );
-        assert!(!error.retryable.unwrap_or(true));
-        assert!(store.list_artifacts(&run.id).expect("artifacts").is_empty());
-    });
+    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+    assert_eq!(
+        error.details["source_error"]["details"]["field"],
+        "artifact.mime"
+    );
+    assert!(!error.retryable.unwrap_or(true));
+    assert!(store.list_artifacts(&run.id).expect("artifacts").is_empty());
 }
 
 #[test]
 fn terminal_artifact_download_failure_rolls_back_every_artifact_and_retry_is_idempotent() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let mut job = terminal_runner_job();
-        let first = b"first terminal artifact";
-        let second = b"second terminal artifact";
-        job.artifacts = [("first", first.as_slice()), ("second", second.as_slice())]
-            .into_iter()
-            .map(|(id, bytes)| JobArtifactMetadata {
-                id: id.to_string(),
-                name: None,
-                path: None,
-                url: None,
-                mime: Some("application/octet-stream".to_string()),
-                size_bytes: Some(bytes.len() as u64),
-                sha256: Some(format!("{:x}", Sha256::digest(bytes))),
-                content_base64: None,
-                metadata: None,
-            })
-            .collect();
-        let run = mirror_job_run(
-            &store,
-            &ssh_runner(),
-            "/runner",
-            &[],
-            &job,
-            &[],
-            &json!({}),
-            None,
-            None,
-        )
-        .expect("synthetic run");
-        let error = mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |id| {
-            if id == "second" {
-                Err(Error::internal_io("runner disconnected", None))
-            } else {
-                Ok(first.to_vec())
-            }
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let mut job = terminal_runner_job();
+    let first = b"first terminal artifact";
+    let second = b"second terminal artifact";
+    job.artifacts = [("first", first.as_slice()), ("second", second.as_slice())]
+        .into_iter()
+        .map(|(id, bytes)| JobArtifactMetadata {
+            id: id.to_string(),
+            name: None,
+            path: None,
+            url: None,
+            mime: Some("application/octet-stream".to_string()),
+            size_bytes: Some(bytes.len() as u64),
+            sha256: Some(format!("{:x}", Sha256::digest(bytes))),
+            content_base64: None,
+            metadata: None,
         })
-        .expect_err("later artifact download fails the complete projection");
-        assert!(error.retryable.unwrap_or(false));
-        assert!(store.list_artifacts(&run.id).expect("artifacts").is_empty());
+        .collect();
+    let run = mirror_job_run(
+        &store,
+        &ssh_runner(),
+        "/runner",
+        &[],
+        &job,
+        &[],
+        &json!({}),
+        None,
+        None,
+    )
+    .expect("synthetic run");
+    let error = mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |id| {
+        if id == "second" {
+            Err(Error::internal_io("runner disconnected", None))
+        } else {
+            Ok(first.to_vec())
+        }
+    })
+    .expect_err("later artifact download fails the complete projection");
+    assert!(error.retryable.unwrap_or(false));
+    assert!(store.list_artifacts(&run.id).expect("artifacts").is_empty());
 
-        let first_projection =
-            mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |id| {
-                Ok(if id == "first" {
-                    first.to_vec()
-                } else {
-                    second.to_vec()
-                })
-            })
-            .expect("retry projects complete artifact set");
-        let replay = mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |id| {
+    let first_projection =
+        mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |id| {
             Ok(if id == "first" {
                 first.to_vec()
             } else {
                 second.to_vec()
             })
         })
-        .expect("identical retry is idempotent");
-        assert_eq!(first_projection, replay);
-        assert_eq!(store.list_artifacts(&run.id).expect("artifacts").len(), 2);
-    });
+        .expect("retry projects complete artifact set");
+    let replay = mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |id| {
+        Ok(if id == "first" {
+            first.to_vec()
+        } else {
+            second.to_vec()
+        })
+    })
+    .expect("identical retry is idempotent");
+    assert_eq!(first_projection, replay);
+    assert_eq!(store.list_artifacts(&run.id).expect("artifacts").len(), 2);
 }
 
 #[test]
 fn failed_refresh_discards_its_synthetic_run_after_artifact_projection_error() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let mut job = terminal_runner_job();
-        job.artifacts = vec![JobArtifactMetadata {
-            id: "malformed".to_string(),
-            name: None,
-            path: None,
-            url: None,
-            mime: None,
-            size_bytes: Some(1),
-            sha256: None,
-            content_base64: None,
-            metadata: None,
-        }];
-        let command = vec!["homeboy".to_string(), "test".to_string()];
-        let synthetic_id = super::util::local_job_run_id("lab", &job.id.to_string(), "test");
-        refresh_mirrored_daemon_evidence_with(
-            &store,
-            MirrorEvidenceRequest::new(
-                &ssh_runner(),
-                "/runner",
-                &command,
-                &job,
-                &[],
-                &json!({}),
-                None,
-                None,
-            ),
-            || Ok(()),
-        )
-        .expect_err("malformed terminal artifact fails refresh");
-        assert!(store
-            .get_run(&synthetic_id)
-            .expect("synthetic lookup")
-            .is_none());
-    });
-}
-
-#[test]
-fn failed_refresh_preserves_a_concurrent_synthetic_winner() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let mut job = terminal_runner_job();
-        job.artifacts = vec![JobArtifactMetadata {
-            id: "malformed".to_string(),
-            name: None,
-            path: None,
-            url: None,
-            mime: None,
-            size_bytes: Some(1),
-            sha256: None,
-            content_base64: None,
-            metadata: None,
-        }];
-        let command = vec!["homeboy".to_string(), "test".to_string()];
-        let winner = mirror_job_run(
-            &store,
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let mut job = terminal_runner_job();
+    job.artifacts = vec![JobArtifactMetadata {
+        id: "malformed".to_string(),
+        name: None,
+        path: None,
+        url: None,
+        mime: None,
+        size_bytes: Some(1),
+        sha256: None,
+        content_base64: None,
+        metadata: None,
+    }];
+    let command = vec!["homeboy".to_string(), "test".to_string()];
+    let synthetic_id = super::util::local_job_run_id("lab", &job.id.to_string(), "test");
+    refresh_mirrored_daemon_evidence_with(
+        &store,
+        MirrorEvidenceRequest::new(
             &ssh_runner(),
             "/runner",
             &command,
@@ -2313,25 +2276,62 @@ fn failed_refresh_preserves_a_concurrent_synthetic_winner() {
             &json!({}),
             None,
             None,
-        )
-        .expect("concurrent winner");
-        refresh_mirrored_daemon_evidence_with(
-            &store,
-            MirrorEvidenceRequest::new(
-                &ssh_runner(),
-                "/runner",
-                &command,
-                &job,
-                &[],
-                &json!({}),
-                None,
-                None,
-            ),
-            || Ok(()),
-        )
-        .expect_err("malformed terminal artifact fails refresh");
-        assert!(store.get_run(&winner.id).expect("winner lookup").is_some());
-    });
+        ),
+        || Ok(()),
+    )
+    .expect_err("malformed terminal artifact fails refresh");
+    assert!(store
+        .get_run(&synthetic_id)
+        .expect("synthetic lookup")
+        .is_none());
+}
+
+#[test]
+fn failed_refresh_preserves_a_concurrent_synthetic_winner() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let mut job = terminal_runner_job();
+    job.artifacts = vec![JobArtifactMetadata {
+        id: "malformed".to_string(),
+        name: None,
+        path: None,
+        url: None,
+        mime: None,
+        size_bytes: Some(1),
+        sha256: None,
+        content_base64: None,
+        metadata: None,
+    }];
+    let command = vec!["homeboy".to_string(), "test".to_string()];
+    let winner = mirror_job_run(
+        &store,
+        &ssh_runner(),
+        "/runner",
+        &command,
+        &job,
+        &[],
+        &json!({}),
+        None,
+        None,
+    )
+    .expect("concurrent winner");
+    refresh_mirrored_daemon_evidence_with(
+        &store,
+        MirrorEvidenceRequest::new(
+            &ssh_runner(),
+            "/runner",
+            &command,
+            &job,
+            &[],
+            &json!({}),
+            None,
+            None,
+        ),
+        || Ok(()),
+    )
+    .expect_err("malformed terminal artifact fails refresh");
+    assert!(store.get_run(&winner.id).expect("winner lookup").is_some());
 }
 
 #[test]
