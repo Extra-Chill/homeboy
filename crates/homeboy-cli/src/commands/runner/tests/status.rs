@@ -17,7 +17,8 @@ use super::super::jobs::format_job_event;
 use super::super::status::{
     declared_executable_requirement_diagnostics, declared_run_followups,
     declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
-    lab_runner_homeboy_output, operator_summary, reconcile_output, reconciliation_outcome,
+    execution_capabilities_with_local_placement, lab_runner_homeboy_output, non_local_sessions,
+    operator_summary, reconcile_output, reconciliation_outcome,
     runner_artifact_feature_diagnostics, runner_followups, runner_followups_with_admission,
     runner_status_operator_commands, selected_admission_summary,
 };
@@ -1328,6 +1329,66 @@ fn runner_status_actions_preserve_runner_ids_for_every_admission_state() {
                 .is_empty());
         }
     }
+}
+
+#[test]
+fn execution_capabilities_separate_local_placement_from_lab_connections() {
+    let connected = connected_report();
+    let disconnected = disconnected_report();
+    let cases = [
+        ("local_only", Vec::new(), true, None),
+        (
+            "lab_only",
+            vec![connected.clone()],
+            false,
+            Some(vec!["homeboy lab"]),
+        ),
+        (
+            "both_ready",
+            vec![connected],
+            true,
+            Some(vec!["homeboy lab"]),
+        ),
+        ("neither_ready", vec![disconnected], false, None),
+    ];
+
+    for (name, reports, local_available, connected_ids) in cases {
+        let capabilities = execution_capabilities_with_local_placement(local_available, &reports);
+        let lab_connection_available = connected_ids.is_some();
+        assert_eq!(
+            capabilities.local_placement.available, local_available,
+            "{name}"
+        );
+        assert_eq!(
+            capabilities.lab_runner_connection.connected_runner_ids,
+            connected_ids.unwrap_or_default(),
+            "{name}"
+        );
+        assert_eq!(
+            capabilities.lab_runner_connection.available, lab_connection_available,
+            "{name}"
+        );
+        assert!(
+            !capabilities
+                .local_placement
+                .next_action
+                .contains("runner connect"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn reserved_local_session_is_not_presented_as_a_lab_connection() {
+    let mut reserved_local = disconnected_report();
+    reserved_local.runner_id = "local".to_string();
+    let mut concrete_local = disconnected_report();
+    concrete_local.runner_id = "project-local".to_string();
+
+    let sessions = non_local_sessions(vec![reserved_local, concrete_local]);
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].runner_id, "project-local");
 }
 
 #[test]
