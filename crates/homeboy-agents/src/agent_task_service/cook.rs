@@ -3994,7 +3994,6 @@ where
     S: CookSideEffectService,
 {
     let failure_options = options.clone();
-    let recipe_existed = store.recipe_exists(&failure_options.cook_id);
     let result = match run_cook_with_boundaries_observed_inner_with_stores(
         store,
         lifecycle_store,
@@ -4009,7 +4008,16 @@ where
             // Once the attempt exists, a controller-side validation failure has
             // not reached a provider and must retain the pre-execution contract.
             if let Ok(mut record) = lifecycle_store.read_record(&failure_options.initial_run_id) {
-                if !recipe_existed
+                let owns_materialized_attempt = store
+                    .load_recipe(&failure_options.cook_id)
+                    .ok()
+                    .is_some_and(|recipe| {
+                        recipe.attempts.iter().any(|attempt| {
+                            attempt.run_id == failure_options.initial_run_id
+                                && attempt.plan == failure_options.initial_plan
+                        })
+                    });
+                if owns_materialized_attempt
                     && store.data_root() == lifecycle_store.data_root()
                     && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
                 {
