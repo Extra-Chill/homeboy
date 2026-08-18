@@ -16,7 +16,8 @@ mod child;
 mod errors;
 mod runtime;
 pub use child::{
-    cleanup_invocation_children, cleanup_stale_child_records, register_child_process,
+    cleanup_invocation_children, cleanup_invocation_children_in_root, cleanup_stale_child_records,
+    cleanup_stale_child_records_in_root, register_child_process, register_child_process_in_root,
     InvocationChildGuard, InvocationChildRecord,
 };
 pub use runtime::{
@@ -70,6 +71,14 @@ pub struct InvocationGuard {
     runtime_tmp_dir: PathBuf,
     runtime_tmp_alias: Option<PathBuf>,
     runtime_tmp_pin: Option<super::temp::RuntimeTempPin>,
+    /// The config root this lease was taken in, captured at acquire time.
+    ///
+    /// The lease is a claim/release pair: `acquire` writes it and `Drop`
+    /// removes it. Resolving the root independently at each end lets a repoint
+    /// between them release nothing and leak the lease — which also leaks its
+    /// port range and its named leases for the life of the process, since
+    /// `refresh_lease_index` only reclaims a lease whose *pid* is gone (#7505).
+    config_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,9 +113,16 @@ impl InvocationGuard {
     }
 
     pub(crate) fn lease_is_active(invocation_id: &str) -> bool {
-        let Ok(path) = lease_path(invocation_id) else {
+        let Ok(config_root) = paths::homeboy() else {
             return false;
         };
+        Self::lease_is_active_in_root(&config_root, invocation_id)
+    }
+
+    /// [`InvocationGuard::lease_is_active`] against an already-resolved config
+    /// root.
+    pub(crate) fn lease_is_active_in_root(config_root: &Path, invocation_id: &str) -> bool {
+        let path = lease_path_in_root(config_root, invocation_id);
         let Ok(Some(lease)) = decode_lease_file(&path) else {
             return false;
         };
@@ -122,7 +138,16 @@ impl InvocationGuard {
     /// to this invocation lease, and is exported as `TMPDIR` for child tools.
     pub fn acquire(run_dir: &RunDir, requirements: &InvocationRequirements) -> Result<Self> {
         let _ = run_dir; // retained for API compatibility (see doc comment)
-        cleanup_stale_child_records()?;
+
+        // Resolved once and then threaded through every config-rooted step of
+        // this acquire — the child-record sweep, the index lock, the lease
+        // index, and the lease file — and retained on the guard so `Drop`
+        // releases the lease in the same installation it was claimed in.
+        //
+        // The *runtime* root (state/artifact/socket dirs) is deliberately not
+        // derived from this value; see `invocation_runtime_root`.
+        let config_root = paths::homeboy()?;
+        cleanup_stale_child_records_in_root(&config_root)?;
 
         let uuid = uuid::Uuid::new_v4();
         let short = short_invocation_id();
@@ -156,15 +181,15 @@ impl InvocationGuard {
 
         let mut port_base = None;
         let mut port_max = None;
-        let _lock = acquire_invocation_index_lock()?;
-        fs::create_dir_all(invocation_leases_dir()?).map_err(|e| {
+        let _lock = acquire_invocation_index_lock_in_root(&config_root)?;
+        fs::create_dir_all(invocation_leases_dir_in_root(&config_root)).map_err(|e| {
             Error::internal_unexpected(format!(
                 "Failed to create invocation lease directory: {}",
                 e
             ))
         })?;
-        let live_leases = refresh_lease_index()?;
-        validate_named_leases(&id, &requirements.named_leases)?;
+        let live_leases = refresh_lease_index_in_root(&config_root)?;
+        validate_named_leases_in_root(&config_root, &id, &requirements.named_leases)?;
 
         if let Some(size) = requirements.port_range_size {
             let (base, max) = allocate_port_range(size, &live_leases)?;
@@ -185,9 +210,9 @@ impl InvocationGuard {
             port_max,
             named_leases: requirements.named_leases.clone(),
         };
-        write_lease(&lease)?;
+        write_lease_in_root(&config_root, &lease)?;
         if let Err(error) = run_dir.bind_invocation(&id) {
-            let _ = fs::remove_file(lease_path(&id)?);
+            let _ = fs::remove_file(lease_path_in_root(&config_root, &id));
             return Err(error);
         }
 
@@ -198,7 +223,7 @@ impl InvocationGuard {
             ) {
                 Ok(temp) => temp,
                 Err(error) => {
-                    let _ = fs::remove_file(lease_path(&id)?);
+                    let _ = fs::remove_file(lease_path_in_root(&config_root, &id));
                     let _ = fs::remove_dir_all(&state_dir);
                     let _ = fs::remove_dir_all(&artifact_dir);
                     return Err(error);
@@ -206,7 +231,7 @@ impl InvocationGuard {
             };
         if let Err(error) = super::temp::bind_run_dir_owner(&runtime_tmp_dir, None, Some(&id)) {
             let _ = fs::remove_dir_all(&runtime_tmp_dir);
-            let _ = fs::remove_file(lease_path(&id)?);
+            let _ = fs::remove_file(lease_path_in_root(&config_root, &id));
             let _ = fs::remove_dir_all(&state_dir);
             let _ = fs::remove_dir_all(&artifact_dir);
             return Err(error);
@@ -216,7 +241,7 @@ impl InvocationGuard {
                 Ok(exported) => exported,
                 Err(error) => {
                     let _ = fs::remove_dir_all(&runtime_tmp_dir);
-                    let _ = fs::remove_file(lease_path(&id)?);
+                    let _ = fs::remove_file(lease_path_in_root(&config_root, &id));
                     let _ = fs::remove_dir_all(&state_dir);
                     let _ = fs::remove_dir_all(&artifact_dir);
                     return Err(error);
@@ -238,6 +263,7 @@ impl InvocationGuard {
             runtime_tmp_dir,
             runtime_tmp_alias,
             runtime_tmp_pin: Some(runtime_tmp_pin),
+            config_root,
         })
     }
 
@@ -362,12 +388,12 @@ impl Drop for InvocationGuard {
         let Some(id) = &self.lease_id else {
             return;
         };
-        let Ok(_lock) = acquire_invocation_index_lock() else {
+        // The root captured at acquire, not a fresh resolution: releasing the
+        // lease anywhere other than where it was claimed releases nothing.
+        let Ok(_lock) = acquire_invocation_index_lock_in_root(&self.config_root) else {
             return;
         };
-        let Ok(path) = lease_path(id) else {
-            return;
-        };
+        let path = lease_path_in_root(&self.config_root, id);
         let Ok(Some(lease)) = decode_lease_file(&path) else {
             return;
         };
@@ -407,11 +433,15 @@ fn exported_runtime_tmp_dir(
     Ok((runtime_tmp_dir.to_path_buf(), None))
 }
 
-fn validate_named_leases(invocation_id: &str, wanted: &[String]) -> Result<()> {
+fn validate_named_leases_in_root(
+    config_root: &Path,
+    invocation_id: &str,
+    wanted: &[String],
+) -> Result<()> {
     if wanted.is_empty() {
         return Ok(());
     }
-    for lease in refresh_lease_index()? {
+    for lease in refresh_lease_index_in_root(config_root)? {
         for name in wanted {
             if lease.named_leases.contains(name) {
                 return Err(Error::validation_invalid_argument(
@@ -478,9 +508,9 @@ fn allocate_port_range(size: u16, live_leases: &[InvocationLease]) -> Result<(u1
     ))
 }
 
-fn refresh_lease_index() -> Result<Vec<InvocationLease>> {
+fn refresh_lease_index_in_root(config_root: &Path) -> Result<Vec<InvocationLease>> {
     let mut live = Vec::new();
-    for path in invocation_lease_files()? {
+    for path in invocation_lease_files_in_root(config_root)? {
         let Some(lease) = decode_lease_file(&path)? else {
             continue;
         };
@@ -493,8 +523,8 @@ fn refresh_lease_index() -> Result<Vec<InvocationLease>> {
     Ok(live)
 }
 
-fn invocation_lease_files() -> Result<Vec<PathBuf>> {
-    let dir = invocation_leases_dir()?;
+fn invocation_lease_files_in_root(config_root: &Path) -> Result<Vec<PathBuf>> {
+    let dir = invocation_leases_dir_in_root(config_root);
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -557,11 +587,11 @@ fn json_excerpt(content: &str) -> String {
     content.chars().take(200).collect()
 }
 
-fn write_lease(lease: &InvocationLease) -> Result<()> {
+fn write_lease_in_root(config_root: &Path, lease: &InvocationLease) -> Result<()> {
     let json = serde_json::to_string_pretty(lease).map_err(|e| {
         Error::internal_unexpected(format!("Failed to serialize invocation lease: {}", e))
     })?;
-    fs::write(lease_path(&lease.invocation_id)?, json).map_err(|e| {
+    fs::write(lease_path_in_root(config_root, &lease.invocation_id), json).map_err(|e| {
         Error::internal_unexpected(format!(
             "Failed to write invocation lease for '{}': {}",
             lease.invocation_id, e
@@ -569,15 +599,17 @@ fn write_lease(lease: &InvocationLease) -> Result<()> {
     })
 }
 
-fn lease_path(invocation_id: &str) -> Result<PathBuf> {
-    Ok(invocation_leases_dir()?.join(format!(
+/// Lease file below an already-resolved config root.
+fn lease_path_in_root(config_root: &Path, invocation_id: &str) -> PathBuf {
+    invocation_leases_dir_in_root(config_root).join(format!(
         "{}.json",
         paths::sanitize_path_segment(invocation_id)
-    )))
+    ))
 }
 
-fn invocation_leases_dir() -> Result<PathBuf> {
-    Ok(paths::homeboy()?.join("invocation-leases"))
+/// Lease index directory below an already-resolved config root.
+fn invocation_leases_dir_in_root(config_root: &Path) -> PathBuf {
+    config_root.join("invocation-leases")
 }
 
 type InvocationIndexLock = FsIndexLock;
@@ -587,8 +619,11 @@ type InvocationIndexLock = FsIndexLock;
 /// Mechanics (mkdir-lock, mtime stale reclaim, the shared 30s/100-attempt/20ms
 /// tuning) live in `homeboy_engine_primitives::fs_index_lock`, which
 /// `homeboy-rig`'s lease index also uses.
-fn acquire_invocation_index_lock() -> Result<InvocationIndexLock> {
-    FsIndexLock::acquire_in(&invocation_leases_dir()?, INVOCATION_INDEX_LOCK)
+fn acquire_invocation_index_lock_in_root(config_root: &Path) -> Result<InvocationIndexLock> {
+    FsIndexLock::acquire_in(
+        &invocation_leases_dir_in_root(config_root),
+        INVOCATION_INDEX_LOCK,
+    )
 }
 
 #[cfg(test)]

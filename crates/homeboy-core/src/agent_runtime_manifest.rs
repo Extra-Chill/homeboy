@@ -691,26 +691,39 @@ fn runtime_source_description(manifest: &AgentRuntimeManifest) -> String {
 }
 
 fn discover_standalone_agent_runtime_catalog() -> AgentRuntimeDiscoveryCatalog {
-    let mut manifests = Vec::new();
-    let mut diagnostics = Vec::new();
-    if let Ok(runtime_dir) = paths::agent_runtimes() {
-        let catalog = discover_standalone_agent_runtime_catalog_in(
-            runtime_dir,
-            paths::agent_runtime_manifest,
-        );
-        manifests.extend(catalog.manifests);
-        diagnostics.extend(catalog.diagnostics);
-    }
+    let Ok(config_root) = paths::homeboy() else {
+        return AgentRuntimeDiscoveryCatalog::default();
+    };
+    discover_standalone_agent_runtime_catalog_in_root(&config_root)
+}
+
+/// [`discover_standalone_agent_runtime_catalog`] against an already-resolved
+/// config root.
+///
+/// The directory that is *listed* and the manifest paths that are *read* now
+/// come from one root. They previously came from two independent resolutions —
+/// `paths::agent_runtimes()` and the `paths::agent_runtime_manifest` function
+/// pointer — so a repoint between the listing and a manifest read reported a
+/// runtime that exists as missing, or read a manifest belonging to a different
+/// installation than the directory entry it was keyed from (#7505).
+fn discover_standalone_agent_runtime_catalog_in_root(
+    config_root: &Path,
+) -> AgentRuntimeDiscoveryCatalog {
+    let catalog = discover_standalone_agent_runtime_catalog_in(
+        paths::agent_runtimes_in_root(config_root),
+        &|id: &str| paths::agent_runtime_manifest_in_root(config_root, id),
+    );
+    let mut manifests = catalog.manifests;
     manifests.sort_by(|a, b| a.id.cmp(&b.id));
     AgentRuntimeDiscoveryCatalog {
         manifests,
-        diagnostics,
+        diagnostics: catalog.diagnostics,
     }
 }
 
 fn discover_standalone_agent_runtime_catalog_in(
     runtime_dir: PathBuf,
-    manifest_path_for: fn(&str) -> crate::Result<PathBuf>,
+    manifest_path_for: &dyn Fn(&str) -> PathBuf,
 ) -> AgentRuntimeDiscoveryCatalog {
     let Ok(entries) = std::fs::read_dir(runtime_dir) else {
         return AgentRuntimeDiscoveryCatalog::default();
@@ -739,7 +752,7 @@ enum StandaloneAgentRuntimeManifestLoad {
 
 fn load_standalone_agent_runtime_manifest(
     path: &Path,
-    manifest_path_for: fn(&str) -> crate::Result<PathBuf>,
+    manifest_path_for: &dyn Fn(&str) -> PathBuf,
 ) -> StandaloneAgentRuntimeManifestLoad {
     if !path.is_dir() {
         return StandaloneAgentRuntimeManifestLoad::Skipped;
@@ -748,9 +761,11 @@ fn load_standalone_agent_runtime_manifest(
         return StandaloneAgentRuntimeManifestLoad::Skipped;
     };
     let id = file_name.to_string_lossy().to_string();
-    let Ok(manifest_path) = manifest_path_for(&id) else {
-        return StandaloneAgentRuntimeManifestLoad::Skipped;
-    };
+    // Infallible now that the root is supplied: the pre-injection `Skipped`
+    // arm here fired only when home resolution failed *between* listing the
+    // runtime directory and resolving one of its manifests, which is the race
+    // this rooting removes rather than a state to keep handling.
+    let manifest_path = manifest_path_for(&id);
     if !manifest_path.exists() {
         return StandaloneAgentRuntimeManifestLoad::Skipped;
     }
