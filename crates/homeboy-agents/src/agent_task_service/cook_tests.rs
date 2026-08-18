@@ -61,6 +61,31 @@ fn with_strict_config_lock(test: impl FnOnce()) {
     test();
 }
 
+/// `agent_task_lifecycle::submit_plan` against an explicitly injected store.
+///
+/// The ambient wrapper resolves its store from the process environment and
+/// admits through `paths::controller_runtimes_store()`, which stays
+/// process-global by design. A hermetic test must not enqueue against the
+/// operator's real admission queue, so runtime admission is supplied as stub
+/// evidence exactly as the rooted proofs in `agent_task_lifecycle::tests` do.
+/// Only the store and that admission edge change; the plan and the requested
+/// run identity are passed through untouched (#7505).
+fn submit_plan_in_test_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
+        lifecycle_store,
+        plan,
+        requested_run_id,
+        None,
+        None,
+        None,
+        |_| Ok(serde_json::json!({})),
+    )
+}
+
 #[test]
 fn deepest_typed_error_selects_the_deepest_explicit_cause() {
     let diagnostic = serde_json::json!({
@@ -1148,133 +1173,137 @@ fn cook_persists_selection_required_before_promotion_or_gates() {
 
 #[test]
 fn candidate_selection_uses_the_winner_for_review_form_and_status_projection() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let mut plan = AgentTaskPlan::new(
-            "selected-candidate",
-            vec![
-                AgentTaskRequest {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let mut plan = AgentTaskPlan::new(
+        "selected-candidate",
+        vec![
+            AgentTaskRequest {
+                task_id: "winner".to_string(),
+                group_key: Some("candidate-group".to_string()),
+                ..batch_cook_options(
+                    "selected-candidate-template",
+                    Arc::new(AcceptedDetachedAttemptDispatcher),
+                )
+                .initial_plan
+                .tasks[0]
+                    .clone()
+            },
+            AgentTaskRequest {
+                task_id: "late-sibling".to_string(),
+                group_key: Some("candidate-group".to_string()),
+                ..batch_cook_options(
+                    "selected-candidate-template-two",
+                    Arc::new(AcceptedDetachedAttemptDispatcher),
+                )
+                .initial_plan
+                .tasks[0]
+                    .clone()
+            },
+        ],
+    );
+    plan.group_key = Some("candidate-group".to_string());
+    plan.options.candidate_completion =
+        crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::FirstGreen;
+    let run_id = "selected-candidate-run";
+    submit_plan_in_test_store(&lifecycle_store, &plan, Some(run_id)).unwrap();
+    agent_task_lifecycle::record_run_aggregate_in_store(
+        &lifecycle_store,
+        run_id,
+        &plan,
+        &crate::agent_task_scheduler::AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: plan.plan_id.clone(),
+            status: crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
+            totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
+                succeeded: 1,
+                cancelled: 1,
+                ..Default::default()
+            },
+            outcomes: vec![
+                crate::agent_task::AgentTaskOutcome {
+                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "winner".to_string(),
-                    group_key: Some("candidate-group".to_string()),
-                    ..batch_cook_options(
-                        "selected-candidate-template",
-                        Arc::new(AcceptedDetachedAttemptDispatcher),
-                    )
-                    .initial_plan
-                    .tasks[0]
-                        .clone()
+                    status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                    summary: None,
+                    failure_classification: None,
+                    artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: test_review_form_outputs(),
+                    workflow: None,
+                    follow_up: None,
+                    metadata: serde_json::json!({ "candidate_selection": {
+                        "policy": "first_green",
+                        "selected_task_id": "winner",
+                        "promotion_action": "promote_selected_candidate_only"
+                    }}),
                 },
-                AgentTaskRequest {
+                crate::agent_task::AgentTaskOutcome {
+                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "late-sibling".to_string(),
-                    group_key: Some("candidate-group".to_string()),
-                    ..batch_cook_options(
-                        "selected-candidate-template-two",
-                        Arc::new(AcceptedDetachedAttemptDispatcher),
-                    )
-                    .initial_plan
-                    .tasks[0]
-                        .clone()
+                    status: crate::agent_task::AgentTaskOutcomeStatus::Cancelled,
+                    summary: None,
+                    failure_classification: None,
+                    artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: Value::Null,
+                    workflow: None,
+                    follow_up: None,
+                    metadata: Value::Null,
                 },
             ],
-        );
-        plan.group_key = Some("candidate-group".to_string());
-        plan.options.candidate_completion =
-            crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::FirstGreen;
-        let run_id = "selected-candidate-run";
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
-        agent_task_lifecycle::record_run_aggregate(
-            run_id,
-            &plan,
-            &crate::agent_task_scheduler::AgentTaskAggregate {
-                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-                plan_id: plan.plan_id.clone(),
-                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
-                totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
-                    succeeded: 1,
-                    cancelled: 1,
-                    ..Default::default()
-                },
-                outcomes: vec![
-                    crate::agent_task::AgentTaskOutcome {
-                        schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                        task_id: "winner".to_string(),
-                        status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
-                        summary: None,
-                        failure_classification: None,
-                        artifacts: Vec::new(),
-                        typed_artifacts: Vec::new(),
-                        evidence_refs: Vec::new(),
-                        diagnostics: Vec::new(),
-                        outputs: test_review_form_outputs(),
-                        workflow: None,
-                        follow_up: None,
-                        metadata: serde_json::json!({ "candidate_selection": {
-                            "policy": "first_green",
-                            "selected_task_id": "winner",
-                            "promotion_action": "promote_selected_candidate_only"
-                        }}),
-                    },
-                    crate::agent_task::AgentTaskOutcome {
-                        schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                        task_id: "late-sibling".to_string(),
-                        status: crate::agent_task::AgentTaskOutcomeStatus::Cancelled,
-                        summary: None,
-                        failure_classification: None,
-                        artifacts: Vec::new(),
-                        typed_artifacts: Vec::new(),
-                        evidence_refs: Vec::new(),
-                        diagnostics: Vec::new(),
-                        outputs: Value::Null,
-                        workflow: None,
-                        follow_up: None,
-                        metadata: Value::Null,
-                    },
-                ],
-                events: Vec::new(),
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            },
-        )
-        .unwrap();
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        },
+    )
+    .unwrap();
 
-        assert_eq!(
-            review_form_from_aggregate(&agent_task_lifecycle::read_aggregate(run_id).unwrap())
-                .unwrap(),
-            Some(test_review_form())
-        );
-        assert_eq!(
-            selected_candidate_task_id(run_id).unwrap(),
-            Some("winner".to_string())
-        );
-        let status = agent_task_lifecycle::run_status(run_id, None).unwrap();
-        let candidate = status
-            .candidate
-            .as_ref()
-            .expect("candidate status projection");
-        assert_eq!(candidate.policy, plan.options.candidate_completion);
-        assert_eq!(candidate.selected_task_id.as_deref(), Some("winner"));
-        assert_eq!(candidate.candidates.len(), 2);
-        assert_eq!(
-            candidate.cancellation_supervision,
-            "scheduler_deferred_cleanup"
-        );
-        assert_eq!(
-            candidate.promotion_action.as_deref(),
-            Some("promote_selected_candidate_only")
-        );
-        let serialized = serde_json::to_value(&status).unwrap();
-        assert_eq!(serialized["candidate"]["policy"], "first_green");
-        assert_eq!(serialized["candidate"]["deadline_timeout_ms"], Value::Null);
-        let mut legacy_json = serialized;
-        legacy_json
-            .as_object_mut()
-            .expect("status object")
-            .remove("candidate");
-        let legacy: crate::agent_task_lifecycle::AgentTaskRunStatus =
-            serde_json::from_value(legacy_json).unwrap();
-        assert!(legacy.candidate.is_none());
-    });
+    assert_eq!(
+        review_form_from_aggregate(
+            &agent_task_lifecycle::read_aggregate_in_store(&lifecycle_store, run_id).unwrap()
+        )
+        .unwrap(),
+        Some(test_review_form())
+    );
+    assert_eq!(
+        selected_candidate_task_id_in_store(&lifecycle_store, run_id).unwrap(),
+        Some("winner".to_string())
+    );
+    let status = agent_task_lifecycle::run_status_in_store(&lifecycle_store, run_id, None).unwrap();
+    let candidate = status
+        .candidate
+        .as_ref()
+        .expect("candidate status projection");
+    assert_eq!(candidate.policy, plan.options.candidate_completion);
+    assert_eq!(candidate.selected_task_id.as_deref(), Some("winner"));
+    assert_eq!(candidate.candidates.len(), 2);
+    assert_eq!(
+        candidate.cancellation_supervision,
+        "scheduler_deferred_cleanup"
+    );
+    assert_eq!(
+        candidate.promotion_action.as_deref(),
+        Some("promote_selected_candidate_only")
+    );
+    let serialized = serde_json::to_value(&status).unwrap();
+    assert_eq!(serialized["candidate"]["policy"], "first_green");
+    assert_eq!(serialized["candidate"]["deadline_timeout_ms"], Value::Null);
+    let mut legacy_json = serialized;
+    legacy_json
+        .as_object_mut()
+        .expect("status object")
+        .remove("candidate");
+    let legacy: crate::agent_task_lifecycle::AgentTaskRunStatus =
+        serde_json::from_value(legacy_json).unwrap();
+    assert!(legacy.candidate.is_none());
 }
 
 #[test]
@@ -6578,33 +6607,40 @@ fn recipe_only_initial_attempt_recovers_once_without_provider_dispatch() {
 
 #[test]
 fn recipe_recovery_rejects_foreign_lifecycle_record_before_indexing() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-recipe-foreign-record";
-        let run_id = "cook-recipe-foreign-record-attempt-1";
-        let mut options = batch_cook_options(
-            cook_id,
-            Arc::new(RecordingDetachedAttemptDispatcher {
-                dispatches: Arc::new(AtomicUsize::new(0)),
-            }),
-        );
-        options.initial_run_id = run_id.to_string();
-        persist_initial_recipe(&options).expect("persist recipe");
-        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
-            .expect("persist foreign lifecycle record");
-        agent_task_lifecycle::record_cook_attempt("other-cook", 1, run_id)
-            .expect("bind foreign Cook ownership");
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let cook_id = "cook-recipe-foreign-record";
+    let run_id = "cook-recipe-foreign-record-attempt-1";
+    let mut options = batch_cook_options(
+        cook_id,
+        Arc::new(RecordingDetachedAttemptDispatcher {
+            dispatches: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+    options.initial_run_id = run_id.to_string();
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist recipe");
+    submit_plan_in_test_store(&lifecycle_store, &options.initial_plan, Some(run_id))
+        .expect("persist foreign lifecycle record");
+    agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle_store, "other-cook", 1, run_id)
+        .expect("bind foreign Cook ownership");
 
-        let error = super::super::cook_pre_execution::recover_recipe_attempt(cook_id)
-            .expect_err("foreign lifecycle record is rejected");
-        assert!(error.message.contains("belongs to a different Cook"));
-        assert!(!agent_task_lifecycle::cook_index_exists(cook_id).expect("no local index written"));
-        assert_eq!(
-            agent_task_lifecycle::exact_record(run_id)
-                .expect("foreign record remains")
-                .metadata["cook_id"],
-            "other-cook"
-        );
-    });
+    let error = recover_recipe_attempt_with_stores(&recipe_store, &lifecycle_store, cook_id)
+        .expect_err("foreign lifecycle record is rejected");
+    assert!(error.message.contains("belongs to a different Cook"));
+    assert!(
+        !agent_task_lifecycle::cook_index_exists_in_store(&lifecycle_store, cook_id)
+            .expect("no local index written")
+    );
+    assert_eq!(
+        agent_task_lifecycle::exact_record_in_store(&lifecycle_store, run_id)
+            .expect("foreign record remains")
+            .metadata["cook_id"],
+        "other-cook"
+    );
 }
 
 #[test]
@@ -11694,38 +11730,48 @@ fn finalization_claims_isolate_identical_run_ids_across_lifecycle_stores() {
 
 #[test]
 fn review_form_follow_up_finalization_replays_its_durable_claim_after_restart() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-review-form-restart";
-        let run_id = "cook-review-form-restart-attempt-2";
-        let plan = AgentTaskPlan::new(cook_id, Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
-        agent_task_lifecycle::record_cook_attempt(cook_id, 2, run_id).unwrap();
-        let options = promotion_claim_options(cook_id, run_id);
-        let promotion = promotion(run_id);
-        let calls = Arc::new(AtomicUsize::new(0));
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-review-form-restart";
+    let run_id = "cook-review-form-restart-attempt-2";
+    let plan = AgentTaskPlan::new(cook_id, Vec::new());
+    submit_plan_in_test_store(&lifecycle_store, &plan, Some(run_id)).unwrap();
+    agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle_store, cook_id, 2, run_id)
+        .unwrap();
+    let options = promotion_claim_options(cook_id, run_id);
+    let promotion = promotion(run_id);
+    let calls = Arc::new(AtomicUsize::new(0));
 
-        for _ in 0..2 {
-            let calls = Arc::clone(&calls);
-            let mut finalize =
-                move |_: &AgentTaskCookServiceOptions, _: &str, _: &AgentTaskPromotionReport| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(serde_json::json!({"status": "review_ready", "review_form": true}))
-                };
-            finalize_with_operation_claim(&options, run_id, &promotion, &mut finalize).unwrap();
-        }
+    for _ in 0..2 {
+        let calls = Arc::clone(&calls);
+        let mut finalize =
+            move |_: &AgentTaskCookServiceOptions, _: &str, _: &AgentTaskPromotionReport| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({"status": "review_ready", "review_form": true}))
+            };
+        finalize_with_operation_claim_in_store(
+            &lifecycle_store,
+            &options,
+            run_id,
+            &promotion,
+            &mut finalize,
+        )
+        .unwrap();
+    }
 
-        let operation_key = finalization_operation_key(run_id, &promotion);
-        let claim = agent_task_lifecycle::operation_claim(run_id, &operation_key)
+    let operation_key = finalization_operation_key(run_id, &promotion);
+    let claim =
+        agent_task_lifecycle::operation_claim_in_store(&lifecycle_store, run_id, &operation_key)
             .unwrap()
             .expect("review-form finalization claim");
-        assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
-        assert_eq!(claim.result.unwrap()["review_form"], true);
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "restart only revalidates publication"
-        );
-    });
+    assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
+    assert_eq!(claim.result.unwrap()["review_form"], true);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "restart only revalidates publication"
+    );
 }
 
 #[test]
@@ -13114,62 +13160,66 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
 
 #[test]
 fn cook_rejects_test_claim_without_matching_durable_gate() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "cook-8058-mismatch";
-        let plan = AgentTaskPlan::new("cook-8058", Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
-        let options = AgentTaskCookServiceOptions {
-            cook_id: "cook-8058".to_string(),
-            initial_run_id: run_id.to_string(),
-            initial_plan: AgentTaskPlan::new("cook-8058", Vec::new()),
-            to_worktree: "homeboy@8058".to_string(),
-            source_worktree_path: None,
-            provider_command: None,
-            provider_invocation: None,
-            gates: VerifyGateOptions {
-                verify: vec!["cargo test unsupported".to_string()],
-                private_verify: Vec::new(),
-                private_gate_reveal: Default::default(),
-                ..VerifyGateOptions::default()
-            },
-            max_attempts: 1,
-            no_finalize: false,
-            draft_pr: false,
-            base: "main".to_string(),
-            task_base_sha: Some("task-candidate-base".to_string()),
-            head: Some("fix/8058".to_string()),
-            title: "Close #8058".to_string(),
-            commit_message: "test".to_string(),
-            source_refs: Vec::new(),
-            protected_branches: vec!["main".to_string()],
-            ai_tool: "fixture-provider".to_string(),
-            ai_model: Some("fixture-model".to_string()),
-            ai_used_for: "Drafted test coverage.".to_string(),
-            attempt_dispatcher: None,
-            harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
-        };
-        // Finalization eligibility is checked before the test-claim contract and
-        // requires a non-empty gate set, so clearing the gates outright never
-        // reaches the check this test names. Keep the gate green but private:
-        // eligible to finalize, yet not visible evidence that can back a
-        // published test claim.
-        let mut unsupported = promotion(run_id);
-        unsupported.deterministic_gates[0].visibility =
-            homeboy_core::gate::HomeboyGateVisibility::Private;
-        let error = finalize_cook_pr_with_backend(
-            &options,
-            run_id,
-            &unsupported,
-            &mut CaptureBackend::default(),
-        )
-        .expect_err("unsupported test claim is rejected");
-        assert!(
-            error
-                .message
-                .contains("matching successful visible durable gate"),
-            "{error}"
-        );
-    });
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let run_id = "cook-8058-mismatch";
+    let plan = AgentTaskPlan::new("cook-8058", Vec::new());
+    submit_plan_in_test_store(&lifecycle_store, &plan, Some(run_id)).unwrap();
+    let options = AgentTaskCookServiceOptions {
+        cook_id: "cook-8058".to_string(),
+        initial_run_id: run_id.to_string(),
+        initial_plan: AgentTaskPlan::new("cook-8058", Vec::new()),
+        to_worktree: "homeboy@8058".to_string(),
+        source_worktree_path: None,
+        provider_command: None,
+        provider_invocation: None,
+        gates: VerifyGateOptions {
+            verify: vec!["cargo test unsupported".to_string()],
+            private_verify: Vec::new(),
+            private_gate_reveal: Default::default(),
+            ..VerifyGateOptions::default()
+        },
+        max_attempts: 1,
+        no_finalize: false,
+        draft_pr: false,
+        base: "main".to_string(),
+        task_base_sha: Some("task-candidate-base".to_string()),
+        head: Some("fix/8058".to_string()),
+        title: "Close #8058".to_string(),
+        commit_message: "test".to_string(),
+        source_refs: Vec::new(),
+        protected_branches: vec!["main".to_string()],
+        ai_tool: "fixture-provider".to_string(),
+        ai_model: Some("fixture-model".to_string()),
+        ai_used_for: "Drafted test coverage.".to_string(),
+        attempt_dispatcher: None,
+        harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
+    };
+    // Finalization eligibility is checked before the test-claim contract and
+    // requires a non-empty gate set, so clearing the gates outright never
+    // reaches the check this test names. Keep the gate green but private:
+    // eligible to finalize, yet not visible evidence that can back a
+    // published test claim.
+    let mut unsupported = promotion(run_id);
+    unsupported.deterministic_gates[0].visibility =
+        homeboy_core::gate::HomeboyGateVisibility::Private;
+    let error = finalize_cook_pr_with_backend_with_stores(
+        &recipe_store,
+        &lifecycle_store,
+        &options,
+        run_id,
+        &unsupported,
+        &mut CaptureBackend::default(),
+    )
+    .expect_err("unsupported test claim is rejected");
+    assert!(
+        error
+            .message
+            .contains("matching successful visible durable gate"),
+        "{error}"
+    );
 }
 
 #[test]
