@@ -1614,8 +1614,9 @@ fn run_reentry_siblings_re_enter_only_the_injected_store() {
         still_quarantined.code.as_str(),
         ErrorCode::ValidationInvalidArgument.as_str()
     );
+    assert_eq!(still_quarantined.details["field"], "run_id");
     assert_eq!(
-        still_quarantined.message,
+        still_quarantined.details["problem"],
         "agent-task run is quarantined; re-arm its exact run id after repairing durable provenance"
     );
 
@@ -1629,8 +1630,9 @@ fn run_reentry_siblings_re_enter_only_the_injected_store() {
         .is_none());
     let never_quarantined = rearm_quarantined_run_in_store(&other, quarantine_target)
         .expect_err("the second root never observed this quarantine");
+    assert_eq!(never_quarantined.details["field"], "run_id");
     assert_eq!(
-        never_quarantined.message,
+        never_quarantined.details["problem"],
         "only an exact queued quarantined run can be re-armed"
     );
 
