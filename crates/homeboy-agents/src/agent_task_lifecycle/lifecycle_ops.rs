@@ -4626,14 +4626,17 @@ pub fn plan_has_retry_materialization_identity(plan: &AgentTaskPlan) -> bool {
 }
 
 pub(crate) fn record_metadata_value(run_id: &str, key: &str, value: Value) -> Result<()> {
-    store::mutate_record(&sanitize_run_id(run_id), |record| {
-        record
-            .ensure_metadata_object()
-            .insert(key.to_string(), value.clone());
-        record.updated_at = Some(now_timestamp());
-        true
-    })
-    .map(|_| ())
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_metadata_value_in_store(&lifecycle_store, run_id, key, value)
+}
+
+pub(crate) fn record_metadata_value_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    key: &str,
+    value: Value,
+) -> Result<()> {
+    lifecycle_store.record_metadata_value(run_id, key, value)
 }
 
 /// Reserve one successor for the complete retry lineage before admitting it.
