@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.14] - 2026-08-18
+
+### Changed
+- root four continuation tests on an injected recipe store
+- root status_and_recovery lifecycle tests on an injected store
+- root four cook tests on an injected lifecycle store
+- root terminal_and_reconcile lifecycle tests on an injected store
+- root the direct-import artifact conflict test on an injected store
+- root five handoff_and_proxy tests on an injected store
+- root agent_task_lifecycle::status on an injected store
+
+### Fixed
+- import the rooted siblings the cook tests call
+
 ## [0.350.13] - 2026-08-18
 
 ### Changed
