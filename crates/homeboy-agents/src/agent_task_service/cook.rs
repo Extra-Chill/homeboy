@@ -6546,7 +6546,7 @@ fn materialize_pending_cook_workspace(
         ),
     }
     };
-    let identity = match resolve() {
+    let mut identity = match resolve() {
         Ok(identity) => identity,
         Err(error)
             if provider_id.is_none()
@@ -6557,6 +6557,14 @@ fn materialize_pending_cook_workspace(
         }
         Err(error) => return Err(error),
     };
+    if homeboy_core::worktree_providers::worktree_provider_path_requires_materialization(
+        &identity.path,
+    ) {
+        identity = homeboy_core::worktree_providers::materialize_apply_enabled_worktree_provider_identity_from_config(
+            &identity,
+            &config,
+        )?;
+    }
     if identity.handle != options.to_worktree {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
