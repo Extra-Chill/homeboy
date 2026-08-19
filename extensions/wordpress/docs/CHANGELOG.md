@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.35.12] - 2026-08-19
+
+### Fixed
+- expose host smoke runtime roots
+
 ## [3.35.10] - 2026-08-18
 
 ### Fixed
