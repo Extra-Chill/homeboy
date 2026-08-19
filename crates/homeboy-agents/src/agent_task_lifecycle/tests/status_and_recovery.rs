@@ -1923,46 +1923,68 @@ fn terminal_proxy_reconciliation_hydrates_persisted_nested_result_idempotently()
     );
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). Reconciliation is not a pure function of the in-memory record it
+/// mutates: it binds the pending handoff, reads the aggregate to decide
+/// idempotence and commits the terminal projection, all durably. Those writes
+/// and that read have to name the installation the planned proxy was persisted
+/// into, or the terminal record asserted below would be reconciled from one
+/// home's aggregate and committed into another's (#7505).
+///
+/// The proxy is created through the `*_with_submission_in_store` form because
+/// the default Lab-offload submission admits through the machine-global
+/// controller-runtime store; see `stub_lab_offload_submission`. Nothing here
+/// asserts on controller-runtime provenance, so the stub pin is invisible to
+/// this test.
 #[test]
 fn transport_proxy_snapshot_reconciliation_advances_queued_lifecycle() {
-    with_isolated_home(|_| {
-        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        let mut record = record_lab_offload_planned(LabOffloadProxyPlan {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_lab_offload_planned_with_submission_in_store(
+        &lifecycle_store,
+        LabOffloadProxyPlan {
             run_id: "agent-task-disconnected-child",
             runner_id: "homeboy-lab",
             remote_workspace: "/runner/workspace/repo",
             remote_command: &command,
             durable_plan: None,
-        })
-        .expect("planned proxy");
-        let job_id = "00000000-0000-0000-0000-000000000123";
-        let metadata = record.ensure_metadata_object();
-        metadata.insert("runner_job_id".to_string(), json!(job_id));
-        metadata.insert(
-            "runner_execution_record".to_string(),
-            serde_json::to_value(
-                homeboy_core::runner_execution_envelope::RunnerExecutionRecord::in_flight(
-                    job_id,
-                    "homeboy-lab",
-                    "daemon",
-                )
-                .with_job_id(job_id),
+        },
+        &stub_lab_offload_submission,
+    )
+    .expect("planned proxy");
+    let job_id = "00000000-0000-0000-0000-000000000123";
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("runner_job_id".to_string(), json!(job_id));
+    metadata.insert(
+        "runner_execution_record".to_string(),
+        serde_json::to_value(
+            homeboy_core::runner_execution_envelope::RunnerExecutionRecord::in_flight(
+                job_id,
+                "homeboy-lab",
+                "daemon",
             )
-            .expect("execution record"),
-        );
+            .with_job_id(job_id),
+        )
+        .expect("execution record"),
+    );
 
-        let aggregate = succeeded_aggregate(&test_plan());
-        reconcile_transport_proxy_snapshot(&mut record, &terminal_child_snapshot(&aggregate))
-            .expect("transport proxy reconciliation");
+    let aggregate = succeeded_aggregate(&test_plan());
+    reconcile_transport_proxy_snapshot_in_store(
+        &lifecycle_store,
+        &mut record,
+        &terminal_child_snapshot(&aggregate),
+    )
+    .expect("transport proxy reconciliation");
 
-        assert_eq!(record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(record.tasks[0].state, AgentTaskState::Succeeded);
-        assert_eq!(record.metadata["runner_job_status"], "succeeded");
-        assert_eq!(
-            record.metadata["runner_execution_record"]["status"],
-            "succeeded"
-        );
-    });
+    assert_eq!(record.state, AgentTaskRunState::Succeeded);
+    assert_eq!(record.tasks[0].state, AgentTaskState::Succeeded);
+    assert_eq!(record.metadata["runner_job_status"], "succeeded");
+    assert_eq!(
+        record.metadata["runner_execution_record"]["status"],
+        "succeeded"
+    );
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
