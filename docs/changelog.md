@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.23] - 2026-08-19
+
+### Changed
+- root the cook-recipe tests and delete their ambient wrappers
+- root the deferred-workload tests and delete their ambient wrappers
+
 ## [0.350.22] - 2026-08-19
 
 ### Changed
