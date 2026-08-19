@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.16] - 2026-08-19
+
+### Changed
+- root the Lab offload entry points in a store
+- root logs, record health, and aggregate source in a store
+- root the terminal runner-result projection
+- root the active Lab handoff reconciliation scan
+
+### Fixed
+- retain materialization failure status
+- preserve pre-execution failures
+
 ## [0.350.15] - 2026-08-18
 
 ### Changed
