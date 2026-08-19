@@ -26,6 +26,10 @@ NODE
 cat > "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+    printf '%s\n' "${FAKE_WP_CODEBOX_VERSION-0.21.0}"
+    exit 0
+fi
 printf '%s\n' 'wp-codebox release stub'
 SH
 chmod +x "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox"
@@ -115,12 +119,17 @@ while [ "$#" -gt 0 ]; do
             exit 0
             ;;
         run)
+            if [ -n "${FAKE_EXPECT_WP_CODEBOX_CLI+x}" ] && [ "${WP_CODEBOX_CLI:-}" != "${FAKE_EXPECT_WP_CODEBOX_CLI}" ]; then
+                printf 'expected explicit external WP_CODEBOX_CLI to survive source fallback: %s\n' "${WP_CODEBOX_CLI:-}" >&2
+                exit 1
+            fi
             mkdir -p "${prefix}/node_modules/@automattic/wp-codebox-core/dist"
             mkdir -p "${prefix}/packages/cli/dist"
             printf '%s\n' 'module.exports = { fixture: true };' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
             printf '%s\n' 'module.exports = { runtimeContractManifest() { return {}; } };' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/contracts.js"
-            cat > "${prefix}/packages/cli/dist/index.js" <<'NODE'
+cat > "${prefix}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
+if (process.argv.includes('--version')) { process.stdout.write(process.env.FAKE_WP_CODEBOX_SOURCE_VERSION ?? '0.21.0'); process.exit(0); }
 console.log('wp-codebox source stub');
 NODE
             chmod +x "${prefix}/packages/cli/dist/index.js"
@@ -192,6 +201,89 @@ fi
 
 if [ ! -f "${source_wp_codebox_core_module}" ]; then
     echo "Expected source fallback to export built runtime core module" >&2
+    exit 1
+fi
+
+# An older release artifact is never accepted just because it responds to
+# `commands`: setup must continue through its existing source provider path.
+OLD_RELEASE_GITHUB_ENV_FILE="${TMPDIR}/old-release-github-env"
+(
+    cd "${EXTENSION_DIR}"
+    HOME="${TMPDIR}/old-release-home" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GITHUB_ENV="${OLD_RELEASE_GITHUB_ENV_FILE}" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/old-release-install" \
+    HOMEBOY_WP_CODEBOX_DOWNLOAD_URL="https://example.test/wp-codebox-cli-linux-x64.tar.gz" \
+    FAKE_WP_CODEBOX_VERSION="0.20.1" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/old-release-setup.out" 2>&1
+)
+
+old_release_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${OLD_RELEASE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+old_release_wp_codebox_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${OLD_RELEASE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+if [ "${old_release_wp_codebox_bin}" != "${TMPDIR}/old-release-install/source/packages/cli/dist/index.js" ]; then
+    echo "Expected incompatible release runtime to be repaired through source setup, got: ${old_release_wp_codebox_bin}" >&2
+    cat "${TMPDIR}/old-release-setup.out" >&2
+    exit 1
+fi
+
+if [ "${old_release_wp_codebox_core_module}" != "${TMPDIR}/old-release-install/source/node_modules/@automattic/wp-codebox-core/dist/contracts.js" ]; then
+    echo "Expected incompatible release fallback to export the source WP Codebox core module, got: ${old_release_wp_codebox_core_module}" >&2
+    cat "${TMPDIR}/old-release-setup.out" >&2
+    exit 1
+fi
+
+if ! grep -q 'wp_codebox_version_too_old' "${TMPDIR}/old-release-setup.out"; then
+    echo "Expected incompatible release runtime to report the adapter version preflight" >&2
+    cat "${TMPDIR}/old-release-setup.out" >&2
+    exit 1
+fi
+
+# A runtime without a parseable version is equally unsafe to dispatch. Setup
+# repairs the release through the configured source provider before tests run.
+MISSING_VERSION_GITHUB_ENV_FILE="${TMPDIR}/missing-version-github-env"
+(
+    cd "${EXTENSION_DIR}"
+    HOME="${TMPDIR}/missing-version-home" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GITHUB_ENV="${MISSING_VERSION_GITHUB_ENV_FILE}" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/missing-version-install" \
+    HOMEBOY_WP_CODEBOX_DOWNLOAD_URL="https://example.test/wp-codebox-cli-linux-x64.tar.gz" \
+    FAKE_WP_CODEBOX_VERSION="" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/missing-version-setup.out" 2>&1
+)
+
+missing_version_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${MISSING_VERSION_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+if [ "${missing_version_wp_codebox_bin}" != "${TMPDIR}/missing-version-install/source/packages/cli/dist/index.js" ]; then
+    echo "Expected release without a version to be repaired through source setup, got: ${missing_version_wp_codebox_bin}" >&2
+    cat "${TMPDIR}/missing-version-setup.out" >&2
+    exit 1
+fi
+
+if ! grep -q 'wp_codebox_version_probe_failed' "${TMPDIR}/missing-version-setup.out"; then
+    echo "Expected release without a version to report the adapter version preflight" >&2
+    cat "${TMPDIR}/missing-version-setup.out" >&2
+    exit 1
+fi
+
+# A configured source that cannot meet the manifest minimum must fail during
+# setup with the same operator repair command used by the test adapter.
+SOURCE_MINIMUM_ERROR="${TMPDIR}/source-minimum.err"
+if (
+    cd "${EXTENSION_DIR}"
+    HOME="${TMPDIR}/source-minimum-home" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    HOMEBOY_WP_CODEBOX_INSTALL_MODE="source" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/source-minimum-install" \
+    FAKE_WP_CODEBOX_SOURCE_VERSION="0.20.1" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" >/dev/null 2> "${SOURCE_MINIMUM_ERROR}"
+); then
+    echo "An incompatible configured source runtime must fail setup" >&2
+    exit 1
+fi
+
+if ! grep -q 'WP Codebox wp_codebox_version_too_old: required >=0.21.0, observed 0.20.1' "${SOURCE_MINIMUM_ERROR}" || ! grep -q 'Run homeboy extension setup wordpress\.' "${SOURCE_MINIMUM_ERROR}"; then
+    echo "Expected exact WP Codebox minimum-version repair command" >&2
+    cat "${SOURCE_MINIMUM_ERROR}" >&2
     exit 1
 fi
 
@@ -324,6 +416,7 @@ printf '%s\n' 'module.exports = { runtimeContractManifest() { return { fixture: 
 
 cat > "${CURRENT_ROOT}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
+if (process.argv.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
 console.log('current wp-codebox');
 NODE
 chmod +x "${CURRENT_ROOT}/packages/cli/dist/index.js"
@@ -401,33 +494,96 @@ if [ "$(PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" "${sour
     exit 1
 fi
 
+MISSING_RELEASE_INSTALL_DIR="${TMPDIR}/missing-release-install"
+MISSING_RELEASE_RUNTIME_DIR="${MISSING_RELEASE_INSTALL_DIR}/release/wp-codebox-cli"
+MISSING_RELEASE_HOME="${TMPDIR}/missing-release-home"
+MISSING_RELEASE_WRAPPER="${MISSING_RELEASE_HOME}/.local/bin/wp-codebox"
+mkdir -p "${MISSING_RELEASE_RUNTIME_DIR}/bin" "${MISSING_RELEASE_RUNTIME_DIR}/node_modules/@automattic/wp-codebox-core/dist"
+cat > "${MISSING_RELEASE_RUNTIME_DIR}/bin/wp-codebox" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+    printf '%s\n' '0.20.1'
+    exit 0
+fi
+printf '%s\n' 'persisted release wp-codebox'
+SH
+chmod +x "${MISSING_RELEASE_RUNTIME_DIR}/bin/wp-codebox"
+printf '%s\n' 'module.exports = { runtimeContractManifest() { return { fixture: "persisted-release" }; } };' > "${MISSING_RELEASE_RUNTIME_DIR}/node_modules/@automattic/wp-codebox-core/dist/contracts.js"
+mkdir -p "$(dirname "${MISSING_RELEASE_WRAPPER}")"
+cat > "${MISSING_RELEASE_WRAPPER}" <<EOF
+#!/usr/bin/env bash
+exec "${MISSING_RELEASE_RUNTIME_DIR}/bin/wp-codebox" "\$@"
+EOF
+chmod +x "${MISSING_RELEASE_WRAPPER}"
+
 (
     cd "${EXTENSION_DIR}"
-    HOME="${HOME_DIR}" \
+    HOME="${MISSING_RELEASE_HOME}" \
     PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
     GITHUB_ENV="${MISSING_RELEASE_GITHUB_ENV_FILE}" \
     FAKE_WP_CODEBOX_RELEASE_MISSING="1" \
-    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/missing-release-install" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${MISSING_RELEASE_INSTALL_DIR}" \
+    HOMEBOY_WP_CODEBOX_BIN="${MISSING_RELEASE_WRAPPER}" \
+    HOMEBOY_WP_CODEBOX_CORE_MODULE="${MISSING_RELEASE_RUNTIME_DIR}/node_modules/@automattic/wp-codebox-core/dist/contracts.js" \
     HOMEBOY_WP_CODEBOX_DOWNLOAD_URL="https://example.test/wp-codebox-cli-linux-x64.tar.gz" \
-    HOMEBOY_WP_CODEBOX_SOURCE="https://example.test/wp-codebox.git" \
-    HOMEBOY_WP_CODEBOX_REF="main" \
     bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/missing-release-setup.out" 2> "${TMPDIR}/missing-release-setup.err"
 )
 
 missing_release_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${MISSING_RELEASE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+missing_release_wp_codebox_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${MISSING_RELEASE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
 
 if [ "$(PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" "${missing_release_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
     echo "Expected missing release artifact to fall back to built CLI" >&2
     exit 1
 fi
 
-if [ "${missing_release_wp_codebox_bin}" != "${TMPDIR}/missing-release-install/source/packages/cli/dist/index.js" ]; then
+if [ "${missing_release_wp_codebox_bin}" != "${MISSING_RELEASE_INSTALL_DIR}/source/packages/cli/dist/index.js" ]; then
     echo "Expected missing release fallback to export the built WP Codebox CLI, got: ${missing_release_wp_codebox_bin}" >&2
     exit 1
 fi
 
-if grep -q 'WP Codebox release artifact not published' "${TMPDIR}/missing-release-setup.err"; then
-    echo "Explicit source/ref setup should not probe release artifacts before source install" >&2
+if [ "${missing_release_wp_codebox_core_module}" != "${MISSING_RELEASE_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/contracts.js" ]; then
+    echo "Expected missing release fallback to export the source WP Codebox core module, got: ${missing_release_wp_codebox_core_module}" >&2
+    cat "${TMPDIR}/missing-release-setup.out" >&2
+    exit 1
+fi
+
+if ! grep -q 'WP Codebox release artifact not published' "${TMPDIR}/missing-release-setup.err"; then
+    echo "Missing release artifact must use the source fallback" >&2
+    cat "${TMPDIR}/missing-release-setup.err" >&2
+    exit 1
+fi
+
+# Source fallback must not erase a caller-owned CLI outside its managed release
+# cache. The fake build checks that the explicit value survives into npm.
+EXTERNAL_CLI="${TMPDIR}/external/wp-codebox"
+EXTERNAL_CLI_GITHUB_ENV_FILE="${TMPDIR}/external-cli-github-env"
+mkdir -p "$(dirname "${EXTERNAL_CLI}")"
+cat > "${EXTERNAL_CLI}" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+    printf '%s\n' '0.20.1'
+    exit 0
+fi
+printf '%s\n' 'external wp-codebox'
+SH
+chmod +x "${EXTERNAL_CLI}"
+(
+    cd "${EXTENSION_DIR}"
+    HOME="${TMPDIR}/external-cli-home" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GITHUB_ENV="${EXTERNAL_CLI_GITHUB_ENV_FILE}" \
+    HOMEBOY_WP_CODEBOX_INSTALL_MODE="source" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/external-cli-install" \
+    WP_CODEBOX_CLI="${EXTERNAL_CLI}" \
+    FAKE_EXPECT_WP_CODEBOX_CLI="${EXTERNAL_CLI}" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/external-cli-setup.out"
+)
+
+external_cli_source_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${EXTERNAL_CLI_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+if [ "${external_cli_source_bin}" != "${TMPDIR}/external-cli-install/source/packages/cli/dist/index.js" ]; then
+    echo "Expected incompatible explicit external CLI to use source fallback, got: ${external_cli_source_bin}" >&2
+    cat "${TMPDIR}/external-cli-setup.out" >&2
     exit 1
 fi
 
