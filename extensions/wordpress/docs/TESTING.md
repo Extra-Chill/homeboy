@@ -88,6 +88,20 @@ dependency mounts, drop-in handling, WordPress version selection, and
 }
 ```
 
+The booted runtime sets `WP_PATH=/wordpress` in each WordPress smoke child.
+Declared validation dependencies are exposed as a JSON object in
+`HOMEBOY_WORDPRESS_DEPENDENCY_ROOTS_JSON`, mapping each plugin slug to its
+mounted `/wordpress/wp-content/plugins/<slug>` root. These are sandbox paths,
+not host checkout paths, so a smoke can require a dependency without embedding
+machine-specific locations. Each slug also receives its deterministic uppercase
+namespaced path mapping. Every character is encoded with its type so separators
+and case do not collide: `example-plugin` becomes
+`HOMEBOY_WORDPRESS_DEPENDENCY_LOWER_E_LOWER_X_LOWER_A_LOWER_M_LOWER_P_LOWER_L_LOWER_E_HYPHEN_LOWER_P_LOWER_L_LOWER_U_LOWER_G_LOWER_I_LOWER_N_ROOT=/wordpress/wp-content/plugins/example-plugin`.
+The legacy `EXAMPLE_PLUGIN_PATH` form remains available only when it is unique
+among the declared dependencies and does not conflict with a reserved runtime
+variable. This preserves established callers such as `DATA_MACHINE_PATH` while
+the JSON map remains the canonical multi-dependency interface.
+
 ```bash
 homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```

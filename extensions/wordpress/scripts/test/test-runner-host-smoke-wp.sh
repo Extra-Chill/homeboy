@@ -43,6 +43,13 @@ HOST_SMOKE_TIMEOUT_SECONDS="${HOMEBOY_WORDPRESS_HOST_SMOKE_TIMEOUT_SECONDS:-120}
 HOST_SMOKE_EXCERPT_BYTES="${HOMEBOY_WORDPRESS_HOST_SMOKE_EXCERPT_BYTES:-65536}"
 WP_CODEBOX_TIMEOUT_DIAGNOSTICS="${SCRIPT_DIR}/../lib/wp-codebox-timeout-diagnostics.mjs"
 
+case "$PLUGIN_SLUG" in
+    ''|*[!A-Za-z0-9._-]*)
+        echo "ERROR: component has an unsafe WordPress plugin slug: ${PLUGIN_SLUG}" >&2
+        exit 2
+        ;;
+esac
+
 homeboy_wordpress_host_smoke_abs() {
     local raw_path="$1"
     local abs_path
@@ -95,11 +102,11 @@ homeboy_wordpress_smoke_wp_version() {
     printf '%s\n' "$version"
 }
 
-# Build the JSON array of recipe mounts: the plugin, its validation
-# dependencies, and the db.php drop-in if present. WordPress loads all mounted
-# plugins so the smoke's `require` paths resolve and WP core functions exist.
-homeboy_wordpress_smoke_recipe_mounts() {
+# Build the recipe mounts and child environment mapping together so every
+# dependency root exposed to a smoke is the translated path that was mounted.
+homeboy_wordpress_smoke_recipe_inputs() {
     local mounts_json='[]'
+    local dependency_roots_json='{}'
     local plugin_source
     plugin_source="$(homeboy_wp_codebox_resolve_mount_path "$PLUGIN_PATH")"
     mounts_json=$(jq -nc --argjson mounts "$mounts_json" --arg source "$plugin_source" --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}" '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
@@ -108,7 +115,7 @@ homeboy_wordpress_smoke_recipe_mounts() {
         homeboy_export_validation_dependency_paths "$PLUGIN_PATH" >/dev/null 2>&1 || true
     fi
     if [ -n "${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}" ]; then
-        local dep_path dep_slug dep_source
+        local dep_path dep_slug dep_source dep_target
         while IFS= read -r dep_path; do
             [ -n "$dep_path" ] || continue
             [ -d "$dep_path" ] || continue
@@ -117,8 +124,16 @@ homeboy_wordpress_smoke_recipe_mounts() {
             else
                 dep_slug="$(basename "$dep_path")"
             fi
+            case "$dep_slug" in
+                ''|*[!A-Za-z0-9._-]*)
+                    echo "ERROR: validation dependency has an unsafe WordPress plugin slug: ${dep_slug}" >&2
+                    return 1
+                    ;;
+            esac
             dep_source="$(homeboy_wp_codebox_resolve_mount_path "$dep_path")"
-            mounts_json=$(jq -nc --argjson mounts "$mounts_json" --arg source "$dep_source" --arg target "/wordpress/wp-content/plugins/${dep_slug}" '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
+            dep_target="/wordpress/wp-content/plugins/${dep_slug}"
+            mounts_json=$(jq -nc --argjson mounts "$mounts_json" --arg source "$dep_source" --arg target "$dep_target" '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
+            dependency_roots_json=$(jq -nc --argjson roots "$dependency_roots_json" --arg slug "$dep_slug" --arg root "$dep_target" '$roots + {($slug): $root}')
         done <<< "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS"
     fi
 
@@ -128,7 +143,7 @@ homeboy_wordpress_smoke_recipe_mounts() {
         mounts_json=$(jq -nc --argjson mounts "$mounts_json" --arg source "$db_source" --arg target "/wordpress/wp-content/db.php" '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
     fi
 
-    printf '%s\n' "$mounts_json"
+    jq -nc --argjson mounts "$mounts_json" --argjson dependencyRoots "$dependency_roots_json" '{mounts: $mounts, dependency_roots: $dependencyRoots}'
 }
 
 # Emit (to stdout) a PHP wrapper that, when executed inside the booted-WP
@@ -137,16 +152,20 @@ homeboy_wordpress_smoke_recipe_mounts() {
 # This prints the wrapper source; it does not run the smoke on the host.
 homeboy_wordpress_smoke_wrapper() {
     local sandbox_smoke_path="$1"
+    local environment_json="$2"
     php -r '
         $smoke = $argv[1];
+        $environment = json_decode($argv[2], true, 512, JSON_THROW_ON_ERROR);
         echo "<?php\n";
         echo "\$smoke = " . var_export($smoke, true) . ";\n";
+        echo "\$homeboy_smoke_environment = " . var_export($environment, true) . ";\n";
+        echo "foreach (\$homeboy_smoke_environment as \$name => \$value) { putenv(\$name . \"=\" . \$value); \$_ENV[\$name] = \$value; }\n";
         echo "\$homeboy_smoke_stderr = defined(\"STDERR\") ? STDERR : fopen(\"php://stderr\", \"w\");\n";
         echo "if (!is_resource(\$homeboy_smoke_stderr)) { \$homeboy_smoke_stderr = fopen(\"php://output\", \"w\"); }\n";
         echo "if (!file_exists(\$smoke)) { fwrite(\$homeboy_smoke_stderr, \"smoke file missing in sandbox: \" . \$smoke . \"\\n\"); exit(3); }\n";
         echo "register_shutdown_function(function () { \$e = error_get_last(); if (\$e && in_array(\$e[\"type\"], array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR), true)) { exit(1); } });\n";
         echo "try { require \$smoke; } catch (\\Throwable \$e) { fwrite(\$homeboy_smoke_stderr, \"smoke threw: \" . \$e->getMessage() . \"\\n\"); exit(1); }\n";
-    ' "$sandbox_smoke_path"
+    ' "$sandbox_smoke_path" "$environment_json"
 }
 
 run_one_smoke() {
@@ -162,7 +181,7 @@ run_one_smoke() {
     stderr_file="${artifacts_dir}/wp-codebox.stderr"
     termination_file="${artifacts_dir}/termination.json"
 
-    homeboy_wordpress_smoke_wrapper "$sandbox_smoke_path" > "$wrapper_file"
+    homeboy_wordpress_smoke_wrapper "$sandbox_smoke_path" "$RECIPE_ENVIRONMENT" > "$wrapper_file"
     echo "HOST_SMOKE_PROGRESS:${rel_path}:phase=wrapper-created artifacts=${artifacts_dir}"
 
     jq -n \
@@ -345,7 +364,44 @@ case "$WP_CODEBOX_BIN" in
         ;;
 esac
 WP_VERSION="$(homeboy_wordpress_smoke_wp_version)"
-RECIPE_MOUNTS="$(homeboy_wordpress_smoke_recipe_mounts)"
+RECIPE_INPUTS="$(homeboy_wordpress_smoke_recipe_inputs)" || exit 1
+RECIPE_MOUNTS="$(jq -c '.mounts' <<< "$RECIPE_INPUTS")"
+RECIPE_DEPENDENCY_ROOTS="$(jq -c '.dependency_roots' <<< "$RECIPE_INPUTS")"
+RECIPE_ENVIRONMENT="$(jq -c '
+    def namespaced_dependency_name:
+        split("")
+        | map(
+            if test("^[a-z]$") then "LOWER_" + ascii_upcase
+            elif test("^[A-Z]$") then "UPPER_" + .
+            elif test("^[0-9]$") then "DIGIT_" + .
+            elif . == "-" then "HYPHEN"
+            elif . == "." then "DOT"
+            elif . == "_" then "UNDERSCORE"
+            else error("unsupported WordPress plugin slug character")
+            end
+        )
+        | "HOMEBOY_WORDPRESS_DEPENDENCY_" + join("_") + "_ROOT";
+    def legacy_dependency_name:
+        ascii_upcase | gsub("[^A-Z0-9_]"; "_") + "_PATH";
+    .dependency_roots as $roots
+    | ["WP_PATH", "HOMEBOY_WORDPRESS_DEPENDENCY_ROOTS_JSON", "PATH", "HOME", "PWD", "TMPDIR", "SHELL", "USER", "LOGNAME"] as $reserved
+    | [$roots | keys[] | legacy_dependency_name]
+    | group_by(.)
+    | map(select(length == 1) | .[0]) as $unique_legacy_names
+    | {
+        WP_PATH: "/wordpress",
+        HOMEBOY_WORDPRESS_DEPENDENCY_ROOTS_JSON: ($roots | tojson)
+    }
+    + reduce ($roots | to_entries[]) as $dependency (
+        {};
+        ($dependency.key | namespaced_dependency_name) as $namespaced_name
+        | ($dependency.key | legacy_dependency_name) as $legacy_name
+        | . + {($namespaced_name): $dependency.value}
+        | if (($unique_legacy_names | index($legacy_name)) != null and ($reserved | index($legacy_name)) == null)
+          then . + {($legacy_name): $dependency.value}
+          else .
+          end
+    )' <<< "$RECIPE_INPUTS")"
 
 echo "  Files: ${#smoke_files[@]}"
 echo "  WordPress: ${WP_VERSION:-default}"

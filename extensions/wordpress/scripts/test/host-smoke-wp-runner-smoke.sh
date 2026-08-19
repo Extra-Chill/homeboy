@@ -8,8 +8,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_PATH}/../.." && pwd)/homeboy}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/crates/homeboy-extension/src/runtime/resolve-context.sh}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+
+if [ ! -f "$RESOLVE_CONTEXT_HELPER" ]; then
+    echo "Missing resolve-context helper: ${RESOLVE_CONTEXT_HELPER}" >&2
+    exit 1
+fi
+export HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER"
 
 assert_contains() {
     local file="$1" expected="$2"
@@ -101,6 +109,92 @@ assert_contains "$captured_recipe" "workspace-recipe/v1"
 assert_contains "${CAPTURE_DIR}/wrapper.php" "\$homeboy_smoke_stderr = defined(\"STDERR\") ? STDERR : fopen(\"php://stderr\", \"w\");"
 assert_contains "${CAPTURE_DIR}/wrapper.php" "fwrite(\$homeboy_smoke_stderr"
 assert_not_contains "${CAPTURE_DIR}/wrapper.php" "fwrite(STDERR"
+
+# --- Child environment contract: runtime and dependency roots are sandbox
+# paths, even when their host checkout paths need shell quoting/translation.
+component_with_spaces="${TMPDIR}/component with spaces"
+dependency_with_spaces="${TMPDIR}/dependency roots/dependency-plugin"
+make_component "$component_with_spaces"
+mkdir -p "$dependency_with_spaces"
+cat > "${dependency_with_spaces}/dependency-plugin.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Dependency Plugin
+ */
+PHP
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component_with_spaces" \
+HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX" \
+HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="tests/alpha-smoke.php" \
+HOMEBOY_SETTINGS_JSON="$(jq -nc --arg path "$dependency_with_spaces" '{validation_dependencies: [{path: $path, plugin_slug: "dependency-plugin"}]}')" \
+FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/environment.out"
+
+captured_environment_recipe="$(ls -t "${CAPTURE_DIR}"/recipe-*.json | head -1)"
+assert_contains "$captured_environment_recipe" "${component_with_spaces}"
+assert_contains "$captured_environment_recipe" "${dependency_with_spaces}"
+assert_contains "$captured_environment_recipe" "/wordpress/wp-content/plugins/dependency-plugin"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'WP_PATH' => '/wordpress'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'HOMEBOY_WORDPRESS_DEPENDENCY_ROOTS_JSON' => '{\"dependency-plugin\":\"/wordpress/wp-content/plugins/dependency-plugin\"}'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'HOMEBOY_WORDPRESS_DEPENDENCY_LOWER_D_LOWER_E_LOWER_P_LOWER_E_LOWER_N_LOWER_D_LOWER_E_LOWER_N_LOWER_C_LOWER_Y_HYPHEN_LOWER_P_LOWER_L_LOWER_U_LOWER_G_LOWER_I_LOWER_N_ROOT' => '/wordpress/wp-content/plugins/dependency-plugin'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'DEPENDENCY_PLUGIN_PATH' => '/wordpress/wp-content/plugins/dependency-plugin'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "putenv(\$name . \"=\" . \$value)"
+
+# --- Normalized legacy aliases cannot overwrite one another or WP_PATH. The
+# canonical JSON map and injective namespaced variables retain every root.
+collision_component="${TMPDIR}/collision-component"
+mkdir -p "${collision_component}/tests"
+cp "${component}/tests/alpha-smoke.php" "${collision_component}/tests/alpha-smoke.php"
+collision_dependencies=()
+for slug in foo-bar foo.bar foo_bar foo FOO wp data-machine; do
+    dependency="${TMPDIR}/collision-dependencies/${slug}"
+    mkdir -p "$dependency"
+    cat > "${dependency}/${slug}.php" <<PHP
+<?php
+/**
+ * Plugin Name: ${slug}
+ */
+PHP
+    collision_dependencies+=("$dependency")
+done
+
+collision_settings="$(jq -nc \
+    --arg fooHyphen "${collision_dependencies[0]}" \
+    --arg fooDot "${collision_dependencies[1]}" \
+    --arg fooUnderscore "${collision_dependencies[2]}" \
+    --arg fooLower "${collision_dependencies[3]}" \
+    --arg fooUpper "${collision_dependencies[4]}" \
+    --arg wp "${collision_dependencies[5]}" \
+    --arg dataMachine "${collision_dependencies[6]}" \
+    '{validation_dependencies: [$fooHyphen, $fooDot, $fooUnderscore, $fooLower, $fooUpper, $wp, $dataMachine]}')"
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="collision-component" \
+HOMEBOY_COMPONENT_PATH="$collision_component" \
+HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX" \
+HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="tests/alpha-smoke.php" \
+HOMEBOY_SETTINGS_JSON="$collision_settings" \
+FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/collision.out"
+
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'WP_PATH' => '/wordpress'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'HOMEBOY_WORDPRESS_DEPENDENCY_LOWER_F_LOWER_O_LOWER_O_HYPHEN_LOWER_B_LOWER_A_LOWER_R_ROOT' => '/wordpress/wp-content/plugins/foo-bar'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'HOMEBOY_WORDPRESS_DEPENDENCY_LOWER_F_LOWER_O_LOWER_O_DOT_LOWER_B_LOWER_A_LOWER_R_ROOT' => '/wordpress/wp-content/plugins/foo.bar'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'HOMEBOY_WORDPRESS_DEPENDENCY_LOWER_F_LOWER_O_LOWER_O_UNDERSCORE_LOWER_B_LOWER_A_LOWER_R_ROOT' => '/wordpress/wp-content/plugins/foo_bar'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'HOMEBOY_WORDPRESS_DEPENDENCY_LOWER_F_LOWER_O_LOWER_O_ROOT' => '/wordpress/wp-content/plugins/foo'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'HOMEBOY_WORDPRESS_DEPENDENCY_UPPER_F_UPPER_O_UPPER_O_ROOT' => '/wordpress/wp-content/plugins/FOO'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'HOMEBOY_WORDPRESS_DEPENDENCY_LOWER_W_LOWER_P_ROOT' => '/wordpress/wp-content/plugins/wp'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'HOMEBOY_WORDPRESS_DEPENDENCY_LOWER_D_LOWER_A_LOWER_T_LOWER_A_HYPHEN_LOWER_M_LOWER_A_LOWER_C_LOWER_H_LOWER_I_LOWER_N_LOWER_E_ROOT' => '/wordpress/wp-content/plugins/data-machine'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "'DATA_MACHINE_PATH' => '/wordpress/wp-content/plugins/data-machine'"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "\"foo-bar\":\"/wordpress/wp-content/plugins/foo-bar\""
+assert_contains "${CAPTURE_DIR}/wrapper.php" "\"foo.bar\":\"/wordpress/wp-content/plugins/foo.bar\""
+assert_contains "${CAPTURE_DIR}/wrapper.php" "\"foo_bar\":\"/wordpress/wp-content/plugins/foo_bar\""
+assert_contains "${CAPTURE_DIR}/wrapper.php" "\"foo\":\"/wordpress/wp-content/plugins/foo\""
+assert_contains "${CAPTURE_DIR}/wrapper.php" "\"FOO\":\"/wordpress/wp-content/plugins/FOO\""
+assert_not_contains "${CAPTURE_DIR}/wrapper.php" "'FOO_BAR_PATH'"
+assert_not_contains "${CAPTURE_DIR}/wrapper.php" "'FOO_PATH'"
+assert_not_contains "${CAPTURE_DIR}/wrapper.php" "'WP_PATH' => '/wordpress/wp-content/plugins/wp'"
 
 # --- Failure propagation: a fake codebox returning success=false fails the run.
 FAKE_CODEBOX_FAIL="${TMPDIR}/fake-wp-codebox-fail.cjs"
