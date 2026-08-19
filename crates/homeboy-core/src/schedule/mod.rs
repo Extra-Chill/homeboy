@@ -27,7 +27,10 @@ pub use execution::{
     raw_digest, result_digest, run_schedule, sequence_digest, ScheduleCommandResult,
     ScheduleCommandRunner, ScheduleRunOutcome, ScheduleStepOutcome, SubprocessRunner,
 };
-pub use state::{load_state, remove_state, save_state, ScheduleState};
+pub use state::{
+    load_state, load_state_in_root, remove_state, remove_state_in_root, save_state,
+    save_state_in_root, ScheduleState,
+};
 pub use ticker::{reclaim_stale_runs, ScheduleTicker};
 pub use types::{
     Cadence, ExecCommand, NotifyPolicy, OverlapPolicy, Schedule, ScheduleStep, ScheduledCommand,

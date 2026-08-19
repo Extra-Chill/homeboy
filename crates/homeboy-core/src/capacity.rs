@@ -296,7 +296,12 @@ fn existing_ancestor(path: &Path) -> PathBuf {
 }
 
 fn capacity_ledger_path(filesystem: &str) -> Result<PathBuf> {
-    let root = crate::paths::homeboy_data()?.join("controller-state/capacity-reservations");
+    capacity_ledger_path_in_root(&crate::paths::homeboy_data()?, filesystem)
+}
+
+/// [`capacity_ledger_path`] below an explicitly injected data root.
+fn capacity_ledger_path_in_root(data_root: &Path, filesystem: &str) -> Result<PathBuf> {
+    let root = data_root.join("controller-state/capacity-reservations");
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),

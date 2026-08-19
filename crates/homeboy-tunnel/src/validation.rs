@@ -1,14 +1,28 @@
+use std::path::Path;
+
 use homeboy_core::config;
 use homeboy_core::error::{Error, Result};
+use homeboy_core::paths;
 use homeboy_core::server;
 use homeboy_engine_primitives::content_hash;
 
 use super::preview::parse_rfc3339_utc;
 use super::types::*;
 
-pub(super) fn validate_service_tunnel(tunnel: &ServiceTunnel) -> Result<()> {
-    if tunnel.server_id != RUNNER_LOCAL_SERVICE_SERVER_ID && !server::exists(&tunnel.server_id) {
-        let suggestions = config::find_similar_ids::<server::Server>(&tunnel.server_id);
+/// Validate a service tunnel against an already-resolved config root.
+///
+/// The referenced server is probed in the same root the tunnel is being written
+/// to; probing the process root would accept a tunnel into one installation on
+/// the strength of a server that only exists in another.
+pub(super) fn validate_service_tunnel_in_root(
+    config_root: &Path,
+    tunnel: &ServiceTunnel,
+) -> Result<()> {
+    if tunnel.server_id != RUNNER_LOCAL_SERVICE_SERVER_ID
+        && !server::exists_in_root(config_root, &tunnel.server_id)
+    {
+        let suggestions =
+            config::find_similar_ids_in_root::<server::Server>(config_root, &tunnel.server_id);
         return Err(Error::server_not_found(
             tunnel.server_id.clone(),
             suggestions,
@@ -93,6 +107,12 @@ pub(super) fn validate_service_tunnel(tunnel: &ServiceTunnel) -> Result<()> {
     }
     validate_native_preview_auth_policy(&tunnel.policy.native_preview_auth, &tunnel.id)?;
     Ok(())
+}
+
+/// Ambient sibling of [`validate_service_tunnel_in_root`]: resolves the process
+/// config root once and delegates.
+pub(super) fn validate_service_tunnel(tunnel: &ServiceTunnel) -> Result<()> {
+    validate_service_tunnel_in_root(&paths::homeboy()?, tunnel)
 }
 
 fn validate_native_preview_auth_policy(

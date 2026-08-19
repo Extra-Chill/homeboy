@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 use serde::Serialize;
 
+use crate::paths::PathRoots;
+
 mod artifacts;
 mod findings;
 mod helpers;
@@ -62,7 +64,18 @@ pub struct ObservationStore {
     connection: Connection,
     path: PathBuf,
     readonly: bool,
-    artifact_root: Option<PathBuf>,
+    /// Filesystem roots this store was opened against, when it was opened
+    /// through a rooted constructor.
+    ///
+    /// The store spans TWO roots — `data` locates the SQLite database and
+    /// `artifacts` locates the bytes the database indexes — so they are held
+    /// together rather than as two independently resolvable fields. Resolving
+    /// one from injection and the other from ambient process state is the
+    /// "split home" defect class this field exists to make impossible (#7505).
+    ///
+    /// `None` means the store was opened at the ambient boundary; artifact
+    /// resolution then falls back to `paths::artifact_root()`.
+    roots: Option<PathRoots>,
 }
 
 pub fn database_path() -> Result<PathBuf> {

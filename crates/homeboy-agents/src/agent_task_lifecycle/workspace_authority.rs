@@ -55,6 +55,26 @@ impl WorkspaceTerminalAuthorityStore {
         }
     }
 
+    /// Bind terminal workspace authority to explicit roots (#7505).
+    pub(crate) fn from_roots(roots: &paths::PathRoots) -> Self {
+        Self::new(roots.data().to_path_buf(), roots.config().to_path_buf())
+    }
+
+    /// Resolve the process roots *once* for one whole authority operation.
+    ///
+    /// Every public entry point below used to resolve them again per path
+    /// helper: `resolve_workspace_terminal_authority` read the data root once
+    /// for the receipt and again for the release marker, then a third time —
+    /// plus the ambient config root — when a substituted job identity drove it
+    /// into `begin_workspace_terminal_authority_release`. A repoint between two
+    /// of those reads let a receipt that failed the exact-binding check be
+    /// frozen in a different installation than the one that rejected it, which
+    /// is precisely the split #7505 exists to remove. Resolving here and
+    /// threading `&self` means one authority decision reads and writes one home.
+    fn from_environment() -> Result<Self> {
+        Ok(Self::new(paths::homeboy_data()?, paths::homeboy()?))
+    }
+
     fn run_index_path(&self, run_id: &str) -> PathBuf {
         let mut digest = Sha256::new();
         digest.update(run_id.as_bytes());
@@ -143,6 +163,179 @@ impl WorkspaceTerminalAuthorityStore {
             )
         })
     }
+
+    fn resolve_authority(
+        &self,
+        run_id: &str,
+        runner_id: &str,
+        remote_workspace: &str,
+        job_id: Option<&str>,
+    ) -> Result<Option<WorkspaceTerminalAuthorityReceipt>> {
+        let path = self.receipt_path(run_id, runner_id, remote_workspace);
+        let release_path = self.release_path(run_id, runner_id, remote_workspace);
+        if release_path.exists() {
+            let release = read_release(&release_path, run_id, runner_id, remote_workspace)?;
+            return match release.state.as_str() {
+                "pending" | "released" => Err(Error::validation_invalid_argument(
+                    "workspace_terminal_authority",
+                    format!("workspace terminal authority release is {}", release.state),
+                    Some(release_path.display().to_string()),
+                    None,
+                )),
+                _ => Err(invalid_release_error(&release_path)),
+            };
+        }
+        if !path.exists() {
+            return Ok(None);
+        }
+        let receipt: WorkspaceTerminalAuthorityReceipt =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            })?)
+            .map_err(|error| {
+                Error::internal_json(error.to_string(), Some(path.display().to_string()))
+            })?;
+        let substituted_job = job_id.is_some_and(|job_id| job_id != receipt.runner_job_id);
+        let valid = receipt.schema == WORKSPACE_TERMINAL_AUTHORITY_SCHEMA
+            && receipt.run_id == run_id
+            && receipt.runner_id == runner_id
+            && receipt.remote_workspace == remote_workspace
+            && !receipt.runner_job_id.is_empty()
+            && job_id.is_none_or(|job_id| job_id == receipt.runner_job_id);
+        valid.then_some(receipt).map(Some).ok_or_else(|| {
+            // A substituted job identity is a conflicting authority assertion.
+            // Freeze cleanup so later compaction cannot make the workspace appear
+            // safely addressable after a failed exact-binding check.
+            //
+            // This freeze must land in the same installation whose receipt just
+            // failed the check. It used to call the ambient
+            // begin_workspace_terminal_authority_release, which re-resolved the
+            // data root a third time inside one authority decision (#7505).
+            if substituted_job {
+                let _ = self.begin_release(run_id, runner_id, remote_workspace);
+            }
+            Error::validation_invalid_argument(
+                "workspace_terminal_authority",
+                "workspace terminal authority receipt is malformed or contradicts workspace ownership",
+                Some(path.display().to_string()),
+                None,
+            )
+        })
+    }
+
+    fn resolve_retained_workspace(&self, run_id: &str) -> Result<RetainedWorkspace> {
+        let index_path = self.run_index_path(run_id);
+        if !index_path.exists() {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "agent task has no retained Lab workspace record",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        let receipt: WorkspaceTerminalAuthorityReceipt =
+            serde_json::from_slice(&std::fs::read(&index_path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(index_path.display().to_string()))
+            })?)
+            .map_err(|error| {
+                Error::internal_json(error.to_string(), Some(index_path.display().to_string()))
+            })?;
+        let receipt = self
+            .resolve_authority(
+                run_id,
+                &receipt.runner_id,
+                &receipt.remote_workspace,
+                Some(&receipt.runner_job_id),
+            )?
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "run_id",
+                    "retained Lab workspace authority is unavailable; the workspace may have been reaped before artifacts were attached",
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })?;
+        Ok(RetainedWorkspace {
+            run_id: receipt.run_id,
+            runner_id: receipt.runner_id,
+            runner_job_id: receipt.runner_job_id,
+            remote_workspace: receipt.remote_workspace,
+        })
+    }
+
+    fn release_is_pending(
+        &self,
+        run_id: &str,
+        runner_id: &str,
+        remote_workspace: &str,
+    ) -> Result<bool> {
+        let path = self.release_path(run_id, runner_id, remote_workspace);
+        if !path.exists() {
+            return Ok(false);
+        }
+        Ok(read_release(&path, run_id, runner_id, remote_workspace)?.state == "pending")
+    }
+
+    fn begin_release(&self, run_id: &str, runner_id: &str, remote_workspace: &str) -> Result<()> {
+        let path = self.release_path(run_id, runner_id, remote_workspace);
+        homeboy_core::config::with_config_lock_at(&self.config_root, || {
+            if path.exists() {
+                let release = read_release(&path, run_id, runner_id, remote_workspace)?;
+                return match release.state.as_str() {
+                    "pending" => Ok(()),
+                    "released" => Err(Error::validation_invalid_argument(
+                        "workspace_terminal_authority",
+                        "workspace terminal authority was already released",
+                        Some(path.display().to_string()),
+                        None,
+                    )),
+                    _ => Err(invalid_release_error(&path)),
+                };
+            }
+            write_release(&path, run_id, runner_id, remote_workspace, "pending")
+        })
+    }
+
+    fn abort_release(&self, run_id: &str, runner_id: &str, remote_workspace: &str) -> Result<()> {
+        let path = self.release_path(run_id, runner_id, remote_workspace);
+        homeboy_core::config::with_config_lock_at(&self.config_root, || {
+            if !path.exists() {
+                return Ok(());
+            }
+            let release = read_release(&path, run_id, runner_id, remote_workspace)?;
+            if release.state != "pending" {
+                return Err(invalid_release_error(&path));
+            }
+            std::fs::remove_file(&path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            })
+        })
+    }
+
+    fn remove_authority(
+        &self,
+        run_id: &str,
+        runner_id: &str,
+        remote_workspace: &str,
+    ) -> Result<()> {
+        let path = self.receipt_path(run_id, runner_id, remote_workspace);
+        let release_path = self.release_path(run_id, runner_id, remote_workspace);
+        homeboy_core::config::with_config_lock_at(&self.config_root, || {
+            write_release(
+                &release_path,
+                run_id,
+                runner_id,
+                remote_workspace,
+                "released",
+            )?;
+            if path.exists() {
+                std::fs::remove_file(&path).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                })?;
+            }
+            Ok(())
+        })
+    }
 }
 
 fn authority_digest(run_id: &str, runner_id: &str, remote_workspace: &str) -> String {
@@ -155,34 +348,12 @@ fn authority_digest(run_id: &str, runner_id: &str, remote_workspace: &str) -> St
     format!("{:x}", digest.finalize())
 }
 
-fn run_index_path(run_id: &str) -> Result<PathBuf> {
-    Ok(
-        WorkspaceTerminalAuthorityStore::new(paths::homeboy_data()?, paths::homeboy()?)
-            .run_index_path(run_id),
-    )
-}
-
-fn receipt_path(run_id: &str, runner_id: &str, remote_workspace: &str) -> Result<PathBuf> {
-    Ok(
-        WorkspaceTerminalAuthorityStore::new(paths::homeboy_data()?, paths::homeboy()?)
-            .receipt_path(run_id, runner_id, remote_workspace),
-    )
-}
-
-fn release_path(run_id: &str, runner_id: &str, remote_workspace: &str) -> Result<PathBuf> {
-    Ok(
-        WorkspaceTerminalAuthorityStore::new(paths::homeboy_data()?, paths::homeboy()?)
-            .release_path(run_id, runner_id, remote_workspace),
-    )
-}
-
 pub(crate) fn persist_terminal_from_record(record: &AgentTaskRunRecord) -> Result<()> {
-    WorkspaceTerminalAuthorityStore::new(paths::homeboy_data()?, paths::homeboy()?)
-        .persist_terminal_from_record(record)
+    WorkspaceTerminalAuthorityStore::from_environment()?.persist_terminal_from_record(record)
 }
 
 fn persist_workspace_terminal_authority(receipt: WorkspaceTerminalAuthorityReceipt) -> Result<()> {
-    WorkspaceTerminalAuthorityStore::new(paths::homeboy_data()?, paths::homeboy()?).persist(receipt)
+    WorkspaceTerminalAuthorityStore::from_environment()?.persist(receipt)
 }
 
 fn read_receipt(path: &std::path::Path) -> Result<WorkspaceTerminalAuthorityReceipt> {
@@ -210,57 +381,22 @@ pub fn persist_workspace_terminal_authority_for_test(
     })
 }
 
+/// Resolve terminal workspace authority in the process installation.
+///
+/// One resolution of the roots covers the receipt read, the release-marker
+/// read, and the freeze this performs when an exact-binding check fails.
 pub fn resolve_workspace_terminal_authority(
     run_id: &str,
     runner_id: &str,
     remote_workspace: &str,
     job_id: Option<&str>,
 ) -> Result<Option<WorkspaceTerminalAuthorityReceipt>> {
-    let path = receipt_path(run_id, runner_id, remote_workspace)?;
-    let release_path = release_path(run_id, runner_id, remote_workspace)?;
-    if release_path.exists() {
-        let release = read_release(&release_path, run_id, runner_id, remote_workspace)?;
-        return match release.state.as_str() {
-            "pending" | "released" => Err(Error::validation_invalid_argument(
-                "workspace_terminal_authority",
-                format!("workspace terminal authority release is {}", release.state),
-                Some(release_path.display().to_string()),
-                None,
-            )),
-            _ => Err(invalid_release_error(&release_path)),
-        };
-    }
-    if !path.exists() {
-        return Ok(None);
-    }
-    let receipt: WorkspaceTerminalAuthorityReceipt =
-        serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(path.display().to_string()))
-        })?)
-        .map_err(|error| {
-            Error::internal_json(error.to_string(), Some(path.display().to_string()))
-        })?;
-    let substituted_job = job_id.is_some_and(|job_id| job_id != receipt.runner_job_id);
-    let valid = receipt.schema == WORKSPACE_TERMINAL_AUTHORITY_SCHEMA
-        && receipt.run_id == run_id
-        && receipt.runner_id == runner_id
-        && receipt.remote_workspace == remote_workspace
-        && !receipt.runner_job_id.is_empty()
-        && job_id.is_none_or(|job_id| job_id == receipt.runner_job_id);
-    valid.then_some(receipt).map(Some).ok_or_else(|| {
-        // A substituted job identity is a conflicting authority assertion.
-        // Freeze cleanup so later compaction cannot make the workspace appear
-        // safely addressable after a failed exact-binding check.
-        if substituted_job {
-            let _ = begin_workspace_terminal_authority_release(run_id, runner_id, remote_workspace);
-        }
-        Error::validation_invalid_argument(
-            "workspace_terminal_authority",
-            "workspace terminal authority receipt is malformed or contradicts workspace ownership",
-            Some(path.display().to_string()),
-            None,
-        )
-    })
+    WorkspaceTerminalAuthorityStore::from_environment()?.resolve_authority(
+        run_id,
+        runner_id,
+        remote_workspace,
+        job_id,
+    )
 }
 
 /// Resolve the retained Lab workspace for a terminal agent task without
@@ -268,42 +404,7 @@ pub fn resolve_workspace_terminal_authority(
 /// fails closed so callers can distinguish a reaped workspace from an empty
 /// discovery result.
 pub fn resolve_retained_workspace(run_id: &str) -> Result<RetainedWorkspace> {
-    let index_path = run_index_path(run_id)?;
-    if !index_path.exists() {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "agent task has no retained Lab workspace record",
-            Some(run_id.to_string()),
-            None,
-        ));
-    }
-    let receipt: WorkspaceTerminalAuthorityReceipt =
-        serde_json::from_slice(&std::fs::read(&index_path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(index_path.display().to_string()))
-        })?)
-        .map_err(|error| {
-            Error::internal_json(error.to_string(), Some(index_path.display().to_string()))
-        })?;
-    let receipt = resolve_workspace_terminal_authority(
-        run_id,
-        &receipt.runner_id,
-        &receipt.remote_workspace,
-        Some(&receipt.runner_job_id),
-    )?
-    .ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            "retained Lab workspace authority is unavailable; the workspace may have been reaped before artifacts were attached",
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
-    Ok(RetainedWorkspace {
-        run_id: receipt.run_id,
-        runner_id: receipt.runner_id,
-        runner_job_id: receipt.runner_job_id,
-        remote_workspace: receipt.remote_workspace,
-    })
+    WorkspaceTerminalAuthorityStore::from_environment()?.resolve_retained_workspace(run_id)
 }
 
 pub fn workspace_terminal_authority_release_is_pending(
@@ -311,11 +412,11 @@ pub fn workspace_terminal_authority_release_is_pending(
     runner_id: &str,
     remote_workspace: &str,
 ) -> Result<bool> {
-    let path = release_path(run_id, runner_id, remote_workspace)?;
-    if !path.exists() {
-        return Ok(false);
-    }
-    Ok(read_release(&path, run_id, runner_id, remote_workspace)?.state == "pending")
+    WorkspaceTerminalAuthorityStore::from_environment()?.release_is_pending(
+        run_id,
+        runner_id,
+        remote_workspace,
+    )
 }
 
 pub fn begin_workspace_terminal_authority_release(
@@ -323,23 +424,11 @@ pub fn begin_workspace_terminal_authority_release(
     runner_id: &str,
     remote_workspace: &str,
 ) -> Result<()> {
-    let path = release_path(run_id, runner_id, remote_workspace)?;
-    homeboy_core::config::with_config_lock(|| {
-        if path.exists() {
-            let release = read_release(&path, run_id, runner_id, remote_workspace)?;
-            return match release.state.as_str() {
-                "pending" => Ok(()),
-                "released" => Err(Error::validation_invalid_argument(
-                    "workspace_terminal_authority",
-                    "workspace terminal authority was already released",
-                    Some(path.display().to_string()),
-                    None,
-                )),
-                _ => Err(invalid_release_error(&path)),
-            };
-        }
-        write_release(&path, run_id, runner_id, remote_workspace, "pending")
-    })
+    WorkspaceTerminalAuthorityStore::from_environment()?.begin_release(
+        run_id,
+        runner_id,
+        remote_workspace,
+    )
 }
 
 pub fn abort_workspace_terminal_authority_release(
@@ -347,19 +436,11 @@ pub fn abort_workspace_terminal_authority_release(
     runner_id: &str,
     remote_workspace: &str,
 ) -> Result<()> {
-    let path = release_path(run_id, runner_id, remote_workspace)?;
-    homeboy_core::config::with_config_lock(|| {
-        if !path.exists() {
-            return Ok(());
-        }
-        let release = read_release(&path, run_id, runner_id, remote_workspace)?;
-        if release.state != "pending" {
-            return Err(invalid_release_error(&path));
-        }
-        std::fs::remove_file(&path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(path.display().to_string()))
-        })
-    })
+    WorkspaceTerminalAuthorityStore::from_environment()?.abort_release(
+        run_id,
+        runner_id,
+        remote_workspace,
+    )
 }
 
 pub fn remove_workspace_terminal_authority(
@@ -367,23 +448,11 @@ pub fn remove_workspace_terminal_authority(
     runner_id: &str,
     remote_workspace: &str,
 ) -> Result<()> {
-    let path = receipt_path(run_id, runner_id, remote_workspace)?;
-    let release_path = release_path(run_id, runner_id, remote_workspace)?;
-    homeboy_core::config::with_config_lock(|| {
-        write_release(
-            &release_path,
-            run_id,
-            runner_id,
-            remote_workspace,
-            "released",
-        )?;
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(path.display().to_string()))
-            })?;
-        }
-        Ok(())
-    })
+    WorkspaceTerminalAuthorityStore::from_environment()?.remove_authority(
+        run_id,
+        runner_id,
+        remote_workspace,
+    )
 }
 
 fn write_release(
@@ -541,8 +610,9 @@ mod tests {
     #[test]
     fn malformed_or_mixed_version_receipts_fail_closed() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let path =
-                receipt_path("run-1", "runner-1", "/runner/workspace").expect("receipt path");
+            let path = WorkspaceTerminalAuthorityStore::from_environment()
+                .expect("authority store")
+                .receipt_path("run-1", "runner-1", "/runner/workspace");
             homeboy_core::engine::local_files::write_json_file_owner_only(
                 &path,
                 &serde_json::json!({

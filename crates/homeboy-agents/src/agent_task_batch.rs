@@ -453,8 +453,16 @@ pub fn expire_stalled_fanout_admission(batch_id: &str) -> Result<bool> {
 /// actionable state. The admission deadline is independent of the heartbeat:
 /// a live process that is stuck before it can create a child must not renew its
 /// way into an indefinite `admitting` state.
+///
+/// The "did a child ever start" probe follows the injected lifecycle root for
+/// the same reason the batch roster follows the injected batch root: this is one
+/// decision about one wave. Read ambiently, another home's copy of the same run
+/// id could report a started child and hold a genuinely stranded coordinator in
+/// `admitting` forever, or report no child and terminalize a wave that is
+/// running somewhere else (#7505, #12619).
 fn expire_stalled_fanout_admission_in_store(
     store: &AgentTaskBatchStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     batch_id: &str,
 ) -> Result<bool> {
     store.with_batch_lock(batch_id, || {
@@ -472,7 +480,11 @@ fn expire_stalled_fanout_admission_in_store(
                 || batch.metadata["child_finalizations"]
                     .get(&child.run_id)
                     .is_some()
-                || agent_task_lifecycle::run_record_exists(&child.run_id).unwrap_or(true)
+                // This used to call agent_task_lifecycle::run_record_exists(&child.run_id),
+                // which probed whatever home the environment pointed at while
+                // the batch roster came from the injected one (#7505, #12619).
+                || agent_task_lifecycle::run_record_exists_in_store(lifecycle_store, &child.run_id)
+                    .unwrap_or(true)
         });
         let expired = batch.state == AgentTaskBatchState::Admitting
             && coordinator["stage"].as_str() == Some("admitting")
@@ -954,18 +966,45 @@ pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
     AgentTaskBatchStore::from_current_data_root()?.artifacts(batch_id)
 }
 
+/// Assemble the fanout artifacts report from explicitly injected roots.
+///
+/// Every child-side read here follows `lifecycle_store`, and all three of them
+/// have to: the status projection reads each child's durable record, the
+/// projection-readiness probe reads that child's record and aggregate, and the
+/// per-child artifacts read walks the same aggregate. Split across two homes,
+/// this report cannot fail while being wrong — it renders a batch roster from
+/// one home and child artifacts from another, and every count in it reads back
+/// self-consistent (#7505, #12619).
 fn artifacts_in_store(
     store: &AgentTaskBatchStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     batch_id: &str,
 ) -> Result<AgentTaskBatchArtifactsReport> {
-    let report = store.status(batch_id)?;
+    // This used to call store.status(batch_id), whose child-status and
+    // projection-readiness probes are the ambient `persisted_status` and
+    // `terminal_artifact_projection_readiness_bounded`. Naming their rooted
+    // siblings here is what keeps the whole report in one home.
+    let report = status_in_store(
+        store,
+        batch_id,
+        |run_id| agent_task_lifecycle::persisted_status_in_store(lifecycle_store, run_id),
+        |run_id| {
+            agent_task_lifecycle::terminal_artifact_projection_readiness_bounded_in_store(
+                lifecycle_store,
+                run_id,
+            )
+        },
+    )?;
     let mut unavailable_child_runs = report.unavailable_child_runs.clone();
     let child_runs = report
         .batch
         .child_runs
         .into_iter()
         .filter_map(
-            |child| match agent_task_lifecycle::artifacts(&child.run_id) {
+            // This used to call agent_task_lifecycle::artifacts(&child.run_id),
+            // which read each child's aggregate out of whatever home the
+            // environment pointed at (#7505, #12619).
+            |child| match agent_task_lifecycle::artifacts_in_store(lifecycle_store, &child.run_id) {
                 Ok(artifacts) => {
                     let artifact_count = artifacts.artifacts.len();
                     let evidence_ref_count = artifacts.evidence_refs.len();
@@ -1288,8 +1327,13 @@ impl AgentTaskBatchStore {
         )
     }
 
+    /// The ambient half of the pair: this method's historical contract is that
+    /// the child probe follows the process environment, so it resolves that root
+    /// once, in one place, and hands it to the rooted body.
     pub fn expire_stalled_fanout_admission(&self, batch_id: &str) -> Result<bool> {
-        expire_stalled_fanout_admission_in_store(self, batch_id)
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        expire_stalled_fanout_admission_in_store(self, &lifecycle_store, batch_id)
     }
 
     pub fn status_with<S, P>(
@@ -1352,8 +1396,13 @@ impl AgentTaskBatchStore {
         owned_child_run_ids_in_store(self, batch_id)
     }
 
+    /// The ambient half of the pair: this method's historical contract is that
+    /// child records and aggregates follow the process environment, so it
+    /// resolves that root once, in one place, and hands it to the rooted body.
     pub fn artifacts(&self, batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
-        artifacts_in_store(self, batch_id)
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        artifacts_in_store(self, &lifecycle_store, batch_id)
     }
 
     /// Return the same dependency projection used by resume without persisting
@@ -2761,6 +2810,230 @@ mod tests {
                 AgentTaskBatchState::Admitting
             );
         }
+    }
+
+    #[test]
+    fn stalled_admission_expiry_follows_the_injected_lifecycle_store() {
+        // The directional pair is the proof. Both homes hold the *same* batch id
+        // in the same eligible-to-expire state, and both calls below go through
+        // the *same* batch store and ask about the same coordinator. The only
+        // thing that changes between them is which lifecycle store is injected,
+        // and the answer flips: the home holding a durable child run record
+        // proves admission advanced and the coordinator is spared, the home
+        // holding none proves it never did and the wave is terminalized.
+        //
+        // Read ambiently, whichever home the process happened to sit in decided
+        // both — and it could not fail while doing it, because the batch record
+        // it wrote reads back perfectly consistent either way (#7505, #12619).
+        //
+        // No environment is mutated here: every root comes from
+        // `HermeticTestContext::path_roots()`.
+        let started_context = homeboy_core::test_support::HermeticTestContext::new();
+        let unstarted_context = homeboy_core::test_support::HermeticTestContext::new();
+        assert_ne!(started_context.data_dir(), unstarted_context.data_dir());
+
+        let batch_store = AgentTaskBatchStore::new(started_context.path_roots());
+        let peer_batch_store = AgentTaskBatchStore::new(unstarted_context.path_roots());
+        let started =
+            agent_task_lifecycle::AgentTaskLifecycleStore::new(started_context.path_roots());
+        let unstarted =
+            agent_task_lifecycle::AgentTaskLifecycleStore::new(unstarted_context.path_roots());
+
+        let children = vec![FanoutRunBatchChild {
+            task_id: "rooted-expiry".to_string(),
+            run_id: "rooted-expiry-run".to_string(),
+        }];
+        for store in [&batch_store, &peer_batch_store] {
+            store
+                .persist_fanout_run_batch(
+                    "rooted-expiry-wave",
+                    "rooted-expiry-wave",
+                    &children,
+                    json!({}),
+                )
+                .expect("persist the same planning record into both roots");
+            store
+                .claim_fanout_run_batch("rooted-expiry-wave")
+                .expect("claim")
+                .expect("claim id");
+            store
+                .mutate_batch("rooted-expiry-wave", |batch| {
+                    batch.metadata["coordinator"]["admission_deadline_at"] =
+                        json!("2000-01-01T00:00:00Z");
+                    batch.metadata["coordinator"]["heartbeat_at"] = json!("2000-01-01T00:00:00Z");
+                    batch.metadata["replan_command"] =
+                        json!("homeboy agent-task fanout run-plan --input @plan.json");
+                    Ok(())
+                })
+                .expect("age the admission lease past its deadline");
+        }
+
+        // Only the first home ever admitted the child, through the same child
+        // plan shape a coordinator would have submitted.
+        let plan = AgentTaskPlan::new("fanout/rooted-expiry", vec![request("rooted-expiry")]);
+        let child = child_plan(&plan, plan.tasks[0].clone(), "rooted-expiry-wave");
+        started
+            .submit_plan_with_runtime_admission(&child, "rooted-expiry-run", |_| Ok(json!({})))
+            .expect("durable child run in the first home only");
+        assert!(started
+            .record_exists("rooted-expiry-run")
+            .expect("seeded child run record"));
+        assert!(!unstarted
+            .record_exists("rooted-expiry-run")
+            .expect("unseeded child run record"));
+
+        assert!(
+            !expire_stalled_fanout_admission_in_store(&batch_store, &started, "rooted-expiry-wave")
+                .expect("observe the started child"),
+            "a child run record in the injected lifecycle home proves admission advanced"
+        );
+        assert_eq!(
+            batch_store
+                .read_batch("rooted-expiry-wave")
+                .expect("spared batch")
+                .state,
+            AgentTaskBatchState::Admitting
+        );
+
+        assert!(
+            expire_stalled_fanout_admission_in_store(
+                &batch_store,
+                &unstarted,
+                "rooted-expiry-wave"
+            )
+            .expect("terminalize the stalled admission"),
+            "same batch store, same batch id, same call — only the injected \
+             lifecycle store changed"
+        );
+        let expired = batch_store
+            .read_batch("rooted-expiry-wave")
+            .expect("expired batch");
+        assert_eq!(expired.state, AgentTaskBatchState::Failed);
+        assert_eq!(
+            expired.metadata["terminal_failure"]["failure"]["code"],
+            "coordinator_admission_timeout"
+        );
+
+        // The negative half. The second home was read from, never written to,
+        // and its own copy of this batch is still exactly where it started:
+        // `Admitting`, no terminal blocker, every child still `Queued` — i.e.
+        // still eligible, so the expiry above landed in one home only.
+        assert!(!unstarted
+            .record_exists("rooted-expiry-run")
+            .expect("second lifecycle root still holds no child run record"));
+        let peer = peer_batch_store
+            .read_batch("rooted-expiry-wave")
+            .expect("peer batch record");
+        assert_eq!(peer.state, AgentTaskBatchState::Admitting);
+        assert!(peer.metadata["terminal_failure"].is_null());
+        assert!(peer
+            .child_runs
+            .iter()
+            .all(|child| child.state == AgentTaskRunState::Queued));
+    }
+
+    #[test]
+    fn batch_artifacts_follow_the_injected_lifecycle_store() {
+        // The same directional shape for the read surface. Both homes hold the
+        // same batch id with the same child roster and the same durable child
+        // run record; only the first has an aggregate staged for that child.
+        // Both calls below go through the *same* batch store, so the roster,
+        // the batch id and the commands are identical — the artifact counts are
+        // not, and the only input that differs is the injected lifecycle store.
+        //
+        // Neither call errors, which is the point: a split report is not a
+        // failed report. It renders a roster from one home and artifacts from
+        // another and every count in it reads back self-consistent (#7505,
+        // #12619).
+        //
+        // `HermeticTestContext::path_roots()` carries `config`, `data` and
+        // `artifacts` separately, so the aggregate write below also proves the
+        // artifact root travels with the injected store rather than the process.
+        let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
+        let bare_context = homeboy_core::test_support::HermeticTestContext::new();
+        assert_ne!(seeded_context.data_dir(), bare_context.data_dir());
+        assert_ne!(seeded_context.artifact_dir(), bare_context.artifact_dir());
+
+        let batch_store = AgentTaskBatchStore::new(seeded_context.path_roots());
+        let peer_batch_store = AgentTaskBatchStore::new(bare_context.path_roots());
+        let seeded =
+            agent_task_lifecycle::AgentTaskLifecycleStore::new(seeded_context.path_roots());
+        let bare = agent_task_lifecycle::AgentTaskLifecycleStore::new(bare_context.path_roots());
+
+        let plan = AgentTaskPlan::new("fanout/rooted-artifacts", vec![request("a")]);
+        submit_batch(&batch_store, &seeded, &plan, "batch/rooted-artifacts");
+        submit_batch(&peer_batch_store, &bare, &plan, "batch/rooted-artifacts");
+        let child_run_id = "batch_rooted-artifacts-a";
+
+        let child_plan = child_plan(&plan, plan.tasks[0].clone(), "batch_rooted-artifacts");
+        let aggregate = AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: child_plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                succeeded: 1,
+                ..Default::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                task_id: "a".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                artifacts: vec![AgentTaskArtifact {
+                    id: "candidate.patch".to_string(),
+                    kind: "patch".to_string(),
+                    path: Some("artifacts/candidate.patch".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        };
+        seeded
+            .record_run_aggregate(child_run_id, &child_plan, &aggregate)
+            .expect("stage a child aggregate in the first home only");
+
+        let from_seeded = artifacts_in_store(&batch_store, &seeded, "batch/rooted-artifacts")
+            .expect("artifacts through the seeded lifecycle root");
+        let from_bare = artifacts_in_store(&batch_store, &bare, "batch/rooted-artifacts")
+            .expect("artifacts through the bare lifecycle root");
+
+        // Both reads succeeded against a real child record, so the difference
+        // below is durable state and not an unreadable child.
+        assert!(from_seeded.unavailable_child_runs.is_empty());
+        assert!(from_bare.unavailable_child_runs.is_empty());
+        assert_eq!(from_seeded.batch_id, from_bare.batch_id);
+        assert_eq!(from_seeded.summary.child_runs, from_bare.summary.child_runs);
+
+        assert_eq!(from_seeded.summary.artifacts, 1);
+        assert_eq!(
+            from_seeded.manifest.artifacts[0].artifact.id,
+            "candidate.patch"
+        );
+        assert_eq!(from_seeded.manifest.artifacts[0].run_id, child_run_id);
+        assert_eq!(
+            from_bare.summary.artifacts, 0,
+            "the same batch store answered the same batch id differently — the \
+             injected lifecycle store is what decided the artifacts"
+        );
+        assert!(from_bare.manifest.artifacts.is_empty());
+
+        // The negative half. Reading through the second lifecycle root neither
+        // created an aggregate there nor moved the one that exists in the
+        // first, and the second home's own batch record is still untouched and
+        // still in its original state.
+        assert!(seeded.aggregate_path(child_run_id).exists());
+        assert!(!bare.aggregate_path(child_run_id).exists());
+        let peer = peer_batch_store
+            .read_batch("batch/rooted-artifacts")
+            .expect("peer batch record");
+        assert_eq!(peer.state, AgentTaskBatchState::Queued);
+        assert!(peer
+            .child_runs
+            .iter()
+            .all(|child| child.state == AgentTaskRunState::Queued));
     }
 
     #[test]

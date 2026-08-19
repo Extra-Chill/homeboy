@@ -153,7 +153,11 @@ pub fn sync_workspace(
                 &excludes,
                 WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
             )?;
+            // Resolved at the point of use rather than at the top of the
+            // function: only the snapshot modes take a filesystem reservation,
+            // so the other sync modes keep resolving nothing they do not use.
             let admission = require_snapshot_filesystem_admission(
+                homeboy_core::paths::PathRoots::from_environment()?.data(),
                 &runner,
                 &local_path,
                 &remote_path,
@@ -1148,17 +1152,22 @@ struct DurablePruneConvergenceReceipt {
     convergence: RunnerWorkspacePruneConvergence,
 }
 
-fn prune_convergence_receipt_path(
+/// Locate one runner/workspace pair's durable prune receipt below an explicitly
+/// injected data root. Resume reads and converge writes both come through here,
+/// so a single injected root keeps a resumed pass reading the receipt the
+/// earlier pass wrote (#7505).
+fn prune_convergence_receipt_path_in_roots(
+    data_root: &Path,
     runner_id: &str,
     workspace_root: &str,
-) -> Result<std::path::PathBuf> {
+) -> std::path::PathBuf {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(format!("{runner_id}\0{workspace_root}").as_bytes());
     let name = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..12]);
-    Ok(homeboy_core::paths::homeboy_data()?
+    data_root
         .join("cleanup")
         .join("workspace-prune")
-        .join(format!("{name}.json")))
+        .join(format!("{name}.json"))
 }
 
 fn write_prune_convergence_receipt(
@@ -1306,10 +1315,15 @@ pub fn prune_workspaces(
     let mut total_candidate_bytes = 0;
     let mut scanned_workspace_count = 0;
     let mut scan_complete = true;
-    let receipt_path = options
-        .converge
-        .then(|| prune_convergence_receipt_path(runner_id, workspace_root))
-        .transpose()?;
+    let receipt_path = if options.converge {
+        Some(prune_convergence_receipt_path_in_roots(
+            homeboy_core::paths::PathRoots::from_environment()?.data(),
+            runner_id,
+            workspace_root,
+        ))
+    } else {
+        None
+    };
     let mut convergence = receipt_path
         .as_ref()
         .map(|path| RunnerWorkspacePruneConvergence {
@@ -2341,6 +2355,7 @@ fn snapshot_filesystem_requirement(
 /// workspace. The controller scratch path and runner destination are probed
 /// independently: a roomy root filesystem cannot mask a constrained `/tmp`.
 fn require_snapshot_filesystem_admission(
+    data_root: &Path,
     runner: &super::super::Runner,
     local_path: &Path,
     remote_path: &str,
@@ -2381,6 +2396,7 @@ fn require_snapshot_filesystem_admission(
         RunnerKind::Ssh => ssh_snapshot_filesystem_probe(runner, remote_path)?,
     };
     let admission = SnapshotFilesystemAdmission::acquire(
+        data_root,
         selected_scratch,
         &[scratch_probe, destination_probe],
         requirement,
@@ -2571,6 +2587,7 @@ impl SnapshotFilesystemAdmission {
     }
 
     fn acquire(
+        data_root: &Path,
         scratch: std::path::PathBuf,
         probes: &[SnapshotFilesystemProbe],
         requirement: SnapshotFilesystemRequirement,
@@ -2583,7 +2600,7 @@ impl SnapshotFilesystemAdmission {
         let lease_id = uuid::Uuid::new_v4().to_string();
         let mut leases = Vec::new();
         for probe in unique.into_values() {
-            let path = snapshot_reservation_path(&probe.identity)?;
+            let path = snapshot_reservation_path_in_roots(data_root, &probe.identity)?;
             let _lock = snapshot_reservation_lock(&path)?;
             let mut records = read_snapshot_reservation_records(&path)?;
             records.retain(snapshot_reservation_is_live);
@@ -2629,10 +2646,16 @@ impl Drop for SnapshotFilesystemAdmission {
     }
 }
 
-fn snapshot_reservation_path(identity: &str) -> Result<std::path::PathBuf> {
+/// Locate one filesystem's reservation ledger below an explicitly injected data
+/// root. Admission and release must agree on the ledger, and `Drop` releases
+/// against the stored path, so the root is fixed once at acquisition (#7505).
+fn snapshot_reservation_path_in_roots(
+    data_root: &Path,
+    identity: &str,
+) -> Result<std::path::PathBuf> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     identity.hash(&mut hasher);
-    let root = homeboy_core::paths::homeboy_data()?.join("snapshot-filesystem-reservations");
+    let root = data_root.join("snapshot-filesystem-reservations");
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -4187,9 +4210,9 @@ mod tests {
     use super::{
         is_runner_git_auth_or_network_failure, retry_idempotent_ssh_operation,
         runner_workspace_disk_is_critical, snapshot_capacity_error,
-        snapshot_filesystem_requirement, snapshot_reservation_path, snapshot_reservation_records,
-        RunnerWorkspaceDiskProbe, SnapshotFilesystemAdmission, SnapshotFilesystemProbe,
-        SnapshotFilesystemRequirement,
+        snapshot_filesystem_requirement, snapshot_reservation_path_in_roots,
+        snapshot_reservation_records, RunnerWorkspaceDiskProbe, SnapshotFilesystemAdmission,
+        SnapshotFilesystemProbe, SnapshotFilesystemRequirement,
     };
     use homeboy_core::error::{Error, ErrorCode};
     use homeboy_core::server::CommandOutput;
@@ -4394,87 +4417,93 @@ mod tests {
             .any(|hint| hint.message.contains("workspace prune")));
     }
 
+    /// The reservation ledger is the only Homeboy state these two tests touch,
+    /// and it is now injected, so neither needs `with_isolated_home` — no
+    /// environment mutation, no shared home mutex (#7505).
     #[test]
     fn snapshot_reservations_prevent_overcommit_then_release() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let runner = reservation_runner();
-            let requirement = SnapshotFilesystemRequirement {
-                bytes: 100,
-                inodes: 100,
-            };
-            let filesystem = probe("tmpfs-concurrent", 150, 150);
-            let first = SnapshotFilesystemAdmission::acquire(
-                tempfile::tempdir().expect("scratch").keep(),
-                std::slice::from_ref(&filesystem),
-                requirement,
-                &runner,
-            )
-            .expect("first reservation");
-            let error = SnapshotFilesystemAdmission::acquire(
-                tempfile::tempdir().expect("scratch").keep(),
-                std::slice::from_ref(&filesystem),
-                requirement,
-                &runner,
-            )
-            .expect_err("second reservation must not overcommit");
-            assert_eq!(error.retryable, Some(true));
-            assert_eq!(
-                error.details["active_reservations"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                1
-            );
-            drop(first);
-            SnapshotFilesystemAdmission::acquire(
-                tempfile::tempdir().expect("scratch").keep(),
-                &[filesystem],
-                requirement,
-                &runner,
-            )
-            .expect("released reservation admits retry");
-        });
+        let data_root = tempfile::tempdir().expect("data root");
+        let runner = reservation_runner();
+        let requirement = SnapshotFilesystemRequirement {
+            bytes: 100,
+            inodes: 100,
+        };
+        let filesystem = probe("tmpfs-concurrent", 150, 150);
+        let first = SnapshotFilesystemAdmission::acquire(
+            data_root.path(),
+            tempfile::tempdir().expect("scratch").keep(),
+            std::slice::from_ref(&filesystem),
+            requirement,
+            &runner,
+        )
+        .expect("first reservation");
+        let error = SnapshotFilesystemAdmission::acquire(
+            data_root.path(),
+            tempfile::tempdir().expect("scratch").keep(),
+            std::slice::from_ref(&filesystem),
+            requirement,
+            &runner,
+        )
+        .expect_err("second reservation must not overcommit");
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(
+            error.details["active_reservations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(first);
+        SnapshotFilesystemAdmission::acquire(
+            data_root.path(),
+            tempfile::tempdir().expect("scratch").keep(),
+            &[filesystem],
+            requirement,
+            &runner,
+        )
+        .expect("released reservation admits retry");
     }
 
     #[test]
     fn snapshot_reservation_reclaims_dead_lease() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let runner = reservation_runner();
-            let requirement = SnapshotFilesystemRequirement {
+        let data_root = tempfile::tempdir().expect("data root");
+        let runner = reservation_runner();
+        let requirement = SnapshotFilesystemRequirement {
+            bytes: 100,
+            inodes: 100,
+        };
+        let filesystem = probe("root-recovery", 150, 150);
+        let path = snapshot_reservation_path_in_roots(data_root.path(), &filesystem.identity)
+            .expect("ledger path");
+        let _lock = super::snapshot_reservation_lock(&path).expect("lock");
+        super::write_snapshot_reservation_records_unlocked(
+            &path,
+            &[super::SnapshotFilesystemReservationRecord {
+                lease_id: "dead".to_string(),
+                controller_pid: u32::MAX,
+                created_unix_seconds: 0,
                 bytes: 100,
                 inodes: 100,
-            };
-            let filesystem = probe("root-recovery", 150, 150);
-            let path = snapshot_reservation_path(&filesystem.identity).expect("ledger path");
-            let _lock = super::snapshot_reservation_lock(&path).expect("lock");
-            super::write_snapshot_reservation_records_unlocked(
-                &path,
-                &[super::SnapshotFilesystemReservationRecord {
-                    lease_id: "dead".to_string(),
-                    controller_pid: u32::MAX,
-                    created_unix_seconds: 0,
-                    bytes: 100,
-                    inodes: 100,
-                }],
-            )
-            .expect("write stale lease");
-            drop(_lock);
+            }],
+        )
+        .expect("write stale lease");
+        drop(_lock);
 
-            let admission = SnapshotFilesystemAdmission::acquire(
-                tempfile::tempdir().expect("scratch").keep(),
-                &[filesystem],
-                requirement,
-                &runner,
-            )
-            .expect("dead lease must be recovered");
-            assert_eq!(
-                snapshot_reservation_records(&path).expect("records").len(),
-                1
-            );
-            drop(admission);
-            assert!(snapshot_reservation_records(&path)
-                .expect("records")
-                .is_empty());
-        });
+        let admission = SnapshotFilesystemAdmission::acquire(
+            data_root.path(),
+            tempfile::tempdir().expect("scratch").keep(),
+            &[filesystem],
+            requirement,
+            &runner,
+        )
+        .expect("dead lease must be recovered");
+        assert_eq!(
+            snapshot_reservation_records(&path).expect("records").len(),
+            1
+        );
+        drop(admission);
+        assert!(snapshot_reservation_records(&path)
+            .expect("records")
+            .is_empty());
     }
 }

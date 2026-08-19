@@ -15,7 +15,7 @@
 //! env/settings manually after setup succeeds.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use homeboy_core::error::Result;
 use homeboy_core::paths;
@@ -24,15 +24,16 @@ use homeboy_engine_primitives::local_files;
 /// Schema marker for the persisted setup-env document.
 const SETUP_ENV_SCHEMA: &str = "homeboy/extension-setup-env/v1";
 
-/// Directory (under the machine-local homeboy data root) that stores persisted
-/// per-extension setup runtime env documents.
-fn setup_env_dir() -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?.join("extension-setup-env"))
+/// Directory that stores persisted per-extension setup runtime env documents,
+/// below an injected Homeboy data root.
+fn setup_env_dir_in_roots(data_root: &Path) -> PathBuf {
+    data_root.join("extension-setup-env")
 }
 
-/// Path to the persisted setup-env document for a single extension.
-fn setup_env_path(extension_id: &str) -> Result<PathBuf> {
-    Ok(setup_env_dir()?.join(format!("{}.json", sanitize_extension_id(extension_id))))
+/// Path to the persisted setup-env document for a single extension, below an
+/// injected Homeboy data root.
+fn setup_env_path_in_roots(data_root: &Path, extension_id: &str) -> PathBuf {
+    setup_env_dir_in_roots(data_root).join(format!("{}.json", sanitize_extension_id(extension_id)))
 }
 
 /// Keep file names filesystem-safe regardless of extension id formatting.
@@ -55,7 +56,21 @@ fn sanitize_extension_id(extension_id: &str) -> String {
 /// removes any previously persisted document so stale values never leak into a
 /// later capability execution.
 pub(crate) fn persist(extension_id: &str, env: &[(String, String)]) -> Result<()> {
-    let path = setup_env_path(extension_id)?;
+    let roots = paths::PathRoots::from_environment()?;
+    persist_in_roots(&roots, extension_id, env)
+}
+
+/// Persist the setup-discovered runtime env below explicitly supplied roots.
+///
+/// Only the data root is consulted. The env pairs themselves are opaque
+/// payload: this function stores them, it does not resolve or reinterpret any
+/// path inside them, and it is not part of subprocess environment construction.
+pub(crate) fn persist_in_roots(
+    roots: &paths::PathRoots,
+    extension_id: &str,
+    env: &[(String, String)],
+) -> Result<()> {
+    let path = setup_env_path_in_roots(roots.data(), extension_id);
 
     if env.is_empty() {
         if path.exists() {
@@ -98,9 +113,15 @@ pub(crate) fn persist(extension_id: &str, env: &[(String, String)]) -> Result<()
 /// persisted (or the document is unreadable/malformed — replay must never hard
 /// fail capability execution).
 pub(crate) fn load(extension_id: &str) -> Vec<(String, String)> {
-    let Ok(path) = setup_env_path(extension_id) else {
+    let Ok(roots) = paths::PathRoots::from_environment() else {
         return Vec::new();
     };
+    load_in_roots(&roots, extension_id)
+}
+
+/// Load the persisted setup runtime env below explicitly supplied roots.
+pub(crate) fn load_in_roots(roots: &paths::PathRoots, extension_id: &str) -> Vec<(String, String)> {
+    let path = setup_env_path_in_roots(roots.data(), extension_id);
     if !path.exists() {
         return Vec::new();
     }

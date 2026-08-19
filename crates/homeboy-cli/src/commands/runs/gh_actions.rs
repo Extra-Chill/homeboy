@@ -24,7 +24,7 @@ use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use serde::{Deserialize, Serialize};
@@ -119,6 +119,12 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
     gh.ensure_ready()?;
     let repo = gh.repo_path()?.to_string();
 
+    // The command boundary resolves the roots exactly once. The HTTP cache
+    // lives under the config root and the downloaded artifacts under the data
+    // root; below this line an import that walks hundreds of artifact files
+    // writes all of them into one installation instead of re-resolving per file.
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+
     let store = ObservationStore::open_initialized()?;
     let pattern = compile_glob(&args.artifact_glob)?;
 
@@ -128,7 +134,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
         let workflow = args.workflow.as_deref().ok_or_else(|| {
             Error::validation_missing_argument(vec!["--workflow or --run-id".to_string()])
         })?;
-        list_workflow_runs(&gh, workflow, &args.since)?
+        list_workflow_runs(roots.config(), &gh, workflow, &args.since)?
     };
     let runs_inspected = runs.len().min(args.limit);
     let runs_to_process: Vec<&GhWorkflowRun> = runs.iter().take(args.limit).collect();
@@ -199,12 +205,14 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                     continue;
                 }
 
-                let stored_path = crate::commands::runs::gh_actions_cache::persist_artifact_file(
-                    &homeboy_run_id,
-                    &artifact_id,
-                    &file_name,
-                    &json_bytes,
-                )?;
+                let stored_path =
+                    crate::commands::runs::gh_actions_cache::persist_artifact_file_in_roots(
+                        roots.data(),
+                        &homeboy_run_id,
+                        &artifact_id,
+                        &file_name,
+                        &json_bytes,
+                    )?;
                 let sha = content_hash::sha256_hex(&json_bytes);
                 let size = i64::try_from(json_bytes.len()).ok();
                 let artifact_record = homeboy::core::observation::ArtifactRecord {
@@ -399,14 +407,15 @@ impl From<GhWorkflowRunRaw> for GhWorkflowRun {
 /// List workflow runs via `gh api`, with ETag caching to keep us off
 /// GitHub's primary rate limit on re-runs of the ingestor.
 fn list_workflow_runs(
+    config_root: &Path,
     gh: &GhClient,
     workflow: &str,
     since: &str,
 ) -> homeboy::core::Result<(Vec<GhWorkflowRun>, bool)> {
     let repo = gh.repo_path()?;
     let cache_key = list_runs_cache_key(repo, workflow);
-    let etag_path = list_runs_cache_path(&cache_key, "etag")?;
-    let body_path = list_runs_cache_path(&cache_key, "json")?;
+    let etag_path = list_runs_cache_path(config_root, &cache_key, "etag")?;
+    let body_path = list_runs_cache_path(config_root, &cache_key, "json")?;
 
     // Build the API path. We list with --paginate and let `gh` walk pages
     // (it caps via per_page=100). `created` filter narrows to recent runs.
@@ -708,8 +717,16 @@ mod helpers {
         content_hash::sha256_hex(composite.as_bytes())
     }
 
-    pub fn list_runs_cache_path(key: &str, ext: &str) -> homeboy::core::Result<PathBuf> {
-        crate::commands::runs::gh_actions_cache::list_runs_cache_path(key, ext)
+    pub fn list_runs_cache_path(
+        config_root: &Path,
+        key: &str,
+        ext: &str,
+    ) -> homeboy::core::Result<PathBuf> {
+        crate::commands::runs::gh_actions_cache::list_runs_cache_path_in_roots(
+            config_root,
+            key,
+            ext,
+        )
     }
 
     // ── Glob compilation ────────────────────────────────────────────────────

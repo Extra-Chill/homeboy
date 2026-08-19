@@ -1,7 +1,15 @@
 //! Observation-store foundation tests.
 //!
-//! These isolate `HOME` / `XDG_DATA_HOME` so the developer's real local DB is
-//! never read or written.
+//! Most of these take their filesystem roots from a `HermeticTestContext` and
+//! open the store with [`ObservationStore::open_initialized_in_roots`], so both
+//! the database and the artifact tree it indexes are injected and no process
+//! state is mutated (#7505).
+//!
+//! The exceptions are deliberate. `test_status` and `test_database_path` pin
+//! the *ambient* resolution order itself, and `run_context_tests` assert the
+//! subprocess environment-variable wiring `start_run` reads. Those still use
+//! `with_isolated_home`, because the thing under test is the process
+//! environment.
 
 use crate::observation::store::{
     self, ObservationStore, CURRENT_MIGRATION_COUNT, CURRENT_SCHEMA_VERSION,
@@ -11,7 +19,7 @@ use crate::observation::{
     FindingListFilter, NewFindingRecord, NewRunRecord, RunContext, RunListFilter, RunProvenance,
     RunRecord, RunStatus,
 };
-use crate::test_support::with_isolated_home;
+use crate::test_support::{with_isolated_home, HermeticTestContext};
 use std::sync::{Arc, Barrier};
 
 struct XdgGuard {
@@ -125,227 +133,227 @@ mod store_init_tests {
 
     #[test]
     fn test_open_initialized() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
 
-            let store = ObservationStore::open_initialized().expect("init store");
-            let status = store.status().expect("status");
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let status = store.status().expect("status");
 
-            assert!(status.exists);
-            assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-            assert_eq!(status.table_count, 8);
-        });
+        assert!(status.exists);
+        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
+        assert_eq!(status.table_count, 8);
     }
 
     #[test]
     fn initialization_is_idempotent() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
 
-            ObservationStore::open_initialized().expect("first init");
-            let second = ObservationStore::open_initialized().expect("second init");
-            let status = second.status().expect("status");
+        ObservationStore::open_initialized_in_roots(&roots).expect("first init");
+        let second = ObservationStore::open_initialized_in_roots(&roots).expect("second init");
+        let status = second.status().expect("status");
 
-            assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-            assert_eq!(status.table_count, 8);
-        });
+        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
+        assert_eq!(status.table_count, 8);
     }
 
     #[test]
     fn initialization_recovers_when_artifact_type_migration_was_interrupted() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
 
-            ObservationStore::open_initialized().expect("initial migration");
-            let path = store::database_path().expect("db path");
-            let connection = rusqlite::Connection::open(&path).expect("open raw db");
-            connection
-                .execute("DELETE FROM schema_migrations WHERE version = 4", [])
-                .expect("remove migration marker");
-            drop(connection);
+        ObservationStore::open_initialized_in_roots(&roots).expect("initial migration");
+        // The database the rooted opens above and below use, resolved from the
+        // injected data root rather than re-derived from the environment.
+        let path = crate::paths::observation_db_in_root(roots.data());
+        let connection = rusqlite::Connection::open(&path).expect("open raw db");
+        connection
+            .execute("DELETE FROM schema_migrations WHERE version = 4", [])
+            .expect("remove migration marker");
+        drop(connection);
 
-            let reopened = ObservationStore::open_initialized().expect("resume migration");
-            let status = reopened.status().expect("status");
+        let reopened =
+            ObservationStore::open_initialized_in_roots(&roots).expect("resume migration");
+        let status = reopened.status().expect("status");
 
-            assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-        });
+        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
     }
 
     #[test]
     fn initialization_is_safe_under_concurrent_setup() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let workers = 4;
-            let barrier = Arc::new(Barrier::new(workers));
-            let handles = (0..workers)
-                .map(|_| {
-                    let barrier = Arc::clone(&barrier);
-                    std::thread::spawn(move || {
-                        barrier.wait();
-                        ObservationStore::open_initialized()
-                            .expect("concurrent init")
-                            .status()
-                            .expect("status")
-                    })
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let workers = 4;
+        let barrier = Arc::new(Barrier::new(workers));
+        let handles = (0..workers)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let roots = roots.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ObservationStore::open_initialized_in_roots(&roots)
+                        .expect("concurrent init")
+                        .status()
+                        .expect("status")
                 })
-                .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
 
-            for handle in handles {
-                let status = handle.join().expect("worker joined");
-                assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-                assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-            }
-        });
+        for handle in handles {
+            let status = handle.join().expect("worker joined");
+            assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+            assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
+        }
     }
 
     #[test]
     fn artifact_handle_backfill_recovers_after_a_transient_writer_lock() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let path = store::database_path().expect("database path");
-            std::fs::create_dir_all(path.parent().expect("database parent"))
-                .expect("create database parent");
-            let connection = super::super::schema::open_connection(&path).expect("open schema");
-            super::super::schema::apply_migrations(&connection).expect("apply schema");
-            drop(connection);
-            let writer = rusqlite::Connection::open(&path).expect("open locking connection");
-            writer
-                .execute_batch("PRAGMA journal_mode=DELETE;")
-                .expect("use rollback journal mode");
-            let store = ObservationStore {
-                connection: rusqlite::Connection::open(&path).expect("open test store"),
-                path: path.clone(),
-                readonly: false,
-                artifact_root: None,
-            };
-            let run = store
-                .start_run(sample_run("test", "homeboy"))
-                .expect("start run");
-            let artifact_id = "legacy-artifact";
-            writer
-                .execute(
-                    "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, viewer_links_json, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank) VALUES (?1, ?2, 'evidence', 'url', 'https://example.test/evidence', '[]', '{}', '2026-01-01T00:00:00Z', NULL, NULL, NULL)",
-                    rusqlite::params![artifact_id, run.id],
-                )
-                .expect("insert legacy artifact");
-            writer
-                .execute_batch("BEGIN EXCLUSIVE;")
-                .expect("hold writer lock");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let path = crate::paths::observation_db_in_root(roots.data());
+        std::fs::create_dir_all(path.parent().expect("database parent"))
+            .expect("create database parent");
+        let connection = super::super::schema::open_connection(&path).expect("open schema");
+        super::super::schema::apply_migrations(&connection).expect("apply schema");
+        drop(connection);
+        let writer = rusqlite::Connection::open(&path).expect("open locking connection");
+        writer
+            .execute_batch("PRAGMA journal_mode=DELETE;")
+            .expect("use rollback journal mode");
+        // Hand-built because the test owns the connection's journal mode, but
+        // the store is still rooted: `roots` carries the artifact tree, so no
+        // handle here can resolve an ambient one (#7505).
+        let store = ObservationStore {
+            connection: rusqlite::Connection::open(&path).expect("open test store"),
+            path: path.clone(),
+            readonly: false,
+            roots: Some(roots.clone()),
+        };
+        let run = store
+            .start_run(sample_run("test", "homeboy"))
+            .expect("start run");
+        let artifact_id = "legacy-artifact";
+        writer
+            .execute(
+                "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, viewer_links_json, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank) VALUES (?1, ?2, 'evidence', 'url', 'https://example.test/evidence', '[]', '{}', '2026-01-01T00:00:00Z', NULL, NULL, NULL)",
+                rusqlite::params![artifact_id, run.id],
+            )
+            .expect("insert legacy artifact");
+        writer
+            .execute_batch("BEGIN EXCLUSIVE;")
+            .expect("hold writer lock");
 
-            let (retry_started_tx, retry_started_rx) = std::sync::mpsc::sync_channel(0);
-            let (release_retry_tx, release_retry_rx) = std::sync::mpsc::sync_channel(0);
-            let worker = std::thread::spawn(move || {
-                store.backfill_artifact_handles_with_retry(|| {
-                    retry_started_tx.send(()).expect("report retry");
-                    release_retry_rx.recv().expect("release retry");
-                })
-            });
-            retry_started_rx
-                .recv()
-                .expect("backfill attempted while locked");
-            writer
-                .execute_batch("COMMIT;")
-                .expect("release writer lock");
-            release_retry_tx.send(()).expect("resume backfill");
-
-            worker
-                .join()
-                .expect("backfill worker joined")
-                .expect("backfill recovers after lock release");
-
-            let check = rusqlite::Connection::open(path).expect("open check connection");
-            let (handle, diagnostic, rank): (String, i64, String) = check
-                .query_row(
-                    "SELECT artifact_handle, failure_diagnostic, failure_diagnostic_rank FROM artifacts WHERE id = ?1",
-                    [artifact_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .expect("read backfilled artifact");
-            assert!(handle.starts_with("ah_"));
-            assert_eq!(diagnostic, 0);
-            assert_eq!(rank, "0");
+        let (retry_started_tx, retry_started_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_retry_tx, release_retry_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            store.backfill_artifact_handles_with_retry(|| {
+                retry_started_tx.send(()).expect("report retry");
+                release_retry_rx.recv().expect("release retry");
+            })
         });
+        retry_started_rx
+            .recv()
+            .expect("backfill attempted while locked");
+        writer
+            .execute_batch("COMMIT;")
+            .expect("release writer lock");
+        release_retry_tx.send(()).expect("resume backfill");
+
+        worker
+            .join()
+            .expect("backfill worker joined")
+            .expect("backfill recovers after lock release");
+
+        let check = rusqlite::Connection::open(path).expect("open check connection");
+        let (handle, diagnostic, rank): (String, i64, String) = check
+            .query_row(
+                "SELECT artifact_handle, failure_diagnostic, failure_diagnostic_rank FROM artifacts WHERE id = ?1",
+                [artifact_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read backfilled artifact");
+        assert!(handle.starts_with("ah_"));
+        assert_eq!(diagnostic, 0);
+        assert_eq!(rank, "0");
     }
 
     #[test]
     fn artifact_handle_backfill_does_not_replace_materialized_diagnostic_metadata() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("initialize store");
-            let run = store
-                .start_run(sample_run("test", "homeboy"))
-                .expect("start run");
-            store
-                .connection
-                .execute(
-                    "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, viewer_links_json, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank) VALUES (?1, ?2, 'evidence', 'url', 'https://example.test/evidence', '[]', '{\"failure_diagnostic\":true,\"failure_diagnostic_rank\":1}', '2026-01-01T00:00:00Z', NULL, 0, '99')",
-                    rusqlite::params!["materialized-artifact", run.id],
-                )
-                .expect("insert partially backfilled artifact");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("initialize store");
+        let run = store
+            .start_run(sample_run("test", "homeboy"))
+            .expect("start run");
+        store
+            .connection
+            .execute(
+                "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, viewer_links_json, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank) VALUES (?1, ?2, 'evidence', 'url', 'https://example.test/evidence', '[]', '{\"failure_diagnostic\":true,\"failure_diagnostic_rank\":1}', '2026-01-01T00:00:00Z', NULL, 0, '99')",
+                rusqlite::params!["materialized-artifact", run.id],
+            )
+            .expect("insert partially backfilled artifact");
 
-            store
-                .backfill_artifact_handles_with_retry(|| {})
-                .expect("backfill artifact handle");
+        store
+            .backfill_artifact_handles_with_retry(|| {})
+            .expect("backfill artifact handle");
 
-            let (handle, diagnostic, rank): (String, i64, String) = store
-                .connection
-                .query_row(
-                    "SELECT artifact_handle, failure_diagnostic, failure_diagnostic_rank FROM artifacts WHERE id = 'materialized-artifact'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .expect("read backfilled artifact");
-            assert!(handle.starts_with("ah_"));
-            assert_eq!(diagnostic, 0);
-            assert_eq!(rank, "99");
-        });
+        let (handle, diagnostic, rank): (String, i64, String) = store
+            .connection
+            .query_row(
+                "SELECT artifact_handle, failure_diagnostic, failure_diagnostic_rank FROM artifacts WHERE id = 'materialized-artifact'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read backfilled artifact");
+        assert!(handle.starts_with("ah_"));
+        assert_eq!(diagnostic, 0);
+        assert_eq!(rank, "99");
     }
 
     #[test]
     fn normal_open_backfills_artifact_handles_before_a_bounded_projection() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let path = store::database_path().expect("database path");
-            let lifecycle = ObservationStore::open_initialized_for_lifecycle_at(&path)
-                .expect("initialize lifecycle store");
-            let run = lifecycle
-                .start_run(sample_run("test", "homeboy"))
-                .expect("start run");
-            lifecycle
-                .connection
-                .execute(
-                    "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, viewer_links_json, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank) VALUES ('legacy-projection-artifact', ?1, 'evidence', 'url', 'https://example.test/evidence', '[]', '{\"failure_diagnostic\":true,\"failure_diagnostic_rank\":2}', '2026-01-01T00:00:00Z', NULL, NULL, NULL)",
-                    [run.id.as_str()],
-                )
-                .expect("insert legacy artifact");
-            drop(lifecycle);
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let lifecycle = ObservationStore::open_initialized_for_lifecycle_in_roots(&roots)
+            .expect("initialize lifecycle store");
+        let run = lifecycle
+            .start_run(sample_run("test", "homeboy"))
+            .expect("start run");
+        lifecycle
+            .connection
+            .execute(
+                "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, viewer_links_json, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank) VALUES ('legacy-projection-artifact', ?1, 'evidence', 'url', 'https://example.test/evidence', '[]', '{\"failure_diagnostic\":true,\"failure_diagnostic_rank\":2}', '2026-01-01T00:00:00Z', NULL, NULL, NULL)",
+                [run.id.as_str()],
+            )
+            .expect("insert legacy artifact");
+        drop(lifecycle);
 
-            let store = ObservationStore::open_initialized().expect("normal open backfills");
-            let projection = store
-                .bounded_artifact_projection_for_runs(&[run.id], 10)
-                .expect("project backfilled artifact");
+        let store =
+            ObservationStore::open_initialized_in_roots(&roots).expect("normal open backfills");
+        let projection = store
+            .bounded_artifact_projection_for_runs(&[run.id], 10)
+            .expect("project backfilled artifact");
 
-            assert_eq!(projection.artifacts.len(), 1);
-            assert!(projection.artifacts[0].id.starts_with("ah_"));
-            assert_eq!(
-                projection.diagnostic_handle,
-                Some(projection.artifacts[0].id.clone())
-            );
-        });
+        assert_eq!(projection.artifacts.len(), 1);
+        assert!(projection.artifacts[0].id.starts_with("ah_"));
+        assert_eq!(
+            projection.diagnostic_handle,
+            Some(projection.artifacts[0].id.clone())
+        );
     }
 
     #[test]
     fn migration_from_version_8_preserves_artifacts_and_adds_query_indexes() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let path = store::database_path().expect("db path");
-            std::fs::create_dir_all(path.parent().expect("db parent")).expect("create db parent");
-            let db = rusqlite::Connection::open(&path).expect("open version 8 db");
-            db.execute_batch(
-                r#"
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let path = crate::paths::observation_db_in_root(roots.data());
+        std::fs::create_dir_all(path.parent().expect("db parent")).expect("create db parent");
+        let db = rusqlite::Connection::open(&path).expect("open version 8 db");
+        db.execute_batch(
+            r#"
                 CREATE TABLE schema_migrations (
                     version INTEGER PRIMARY KEY,
                     applied_at TEXT NOT NULL
@@ -416,229 +424,224 @@ mod store_init_tests {
                        ('artifact-2', 'run-1', 'log', '/tmp/two', '2026-01-01T00:01:00Z'),
                        ('artifact-3', 'run-2', 'log', '/tmp/three', '2026-01-01T00:02:00Z');
                 "#,
-            )
-            .expect("create version 8 fixture");
-            drop(db);
+        )
+        .expect("create version 8 fixture");
+        drop(db);
 
-            let store = ObservationStore::open_initialized_at(&path).expect("migrate version 8");
-            let status = store.status().expect("status");
-            assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
+        // `open_initialized_in_roots` resolves the same database as `path`
+        // above, and additionally roots the artifact tree the migrated store
+        // indexes — which `open_initialized_at` would have left ambient.
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("migrate version 8");
+        let status = store.status().expect("status");
+        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
 
-            let db = rusqlite::Connection::open(path).expect("inspect migrated db");
-            let indexes = db
+        let db = rusqlite::Connection::open(path).expect("inspect migrated db");
+        let indexes = db
                 .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'artifacts' ORDER BY name")
                 .expect("prepare indexes")
                 .query_map([], |row| row.get::<_, String>(0))
                 .expect("query indexes")
                 .collect::<Result<Vec<_>, _>>()
                 .expect("collect indexes");
-            assert!(indexes.contains(&"idx_artifacts_run_created".to_string()));
-            assert!(indexes.contains(&"idx_artifacts_created_at".to_string()));
+        assert!(indexes.contains(&"idx_artifacts_run_created".to_string()));
+        assert!(indexes.contains(&"idx_artifacts_created_at".to_string()));
 
-            let artifact_count: i64 = db
-                .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
-                .expect("count migrated artifacts");
-            assert_eq!(artifact_count, 3);
+        let artifact_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+            .expect("count migrated artifacts");
+        assert_eq!(artifact_count, 3);
 
-            for (index, columns) in [
-                (
-                    "idx_artifacts_run_created",
-                    vec![("run_id", 0), ("created_at", 0), ("id", 0)],
-                ),
-                (
-                    "idx_artifacts_created_at",
-                    vec![("created_at", 0), ("id", 0)],
-                ),
-            ] {
-                let mut statement = db
+        for (index, columns) in [
+            (
+                "idx_artifacts_run_created",
+                vec![("run_id", 0), ("created_at", 0), ("id", 0)],
+            ),
+            (
+                "idx_artifacts_created_at",
+                vec![("created_at", 0), ("id", 0)],
+            ),
+        ] {
+            let mut statement = db
                     .prepare(
                         "SELECT name, desc FROM pragma_index_xinfo(?1) WHERE \"key\" = 1 ORDER BY seqno",
                     )
                     .expect("prepare index columns");
-                let actual_columns = statement
-                    .query_map([index], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                    })
-                    .expect("query index columns")
-                    .collect::<Result<Vec<_>, _>>()
-                    .expect("collect index columns");
-                assert_eq!(
-                    actual_columns
-                        .iter()
-                        .map(|(name, descending)| (name.as_str(), *descending))
-                        .collect::<Vec<_>>(),
-                    columns,
-                    "unexpected columns for {index}"
-                );
-            }
-        });
+            let actual_columns = statement
+                .query_map([index], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .expect("query index columns")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect index columns");
+            assert_eq!(
+                actual_columns
+                    .iter()
+                    .map(|(name, descending)| (name.as_str(), *descending))
+                    .collect::<Vec<_>>(),
+                columns,
+                "unexpected columns for {index}"
+            );
+        }
     }
 
     #[test]
     fn readonly_run_lookups_complete_while_import_writes_evidence() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("initialize store");
-            let persisted = sample_import_run("terminal-run");
-            store.import_run(&persisted).expect("persist terminal run");
-            store
-                .record_url_artifact(&persisted.id, "evidence", "https://example.test/evidence")
-                .expect("persist artifact");
-            let path = store::database_path().expect("database path");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("initialize store");
+        let persisted = sample_import_run("terminal-run");
+        store.import_run(&persisted).expect("persist terminal run");
+        store
+            .record_url_artifact(&persisted.id, "evidence", "https://example.test/evidence")
+            .expect("persist artifact");
 
-            let workers = 5;
-            let barrier = Arc::new(Barrier::new(workers));
-            let writer_path = path.clone();
-            let writer_barrier = Arc::clone(&barrier);
-            let writer = std::thread::spawn(move || {
-                let writer =
-                    ObservationStore::open_initialized_at(writer_path).expect("writer store");
-                writer_barrier.wait();
-                for index in 0..100 {
-                    let mut imported = sample_import_run(&format!("import-{index}"));
-                    imported.metadata_json["import_sequence"] = serde_json::json!(index);
-                    writer.import_run(&imported).expect("import evidence");
-                }
-            });
-
-            let readers = (0..workers - 1)
-                .map(|_| {
-                    let path = path.clone();
-                    let barrier = Arc::clone(&barrier);
-                    let expected = persisted.clone();
-                    std::thread::spawn(move || {
-                        barrier.wait();
-                        for _ in 0..100 {
-                            let reader = ObservationStore::open_readonly_at(&path)
-                                .expect("bounded read-only store");
-                            assert_eq!(
-                                reader.get_run(&expected.id).expect("read terminal run"),
-                                Some(expected.clone()),
-                                "readers retain a coherent terminal record while imports write"
-                            );
-                            assert_eq!(
-                                reader
-                                    .list_artifacts(&expected.id)
-                                    .expect("read terminal artifacts")
-                                    .len(),
-                                1,
-                                "readers retain coherent artifacts while imports write"
-                            );
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
-
-            writer.join().expect("writer joined");
-            for reader in readers {
-                reader.join().expect("reader joined");
+        let workers = 5;
+        let barrier = Arc::new(Barrier::new(workers));
+        let writer_roots = roots.clone();
+        let writer_barrier = Arc::clone(&barrier);
+        let writer = std::thread::spawn(move || {
+            let writer =
+                ObservationStore::open_initialized_in_roots(&writer_roots).expect("writer store");
+            writer_barrier.wait();
+            for index in 0..100 {
+                let mut imported = sample_import_run(&format!("import-{index}"));
+                imported.metadata_json["import_sequence"] = serde_json::json!(index);
+                writer.import_run(&imported).expect("import evidence");
             }
-            assert!(store
-                .get_run("import-99")
-                .expect("read imported run")
-                .is_some());
         });
+
+        let readers = (0..workers - 1)
+            .map(|_| {
+                let roots = roots.clone();
+                let barrier = Arc::clone(&barrier);
+                let expected = persisted.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..100 {
+                        let reader = ObservationStore::open_readonly_in_roots(&roots)
+                            .expect("bounded read-only store");
+                        assert_eq!(
+                            reader.get_run(&expected.id).expect("read terminal run"),
+                            Some(expected.clone()),
+                            "readers retain a coherent terminal record while imports write"
+                        );
+                        assert_eq!(
+                            reader
+                                .list_artifacts(&expected.id)
+                                .expect("read terminal artifacts")
+                                .len(),
+                            1,
+                            "readers retain coherent artifacts while imports write"
+                        );
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        writer.join().expect("writer joined");
+        for reader in readers {
+            reader.join().expect("reader joined");
+        }
+        assert!(store
+            .get_run("import-99")
+            .expect("read imported run")
+            .is_some());
     }
 
     #[test]
     fn readonly_artifact_lookup_reports_a_retryable_busy_envelope() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let _store = ObservationStore::open_initialized().expect("initialize store");
-            let path = store::database_path().expect("database path");
-            let reader = ObservationStore::open_readonly_at(&path).expect("read-only store");
-            let error = reader.read_error(
-                "list artifact records",
-                rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                    Some("database is locked".to_string()),
-                ),
-            );
-            assert_eq!(error.code.as_str(), "observation_store.busy");
-            assert_eq!(error.retryable, Some(true));
-            assert!(error.details.to_string().contains("list artifact records"));
-        });
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let _store = ObservationStore::open_initialized_in_roots(&roots).expect("initialize store");
+        let reader = ObservationStore::open_readonly_in_roots(&roots).expect("read-only store");
+        let error = reader.read_error(
+            "list artifact records",
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("database is locked".to_string()),
+            ),
+        );
+        assert_eq!(error.code.as_str(), "observation_store.busy");
+        assert_eq!(error.retryable, Some(true));
+        assert!(error.details.to_string().contains("list artifact records"));
     }
 
     #[test]
     fn test_record_finding() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("lint", "homeboy"))
-                .expect("start run");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("lint", "homeboy"))
+            .expect("start run");
 
-            let record = store
-                .record_finding(&sample_finding(&run.id, "security", "src/foo.php"))
-                .expect("record finding");
-            let fetched = store
-                .get_finding(&record.id)
-                .expect("get finding")
-                .expect("finding exists");
+        let record = store
+            .record_finding(&sample_finding(&run.id, "security", "src/foo.php"))
+            .expect("record finding");
+        let fetched = store
+            .get_finding(&record.id)
+            .expect("get finding")
+            .expect("finding exists");
 
-            assert_eq!(fetched.message, "Missing security");
-            assert_eq!(fetched.fixable, Some(true));
-        });
+        assert_eq!(fetched.message, "Missing security");
+        assert_eq!(fetched.fixable, Some(true));
     }
 
     #[test]
     fn test_record_findings() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("lint", "homeboy"))
-                .expect("start run");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("lint", "homeboy"))
+            .expect("start run");
 
-            let records = store
-                .record_findings(&[
-                    sample_finding(&run.id, "security", "src/foo.php"),
-                    sample_finding(&run.id, "i18n", "src/bar.php"),
-                ])
-                .expect("record findings");
+        let records = store
+            .record_findings(&[
+                sample_finding(&run.id, "security", "src/foo.php"),
+                sample_finding(&run.id, "i18n", "src/bar.php"),
+            ])
+            .expect("record findings");
 
-            assert_eq!(records.len(), 2);
-            assert_eq!(records[0].rule.as_deref(), Some("security"));
-            assert_eq!(records[1].rule.as_deref(), Some("i18n"));
-        });
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].rule.as_deref(), Some("security"));
+        assert_eq!(records[1].rule.as_deref(), Some("i18n"));
     }
 
     #[test]
     fn test_list_findings() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("lint", "homeboy"))
-                .expect("start run");
-            let records = store
-                .record_findings(&[
-                    sample_finding(&run.id, "security", "src/foo.php"),
-                    sample_finding(&run.id, "i18n", "src/bar.php"),
-                ])
-                .expect("record findings");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("lint", "homeboy"))
+            .expect("start run");
+        let records = store
+            .record_findings(&[
+                sample_finding(&run.id, "security", "src/foo.php"),
+                sample_finding(&run.id, "i18n", "src/bar.php"),
+            ])
+            .expect("record findings");
 
-            let all = store
-                .list_findings(FindingListFilter {
-                    run_id: Some(run.id.clone()),
-                    tool: Some("lint".to_string()),
-                    ..FindingListFilter::default()
-                })
-                .expect("list findings");
-            let filtered = store
-                .list_findings(FindingListFilter {
-                    run_id: Some(run.id),
-                    file: Some("src/foo.php".to_string()),
-                    ..FindingListFilter::default()
-                })
-                .expect("list file findings");
+        let all = store
+            .list_findings(FindingListFilter {
+                run_id: Some(run.id.clone()),
+                tool: Some("lint".to_string()),
+                ..FindingListFilter::default()
+            })
+            .expect("list findings");
+        let filtered = store
+            .list_findings(FindingListFilter {
+                run_id: Some(run.id),
+                file: Some("src/foo.php".to_string()),
+                ..FindingListFilter::default()
+            })
+            .expect("list file findings");
 
-            assert_eq!(all.len(), 2);
-            assert_eq!(filtered.len(), 1);
-            assert_eq!(filtered[0].id, records[0].id);
-        });
+        assert_eq!(all.len(), 2);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, records[0].id);
     }
 }
 
@@ -696,27 +699,26 @@ fn sample_import_run(id: &str) -> RunRecord {
 
 #[test]
 fn test_start_run() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
+    let context = HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
 
-        let started = store
-            .start_run(sample_run("bench", "homeboy"))
-            .expect("start run");
+    let started = store
+        .start_run(sample_run("bench", "homeboy"))
+        .expect("start run");
 
-        assert_eq!(started.kind, "bench");
-        assert_eq!(started.component_id.as_deref(), Some("homeboy"));
-        assert_eq!(started.status, "running");
-        assert!(started.finished_at.is_none());
-        assert_eq!(started.metadata_json["scenario"], "fixture");
+    assert_eq!(started.kind, "bench");
+    assert_eq!(started.component_id.as_deref(), Some("homeboy"));
+    assert_eq!(started.status, "running");
+    assert!(started.finished_at.is_none());
+    assert_eq!(started.metadata_json["scenario"], "fixture");
 
-        let fetched = store
-            .get_run(&started.id)
-            .expect("get run")
-            .expect("run exists");
+    let fetched = store
+        .get_run(&started.id)
+        .expect("get run")
+        .expect("run exists");
 
-        assert_eq!(fetched, started);
-    });
+    assert_eq!(fetched, started);
 }
 
 mod run_context_tests {
@@ -823,202 +825,196 @@ mod run_context_tests {
 
 #[test]
 fn import_run_is_idempotent_for_existing_mirrored_run_id() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let first = ObservationStore::open_initialized().expect("first store");
-        let second = ObservationStore::open_initialized().expect("second store");
-        let run = sample_import_run("runner-run-123");
+    let context = HermeticTestContext::new();
+    let roots = context.path_roots();
+    let first = ObservationStore::open_initialized_in_roots(&roots).expect("first store");
+    let second = ObservationStore::open_initialized_in_roots(&roots).expect("second store");
+    let run = sample_import_run("runner-run-123");
 
-        first.import_run(&run).expect("first import");
-        second.import_run(&run).expect("duplicate import");
+    first.import_run(&run).expect("first import");
+    second.import_run(&run).expect("duplicate import");
 
-        assert_eq!(second.get_run(&run.id).expect("get run"), Some(run));
-    });
+    assert_eq!(second.get_run(&run.id).expect("get run"), Some(run));
 }
 
 #[test]
 fn import_run_rejects_conflicting_existing_record() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = sample_import_run("runner-run-456");
-        let mut conflicting = run.clone();
-        conflicting.status = "fail".to_string();
+    let context = HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let run = sample_import_run("runner-run-456");
+    let mut conflicting = run.clone();
+    conflicting.status = "fail".to_string();
 
-        store.import_run(&run).expect("first import");
-        let err = store
-            .import_run(&conflicting)
-            .expect_err("conflicting duplicate should fail");
+    store.import_run(&run).expect("first import");
+    let err = store
+        .import_run(&conflicting)
+        .expect_err("conflicting duplicate should fail");
 
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("existing run record conflicts"));
-    });
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err.message.contains("existing run record conflicts"));
 }
 
 #[test]
 fn test_finish_run() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let started = store
-            .start_run(sample_run("bench", "homeboy"))
-            .expect("start run");
+    let context = HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+    let started = store
+        .start_run(sample_run("bench", "homeboy"))
+        .expect("start run");
 
-        let finished = store
-            .finish_run(
-                &started.id,
-                RunStatus::Pass,
-                Some(serde_json::json!({ "scenario": "fixture", "ok": true })),
-            )
-            .expect("finish run");
-        let fetched = store
-            .get_run(&started.id)
-            .expect("get run")
-            .expect("run exists");
+    let finished = store
+        .finish_run(
+            &started.id,
+            RunStatus::Pass,
+            Some(serde_json::json!({ "scenario": "fixture", "ok": true })),
+        )
+        .expect("finish run");
+    let fetched = store
+        .get_run(&started.id)
+        .expect("get run")
+        .expect("run exists");
 
-        assert_eq!(finished.status, "pass");
-        assert!(finished.finished_at.is_some());
-        assert_eq!(finished.metadata_json["ok"], true);
-        assert_eq!(fetched, finished);
-    });
+    assert_eq!(finished.status, "pass");
+    assert!(finished.finished_at.is_some());
+    assert_eq!(finished.metadata_json["ok"], true);
+    assert_eq!(fetched, finished);
 }
 
 #[test]
 fn finish_running_run_preserves_an_existing_terminal_outcome() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let started = store
-            .start_run(sample_run("review", "homeboy"))
-            .expect("start run");
+    let context = HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+    let started = store
+        .start_run(sample_run("review", "homeboy"))
+        .expect("start run");
 
-        let cancelled = store
-            .finish_running_run(
-                &started.id,
-                RunStatus::Skipped,
-                Some(serde_json::json!({ "cancellation": { "requested": true } })),
-            )
-            .expect("cancel running run")
-            .expect("running run was cancelled");
-        let late_completion = store
-            .finish_running_run(
-                &started.id,
-                RunStatus::Pass,
-                Some(serde_json::json!({ "passed": true })),
-            )
-            .expect("late completion query");
+    let cancelled = store
+        .finish_running_run(
+            &started.id,
+            RunStatus::Skipped,
+            Some(serde_json::json!({ "cancellation": { "requested": true } })),
+        )
+        .expect("cancel running run")
+        .expect("running run was cancelled");
+    let late_completion = store
+        .finish_running_run(
+            &started.id,
+            RunStatus::Pass,
+            Some(serde_json::json!({ "passed": true })),
+        )
+        .expect("late completion query");
 
-        assert_eq!(cancelled.status, "skipped");
-        assert!(late_completion.is_none());
-        let persisted = store
-            .get_run(&started.id)
-            .expect("get run")
-            .expect("run exists");
-        assert_eq!(persisted.status, "skipped");
-        assert_eq!(persisted.metadata_json["cancellation"]["requested"], true);
-        assert!(persisted.metadata_json.get("passed").is_none());
-    });
+    assert_eq!(cancelled.status, "skipped");
+    assert!(late_completion.is_none());
+    let persisted = store
+        .get_run(&started.id)
+        .expect("get run")
+        .expect("run exists");
+    assert_eq!(persisted.status, "skipped");
+    assert_eq!(persisted.metadata_json["cancellation"]["requested"], true);
+    assert!(persisted.metadata_json.get("passed").is_none());
 }
 
 #[test]
 fn test_list_runs() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
+    let context = HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
 
-        let bench = store
-            .start_run(sample_run("bench", "homeboy"))
-            .expect("start bench");
-        store
-            .finish_run(&bench.id, RunStatus::Pass, None)
-            .expect("finish bench");
+    let bench = store
+        .start_run(sample_run("bench", "homeboy"))
+        .expect("start bench");
+    store
+        .finish_run(&bench.id, RunStatus::Pass, None)
+        .expect("finish bench");
 
-        let mut trace = sample_run("trace", "homeboy");
-        trace.rig_id = Some("other-rig".to_string());
-        let trace = store.start_run(trace).expect("start trace");
-        store
-            .finish_run(&trace.id, RunStatus::Fail, None)
-            .expect("finish trace");
+    let mut trace = sample_run("trace", "homeboy");
+    trace.rig_id = Some("other-rig".to_string());
+    let trace = store.start_run(trace).expect("start trace");
+    store
+        .finish_run(&trace.id, RunStatus::Fail, None)
+        .expect("finish trace");
 
-        let filtered = store
-            .list_runs(RunListFilter {
-                kind: Some("bench".to_string()),
-                component_id: Some("homeboy".to_string()),
-                status: Some("pass".to_string()),
-                rig_id: Some("studio".to_string()),
-                limit: Some(10),
-                ..RunListFilter::default()
-            })
-            .expect("list filtered");
+    let filtered = store
+        .list_runs(RunListFilter {
+            kind: Some("bench".to_string()),
+            component_id: Some("homeboy".to_string()),
+            status: Some("pass".to_string()),
+            rig_id: Some("studio".to_string()),
+            limit: Some(10),
+            ..RunListFilter::default()
+        })
+        .expect("list filtered");
 
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].id, bench.id);
-        assert_eq!(filtered[0].status, "pass");
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].id, bench.id);
+    assert_eq!(filtered[0].status, "pass");
 
-        let missing = store
-            .list_runs(RunListFilter {
-                status: Some("error".to_string()),
-                ..RunListFilter::default()
-            })
-            .expect("list missing");
-        assert!(missing.is_empty());
-    });
+    let missing = store
+        .list_runs(RunListFilter {
+            status: Some("error".to_string()),
+            ..RunListFilter::default()
+        })
+        .expect("list missing");
+    assert!(missing.is_empty());
 }
 
 #[test]
 fn test_latest_run() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
+    let context = HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
 
-        let old = store
-            .start_run(sample_run("lint", "homeboy"))
-            .expect("start old");
-        store
-            .finish_run(&old.id, RunStatus::Pass, None)
-            .expect("finish old");
-        let latest = store
-            .start_run(sample_run("lint", "homeboy"))
-            .expect("start latest");
-        store
-            .finish_run(&latest.id, RunStatus::Fail, None)
-            .expect("finish latest");
-        let other_kind = store
-            .start_run(sample_run("bench", "homeboy"))
-            .expect("start bench");
+    let old = store
+        .start_run(sample_run("lint", "homeboy"))
+        .expect("start old");
+    store
+        .finish_run(&old.id, RunStatus::Pass, None)
+        .expect("finish old");
+    let latest = store
+        .start_run(sample_run("lint", "homeboy"))
+        .expect("start latest");
+    store
+        .finish_run(&latest.id, RunStatus::Fail, None)
+        .expect("finish latest");
+    let other_kind = store
+        .start_run(sample_run("bench", "homeboy"))
+        .expect("start bench");
 
-        let selected = store
-            .latest_run(RunListFilter {
-                kind: Some("lint".to_string()),
-                component_id: Some("homeboy".to_string()),
-                ..RunListFilter::default()
-            })
-            .expect("latest run")
-            .expect("run exists");
-        let missing = store
-            .latest_run(RunListFilter {
-                status: Some("stale".to_string()),
-                ..RunListFilter::default()
-            })
-            .expect("missing latest");
+    let selected = store
+        .latest_run(RunListFilter {
+            kind: Some("lint".to_string()),
+            component_id: Some("homeboy".to_string()),
+            ..RunListFilter::default()
+        })
+        .expect("latest run")
+        .expect("run exists");
+    let missing = store
+        .latest_run(RunListFilter {
+            status: Some("stale".to_string()),
+            ..RunListFilter::default()
+        })
+        .expect("missing latest");
 
-        assert_eq!(selected.id, latest.id);
-        assert_ne!(selected.id, old.id);
-        assert_ne!(selected.id, other_kind.id);
-        assert!(missing.is_none());
-    });
+    assert_eq!(selected.id, latest.id);
+    assert_ne!(selected.id, old.id);
+    assert_ne!(selected.id, other_kind.id);
+    assert!(missing.is_none());
 }
 
 #[test]
 fn latest_queries_use_timestamp_indexes_for_large_history() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("store");
-        let path = store.status().expect("status").path;
-        let db = rusqlite::Connection::open(path).expect("raw db");
-        let tx = db.unchecked_transaction().expect("transaction");
-        for index in 0..2_000 {
-            tx.execute(
+    let context = HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let path = store.status().expect("status").path;
+    let db = rusqlite::Connection::open(path).expect("raw db");
+    let tx = db.unchecked_transaction().expect("transaction");
+    for index in 0..2_000 {
+        tx.execute(
                 "INSERT INTO runs(id, kind, component_id, started_at, status, metadata_json) VALUES (?1, ?2, ?3, ?4, 'pass', '{}')",
                 rusqlite::params![
                     format!("run-{index:04}"),
@@ -1027,34 +1023,39 @@ fn latest_queries_use_timestamp_indexes_for_large_history() {
                     format!("2026-01-01T00:{:02}:{:02}Z", (index / 60) % 60, index % 60),
                 ],
             ).expect("insert history");
-        }
-        tx.commit().expect("commit history");
+    }
+    tx.commit().expect("commit history");
 
-        let latest = store
-            .latest_run(RunListFilter {
-                kind: Some("triage".to_string()),
-                component_id: Some("workspace".to_string()),
-                limit: Some(1),
-                ..RunListFilter::default()
-            })
-            .expect("latest")
-            .expect("matching run");
-        assert_eq!(latest.id, "run-1998");
+    let latest = store
+        .latest_run(RunListFilter {
+            kind: Some("triage".to_string()),
+            component_id: Some("workspace".to_string()),
+            limit: Some(1),
+            ..RunListFilter::default()
+        })
+        .expect("latest")
+        .expect("matching run");
+    assert_eq!(latest.id, "run-1998");
 
-        for sql in [
-            "EXPLAIN QUERY PLAN SELECT id FROM runs ORDER BY started_at DESC, id DESC LIMIT 1",
-            "EXPLAIN QUERY PLAN SELECT id FROM runs WHERE kind = 'triage' AND component_id = 'workspace' ORDER BY started_at DESC, id DESC LIMIT 1",
-        ] {
-            let plan = db.prepare(sql).expect("plan").query_map([], |row| row.get::<_, String>(3))
-                .expect("plan rows").collect::<Result<Vec<_>, _>>().expect("plan detail").join(" ");
-            assert!(plan.contains("INDEX"), "expected index-backed plan: {plan}");
-            assert!(!plan.contains("TEMP B-TREE"), "unexpected sort: {plan}");
-            assert!(
-                !plan.contains("SCAN runs") || plan.contains("USING COVERING INDEX"),
-                "unexpected table scan: {plan}"
-            );
-        }
-    });
+    for sql in [
+        "EXPLAIN QUERY PLAN SELECT id FROM runs ORDER BY started_at DESC, id DESC LIMIT 1",
+        "EXPLAIN QUERY PLAN SELECT id FROM runs WHERE kind = 'triage' AND component_id = 'workspace' ORDER BY started_at DESC, id DESC LIMIT 1",
+    ] {
+        let plan = db
+            .prepare(sql)
+            .expect("plan")
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("plan rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("plan detail")
+            .join(" ");
+        assert!(plan.contains("INDEX"), "expected index-backed plan: {plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "unexpected sort: {plan}");
+        assert!(
+            !plan.contains("SCAN runs") || plan.contains("USING COVERING INDEX"),
+            "unexpected table scan: {plan}"
+        );
+    }
 }
 
 mod store_artifact_tests {
@@ -1062,134 +1063,138 @@ mod store_artifact_tests {
 
     #[test]
     fn test_record_artifact() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("trace", "homeboy"))
-                .expect("start run");
-            let artifact_path = home.path().join("trace-results.json");
-            std::fs::write(&artifact_path, br#"{"status":"pass"}"#).expect("write artifact");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("trace", "homeboy"))
+            .expect("start run");
+        let artifact_path = context.root().join("trace-results.json");
+        std::fs::write(&artifact_path, br#"{"status":"pass"}"#).expect("write artifact");
 
-            let artifact = store
-                .record_artifact(&run.id, "trace-results", &artifact_path)
-                .expect("record artifact");
-            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+        let artifact = store
+            .record_artifact(&run.id, "trace-results", &artifact_path)
+            .expect("record artifact");
+        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
 
-            assert_eq!(artifacts, vec![artifact.clone()]);
-            assert_eq!(artifact.run_id, run.id);
-            assert_eq!(artifact.kind, "trace-results");
-            assert_eq!(artifact.artifact_type, "file");
-            assert_ne!(artifact.path, artifact_path.to_string_lossy());
-            assert!(std::path::PathBuf::from(&artifact.path).is_file());
-            assert_eq!(
-                std::fs::read_to_string(&artifact.path).expect("read persisted artifact"),
-                "{\"status\":\"pass\"}"
-            );
-            assert_eq!(artifact.url, None);
-            assert_eq!(artifact.size_bytes, Some(17));
-            assert_eq!(artifact.mime.as_deref(), Some("application/json"));
-            assert_eq!(
-                artifact.sha256.as_deref(),
-                Some("117367705c6e7ef5d779dd71de15a95ee62339e1ef635f08246f8e1ec99167e2")
-            );
-        });
+        assert_eq!(artifacts, vec![artifact.clone()]);
+        assert_eq!(artifact.run_id, run.id);
+        assert_eq!(artifact.kind, "trace-results");
+        assert_eq!(artifact.artifact_type, "file");
+        assert_ne!(artifact.path, artifact_path.to_string_lossy());
+        assert!(std::path::PathBuf::from(&artifact.path).is_file());
+        assert_eq!(
+            std::fs::read_to_string(&artifact.path).expect("read persisted artifact"),
+            "{\"status\":\"pass\"}"
+        );
+        assert_eq!(artifact.url, None);
+        assert_eq!(artifact.size_bytes, Some(17));
+        assert_eq!(artifact.mime.as_deref(), Some("application/json"));
+        assert_eq!(
+            artifact.sha256.as_deref(),
+            Some("117367705c6e7ef5d779dd71de15a95ee62339e1ef635f08246f8e1ec99167e2")
+        );
     }
 
     #[test]
     fn publication_manifest_artifact_store_refs_are_indexed() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("bench", "homeboy"))
-                .expect("start run");
-            let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json";
-            let artifact_root = home.path().join(".local/share/homeboy/artifacts");
-            let nested_path = artifact_root.join(locator);
-            std::fs::create_dir_all(nested_path.parent().expect("nested parent"))
-                .expect("create artifact-store parent");
-            std::fs::write(&nested_path, br#"{"steps":[]}"#).expect("nested artifact");
-            let manifest_path = home.path().join("publication-manifest.json");
-            std::fs::write(
-                &manifest_path,
-                serde_json::json!({
-                    "schema": "example/publication-manifest/v1",
-                    "id": "publish-run-1",
-                    "artifacts": [{
-                        "schema": "example/artifact-reference/v1",
-                        "id": "scenario/adapter/attempt-1/blueprint.after",
-                        "kind": "published-blueprint-after",
-                        "role": "output",
-                        "locator": {
-                            "type": "artifact-store",
-                            "value": locator,
-                        },
-                        "media_type": "application/json",
-                        "bytes": 12,
-                        "sha256": "abc123",
-                        "created_at": "2026-06-11T15:42:42Z"
-                    }]
-                })
-                .to_string(),
-            )
-            .expect("manifest artifact");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy"))
+            .expect("start run");
+        let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json";
+        // The artifact root this store indexes against, asked of the store
+        // itself rather than reconstructed from an ambient home layout. A
+        // rooted store answers from its injected roots (#7505).
+        let artifact_root = store.artifact_root().expect("store artifact root");
+        let nested_path = artifact_root.join(locator);
+        std::fs::create_dir_all(nested_path.parent().expect("nested parent"))
+            .expect("create artifact-store parent");
+        std::fs::write(&nested_path, br#"{"steps":[]}"#).expect("nested artifact");
+        let manifest_path = context.root().join("publication-manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "schema": "example/publication-manifest/v1",
+                "id": "publish-run-1",
+                "artifacts": [{
+                    "schema": "example/artifact-reference/v1",
+                    "id": "scenario/adapter/attempt-1/blueprint.after",
+                    "kind": "published-blueprint-after",
+                    "role": "output",
+                    "locator": {
+                        "type": "artifact-store",
+                        "value": locator,
+                    },
+                    "media_type": "application/json",
+                    "bytes": 12,
+                    "sha256": "abc123",
+                    "created_at": "2026-06-11T15:42:42Z"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("manifest artifact");
 
-            let source = store
-                .record_artifact(&run.id, "publication_manifest", &manifest_path)
-                .expect("record manifest");
-            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
-            let nested = artifacts
-                .iter()
-                .find(|artifact| artifact.id != source.id)
-                .expect("nested artifact indexed");
+        let source = store
+            .record_artifact(&run.id, "publication_manifest", &manifest_path)
+            .expect("record manifest");
+        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+        let nested = artifacts
+            .iter()
+            .find(|artifact| artifact.id != source.id)
+            .expect("nested artifact indexed");
 
-            assert_eq!(artifacts.len(), 2);
-            assert_eq!(nested.kind, "published-blueprint-after");
-            assert_eq!(nested.artifact_type, "file");
-            assert_eq!(nested.path, nested_path.to_string_lossy());
-            assert_eq!(nested.mime.as_deref(), Some("application/json"));
-            assert_eq!(nested.size_bytes, Some(12));
-            assert_eq!(nested.sha256.as_deref(), Some("abc123"));
-            assert_eq!(
-                nested.metadata_json["source_manifest_artifact_id"].as_str(),
-                Some(source.id.as_str())
-            );
-            assert_eq!(
-                nested.metadata_json["original_manifest_id"].as_str(),
-                Some("scenario/adapter/attempt-1/blueprint.after")
-            );
-            assert_eq!(
-                nested.metadata_json["name"].as_str(),
-                Some("blueprint.after")
-            );
-            assert_eq!(
-                store
-                    .get_artifact_for_run_token(&run.id, "blueprint.after")
-                    .expect("lookup by name")
-                    .expect("artifact by name")
-                    .id,
-                nested.id
-            );
-        });
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(nested.kind, "published-blueprint-after");
+        assert_eq!(nested.artifact_type, "file");
+        assert_eq!(nested.path, nested_path.to_string_lossy());
+        assert_eq!(nested.mime.as_deref(), Some("application/json"));
+        assert_eq!(nested.size_bytes, Some(12));
+        assert_eq!(nested.sha256.as_deref(), Some("abc123"));
+        assert_eq!(
+            nested.metadata_json["source_manifest_artifact_id"].as_str(),
+            Some(source.id.as_str())
+        );
+        assert_eq!(
+            nested.metadata_json["original_manifest_id"].as_str(),
+            Some("scenario/adapter/attempt-1/blueprint.after")
+        );
+        assert_eq!(
+            nested.metadata_json["name"].as_str(),
+            Some("blueprint.after")
+        );
+        assert_eq!(
+            store
+                .get_artifact_for_run_token(&run.id, "blueprint.after")
+                .expect("lookup by name")
+                .expect("artifact by name")
+                .id,
+            nested.id
+        );
     }
 
     #[test]
     fn publication_manifest_public_url_refs_are_indexed_from_artifact_origin() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("bench", "homeboy"))
-                .expect("start run");
-            let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json";
-            let artifact_root = home.path().join(".local/share/homeboy/artifacts");
-            let nested_path = artifact_root.join(locator);
-            std::fs::create_dir_all(nested_path.parent().expect("nested parent"))
-                .expect("create artifact-store parent");
-            std::fs::write(&nested_path, br#"{"steps":[]}"#).expect("nested artifact");
-            let manifest_path = home.path().join("publication-manifest.json");
-            std::fs::write(
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy"))
+            .expect("start run");
+        let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json";
+        // The artifact root this store indexes against, asked of the store
+        // itself rather than reconstructed from an ambient home layout. A
+        // rooted store answers from its injected roots (#7505).
+        let artifact_root = store.artifact_root().expect("store artifact root");
+        let nested_path = artifact_root.join(locator);
+        std::fs::create_dir_all(nested_path.parent().expect("nested parent"))
+            .expect("create artifact-store parent");
+        std::fs::write(&nested_path, br#"{"steps":[]}"#).expect("nested artifact");
+        let manifest_path = context.root().join("publication-manifest.json");
+        std::fs::write(
                 &manifest_path,
                 serde_json::json!({
                     "schema": "example/publication-manifest/v1",
@@ -1217,192 +1222,184 @@ mod store_artifact_tests {
             )
             .expect("manifest artifact");
 
-            let source = store
-                .record_artifact(&run.id, "publication_manifest", &manifest_path)
-                .expect("record manifest");
-            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
-            let nested = artifacts
-                .iter()
-                .find(|artifact| artifact.id != source.id)
-                .expect("nested artifact indexed");
+        let source = store
+            .record_artifact(&run.id, "publication_manifest", &manifest_path)
+            .expect("record manifest");
+        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+        let nested = artifacts
+            .iter()
+            .find(|artifact| artifact.id != source.id)
+            .expect("nested artifact indexed");
 
-            assert_eq!(artifacts.len(), 2);
-            assert_eq!(nested.kind, "published-blueprint-after");
-            assert_eq!(nested.path, nested_path.to_string_lossy());
-            assert_eq!(
-                nested.metadata_json["locator"]["value"].as_str(),
-                Some(locator)
-            );
-            assert_eq!(
-                nested.metadata_json["public_url"].as_str(),
-                Some("https://artifacts.example.test/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json")
-            );
-        });
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(nested.kind, "published-blueprint-after");
+        assert_eq!(nested.path, nested_path.to_string_lossy());
+        assert_eq!(
+            nested.metadata_json["locator"]["value"].as_str(),
+            Some(locator)
+        );
+        assert_eq!(
+            nested.metadata_json["public_url"].as_str(),
+            Some(
+                "https://artifacts.example.test/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json"
+            )
+        );
     }
 
     #[test]
     fn test_record_directory_artifact() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("bench", "homeboy"))
-                .expect("start run");
-            let artifact_path = home.path().join("visual-comparisons");
-            std::fs::create_dir_all(artifact_path.join("nested")).expect("mkdir artifact");
-            std::fs::write(artifact_path.join("summary.json"), br#"{"status":"skip"}"#)
-                .expect("write artifact");
-            std::fs::write(artifact_path.join("nested/detail.txt"), "detail")
-                .expect("write nested");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy"))
+            .expect("start run");
+        let artifact_path = context.root().join("visual-comparisons");
+        std::fs::create_dir_all(artifact_path.join("nested")).expect("mkdir artifact");
+        std::fs::write(artifact_path.join("summary.json"), br#"{"status":"skip"}"#)
+            .expect("write artifact");
+        std::fs::write(artifact_path.join("nested/detail.txt"), "detail").expect("write nested");
 
-            let artifact = store
-                .record_directory_artifact(&run.id, "bench_artifact", &artifact_path)
-                .expect("record directory artifact");
-            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+        let artifact = store
+            .record_directory_artifact(&run.id, "bench_artifact", &artifact_path)
+            .expect("record directory artifact");
+        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
 
-            assert_eq!(artifacts, vec![artifact.clone()]);
-            assert_eq!(artifact.run_id, run.id);
-            assert_eq!(artifact.kind, "bench_artifact");
-            assert_eq!(artifact.artifact_type, "directory");
-            assert_ne!(artifact.path, artifact_path.to_string_lossy());
-            let persisted = std::path::PathBuf::from(&artifact.path);
-            assert!(persisted.is_dir());
-            assert_eq!(
-                std::fs::read_to_string(persisted.join("summary.json")).expect("read persisted"),
-                "{\"status\":\"skip\"}"
-            );
-            assert_eq!(
-                std::fs::read_to_string(persisted.join("nested/detail.txt")).expect("read nested"),
-                "detail"
-            );
-            // The immutable tree digest lives in `sha256`, not `url`.
-            // `record_directory_artifact_with_id_and_metadata` computes
-            // `directory_tree_sha256` and stores it there -- it is also what the
-            // idempotent-reuse check compares (`existing.sha256.as_deref()`).
-            // This assertion had the two fields swapped and failed for that
-            // reason.
-            assert_eq!(
-                artifact.sha256,
-                Some(
-                    crate::observation::directory_tree_sha256(&persisted)
-                        .expect("directory digest")
-                )
-            );
-            assert_eq!(artifact.size_bytes, None);
-            assert_eq!(artifact.mime, None);
-            assert_eq!(artifact.url, None);
-        });
+        assert_eq!(artifacts, vec![artifact.clone()]);
+        assert_eq!(artifact.run_id, run.id);
+        assert_eq!(artifact.kind, "bench_artifact");
+        assert_eq!(artifact.artifact_type, "directory");
+        assert_ne!(artifact.path, artifact_path.to_string_lossy());
+        let persisted = std::path::PathBuf::from(&artifact.path);
+        assert!(persisted.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(persisted.join("summary.json")).expect("read persisted"),
+            "{\"status\":\"skip\"}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(persisted.join("nested/detail.txt")).expect("read nested"),
+            "detail"
+        );
+        // The immutable tree digest lives in `sha256`, not `url`.
+        // `record_directory_artifact_with_id_and_metadata` computes
+        // `directory_tree_sha256` and stores it there -- it is also what the
+        // idempotent-reuse check compares (`existing.sha256.as_deref()`).
+        // This assertion had the two fields swapped and failed for that
+        // reason.
+        assert_eq!(
+            artifact.sha256,
+            Some(crate::observation::directory_tree_sha256(&persisted).expect("directory digest"))
+        );
+        assert_eq!(artifact.size_bytes, None);
+        assert_eq!(artifact.mime, None);
+        assert_eq!(artifact.url, None);
     }
 
     #[test]
     fn test_record_url_artifact() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("bench", "homeboy"))
-                .expect("start run");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy"))
+            .expect("start run");
 
-            let artifact = store
-                .record_url_artifact(&run.id, "frontend_url", "https://example.test/")
-                .expect("record URL artifact");
-            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+        let artifact = store
+            .record_url_artifact(&run.id, "frontend_url", "https://example.test/")
+            .expect("record URL artifact");
+        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
 
-            assert_eq!(artifacts, vec![artifact.clone()]);
-            assert_eq!(artifact.kind, "frontend_url");
-            assert_eq!(artifact.artifact_type, "url");
-            assert_eq!(artifact.path, "https://example.test/");
-            assert_eq!(artifact.url.as_deref(), Some("https://example.test/"));
-            assert_eq!(artifact.sha256, None);
-            assert_eq!(artifact.size_bytes, None);
-            assert_eq!(artifact.mime, None);
-        });
+        assert_eq!(artifacts, vec![artifact.clone()]);
+        assert_eq!(artifact.kind, "frontend_url");
+        assert_eq!(artifact.artifact_type, "url");
+        assert_eq!(artifact.path, "https://example.test/");
+        assert_eq!(artifact.url.as_deref(), Some("https://example.test/"));
+        assert_eq!(artifact.sha256, None);
+        assert_eq!(artifact.size_bytes, None);
+        assert_eq!(artifact.mime, None);
     }
 
     #[test]
     fn test_list_artifacts() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("trace", "homeboy"))
-                .expect("start run");
-            let first_path = home.path().join("first.json");
-            let second_path = home.path().join("second.log");
-            std::fs::write(&first_path, b"first").expect("write first");
-            std::fs::write(&second_path, b"second").expect("write second");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("trace", "homeboy"))
+            .expect("start run");
+        let first_path = context.root().join("first.json");
+        let second_path = context.root().join("second.log");
+        std::fs::write(&first_path, b"first").expect("write first");
+        std::fs::write(&second_path, b"second").expect("write second");
 
-            let first = store
-                .record_artifact(&run.id, "first", &first_path)
-                .expect("record first");
-            let second = store
-                .record_artifact(&run.id, "second", &second_path)
-                .expect("record second");
+        let first = store
+            .record_artifact(&run.id, "first", &first_path)
+            .expect("record first");
+        let second = store
+            .record_artifact(&run.id, "second", &second_path)
+            .expect("record second");
 
-            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
-            assert_eq!(artifacts.len(), 2);
-            assert_eq!(artifacts[0].id, first.id);
-            assert_eq!(artifacts[1].id, second.id);
-        });
+        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].id, first.id);
+        assert_eq!(artifacts[1].id, second.id);
     }
 
     #[test]
     fn test_list_artifacts_for_runs() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let first_run = store
-                .start_run(sample_run("trace", "homeboy"))
-                .expect("start first run");
-            let second_run = store
-                .start_run(sample_run("bench", "homeboy"))
-                .expect("start second run");
-            let empty_run = store
-                .start_run(sample_run("lint", "homeboy"))
-                .expect("start empty run");
-            let first_path = home.path().join("first.json");
-            let second_path = home.path().join("second.log");
-            std::fs::write(&first_path, b"first").expect("write first");
-            std::fs::write(&second_path, b"second").expect("write second");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let first_run = store
+            .start_run(sample_run("trace", "homeboy"))
+            .expect("start first run");
+        let second_run = store
+            .start_run(sample_run("bench", "homeboy"))
+            .expect("start second run");
+        let empty_run = store
+            .start_run(sample_run("lint", "homeboy"))
+            .expect("start empty run");
+        let first_path = context.root().join("first.json");
+        let second_path = context.root().join("second.log");
+        std::fs::write(&first_path, b"first").expect("write first");
+        std::fs::write(&second_path, b"second").expect("write second");
 
-            let first = store
-                .record_artifact(&first_run.id, "first", &first_path)
-                .expect("record first");
-            let second = store
-                .record_artifact(&second_run.id, "second", &second_path)
-                .expect("record second");
+        let first = store
+            .record_artifact(&first_run.id, "first", &first_path)
+            .expect("record first");
+        let second = store
+            .record_artifact(&second_run.id, "second", &second_path)
+            .expect("record second");
 
-            let artifacts = store
-                .list_artifacts_for_runs(&[
-                    first_run.id.clone(),
-                    second_run.id.clone(),
-                    empty_run.id.clone(),
-                ])
-                .expect("list artifacts for runs");
-            assert_eq!(artifacts[&first_run.id], vec![first]);
-            assert_eq!(artifacts[&second_run.id], vec![second]);
-            assert!(artifacts[&empty_run.id].is_empty());
-        });
+        let artifacts = store
+            .list_artifacts_for_runs(&[
+                first_run.id.clone(),
+                second_run.id.clone(),
+                empty_run.id.clone(),
+            ])
+            .expect("list artifacts for runs");
+        assert_eq!(artifacts[&first_run.id], vec![first]);
+        assert_eq!(artifacts[&second_run.id], vec![second]);
+        assert!(artifacts[&empty_run.id].is_empty());
     }
 
     #[test]
     fn missing_artifact_file_returns_clear_error() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("bench", "homeboy"))
-                .expect("start run");
-            let missing = home.path().join("missing.json");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy"))
+            .expect("start run");
+        let missing = context.root().join("missing.json");
 
-            let err = store
-                .record_artifact(&run.id, "missing", &missing)
-                .expect_err("missing artifact should fail");
+        let err = store
+            .record_artifact(&run.id, "missing", &missing)
+            .expect_err("missing artifact should fail");
 
-            assert_eq!(err.code.as_str(), "validation.invalid_argument");
-            assert!(err.message.contains("artifact file not found"));
-            assert!(err.details.to_string().contains("missing.json"));
-        });
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("artifact file not found"));
+        assert!(err.details.to_string().contains("missing.json"));
     }
 }
 
@@ -1499,108 +1496,103 @@ mod notification_delivery_marker_tests {
 
     #[test]
     fn mark_notification_delivered_sets_marker_and_returns_true() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("test", "homeboy"))
-                .expect("start run");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("test", "homeboy"))
+            .expect("start run");
 
-            assert!(!store.is_notification_delivered(&run.id).unwrap());
-            let won = store
-                .mark_notification_delivered(&run.id, "runner-direct")
-                .unwrap();
+        assert!(!store.is_notification_delivered(&run.id).unwrap());
+        let won = store
+            .mark_notification_delivered(&run.id, "runner-direct")
+            .unwrap();
 
-            assert!(won);
-            assert!(store.is_notification_delivered(&run.id).unwrap());
-        });
+        assert!(won);
+        assert!(store.is_notification_delivered(&run.id).unwrap());
     }
 
     #[test]
     fn mark_notification_delivered_idempotent_second_call_returns_false() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("test", "homeboy"))
-                .expect("start run");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("test", "homeboy"))
+            .expect("start run");
 
-            let first = store
-                .mark_notification_delivered(&run.id, "runner-direct")
-                .unwrap();
-            let second = store
-                .mark_notification_delivered(&run.id, "controller")
-                .unwrap();
+        let first = store
+            .mark_notification_delivered(&run.id, "runner-direct")
+            .unwrap();
+        let second = store
+            .mark_notification_delivered(&run.id, "controller")
+            .unwrap();
 
-            assert!(first);
-            assert!(!second);
-            assert!(store.is_notification_delivered(&run.id).unwrap());
-        });
+        assert!(first);
+        assert!(!second);
+        assert!(store.is_notification_delivered(&run.id).unwrap());
     }
 
     #[test]
     fn is_notification_delivered_returns_false_for_missing_run() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
 
-            assert!(!store.is_notification_delivered("nonexistent-run").unwrap());
-        });
+        assert!(!store.is_notification_delivered("nonexistent-run").unwrap());
     }
 
     #[test]
     fn notification_delivered_marker_preserves_existing_metadata() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("test", "homeboy"))
-                .expect("start run");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("test", "homeboy"))
+            .expect("start run");
 
-            store
-                .mark_notification_delivered(&run.id, "runner-direct")
-                .unwrap();
+        store
+            .mark_notification_delivered(&run.id, "runner-direct")
+            .unwrap();
 
-            let fetched = store
-                .get_run(&run.id)
-                .expect("get run")
-                .expect("run exists");
-            assert_eq!(fetched.metadata_json["scenario"], "fixture");
-            assert_eq!(
-                fetched.metadata_json["notification_delivered"]["by"],
-                "runner-direct"
-            );
-            assert!(fetched.metadata_json["notification_delivered"]["at"]
-                .as_str()
-                .is_some());
-        });
+        let fetched = store
+            .get_run(&run.id)
+            .expect("get run")
+            .expect("run exists");
+        assert_eq!(fetched.metadata_json["scenario"], "fixture");
+        assert_eq!(
+            fetched.metadata_json["notification_delivered"]["by"],
+            "runner-direct"
+        );
+        assert!(fetched.metadata_json["notification_delivered"]["at"]
+            .as_str()
+            .is_some());
     }
 
     #[test]
     fn runner_and_controller_race_only_one_wins() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("test", "homeboy"))
-                .expect("start run");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("test", "homeboy"))
+            .expect("start run");
 
-            let runner_won = store
-                .mark_notification_delivered(&run.id, "runner-direct")
-                .unwrap();
-            let controller_won = store
-                .mark_notification_delivered(&run.id, "controller")
-                .unwrap();
+        let runner_won = store
+            .mark_notification_delivered(&run.id, "runner-direct")
+            .unwrap();
+        let controller_won = store
+            .mark_notification_delivered(&run.id, "controller")
+            .unwrap();
 
-            assert!(runner_won);
-            assert!(!controller_won);
-            let marker = &store
-                .get_run(&run.id)
-                .expect("get run")
-                .expect("run exists")
-                .metadata_json["notification_delivered"];
-            assert_eq!(marker["by"], "runner-direct");
-        });
+        assert!(runner_won);
+        assert!(!controller_won);
+        let marker = &store
+            .get_run(&run.id)
+            .expect("get run")
+            .expect("run exists")
+            .metadata_json["notification_delivered"];
+        assert_eq!(marker["by"], "runner-direct");
     }
 }
 
@@ -1615,16 +1607,15 @@ mod referential_integrity_tests {
 
     #[test]
     fn an_initialized_store_enforces_the_declared_foreign_keys() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
 
-            assert!(
-                crate::observation::store::schema::foreign_keys_enforced(&store.connection)
-                    .expect("read enforcement"),
-                "an initialized store must enforce the foreign keys it declares"
-            );
-        });
+        assert!(
+            crate::observation::store::schema::foreign_keys_enforced(&store.connection)
+                .expect("read enforcement"),
+            "an initialized store must enforce the foreign keys it declares"
+        );
     }
 
     /// The invariant made observable: a run cannot be dropped out from under a
@@ -1633,31 +1624,30 @@ mod referential_integrity_tests {
     /// retention had already reclaimed.
     #[test]
     fn a_run_cannot_be_deleted_while_a_child_row_still_references_it() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("trace", "homeboy"))
-                .expect("start run");
-            let artifact_path = home.path().join("trace-results.json");
-            std::fs::write(&artifact_path, b"{}").expect("write artifact");
-            store
-                .record_artifact(&run.id, "trace-results", &artifact_path)
-                .expect("record artifact");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("trace", "homeboy"))
+            .expect("start run");
+        let artifact_path = context.root().join("trace-results.json");
+        std::fs::write(&artifact_path, b"{}").expect("write artifact");
+        store
+            .record_artifact(&run.id, "trace-results", &artifact_path)
+            .expect("record artifact");
 
-            let orphaning = store
-                .connection
-                .execute("DELETE FROM runs WHERE id = ?1", [&run.id]);
+        let orphaning = store
+            .connection
+            .execute("DELETE FROM runs WHERE id = ?1", [&run.id]);
 
-            assert!(
-                orphaning.is_err(),
-                "deleting a referenced run must be refused, not silently orphan its artifact"
-            );
-            assert_eq!(
-                store.list_artifacts(&run.id).expect("list artifacts").len(),
-                1
-            );
-        });
+        assert!(
+            orphaning.is_err(),
+            "deleting a referenced run must be refused, not silently orphan its artifact"
+        );
+        assert_eq!(
+            store.list_artifacts(&run.id).expect("list artifacts").len(),
+            1
+        );
     }
 
     /// The delete paths enumerate child tables by hand. If a sixth child table
@@ -1666,35 +1656,34 @@ mod referential_integrity_tests {
     /// list against the live schema so the omission fails here instead.
     #[test]
     fn every_table_referencing_runs_is_covered_by_the_delete_paths() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("init store");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
 
-            let mut referencing: Vec<String> = {
-                let mut statement = store
-                    .connection
-                    .prepare(
-                        "SELECT name FROM sqlite_master \
-                         WHERE type = 'table' AND sql LIKE '%REFERENCES runs(id)%'",
-                    )
-                    .expect("prepare schema scan");
-                let rows = statement
-                    .query_map([], |row| row.get::<_, String>(0))
-                    .expect("scan schema");
-                rows.map(|row| row.expect("read table name")).collect()
-            };
-            referencing.sort();
-            let mut covered: Vec<String> = RUN_OWNED_CHILD_TABLES
-                .iter()
-                .map(|table| (*table).to_string())
-                .collect();
-            covered.sort();
+        let mut referencing: Vec<String> = {
+            let mut statement = store
+                .connection
+                .prepare(
+                    "SELECT name FROM sqlite_master \
+                     WHERE type = 'table' AND sql LIKE '%REFERENCES runs(id)%'",
+                )
+                .expect("prepare schema scan");
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("scan schema");
+            rows.map(|row| row.expect("read table name")).collect()
+        };
+        referencing.sort();
+        let mut covered: Vec<String> = RUN_OWNED_CHILD_TABLES
+            .iter()
+            .map(|table| (*table).to_string())
+            .collect();
+        covered.sort();
 
-            assert_eq!(
-                referencing, covered,
-                "every table that references runs(id) must be deleted before its run"
-            );
-        });
+        assert_eq!(
+            referencing, covered,
+            "every table that references runs(id) must be deleted before its run"
+        );
     }
 
     /// Retention deletes children first and the parent last. With enforcement
@@ -1702,44 +1691,43 @@ mod referential_integrity_tests {
     /// error -- so the happy path is worth pinning.
     #[test]
     fn terminal_retention_deletes_a_run_and_its_children_in_a_safe_order() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let mut store = ObservationStore::open_initialized().expect("init store");
-            let run = store
-                .start_run(sample_run("trace", "homeboy"))
-                .expect("start run");
-            let artifact_path = home.path().join("trace-results.json");
-            std::fs::write(&artifact_path, b"{}").expect("write artifact");
-            store
-                .record_artifact(&run.id, "trace-results", &artifact_path)
-                .expect("record artifact");
-            store
-                .record_finding(&NewFindingRecord {
-                    run_id: run.id.clone(),
-                    tool: "clippy".to_string(),
-                    rule: None,
-                    file: None,
-                    line: None,
-                    severity: None,
-                    fingerprint: None,
-                    message: "finding".to_string(),
-                    fixable: None,
-                    metadata_json: serde_json::json!({}),
-                })
-                .expect("record finding");
-            store
-                .finish_run(&run.id, RunStatus::Pass, None)
-                .expect("finish run");
+        let context = HermeticTestContext::new();
+        let roots = context.path_roots();
+        let mut store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
+        let run = store
+            .start_run(sample_run("trace", "homeboy"))
+            .expect("start run");
+        let artifact_path = context.root().join("trace-results.json");
+        std::fs::write(&artifact_path, b"{}").expect("write artifact");
+        store
+            .record_artifact(&run.id, "trace-results", &artifact_path)
+            .expect("record artifact");
+        store
+            .record_finding(&NewFindingRecord {
+                run_id: run.id.clone(),
+                tool: "clippy".to_string(),
+                rule: None,
+                file: None,
+                line: None,
+                severity: None,
+                fingerprint: None,
+                message: "finding".to_string(),
+                fixable: None,
+                metadata_json: serde_json::json!({}),
+            })
+            .expect("record finding");
+        store
+            .finish_run(&run.id, RunStatus::Pass, None)
+            .expect("finish run");
 
-            store
-                .delete_terminal_runs(std::slice::from_ref(&run.id))
-                .expect("terminal retention must not be refused by the constraint");
+        store
+            .delete_terminal_runs(std::slice::from_ref(&run.id))
+            .expect("terminal retention must not be refused by the constraint");
 
-            assert!(store.get_run(&run.id).expect("get run").is_none());
-            assert!(store
-                .list_artifacts(&run.id)
-                .expect("list artifacts")
-                .is_empty());
-        });
+        assert!(store.get_run(&run.id).expect("get run").is_none());
+        assert!(store
+            .list_artifacts(&run.id)
+            .expect("list artifacts")
+            .is_empty());
     }
 }

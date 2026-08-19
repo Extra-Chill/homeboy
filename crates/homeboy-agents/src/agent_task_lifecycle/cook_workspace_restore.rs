@@ -23,9 +23,16 @@ use crate::agent_task_scheduler::AgentTaskPlan;
 /// The durable promotion below is *not* rooted here, deliberately.
 /// `persisted_promotion_for_attempt` reads through `agent_task_lifecycle::status`,
 /// which reconciles and writes as it reads; its `_in_store` sibling is a plain
-/// record read instead. Substituting one for the other would change what an
-/// existing caller of the ambient retry sees, so rooting it waits on the slice
-/// that roots `status` itself (#7505).
+/// record read instead.
+///
+/// `status_in_store` now exists, so the missing rooted form is no longer the
+/// obstacle. What remains is a behaviour decision this slice does not get to
+/// make silently: `persisted_promotion_for_attempt_in_store` is a plain
+/// `read_record`, and pointing it at `status_in_store` would add roughly twenty
+/// durable writes and two advisory locks to every existing caller of the rooted
+/// promotion read. Either that read starts reconciling for everyone or this
+/// function keeps reading a not-yet-reconciled record — both are defensible and
+/// neither is a mechanical substitution, so it is its own slice (#7505).
 pub(super) fn restore_follow_up_cook_candidate_workspace_in_root(
     plan: &mut AgentTaskPlan,
     artifact_root: &Path,
