@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.18] - 2026-08-19
+
+### Changed
+- stop the rooted offload tests reaching the operator's runtime store
+- root submit_and_persist tests in an injected store
+- root 5 handoff_and_proxy transport-proxy tests in an injected store
+- root the transport-proxy snapshot reconcile in an injected store
+
 ## [0.350.17] - 2026-08-19
 
 ### Changed
