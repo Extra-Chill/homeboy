@@ -3846,13 +3846,22 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
 
 #[test]
 fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() {
+    let ambient_lifecycle_store =
+        AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
+    let run_id = homeboy_core::test_support::with_isolated_home(|_| {
+        run_concurrent_first_cooks_recipe_creator_fixture()
+    });
+    assert!(!ambient_lifecycle_store
+        .record_exists(&run_id)
+        .expect("ambient lifecycle state remains untouched"));
+}
+
+fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = CookRecipeStore::new(context.path_roots());
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let mut winner = batch_cook_options(
-        "concurrent-first-cook",
-        Arc::new(AcceptedDetachedAttemptDispatcher),
-    );
+    let cook_id = format!("concurrent-first-cook-{}", uuid::Uuid::new_v4());
+    let mut winner = batch_cook_options(&cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
     winner.initial_plan.plan_id = "creator-plan".to_string();
     let mut loser = winner.clone();
     loser.initial_plan.plan_id = "loser-plan".to_string();
@@ -3899,9 +3908,7 @@ fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() 
             .count(),
         1
     );
-    let recipe = store
-        .load_recipe("concurrent-first-cook")
-        .expect("creator recipe");
+    let recipe = store.load_recipe(&cook_id).expect("creator recipe");
     let creator_options = super::super::reconstruct_options_with_dispatcher(
         &recipe,
         Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
@@ -3941,6 +3948,7 @@ fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() 
         .ok(),
         aggregate_before
     );
+    creator_options.initial_run_id
 }
 
 #[test]
