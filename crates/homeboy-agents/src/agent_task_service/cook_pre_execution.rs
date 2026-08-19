@@ -252,6 +252,7 @@ pub(crate) fn materialize_initial_cook_attempt_with_stores(
         recipe_store,
         lifecycle_store,
         options,
+        false,
     )
     .map(|_| ())
 }
@@ -260,11 +261,13 @@ pub(crate) fn materialize_initial_cook_attempt_with_stores_outcome(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,
+    recipe_created_by_invocation: bool,
 ) -> Result<bool> {
     materialize_initial_cook_attempt_with_store_and_lifecycle(
         recipe_store,
         lifecycle_store,
         options,
+        recipe_created_by_invocation,
     )
 }
 
@@ -272,9 +275,8 @@ fn materialize_initial_cook_attempt_with_store_and_lifecycle(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &AgentTaskCookServiceOptions,
+    recipe_created_by_invocation: bool,
 ) -> Result<bool> {
-    let created = !recipe_store.recipe_exists(&options.cook_id)
-        && !lifecycle_store.record_exists(&options.initial_run_id)?;
     CookExecutionPreparation::new(recipe_store, lifecycle_store).materialize_with_runtime(
         &options.cook_id,
         &options.initial_run_id,
@@ -284,7 +286,7 @@ fn materialize_initial_cook_attempt_with_store_and_lifecycle(
         production_runtime_admission(lifecycle_store),
         |cook_id| reconcile_reserved_cancellation_in_store(lifecycle_store, cook_id),
     )?;
-    Ok(created)
+    Ok(recipe_created_by_invocation)
 }
 
 /// Complete recipe, run-record, and index registration for an attempt. Each

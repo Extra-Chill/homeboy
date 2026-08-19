@@ -38,12 +38,13 @@ use super::cook_budget::{
     budget_remaining, execution_budget_usage, reserve_remediation_budget,
     validate_effective_cook_budget, ExecutionBudgetUsage,
 };
+#[cfg(test)]
+use super::cook_pre_execution::materialize_initial_cook_attempt_with_stores;
 use super::cook_pre_execution::{
-    materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores,
-    materialize_initial_cook_attempt_with_stores_outcome, pre_execution_failure_details,
-    pre_execution_failure_phase, pre_execution_failure_report, record_pre_execution_failure,
-    retryable_pre_execution_failure, terminal_executor_matches, with_pre_execution_phase,
-    CookExecutionPreparation,
+    materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores_outcome,
+    pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
+    record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
+    with_pre_execution_phase, CookExecutionPreparation,
 };
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
@@ -54,7 +55,7 @@ use super::cook_promotion::{
     refreshed_moving_base_recovery, retryable_provider_discovery_failure,
     retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
 };
-use super::cook_recipe::CookRecipeStore;
+use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
 #[cfg(test)]
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
@@ -4259,26 +4260,26 @@ where
         .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
         .transpose()?
         .flatten();
-    let existing_recipe = store.recipe_exists(&options.cook_id);
     // A form-only continuation has already appended and persisted its exact
     // attempt. Re-persisting it as a fresh initial recipe would falsely look
     // like an unsafe post-gate correction because the durable lineage now has
     // more attempts than the caller's one-attempt input.
-    let recipe = if existing_recipe {
-        let recipe = store.load_recipe(&options.cook_id)?;
-        if recipe
-            .attempts
-            .iter()
-            .any(|attempt| attempt.run_id == options.initial_run_id)
-        {
-            recipe
-        } else {
-            store.persist_initial_recipe(&options)?
-        }
-    } else {
+    if !store.recipe_exists(&options.cook_id) {
         lifecycle_store.require_detached_cook_handoff_fence_open(&options.cook_id)?;
-        store.persist_initial_recipe(&options)?
+    }
+    let recipe_materialization = match store.load_recipe(&options.cook_id) {
+        Ok(recipe)
+            if recipe
+                .attempts
+                .iter()
+                .any(|attempt| attempt.run_id == options.initial_run_id) =>
+        {
+            InitialRecipeMaterialization::reused(recipe)
+        }
+        Ok(_) | Err(_) => store.persist_initial_recipe_with_outcome(&options)?,
     };
+    let existing_recipe = !recipe_materialization.created;
+    let recipe = recipe_materialization.recipe;
     // A recipe can survive an interruption before its first lifecycle record.
     // Resume from the validated durable inputs so ambient transport state cannot
     // turn replay into a conflicting new cook.
@@ -4322,8 +4323,12 @@ where
     // Recipe persistence and lifecycle materialization are a recoverable saga.
     // Complete it before any capacity, workspace, or provider-facing work so a
     // controller interruption leaves a status-addressable, resumable attempt.
-    let materialized_by_invocation =
-        materialize_initial_cook_attempt_with_stores_outcome(store, lifecycle_store, &options)?;
+    let materialized_by_invocation = materialize_initial_cook_attempt_with_stores_outcome(
+        store,
+        lifecycle_store,
+        &options,
+        recipe_materialization.created,
+    )?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.

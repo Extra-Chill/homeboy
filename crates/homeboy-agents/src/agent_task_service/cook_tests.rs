@@ -23,7 +23,9 @@ use super::super::cook_promotion::{
     refreshed_moving_base_recovery, selected_candidate_task_id_in_store, CookReportInput,
     MovingBaseCookRecovery,
 };
-use super::super::cook_recipe::persist_initial_recipe;
+use super::super::cook_recipe::{
+    persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
+};
 use super::*;
 use crate::agent_task::{
     AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
@@ -3674,6 +3676,107 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
         assert_eq!(result.value.status, "durable_failure");
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
     });
+}
+
+#[test]
+fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let mut winner = batch_cook_options(
+        "concurrent-first-cook",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    winner.initial_plan.plan_id = "creator-plan".to_string();
+    let mut loser = winner.clone();
+    loser.initial_plan.plan_id = "loser-plan".to_string();
+
+    let barrier = Arc::new(Barrier::new(2));
+    set_initial_recipe_creation_barrier_for_test(Some(Arc::clone(&barrier)));
+    let (winner_result, loser_result) = std::thread::scope(|scope| {
+        let winner = scope.spawn(|| {
+            run_cook_with_boundaries_reported_with_stores(
+                &store,
+                &lifecycle_store,
+                winner,
+                UnusedExecutor,
+                DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+                None,
+                false,
+            )
+        });
+        let loser = scope.spawn(|| {
+            run_cook_with_boundaries_reported_with_stores(
+                &store,
+                &lifecycle_store,
+                loser,
+                UnusedExecutor,
+                DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+                None,
+                false,
+            )
+        });
+        (winner.join().unwrap(), loser.join().unwrap())
+    });
+    set_initial_recipe_creation_barrier_for_test(None);
+
+    let outcomes = [winner_result.unwrap(), loser_result.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.value.status == "in_flight")
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.value.status == "durable_failure")
+            .count(),
+        1
+    );
+    let recipe = store
+        .load_recipe("concurrent-first-cook")
+        .expect("creator recipe");
+    let creator_options = super::super::reconstruct_options_with_dispatcher(
+        &recipe,
+        Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
+    )
+    .expect("creator options");
+    let record_before = lifecycle_store
+        .read_record(&creator_options.initial_run_id)
+        .expect("queued creator record");
+    let plan_before = lifecycle_store
+        .read_controller_plan(&creator_options.initial_run_id)
+        .expect("creator controller plan");
+    let aggregate_before = agent_task_lifecycle::read_aggregate_in_store(
+        &lifecycle_store,
+        &creator_options.initial_run_id,
+    )
+    .ok();
+
+    assert_eq!(record_before.state, AgentTaskRunState::Queued);
+    assert_eq!(
+        lifecycle_store
+            .read_record(&creator_options.initial_run_id)
+            .expect("creator record remains queued")
+            .state,
+        record_before.state
+    );
+    assert_eq!(
+        lifecycle_store
+            .read_controller_plan(&creator_options.initial_run_id)
+            .expect("creator plan remains immutable"),
+        plan_before
+    );
+    assert_eq!(
+        agent_task_lifecycle::read_aggregate_in_store(
+            &lifecycle_store,
+            &creator_options.initial_run_id,
+        )
+        .ok(),
+        aggregate_before
+    );
 }
 
 #[test]
