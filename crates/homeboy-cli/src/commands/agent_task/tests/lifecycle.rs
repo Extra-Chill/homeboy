@@ -17,6 +17,42 @@ use homeboy::agents::agent_tasks::batch::{persist_fanout_run_batch, FanoutRunBat
 
 use super::super::AgentTaskCommand;
 
+#[test]
+fn bounded_full_status_refs_hydrate_through_the_agent_task_resolver() {
+    with_isolated_home(|_| {
+        let run_id = "bounded-status-ref";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submitted");
+        let (bounded, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            bounded: true,
+            no_runner_probe: false,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        })
+        .expect("bounded status");
+        let evidence = AgentTaskEvidenceRef {
+            kind: "status".to_string(),
+            uri: bounded["details"]["status"]["ref"]
+                .as_str()
+                .expect("status ref")
+                .to_string(),
+            label: None,
+        };
+        let hydrated = homeboy::agents::agent_task_service::hydrate_evidence_ref(
+            run_id, &evidence, None, None, None,
+        );
+
+        assert_eq!(hydrated.status, "ok");
+        assert_eq!(hydrated.content["run_id"], run_id);
+    });
+}
+
 #[derive(Debug)]
 struct RecoverableRunnerDispatcher {
     unavailable: AtomicBool,
@@ -460,6 +496,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
             bridge: false,
             since_cursor: None,
             full: true,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -494,6 +531,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
                 bridge: false,
                 since_cursor: None,
                 full: true,
+                bounded: false,
                 no_runner_probe: false,
                 strict_subject_exit: false,
                 watch: false,
@@ -559,6 +597,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
             bridge: false,
             since_cursor: None,
             full: true,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -1287,6 +1326,7 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
             bridge: false,
             since_cursor: None,
             full: true,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -1532,6 +1572,7 @@ fn submit_run_status_reports_terminal_state() {
             bridge: false,
             since_cursor: None,
             full: true,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -1545,6 +1586,7 @@ fn submit_run_status_reports_terminal_state() {
             bridge: true,
             since_cursor: Some(0),
             full: false,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -1581,6 +1623,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
             bridge: false,
             since_cursor: None,
             full: false,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -1740,6 +1783,7 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
             bridge: false,
             since_cursor: None,
             full: true,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -1995,6 +2039,7 @@ fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit()
             bridge: false,
             since_cursor: None,
             full: true,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -2093,6 +2138,7 @@ fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
             bridge: false,
             since_cursor: None,
             full: true,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -2570,6 +2616,7 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
             bridge: false,
             since_cursor: None,
             full: true,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -3058,6 +3105,7 @@ fn terminal_provider_failure_with_large_promotion_evidence_keeps_full_readers_lo
             run_id: run_id.to_string(),
             exact: false,
             full: true,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             bridge: false,
@@ -3453,6 +3501,7 @@ fn exact_full_status_displays_retained_safe_quarantine_diagnostic() {
             bridge: false,
             since_cursor: None,
             full: true,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -3815,6 +3864,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             bridge: true,
             since_cursor: Some(1),
             full: false,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -3851,6 +3901,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             bridge: true,
             since_cursor: Some(1),
             full: false,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
@@ -3895,6 +3946,7 @@ fn non_bridge_resume_keeps_aggregate_output_shape() {
             bridge: false,
             since_cursor: None,
             full: false,
+            bounded: false,
             no_runner_probe: false,
             strict_subject_exit: false,
             watch: false,
