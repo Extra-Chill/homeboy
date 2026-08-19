@@ -808,6 +808,28 @@ fn accepted_handoff_replays_idempotently_and_rejects_a_different_identity() {
     assert_eq!(stored.runner_job_id(), Some("job-immutable"));
 }
 
+/// Deliberately still on `with_isolated_home` (#7505), and not because a rooted
+/// sibling is missing — `reconcile_transport_proxy_snapshot_in_store` exists and
+/// every other call here has one.
+///
+/// The blocker is the closing `status()`. Unlike its migrated siblings, this
+/// test reads status back over a record the reconciliation left *Running* and
+/// runner-backed, so `runner_probe_plan` returns `performed: true` and
+/// `status_in_store` reaches `reconcile_runner_job_state_in_store` ->
+/// `with_runner_continuation`. That provider slot is process-global by design
+/// (#12618) and is *not* covered by any lock of its own:
+/// `RunnerContinuationTestGuard` installs and clears it, and the only thing
+/// serializing installers today is the hermetic-home mutex every ambient test
+/// holds.
+///
+/// Three ambient tests in this same file install a one-shot
+/// `ReconciliationProvider` whose result is a `Mutex<Option<..>>` that
+/// `reconcile_runner_job` `take()`s. A rooted form of this test would run
+/// concurrently with them and consume that single result — silently failing
+/// *those* tests, and taking a `ConfirmedAbsent` verdict that would terminalize
+/// this run and break the `runner_job_id` assertion below. Migrating this one
+/// trades a hermetic-home mutation for a genuine cross-test race, so it stays
+/// until the continuation registry is serialized independently.
 #[test]
 fn runner_snapshot_binds_pending_lab_handoff_before_validation() {
     with_isolated_home(|_| {
@@ -843,6 +865,20 @@ fn runner_snapshot_binds_pending_lab_handoff_before_validation() {
     });
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). The planned proxy, the recovery-state write that strips the pending
+/// handoff, and the reconciliation that has to bind from what is left are one
+/// operation on one durable row: "the runner identity survives only on the
+/// planned execution record" is a claim about a specific record, so the record
+/// the fixture mutilates and the record the binder reads must be the same one.
+///
+/// `reconcile_transport_proxy_snapshot_in_store` is a pure alias for
+/// `reconcile_runner_job_snapshot_in_store`, whose binding write, aggregate
+/// idempotence read, and terminal commit are all rooted. The bind reaches
+/// `record_detached_lab_run_in_store`, which still carries the default Lab
+/// offload submission — but it cannot fire here, because the planned proxy has
+/// already written the record, so acceptance reads it rather than falling
+/// through to `submit_plan_in_store`.
 #[test]
 fn preacceptance_snapshot_binds_replacement_job_from_planned_execution_record() {
     // Issue #9382: a durable Lab-offloaded run interrupted *before* acceptance
@@ -852,77 +888,101 @@ fn preacceptance_snapshot_binds_replacement_job_from_planned_execution_record() 
     // exact run, the runner accepts a fresh replacement job, and its snapshot
     // must bind that replacement rather than reject it as "no accepted runner
     // job identity".
-    with_isolated_home(|_| {
-        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        let mut record = record_lab_offload_planned(LabOffloadProxyPlan {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_lab_offload_planned_with_submission_in_store(
+        &lifecycle_store,
+        LabOffloadProxyPlan {
             run_id: "preacceptance-recovery",
             runner_id: "homeboy-lab",
             remote_workspace: "/runner/workspace/repo",
             remote_command: &command,
             durable_plan: None,
-        })
-        .expect("planned controller proxy");
+        },
+        &stub_lab_offload_submission,
+    )
+    .expect("planned controller proxy");
 
-        // Simulate the post-interruption recovery state: the pending controller
-        // handoff is gone (deadline/recovery cleared it) AND the metadata
-        // runner_id was not persisted, so the runner identity survives only on
-        // the planned execution record. Without the #9382 fix the binder has no
-        // runner source and validation rejects the replacement job.
-        record.lab_handoff = None;
-        record
-            .metadata
-            .as_object_mut()
-            .expect("metadata object")
-            .remove("runner_id");
-        assert!(record.runner_id().is_none());
-        assert_eq!(
-            record.metadata["runner_execution_record"]["status"],
-            "planned"
-        );
-        assert_eq!(
-            record.metadata["runner_execution_record"]["runner_id"],
-            "homeboy-lab"
-        );
-        store::write_record(&record).expect("persist recovery state");
+    // Simulate the post-interruption recovery state: the pending controller
+    // handoff is gone (deadline/recovery cleared it) AND the metadata
+    // runner_id was not persisted, so the runner identity survives only on
+    // the planned execution record. Without the #9382 fix the binder has no
+    // runner source and validation rejects the replacement job.
+    record.lab_handoff = None;
+    record
+        .metadata
+        .as_object_mut()
+        .expect("metadata object")
+        .remove("runner_id");
+    assert!(record.runner_id().is_none());
+    assert_eq!(
+        record.metadata["runner_execution_record"]["status"],
+        "planned"
+    );
+    assert_eq!(
+        record.metadata["runner_execution_record"]["runner_id"],
+        "homeboy-lab"
+    );
+    lifecycle_store
+        .write_record(&record)
+        .expect("persist recovery state");
 
-        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
-        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
-        snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
-        snapshot.events.clear();
-        let replacement_job_id = snapshot.job.id.to_string();
+    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+    snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+    snapshot.events.clear();
+    let replacement_job_id = snapshot.job.id.to_string();
 
-        reconcile_transport_proxy_snapshot(&mut record, &snapshot)
-            .expect("replacement runner snapshot binds the planned execution record");
+    reconcile_transport_proxy_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("replacement runner snapshot binds the planned execution record");
 
-        assert_eq!(record.state, AgentTaskRunState::Running);
-        assert_eq!(record.runner_job_id(), Some(replacement_job_id.as_str()));
-        assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
-    });
+    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.runner_job_id(), Some(replacement_job_id.as_str()));
+    assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). "The controller job" the snapshot is refused against is the one the
+/// acceptance above persisted, so the acceptance and the validation that reads
+/// it back name one home. The run does not exist yet, so the acceptance is
+/// spelled with its explicit submission rather than the default one, which would
+/// reach the machine-global controller-runtime admission queue — see
+/// `stub_lab_offload_submission`.
+///
+/// The refusal happens before any durable write: the record already carries an
+/// accepted `runner_job_id`, so `bind_pending_lab_handoff_snapshot_in_store`
+/// returns immediately and `validate_runner_job_snapshot` rejects.
 #[test]
 fn runner_snapshot_rejects_conflicting_bound_lab_job_identity() {
-    with_isolated_home(|_| {
-        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_detached_lab_run_with_submission_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
             run_id: "snapshot-conflicting-handoff",
             runner_id: "homeboy-lab",
             runner_job_id: "00000000-0000-0000-0000-000000000456",
             remote_workspace: "/runner/workspace/repo",
             remote_command: &command,
-        })
-        .expect("accepted controller handoff");
-        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
-        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
-        snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
-        snapshot.events.clear();
+        },
+        &stub_lab_offload_submission,
+    )
+    .expect("accepted controller handoff");
+    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+    snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+    snapshot.events.clear();
 
-        let error = reconcile_transport_proxy_snapshot(&mut record, &snapshot)
+    let error =
+        reconcile_transport_proxy_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
             .expect_err("different runner snapshot job is rejected");
 
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert!(error.message.contains("does not match controller job"));
-    });
+    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+    assert!(error.message.contains("does not match controller job"));
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -1174,41 +1234,61 @@ fn accepted_handoff_does_not_terminalize_unconfirmed_generation_absence() {
     });
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). "Binds before validation" is a claim about one durable row: the
+/// pre-acceptance phase record the binder reads its runner from and the accepted
+/// handoff it commits back are the same record in the same home. The stub
+/// admission keeps submission off the machine-global controller-runtime queue;
+/// nothing here asserts on runtime provenance.
+///
+/// The bind reaches `record_detached_lab_run_in_store`, which carries the
+/// default Lab offload submission — but the phase write above has already
+/// created the record, so acceptance reads it instead of falling through.
 #[test]
 fn preacceptance_snapshot_binds_planned_runner_job_before_validation() {
-    with_isolated_home(|_| {
-        let run_id = "cook-preacceptance-snapshot";
-        let plan = test_plan();
-        let mut record = record_lab_offload_phase(
-            run_id,
-            "homeboy-lab",
-            "lab_handoff_preacceptance",
-            Some("/runner/workspace/homeboy"),
-            None,
-            None,
-            Some(&plan),
-        )
-        .expect("persist planned controller execution");
-        assert!(record.lab_handoff.is_none());
-        assert_eq!(record.metadata["runner_id"], "homeboy-lab");
-        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
-        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
-        snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
-        snapshot.events.clear();
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "cook-preacceptance-snapshot";
+    let plan = test_plan();
+    let mut record = record_lab_offload_phase_with_submission_in_store(
+        &lifecycle_store,
+        LabOffloadPhaseRecord {
+            requested_run_id: run_id,
+            runner_id: "homeboy-lab",
+            phase: "lab_handoff_preacceptance",
+            remote_workspace: Some("/runner/workspace/homeboy"),
+            source_checkout: None,
+            provider_rotation: None,
+            durable_plan: Some(&plan),
+        },
+        &stub_lab_offload_submission,
+    )
+    .expect("persist planned controller execution");
+    assert!(record.lab_handoff.is_none());
+    assert_eq!(record.metadata["runner_id"], "homeboy-lab");
+    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+    snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+    snapshot.events.clear();
 
-        reconcile_transport_proxy_snapshot(&mut record, &snapshot)
-            .expect("accepted daemon snapshot binds before validation");
+    reconcile_transport_proxy_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("accepted daemon snapshot binds before validation");
 
-        let accepted_job_id = snapshot.job.id.to_string();
-        assert_eq!(record.runner_job_id(), Some(accepted_job_id.as_str()));
-        assert_eq!(
-            record.lab_handoff.as_ref().expect("handoff").state,
-            AgentTaskLabHandoffState::Accepted
-        );
-        assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
-    });
+    let accepted_job_id = snapshot.job.id.to_string();
+    assert_eq!(record.runner_job_id(), Some(accepted_job_id.as_str()));
+    assert_eq!(
+        record.lab_handoff.as_ref().expect("handoff").state,
+        AgentTaskLabHandoffState::Accepted
+    );
+    assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). Same shape as its sibling above: the pre-acceptance phase record
+/// supplies the binding authority and receives the accepted handoff, so both
+/// halves have to name one home. The stub admission keeps submission off the
+/// machine-global controller-runtime queue.
 #[test]
 fn preacceptance_snapshot_binds_a_pre_claim_job_without_a_target_runner() {
     // A daemon job is created with `target_runner_id: None` and only gains a
@@ -1216,61 +1296,79 @@ fn preacceptance_snapshot_binds_a_pre_claim_job_without_a_target_runner() {
     // has no target. The expected-Lab controller handoff is the binding
     // authority: an absent target must still bind (regression for a strict
     // `!=` check that silently skipped this pre-claim window).
-    with_isolated_home(|_| {
-        let run_id = "cook-preacceptance-no-target";
-        let plan = test_plan();
-        let mut record = record_lab_offload_phase(
-            run_id,
-            "homeboy-lab",
-            "lab_handoff_preacceptance",
-            Some("/runner/workspace/homeboy"),
-            None,
-            None,
-            Some(&plan),
-        )
-        .expect("persist planned controller execution");
-        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
-        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
-        snapshot.job.target_runner_id = None;
-        snapshot.events.clear();
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "cook-preacceptance-no-target";
+    let plan = test_plan();
+    let mut record = record_lab_offload_phase_with_submission_in_store(
+        &lifecycle_store,
+        LabOffloadPhaseRecord {
+            requested_run_id: run_id,
+            runner_id: "homeboy-lab",
+            phase: "lab_handoff_preacceptance",
+            remote_workspace: Some("/runner/workspace/homeboy"),
+            source_checkout: None,
+            provider_rotation: None,
+            durable_plan: Some(&plan),
+        },
+        &stub_lab_offload_submission,
+    )
+    .expect("persist planned controller execution");
+    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+    snapshot.job.target_runner_id = None;
+    snapshot.events.clear();
 
-        reconcile_transport_proxy_snapshot(&mut record, &snapshot)
-            .expect("pre-claim daemon snapshot binds before validation");
+    reconcile_transport_proxy_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("pre-claim daemon snapshot binds before validation");
 
-        let accepted_job_id = snapshot.job.id.to_string();
-        assert_eq!(record.runner_job_id(), Some(accepted_job_id.as_str()));
-        assert_eq!(
-            record.lab_handoff.as_ref().expect("handoff").state,
-            AgentTaskLabHandoffState::Accepted
-        );
-        assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
-    });
+    let accepted_job_id = snapshot.job.id.to_string();
+    assert_eq!(record.runner_job_id(), Some(accepted_job_id.as_str()));
+    assert_eq!(
+        record.lab_handoff.as_ref().expect("handoff").state,
+        AgentTaskLabHandoffState::Accepted
+    );
+    assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
 }
 
+/// Rooted in an explicit store rather than a mutated process environment
+/// (#7505). "Fails closed against the *bound* daemon job" only means anything
+/// when the acceptance that bound it and the validation that refuses the
+/// mismatch read one record. The run does not exist yet, so the acceptance is
+/// spelled with its explicit submission rather than the default one, which would
+/// reach the machine-global controller-runtime admission queue — see
+/// `stub_lab_offload_submission`.
 #[test]
 fn preacceptance_snapshot_rejects_a_different_bound_daemon_job() {
-    with_isolated_home(|_| {
-        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_detached_lab_run_with_submission_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
             run_id: "cook-preacceptance-mismatch",
             runner_id: "homeboy-lab",
             runner_job_id: "00000000-0000-0000-0000-000000000123",
             remote_workspace: "/runner/workspace/homeboy",
             remote_command: &command,
-        })
-        .expect("persist accepted controller handoff");
-        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
-        snapshot.job.id =
-            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000456").expect("snapshot job id");
-        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
-        snapshot.events.clear();
+        },
+        &stub_lab_offload_submission,
+    )
+    .expect("persist accepted controller handoff");
+    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+    snapshot.job.id =
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000456").expect("snapshot job id");
+    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+    snapshot.events.clear();
 
-        let error = reconcile_transport_proxy_snapshot(&mut record, &snapshot)
+    let error =
+        reconcile_transport_proxy_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
             .expect_err("different accepted daemon job fails closed");
 
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert!(error.message.contains("does not match controller job"));
-    });
+    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+    assert!(error.message.contains("does not match controller job"));
 }
 
 #[test]
