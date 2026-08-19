@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.35.14] - 2026-08-19
+
+### Fixed
+- order Git URL delimiter correctly
+
 ## [3.35.13] - 2026-08-19
 
 ### Fixed
