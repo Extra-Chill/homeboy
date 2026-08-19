@@ -349,6 +349,7 @@ Read durable run status
 | `--bridge` | flag | _no help text_ |
 | `--since-cursor` | `<CURSOR>` | _no help text_ |
 | `--full` | flag | _no help text_ |
+| `--bounded` | flag | Present `--full` as a bounded, outcome-first summary with drill-down refs |
 | `--strict-subject-exit` | flag | Exit nonzero when the inspected Cook needs follow-up action |
 | `--no-runner-probe` | flag | _no help text_ |
 | `--watch` | flag | Follow this durable status until it reaches a terminal state or the timeout expires |

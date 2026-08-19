@@ -816,6 +816,17 @@ fn seed_patch_alias_aggregate(
     plan: &AgentTaskPlan,
     patches: &[(&str, &std::path::Path, &str)],
 ) {
+    let lifecycle_store =
+        AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
+    seed_patch_alias_aggregate_in_store(&lifecycle_store, run_id, plan, patches);
+}
+
+fn seed_patch_alias_aggregate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    patches: &[(&str, &std::path::Path, &str)],
+) {
     use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -843,40 +854,41 @@ fn seed_patch_alias_aggregate(
             }
         })
         .collect();
-    agent_task_lifecycle::record_run_aggregate(
-        run_id,
-        plan,
-        &AgentTaskAggregate {
-            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-            plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
-            totals: AgentTaskAggregateTotals {
-                succeeded: 1,
-                ..Default::default()
+    lifecycle_store
+        .record_run_aggregate(
+            run_id,
+            plan,
+            &AgentTaskAggregate {
+                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::Succeeded,
+                totals: AgentTaskAggregateTotals {
+                    succeeded: 1,
+                    ..Default::default()
+                },
+                outcomes: vec![AgentTaskOutcome {
+                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: task.task_id.clone(),
+                    status: AgentTaskOutcomeStatus::Succeeded,
+                    summary: None,
+                    failure_classification: None,
+                    artifacts,
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: test_review_form_outputs(),
+                    workflow: None,
+                    follow_up: None,
+                    metadata: serde_json::json!({ "model": task.executor.model() }),
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
             },
-            outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                task_id: task.task_id.clone(),
-                status: AgentTaskOutcomeStatus::Succeeded,
-                summary: None,
-                failure_classification: None,
-                artifacts,
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: test_review_form_outputs(),
-                workflow: None,
-                follow_up: None,
-                metadata: serde_json::json!({ "model": task.executor.model() }),
-            }],
-            events: Vec::new(),
-            artifact_lineage: Vec::new(),
-            child_runs: Vec::new(),
-            artifact_bindings: Vec::new(),
-            queue: Default::default(),
-        },
-    )
-    .expect("persist candidate aggregate");
+        )
+        .expect("persist candidate aggregate");
 }
 
 #[test]
@@ -1074,6 +1086,55 @@ impl CookSideEffectService for CanonicalSelectionSideEffects {
     }
 }
 
+struct SelectionRequiredSideEffects;
+
+impl CookSideEffectService for SelectionRequiredSideEffects {
+    fn promote(
+        &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
+        _options: &AgentTaskCookServiceOptions,
+        run_id: &str,
+    ) -> Result<AgentTaskPromotionReport> {
+        let aggregate = lifecycle_store.read_aggregate(run_id)?;
+        let choices = aggregate
+            .outcomes
+            .iter()
+            .flat_map(|outcome| outcome.artifacts.iter())
+            .map(|artifact| serde_json::json!({ "artifact_id": artifact.id }))
+            .collect::<Vec<_>>();
+        assert_eq!(choices.len(), 2, "rooted aggregate has distinct candidates");
+        Err(homeboy_core::Error::new(
+            homeboy_core::ErrorCode::ValidationInvalidArgument,
+            "Cook found distinct canonical patch candidates; select one before promotion",
+            serde_json::json!({
+                "field": "artifact_id",
+                "state": "selection_required",
+                "selection_required": true,
+                "choices": choices,
+            }),
+        ))
+    }
+
+    fn recover_moving_base(
+        &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
+        _options: &AgentTaskCookServiceOptions,
+        _recovery: &MovingBaseCookRecovery,
+    ) -> Result<AgentTaskPromotionReport> {
+        unreachable!("selection-required Cook must not recover a moving base")
+    }
+
+    fn finalize(
+        &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
+        _options: &AgentTaskCookServiceOptions,
+        _run_id: &str,
+        _promotion: &AgentTaskPromotionReport,
+    ) -> Result<Value> {
+        unreachable!("selection-required Cook must not finalize")
+    }
+}
+
 #[test]
 fn cook_promotes_the_rotated_success_after_a_retained_timeout_with_aliases_collapsed() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -1173,6 +1234,104 @@ fn cook_persists_selection_required_before_promotion_or_gates() {
             2
         );
     });
+}
+
+#[test]
+fn cook_selection_required_metadata_uses_supplied_lifecycle_store() {
+    let _ambient_context = homeboy_core::test_support::HomeGuard::new();
+    let supplied_context = homeboy_core::test_support::HermeticTestContext::new();
+    let ambient_store =
+        AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
+    let recipe_store = CookRecipeStore::new(supplied_context.path_roots());
+    let supplied_store = AgentTaskLifecycleStore::new(supplied_context.path_roots());
+    let temp = tempfile::tempdir().expect("candidate artifacts");
+    let cook_id = "same-selection-required-cook";
+    let run_id = "same-selection-required-run";
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.initial_run_id = run_id.to_string();
+
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist supplied recipe");
+    for store in [&ambient_store, &supplied_store] {
+        store
+            .submit_plan_with_runtime_admission(&options.initial_plan, run_id, |_| {
+                Ok(serde_json::json!({}))
+            })
+            .expect("seed lifecycle record");
+    }
+    supplied_store
+        .record_cook_attempt(cook_id, 1, run_id)
+        .expect("record supplied Cook attempt");
+    seed_patch_alias_aggregate_in_store(
+        &supplied_store,
+        run_id,
+        &options.initial_plan,
+        &[
+            (
+                "patch-a",
+                &temp.path().join("a"),
+                "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+one\n",
+            ),
+            (
+                "patch-b",
+                &temp.path().join("b"),
+                "diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-old\n+two\n",
+            ),
+        ],
+    );
+    supplied_store
+        .record_metadata_value(
+            run_id,
+            "latest_promotion",
+            serde_json::json!({ "status": "verification_pending" }),
+        )
+        .expect("seed rooted verification-pending continuation");
+    ambient_store
+        .record_metadata_value(
+            run_id,
+            "controller_admission",
+            serde_json::json!({
+                "state": "none",
+                "owner": null,
+                "position": null,
+                "requested_at_ms": null,
+                "wait_duration_ms": null,
+            }),
+        )
+        .expect("seed ambient runtime-promotion projection");
+    let ambient_before = ambient_store
+        .read_record(run_id)
+        .expect("read untouched root");
+
+    let result = run_cook_with_boundaries_observed_inner_with_stores(
+        &recipe_store,
+        &supplied_store,
+        options,
+        UnusedExecutor,
+        SelectionRequiredSideEffects,
+        None,
+        false,
+    )
+    .expect("Cook reports selection-required promotion failure");
+
+    let supplied_record = supplied_store
+        .read_record(run_id)
+        .expect("read supplied root");
+    let ambient_record = ambient_store
+        .read_record(run_id)
+        .expect("read untouched root");
+    assert_eq!(result.value.status, "selection_required");
+    assert_eq!(
+        supplied_record.metadata["cook_selection_required"]["state"],
+        "selection_required"
+    );
+    assert!(supplied_record
+        .metadata
+        .get("cook_controller_failure")
+        .is_some());
+    assert_eq!(ambient_record.metadata, ambient_before.metadata);
+    assert_eq!(ambient_record.updated_at, ambient_before.updated_at);
 }
 
 #[test]

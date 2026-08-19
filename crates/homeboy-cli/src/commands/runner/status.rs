@@ -9,20 +9,21 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners::{
-    self as runner, RunnerActiveJobState, RunnerBinarySource, RunnerSession, RunnerStatusReport,
-    RunnerTunnelMode, RuntimeMaterializationStatus,
+    self as runner, Runner, RunnerActiveJobState, RunnerBinarySource, RunnerKind, RunnerSession,
+    RunnerStatusReport, RunnerTunnelMode, RuntimeMaterializationStatus,
 };
 
 use super::super::CmdResult;
 use super::controller_ancestry::{commits_are_ancestral, CommitAncestry};
 use super::types::{
-    LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
-    RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
-    RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOperatorSummary, RunnerOutput,
-    RunnerReconciliationOutcome, RunnerReconciliationStatus, RunnerRuntimeDiagnostics,
-    RunnerRuntimePackageDiagnostics, RunnerStatusInspection, RunnerStatusUnavailable,
-    RunnerToolDiagnostics, RunnerTruncation, RunnerWorkflowBinaryGuidance, RuntimeDiagnostic,
-    RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
+    LabFollowup, LabRunnerConnectionCapability, LabRunnerHomeboyOutput, LabSelectedRunnerOutput,
+    RunnerArtifactFeatureDiagnostics, RunnerConnectionOutput,
+    RunnerExecutableRequirementDiagnostics, RunnerExecutionCapabilities, RunnerExecutionCapability,
+    RunnerExtra, RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOperatorSummary,
+    RunnerOutput, RunnerReconciliationOutcome, RunnerReconciliationStatus,
+    RunnerRuntimeDiagnostics, RunnerRuntimePackageDiagnostics, RunnerStatusInspection,
+    RunnerStatusUnavailable, RunnerToolDiagnostics, RunnerTruncation, RunnerWorkflowBinaryGuidance,
+    RuntimeDiagnostic, RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
 };
 
 const DEFAULT_STATUS_SESSION_LIMIT: usize = 20;
@@ -32,10 +33,30 @@ pub(super) fn status(
     include_generations: bool,
     full: bool,
 ) -> CmdResult<RunnerOutput> {
-    let preferred_lab_runner = runner::resolve_default_lab_runner()?;
     if let Some(id) = id {
+        let runners = runner::list()?;
+        if is_controller_local_runner(&runners, id) {
+            return Ok((
+                RunnerOutput {
+                    command: "runner.status".to_string(),
+                    id: Some(id.to_string()),
+                    extra: RunnerExtra {
+                        execution_capabilities: Some(global_execution_capabilities(&runners, None)?),
+                        operator_hints: vec![
+                            "Controller-local execution is available; use `homeboy --placement local agent-task cook ...`."
+                                .to_string(),
+                        ],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ));
+        }
+        let preferred_lab_runner = runner::resolve_default_lab_runner()?;
         let admission_snapshot = runner::runner_admission_snapshot(id)?;
         let report = admission_snapshot.status;
+        let capabilities = global_execution_capabilities(&runners, Some(&report))?;
         let generation_inventory = admission_snapshot.generation_inventory;
         // Lead with the compact authoritative admission answer, summarizing the
         // draining generations by count rather than expanding the full ledger
@@ -63,6 +84,7 @@ pub(super) fn status(
                     id: Some(id.to_string()),
                     extra: RunnerExtra {
                         admission_summary,
+                        execution_capabilities: Some(capabilities),
                         operator_summary: Some(operator_summary),
                         truncation: Some(RunnerTruncation {
                             omitted_generations: generation_count
@@ -94,6 +116,7 @@ pub(super) fn status(
                 id: Some(id.to_string()),
                 extra: RunnerExtra {
                     admission_summary,
+                    execution_capabilities: Some(capabilities),
                     connection: Some(RunnerConnectionOutput::Status(Box::new(
                         sanitized_status_for_output(report),
                     ))),
@@ -112,7 +135,10 @@ pub(super) fn status(
         ));
     }
 
-    let sessions = runner::persisted_statuses()?;
+    let preferred_lab_runner = runner::resolve_default_lab_runner()?;
+    let runners = runner::list()?;
+    let sessions = non_local_sessions(&runners, runner::persisted_statuses()?);
+    let capabilities = execution_capabilities(&runners, &sessions);
     if !full {
         let omitted = sessions.len().saturating_sub(DEFAULT_STATUS_SESSION_LIMIT);
         let sessions = sessions
@@ -125,6 +151,7 @@ pub(super) fn status(
                 command: "runner.status".to_string(),
                 extra: RunnerExtra {
                     operator_summaries: sessions,
+                    execution_capabilities: Some(capabilities),
                     truncation: Some(RunnerTruncation {
                         omitted_generations: 0,
                         omitted_sessions: omitted,
@@ -140,6 +167,7 @@ pub(super) fn status(
         ));
     }
     let (sessions, inspection) = full_status_projections(sessions, runner::statuses_indexed());
+    let capabilities = execution_capabilities(&runners, &sessions);
     let mut operator_hints: Vec<String> = sessions
         .iter()
         .flat_map(runner_status_operator_hints)
@@ -172,6 +200,7 @@ pub(super) fn status(
                     .into_iter()
                     .map(sanitized_status_for_output)
                     .collect(),
+                execution_capabilities: Some(capabilities),
                 inspection: Some(inspection),
                 preferred_lab_runner,
                 selected_lab_runner,
@@ -185,6 +214,88 @@ pub(super) fn status(
         },
         0,
     ))
+}
+
+fn is_controller_local_runner(runners: &[Runner], id: &str) -> bool {
+    runners
+        .iter()
+        .any(|runner| runner.id == id && runner.kind == RunnerKind::Local)
+}
+
+pub(super) fn non_local_sessions(
+    runners: &[Runner],
+    sessions: Vec<RunnerStatusReport>,
+) -> Vec<RunnerStatusReport> {
+    sessions
+        .into_iter()
+        .filter(|report| !is_controller_local_runner(runners, &report.runner_id))
+        .collect()
+}
+
+fn global_execution_capabilities(
+    runners: &[Runner],
+    queried_report: Option<&RunnerStatusReport>,
+) -> homeboy::core::Result<RunnerExecutionCapabilities> {
+    let mut sessions = runner::persisted_statuses()?;
+    if let Some(queried_report) = queried_report {
+        if let Some(session) = sessions
+            .iter_mut()
+            .find(|session| session.runner_id == queried_report.runner_id)
+        {
+            *session = queried_report.clone();
+        } else {
+            sessions.push(queried_report.clone());
+        }
+    }
+    Ok(execution_capabilities(runners, &sessions))
+}
+
+fn execution_capabilities(
+    runners: &[Runner],
+    sessions: &[RunnerStatusReport],
+) -> RunnerExecutionCapabilities {
+    execution_capabilities_with_local_placement(true, runners, sessions)
+}
+
+pub(super) fn execution_capabilities_with_local_placement(
+    local_placement_available: bool,
+    runners: &[Runner],
+    sessions: &[RunnerStatusReport],
+) -> RunnerExecutionCapabilities {
+    let connected_runner_ids = sessions
+        .iter()
+        .filter(|report| !is_controller_local_runner(runners, &report.runner_id))
+        .filter(|report| report.connected)
+        .map(|report| report.runner_id.clone())
+        .collect::<Vec<_>>();
+    let next_action = if connected_runner_ids.is_empty() {
+        sessions
+            .iter()
+            .find(|report| !is_controller_local_runner(runners, &report.runner_id))
+            .map(|report| report.status_action().render_command())
+    } else {
+        None
+    };
+    RunnerExecutionCapabilities {
+        local_placement: RunnerExecutionCapability {
+            available: local_placement_available,
+            state: if local_placement_available {
+                "available"
+            } else {
+                "unavailable"
+            },
+            next_action: if local_placement_available {
+                "homeboy --placement local agent-task cook ...".to_string()
+            } else {
+                "Inspect controller-local execution prerequisites.".to_string()
+            },
+        },
+        lab_runner_connection: LabRunnerConnectionCapability {
+            available: !connected_runner_ids.is_empty(),
+            connected_runner_ids,
+            next_action,
+        },
+    }
 }
 
 pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {

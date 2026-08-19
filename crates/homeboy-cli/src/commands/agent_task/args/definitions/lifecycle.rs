@@ -70,6 +70,9 @@ pub struct StatusArgs {
     pub since_cursor: Option<u64>,
     #[arg(long, conflicts_with = "bridge")]
     pub full: bool,
+    /// Present `--full` as a bounded, outcome-first summary with drill-down refs.
+    #[arg(long, requires = "full", conflicts_with = "bridge")]
+    pub bounded: bool,
     /// Exit nonzero when the inspected Cook needs follow-up action.
     ///
     /// Normal status reads report their own success independently from the

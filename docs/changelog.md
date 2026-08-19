@@ -4,6 +4,35 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.23] - 2026-08-19
+
+### Changed
+- root the cook-recipe tests and delete their ambient wrappers
+- root the deferred-workload tests and delete their ambient wrappers
+
+## [0.350.22] - 2026-08-19
+
+### Changed
+- use explicit lifecycle store
+
+### Fixed
+- make bounded status explicit
+- bound full status details
+- project detached Cook materialization
+- derive status capabilities globally
+- separate local placement status
+- persist explicit transport rejections
+- classify terminal transport rejections
+
+## [0.350.21] - 2026-08-19
+
+### Changed
+- root Cook selection-required metadata
+- delete the ambient twins nothing calls anymore
+
+### Fixed
+- retain timeout candidates after rotation failure
+
 ## [0.350.20] - 2026-08-19
 
 ### Changed
