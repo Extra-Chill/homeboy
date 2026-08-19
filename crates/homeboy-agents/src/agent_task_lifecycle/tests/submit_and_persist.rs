@@ -17,42 +17,6 @@ use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
-/// The submission a rooted Lab-offload test hands to the
-/// `*_with_submission_in_store` entry points.
-///
-/// Every Lab offload entry point reads its record first and submits only on the
-/// fall-through, and that fall-through is the one reach a rooted Lab offload
-/// function still makes past its lifecycle store: the default
-/// `admitted_lab_offload_submission` calls `submit_plan_in_store`, which admits
-/// through `homeboy_core::controller_runtime`, whose FIFO admission queue and
-/// content-addressed pin store hang off `paths::controller_runtimes_store()` and
-/// are machine-global on purpose (#7505, #12608). A test that no longer mutates
-/// HOME would therefore enqueue against the *real operator* runtime store and
-/// block on its cross-process lock. Naming the submission keeps the whole
-/// operation inside the injected store and reaches nothing process-global at
-/// all.
-///
-/// It is named even where the record already exists and the fall-through
-/// therefore cannot be reached: if that reasoning is ever wrong, a stub
-/// submission fails loudly inside the injected store instead of quietly
-/// enqueueing against the operator's real home.
-///
-/// The consequence to keep in mind when choosing what to migrate: the durable
-/// run this creates carries `{}` for its controller-runtime pin rather than a
-/// real admission, so a test that asserts on controller-runtime *provenance*
-/// stays on `with_isolated_home`.
-///
-/// This mirrors the identically named helper in the `handoff_and_proxy`
-/// partition; each partition is its own module, so the two are separate items
-/// rather than a redefinition.
-fn stub_lab_offload_submission(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    plan: &AgentTaskPlan,
-    run_id: &str,
-) -> Result<AgentTaskRunRecord> {
-    lifecycle_store.submit_plan_with_runtime_admission(plan, run_id, |_| Ok(json!({})))
-}
-
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The submission, the hand-written running projection and the status
 /// read that judges it are one home, so "the accepted daemon authority kept
