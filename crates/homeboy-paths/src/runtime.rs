@@ -168,16 +168,6 @@ pub(crate) fn runner_lease_evidence_file_in_root(
         .join(format!("{}.json", sanitize_path_segment(lease_id)))
 }
 
-/// Controller-owned lease evidence retained after an ephemeral runner session
-/// or remote daemon state file disappears.
-pub(crate) fn runner_lease_evidence_file(runner_id: &str, lease_id: &str) -> Result<PathBuf> {
-    Ok(runner_lease_evidence_file_in_root(
-        &homeboy()?,
-        runner_id,
-        lease_id,
-    ))
-}
-
 /// Runner-owned durable reverse-execution evidence below an already-resolved
 /// config root.
 pub fn runner_job_execution_context_evidence_file_in_root(

@@ -1305,18 +1305,6 @@ pub fn release_local_workspace_claim(claim: &WorkspaceClaim) -> Result<()> {
     store()?.release(claim, now_ms())
 }
 
-pub(crate) fn register_local_workspace_owner(
-    workspace: WorkspaceIdentity,
-    run_id: &str,
-) -> Result<WorkspaceOwnerLease> {
-    store()?.register_owner(
-        workspace,
-        run_id,
-        LOCAL_WORKSPACE_OWNER_LEASE_TTL_MS,
-        now_ms(),
-    )
-}
-
 pub(crate) fn register_local_workspace_owner_in_store(
     store: &WorkspaceClaimStore,
     workspace: WorkspaceIdentity,
@@ -1336,10 +1324,6 @@ pub(crate) fn renew_local_workspace_owner(
     store()?.renew_owner(lease, LOCAL_WORKSPACE_OWNER_LEASE_TTL_MS, now_ms())
 }
 
-pub(crate) fn validate_local_workspace_owner(lease: &WorkspaceOwnerLease) -> Result<bool> {
-    store()?.validate_owner(lease, now_ms())
-}
-
 pub(crate) fn validate_local_workspace_owner_in_store(
     store: &WorkspaceClaimStore,
     lease: &WorkspaceOwnerLease,
@@ -1347,19 +1331,11 @@ pub(crate) fn validate_local_workspace_owner_in_store(
     store.validate_owner(lease, now_ms())
 }
 
-pub(crate) fn release_local_workspace_owner(lease: &WorkspaceOwnerLease) -> Result<()> {
-    store()?.release_owner(lease, now_ms())
-}
-
 pub(crate) fn release_local_workspace_owner_in_store(
     store: &WorkspaceClaimStore,
     lease: &WorkspaceOwnerLease,
 ) -> Result<()> {
     store.release_owner(lease, now_ms())
-}
-
-pub(crate) fn renew_record_workspace_owner(record: &mut AgentTaskRunRecord) -> Result<()> {
-    renew_record_workspace_owner_in_store(&store()?, record)
 }
 
 pub(crate) fn renew_record_workspace_owner_in_store(
@@ -1452,10 +1428,6 @@ pub(crate) fn require_record_workspace_owner_in_store(
         ));
     }
     Ok(())
-}
-
-pub(crate) fn release_terminal_record_workspace_owner(record: &AgentTaskRunRecord) -> Result<()> {
-    release_terminal_record_workspace_owner_in_store(&store()?, record)
 }
 
 pub(crate) fn release_terminal_record_workspace_owner_in_store(

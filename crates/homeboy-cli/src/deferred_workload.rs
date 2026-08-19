@@ -347,12 +347,6 @@ pub fn terminalize_in_roots(config_root: &Path, id: &str, succeeded: bool) -> Re
     })
 }
 
-/// Return a claimed workload to the queue when runner preflight discovers that
-/// the selected runner no longer satisfies its persisted contract.
-pub fn defer_claim(id: &str, owner: &str) -> Result<()> {
-    defer_claim_in_roots(&ambient_config_root()?, id, owner)
-}
-
 pub fn defer_claim_in_roots(config_root: &Path, id: &str, owner: &str) -> Result<()> {
     update_in_roots(config_root, |records| {
         if let Some(record) = records.iter_mut().find(|record| record.id == id) {
@@ -406,11 +400,6 @@ pub fn records() -> Result<Vec<DeferredWorkload>> {
 
 pub fn records_in_roots(config_root: &Path) -> Result<Vec<DeferredWorkload>> {
     read_store(&store_path_in_roots(config_root))
-}
-
-/// Whether any record still needs a worker.
-pub fn has_pending_work() -> Result<bool> {
-    has_pending_work_in_roots(&ambient_config_root()?)
 }
 
 pub fn has_pending_work_in_roots(config_root: &Path) -> Result<bool> {
@@ -476,10 +465,6 @@ pub fn try_acquire_worker_lock_in_roots(
             )),
         )),
     }
-}
-
-pub fn acquire_worker_start_lock() -> Result<DeferredWorkloadWorkerStartLock> {
-    acquire_worker_start_lock_in_roots(&ambient_config_root()?)
 }
 
 pub fn acquire_worker_start_lock_in_roots(
@@ -835,10 +820,6 @@ pub fn write_worker_status_in_roots(
         )
     })?;
     write_store(&path, &bytes)
-}
-
-pub fn append_worker_log(message: impl AsRef<str>) -> Result<()> {
-    append_worker_log_in_roots(&ambient_config_root()?, message)
 }
 
 pub fn append_worker_log_in_roots(config_root: &Path, message: impl AsRef<str>) -> Result<()> {

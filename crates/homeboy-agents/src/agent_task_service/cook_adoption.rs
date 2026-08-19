@@ -1258,19 +1258,6 @@ pub(super) fn resolve_adoption_target_with_attempt_in_stores(
     ))
 }
 
-fn materialize_adoption_attempt(
-    recipe: super::AgentTaskCookRecipe,
-    run_id: String,
-) -> Result<(
-    agent_task_lifecycle::AgentTaskRunRecord,
-    super::AgentTaskCookRecipe,
-)> {
-    let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    materialize_adoption_attempt_in_stores(&recipe_store, &lifecycle_store, recipe, run_id)
-}
-
 fn materialize_adoption_attempt_in_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
