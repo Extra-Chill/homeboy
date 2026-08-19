@@ -261,7 +261,11 @@ jobs:
       component: homeboy
       extension-ref: 691d0527d7a4b3917649043a7f91a81913a139ab
       source: .
-      scope: auto
+      # TEMPORARY -- do not merge. Forces a one-off full-suite run to validate
+      # the #7505 campaign's ~40 merged PRs. main only ever runs changed-scope
+      # (the full-scope Main Guard was removed deliberately in #10696), so the
+      # night's work has never been exercised against the whole suite.
+      scope: full
       differential-gating: 'true'
       baseline-commands: none
       test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}
