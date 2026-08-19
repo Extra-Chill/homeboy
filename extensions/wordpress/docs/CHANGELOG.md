@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.35.13] - 2026-08-19
+
+### Fixed
+- converge WP Codebox cache origin
+
 ## [3.35.12] - 2026-08-19
 
 ### Fixed
