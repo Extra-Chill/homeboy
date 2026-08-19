@@ -3222,39 +3222,21 @@ fn local_provider_reservation_persists_reusable_owner_identity_before_execution(
 /// this test's own reservation.
 #[test]
 fn status_keeps_live_local_provider_owner_running_idempotently() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "owner-live", |_| Ok(json!({})))
-        .expect("submitted");
-    mark_running_in_store(&lifecycle_store, "owner-live").expect("running");
-    reserve_provider_execution_in_store(&lifecycle_store, "owner-live", &plan.tasks[0], 1)
-        .expect("reserved");
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-live")).expect("submitted");
+        mark_running("owner-live").expect("running");
+        reserve_provider_execution("owner-live", &plan.tasks[0], 1).expect("reserved");
 
-    let first = status_in_store(
-        &lifecycle_store,
-        "owner-live",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("first status")
-    .record;
-    let second = status_in_store(
-        &lifecycle_store,
-        "owner-live",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("second status")
-    .record;
-    assert_eq!(first.state, AgentTaskRunState::Running);
-    assert_eq!(second.state, AgentTaskRunState::Running);
-    assert_eq!(
-        second.metadata["provider_executions"][0]["owner_state"],
-        json!("live")
-    );
+        let first = status("owner-live").expect("first status");
+        let second = status("owner-live").expect("second status");
+        assert_eq!(first.state, AgentTaskRunState::Running);
+        assert_eq!(second.state, AgentTaskRunState::Running);
+        assert_eq!(
+            second.metadata["provider_executions"][0]["owner_state"],
+            json!("live")
+        );
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -3262,43 +3244,21 @@ fn status_keeps_live_local_provider_owner_running_idempotently() {
 /// that must *not* terminalize it all name the same installation.
 #[test]
 fn status_does_not_terminalize_a_live_owner_after_provider_success() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "owner-live-late-import", |_| Ok(json!({})))
-        .expect("submitted");
-    mark_running_in_store(&lifecycle_store, "owner-live-late-import").expect("running");
-    reserve_provider_execution_in_store(
-        &lifecycle_store,
-        "owner-live-late-import",
-        &plan.tasks[0],
-        1,
-    )
-    .expect("reserved");
-    record_provider_execution_terminal_in_store(
-        &lifecycle_store,
-        "owner-live-late-import",
-        "task-a",
-        1,
-        "succeeded",
-    )
-    .expect("provider success recorded");
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-live-late-import")).expect("submitted");
+        mark_running("owner-live-late-import").expect("running");
+        reserve_provider_execution("owner-live-late-import", &plan.tasks[0], 1).expect("reserved");
+        record_provider_execution_terminal("owner-live-late-import", "task-a", 1, "succeeded")
+            .expect("provider success recorded");
 
-    let record = status_in_store(
-        &lifecycle_store,
-        "owner-live-late-import",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("status before aggregate import")
-    .record;
-    assert_eq!(record.state, AgentTaskRunState::Running);
-    assert_eq!(
-        record.metadata["provider_executions"][0]["owner_state"],
-        json!("live")
-    );
+        let record = status("owner-live-late-import").expect("status before aggregate import");
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(
+            record.metadata["provider_executions"][0]["owner_state"],
+            json!("live")
+        );
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -3312,39 +3272,28 @@ fn status_does_not_terminalize_a_live_owner_after_provider_success() {
 /// is a fact about this process, not a lifecycle root.
 #[test]
 fn legacy_provider_reservation_without_owner_proof_remains_joinable() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "owner-legacy", |_| Ok(json!({})))
-        .expect("submitted");
-    mark_running_in_store(&lifecycle_store, "owner-legacy").expect("running");
-    reserve_provider_execution_in_store(&lifecycle_store, "owner-legacy", &plan.tasks[0], 1)
-        .expect("reserved");
-    rewrite_record_for_test_in_store(&lifecycle_store, "owner-legacy", |record| {
-        let execution = record.metadata["provider_executions"][0]
-            .as_object_mut()
-            .expect("provider execution object");
-        execution.remove("owner_pid");
-        execution.remove("owner_linux_starttime_ticks");
-        execution.remove("owner_identity");
-    })
-    .expect("legacy reservation fixture");
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-legacy")).expect("submitted");
+        mark_running("owner-legacy").expect("running");
+        reserve_provider_execution("owner-legacy", &plan.tasks[0], 1).expect("reserved");
+        rewrite_record_for_test("owner-legacy", |record| {
+            let execution = record.metadata["provider_executions"][0]
+                .as_object_mut()
+                .expect("provider execution object");
+            execution.remove("owner_pid");
+            execution.remove("owner_linux_starttime_ticks");
+            execution.remove("owner_identity");
+        })
+        .expect("legacy reservation fixture");
 
-    let record = status_in_store(
-        &lifecycle_store,
-        "owner-legacy",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("legacy status")
-    .record;
-    assert_eq!(record.state, AgentTaskRunState::Running);
-    assert_eq!(
-        record.metadata["provider_executions"][0]["owner_state"],
-        json!("unverifiable")
-    );
+        let record = status("owner-legacy").expect("legacy status");
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(
+            record.metadata["provider_executions"][0]["owner_state"],
+            json!("unverifiable")
+        );
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -3357,35 +3306,24 @@ fn legacy_provider_reservation_without_owner_proof_remains_joinable() {
 #[cfg(target_os = "linux")]
 #[test]
 fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "owner-pid-reused", |_| Ok(json!({})))
-        .expect("submitted");
-    mark_running_in_store(&lifecycle_store, "owner-pid-reused").expect("running");
-    reserve_provider_execution_in_store(&lifecycle_store, "owner-pid-reused", &plan.tasks[0], 1)
-        .expect("reserved");
-    rewrite_record_for_test_in_store(&lifecycle_store, "owner-pid-reused", |record| {
-        record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = json!(0);
-    })
-    .expect("reused PID fixture");
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-pid-reused")).expect("submitted");
+        mark_running("owner-pid-reused").expect("running");
+        reserve_provider_execution("owner-pid-reused", &plan.tasks[0], 1).expect("reserved");
+        rewrite_record_for_test("owner-pid-reused", |record| {
+            record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = json!(0);
+        })
+        .expect("reused PID fixture");
 
-    let record = status_in_store(
-        &lifecycle_store,
-        "owner-pid-reused",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("reconcile PID reuse")
-    .record;
-    assert_eq!(record.state, AgentTaskRunState::Cancelled);
-    assert_eq!(
-        record.metadata["provider_executions"][0]["owner_state"],
-        json!("identity_mismatch")
-    );
-    assert!(homeboy_core::process::pid_is_running(std::process::id()));
+        let record = status("owner-pid-reused").expect("reconcile PID reuse");
+        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            record.metadata["provider_executions"][0]["owner_state"],
+            json!("identity_mismatch")
+        );
+        assert!(homeboy_core::process::pid_is_running(std::process::id()));
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -3395,54 +3333,36 @@ fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it()
 #[cfg(unix)]
 #[test]
 fn dead_local_provider_owner_terminalizes_running_reservation_once() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "owner-dead", |_| Ok(json!({})))
-        .expect("submitted");
-    mark_running_in_store(&lifecycle_store, "owner-dead").expect("running");
-    reserve_provider_execution_in_store(&lifecycle_store, "owner-dead", &plan.tasks[0], 1)
-        .expect("reserved");
-    let mut owner = Command::new("sleep")
-        .arg("60")
-        .spawn()
-        .expect("start provider owner");
-    rewrite_record_for_test_in_store(&lifecycle_store, "owner-dead", |record| {
-        record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
-        record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
-    })
-    .expect("provider owner fixture");
-    owner.kill().expect("interrupt provider owner");
-    owner.wait().expect("reap provider owner");
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-dead")).expect("submitted");
+        mark_running("owner-dead").expect("running");
+        reserve_provider_execution("owner-dead", &plan.tasks[0], 1).expect("reserved");
+        let mut owner = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start provider owner");
+        rewrite_record_for_test("owner-dead", |record| {
+            record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
+            record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
+        })
+        .expect("provider owner fixture");
+        owner.kill().expect("interrupt provider owner");
+        owner.wait().expect("reap provider owner");
 
-    let terminal = status_in_store(
-        &lifecycle_store,
-        "owner-dead",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("reconciled status")
-    .record;
-    let replay = status_in_store(
-        &lifecycle_store,
-        "owner-dead",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("idempotent status")
-    .record;
-    assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
-    assert_eq!(replay.state, AgentTaskRunState::Cancelled);
-    assert_eq!(
-        replay.metadata["provider_executions"][0]["state"],
-        json!("cancelled")
-    );
-    assert_eq!(
-        replay.metadata["local_provider_ownership"]["state"],
-        json!("owner_dead")
-    );
+        let terminal = status("owner-dead").expect("reconciled status");
+        let replay = status("owner-dead").expect("idempotent status");
+        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+        assert_eq!(replay.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            replay.metadata["provider_executions"][0]["state"],
+            json!("cancelled")
+        );
+        assert_eq!(
+            replay.metadata["local_provider_ownership"]["state"],
+            json!("owner_dead")
+        );
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -3452,49 +3372,32 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
 #[cfg(unix)]
 #[test]
 fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "owner-late-success", |_| Ok(json!({})))
-        .expect("submitted");
-    mark_running_in_store(&lifecycle_store, "owner-late-success").expect("running");
-    reserve_provider_execution_in_store(&lifecycle_store, "owner-late-success", &plan.tasks[0], 1)
-        .expect("reserved");
-    record_provider_execution_terminal_in_store(
-        &lifecycle_store,
-        "owner-late-success",
-        "task-a",
-        1,
-        "succeeded",
-    )
-    .expect("provider success recorded");
-    let mut owner = Command::new("sleep")
-        .arg("60")
-        .spawn()
-        .expect("start provider owner");
-    rewrite_record_for_test_in_store(&lifecycle_store, "owner-late-success", |record| {
-        record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
-        record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
-    })
-    .expect("provider owner fixture");
-    owner.kill().expect("interrupt provider owner");
-    owner.wait().expect("reap provider owner");
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-late-success")).expect("submitted");
+        mark_running("owner-late-success").expect("running");
+        reserve_provider_execution("owner-late-success", &plan.tasks[0], 1).expect("reserved");
+        record_provider_execution_terminal("owner-late-success", "task-a", 1, "succeeded")
+            .expect("provider success recorded");
+        let mut owner = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start provider owner");
+        rewrite_record_for_test("owner-late-success", |record| {
+            record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
+            record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
+        })
+        .expect("provider owner fixture");
+        owner.kill().expect("interrupt provider owner");
+        owner.wait().expect("reap provider owner");
 
-    let recovered = status_in_store(
-        &lifecycle_store,
-        "owner-late-success",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("recovered status")
-    .record;
-    assert_eq!(recovered.state, AgentTaskRunState::CandidateRecoverable);
-    assert_eq!(
-        recovered.metadata["provider_executions"][0]["state"],
-        json!("succeeded")
-    );
+        let recovered = status("owner-late-success").expect("recovered status");
+        assert_eq!(recovered.state, AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(
+            recovered.metadata["provider_executions"][0]["state"],
+            json!("succeeded")
+        );
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -3503,35 +3406,25 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
 /// is decided from the evidence this test wrote.
 #[test]
 fn cancellation_race_defers_to_a_durable_provider_success() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "cancel-race", |_| Ok(json!({})))
-        .expect("submitted");
-    mark_running_in_store(&lifecycle_store, "cancel-race").expect("running");
-    reserve_provider_execution_in_store(&lifecycle_store, "cancel-race", &plan.tasks[0], 1)
-        .expect("reserved");
-    record_provider_execution_terminal_in_store(
-        &lifecycle_store,
-        "cancel-race",
-        "task-a",
-        1,
-        "succeeded",
-    )
-    .expect("provider success recorded");
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("cancel-race")).expect("submitted");
+        mark_running("cancel-race").expect("running");
+        reserve_provider_execution("cancel-race", &plan.tasks[0], 1).expect("reserved");
+        record_provider_execution_terminal("cancel-race", "task-a", 1, "succeeded")
+            .expect("provider success recorded");
 
-    let deferred = cancel_run_in_store(&lifecycle_store, "cancel-race", Some("operator cancel"))
-        .expect("cancellation defers to terminal provider");
-    let replay = cancel_run_in_store(&lifecycle_store, "cancel-race", Some("operator cancel"))
-        .expect("idempotent cancellation deferral");
-    assert_eq!(deferred.state, AgentTaskRunState::Running);
-    assert_eq!(replay.state, AgentTaskRunState::Running);
-    assert_eq!(
-        replay.metadata["provider_executions"][0]["state"],
-        json!("succeeded")
-    );
+        let deferred = cancel_run("cancel-race", Some("operator cancel"))
+            .expect("cancellation defers to terminal provider");
+        let replay = cancel_run("cancel-race", Some("operator cancel"))
+            .expect("idempotent cancellation deferral");
+        assert_eq!(deferred.state, AgentTaskRunState::Running);
+        assert_eq!(replay.state, AgentTaskRunState::Running);
+        assert_eq!(
+            replay.metadata["provider_executions"][0]["state"],
+            json!("succeeded")
+        );
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
