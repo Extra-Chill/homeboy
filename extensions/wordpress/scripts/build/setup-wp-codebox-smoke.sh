@@ -125,6 +125,10 @@ while [ "$#" -gt 0 ]; do
                 printf 'expected explicit external WP_CODEBOX_CLI to survive source fallback: %s\n' "${WP_CODEBOX_CLI:-}" >&2
                 exit 1
             fi
+            if [ -n "${FAKE_EXPECT_WP_CODEBOX_CORE_MODULE+x}" ] && [ "${WP_CODEBOX_CORE_MODULE:-}" != "${FAKE_EXPECT_WP_CODEBOX_CORE_MODULE}" ]; then
+                printf 'expected explicit external WP_CODEBOX_CORE_MODULE to survive source fallback: %s\n' "${WP_CODEBOX_CORE_MODULE:-}" >&2
+                exit 1
+            fi
             mkdir -p "${prefix}/node_modules/@automattic/wp-codebox-core/dist"
             mkdir -p "${prefix}/packages/cli/dist"
             printf '%s\n' 'module.exports = { fixture: true };' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
@@ -249,6 +253,16 @@ git -C "${REQUESTED_WORKTREE}" commit --quiet -m 'requested source fixture'
 REQUESTED_SHA="$(git -C "${REQUESTED_WORKTREE}" rev-parse HEAD)"
 git -C "${REQUESTED_WORKTREE}" push --quiet origin HEAD:main
 
+# Newer Git versions accept `--` as an option separator in either position.
+# Keep the fixture's positional contract deterministic while its successful
+# setup run uses the real Git binary below.
+git() {
+    if [ "${1:-}" = "-C" ] && [ "${3:-}" = "remote" ] && [ "${4:-}" = "set-url" ] && [ "${5:-}" = "origin" ] && [ "${6:-}" = "--" ] && [ "${7:-}" = "${REQUESTED_SOURCE}" ]; then
+        return 1
+    fi
+    command git "$@"
+}
+
 # `--` after the remote name is parsed as the replacement URL, not an option
 # terminator. Keep this fixture dash-prefixed so the old ordering must fail.
 if git -C "${STALE_ORIGIN_REPO_DIR}" remote set-url origin -- "${REQUESTED_SOURCE}"; then
@@ -270,6 +284,10 @@ fi
 # Restore the stale cache so setup itself must perform the same repair.
 git -C "${STALE_ORIGIN_REPO_DIR}" remote set-url -- origin "${DIFFERENT_SOURCE}"
 
+# Git 2.50 rejects a local transport pathname beginning with `-`. Preserve the
+# stored dash-prefixed relative source while rewriting only the transport path.
+command git -C "${STALE_ORIGIN_REPO_DIR}" config "url../${REQUESTED_SOURCE}.insteadOf" "${REQUESTED_SOURCE}"
+
 (
     cd "${EXTENSION_DIR}"
     HOME="${TMPDIR}/stale-origin-home" \
@@ -281,6 +299,8 @@ git -C "${STALE_ORIGIN_REPO_DIR}" remote set-url -- origin "${DIFFERENT_SOURCE}"
     HOMEBOY_WP_CODEBOX_REF="main" \
     bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/stale-origin-setup.out"
 )
+
+command git -C "${STALE_ORIGIN_REPO_DIR}" config --unset-all "url../${REQUESTED_SOURCE}.insteadOf"
 
 stale_origin_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${STALE_ORIGIN_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
 stale_origin_wp_codebox_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${STALE_ORIGIN_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
@@ -656,9 +676,12 @@ if ! grep -q 'WP Codebox release artifact not published' "${TMPDIR}/missing-rele
     exit 1
 fi
 
-# Source fallback must not erase a caller-owned CLI outside its managed release
-# cache. The fake build checks that the explicit value survives into npm.
+# Source fallback must not erase caller-owned CLI/core values outside its
+# managed release cache. This runs under setup's `set -e`; the rejected release
+# must still converge the source cache after the final preserved override makes
+# the wrapper predicate return false.
 EXTERNAL_CLI="${TMPDIR}/external/wp-codebox"
+EXTERNAL_CORE_MODULE="${TMPDIR}/external/contracts.js"
 EXTERNAL_CLI_GITHUB_ENV_FILE="${TMPDIR}/external-cli-github-env"
 mkdir -p "$(dirname "${EXTERNAL_CLI}")"
 cat > "${EXTERNAL_CLI}" <<'SH'
@@ -670,21 +693,38 @@ fi
 printf '%s\n' 'external wp-codebox'
 SH
 chmod +x "${EXTERNAL_CLI}"
+printf '%s\n' 'module.exports = { runtimeContractManifest() { return { fixture: "external" }; } };' > "${EXTERNAL_CORE_MODULE}"
 (
     cd "${EXTENSION_DIR}"
     HOME="${TMPDIR}/external-cli-home" \
     PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
     GITHUB_ENV="${EXTERNAL_CLI_GITHUB_ENV_FILE}" \
-    HOMEBOY_WP_CODEBOX_INSTALL_MODE="source" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/external-cli-install" \
+    HOMEBOY_WP_CODEBOX_DOWNLOAD_URL="https://example.test/wp-codebox-cli-linux-x64.tar.gz" \
+    FAKE_WP_CODEBOX_RELEASE_MISSING="1" \
     WP_CODEBOX_CLI="${EXTERNAL_CLI}" \
+    WP_CODEBOX_CORE_MODULE="${EXTERNAL_CORE_MODULE}" \
     FAKE_EXPECT_WP_CODEBOX_CLI="${EXTERNAL_CLI}" \
+    FAKE_EXPECT_WP_CODEBOX_CORE_MODULE="${EXTERNAL_CORE_MODULE}" \
     bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/external-cli-setup.out"
 )
 
 external_cli_source_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${EXTERNAL_CLI_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
 if [ "${external_cli_source_bin}" != "${TMPDIR}/external-cli-install/source/packages/cli/dist/index.js" ]; then
     echo "Expected incompatible explicit external CLI to use source fallback, got: ${external_cli_source_bin}" >&2
+    cat "${TMPDIR}/external-cli-setup.out" >&2
+    exit 1
+fi
+
+external_cli_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${EXTERNAL_CLI_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+if [ "${external_cli_core_module}" != "${EXTERNAL_CORE_MODULE}" ]; then
+    echo "Expected source fallback to preserve the explicit external core module, got: ${external_cli_core_module}" >&2
+    cat "${TMPDIR}/external-cli-setup.out" >&2
+    exit 1
+fi
+
+if [ ! -x "${TMPDIR}/external-cli-install/source/packages/cli/dist/index.js" ]; then
+    echo "Expected source fallback to converge the WP Codebox cache" >&2
     cat "${TMPDIR}/external-cli-setup.out" >&2
     exit 1
 fi

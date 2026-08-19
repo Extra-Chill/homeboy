@@ -194,6 +194,8 @@ NODE
                 *) managed_wrapper_targets_release "${value}" "${release_root}" && unset "${name}" ;;
             esac
         done
+
+        return 0
     }
 
     # Machine-scoped override file under the homeboy-managed cache install root.
