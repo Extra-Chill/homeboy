@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.350.17] - 2026-08-19
+
+### Changed
+- root 12 status_and_recovery tests in an injected store
+- root 20 handoff/proxy tests in an injected lifecycle store
+- root 17 terminal_and_reconcile tests in an injected store
+- root transport-proxy recovery and reconcile in a store
+
+### Fixed
+- elect initial recipe ownership
+- bind failures to materialization
+- verify materialized failure ownership
+
 ## [0.350.16] - 2026-08-19
 
 ### Changed
