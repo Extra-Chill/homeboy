@@ -99,6 +99,8 @@ struct CookProgressState {
     emitted_lines: usize,
     heartbeat_count: usize,
     last_phase: Option<String>,
+    /// The terminal report is allowed one line beyond the progress budget.
+    terminal_emitted: bool,
     /// Last provider-activity sentence emitted, so an unchanged sample stays
     /// silent while a genuinely new one gets a line.
     last_activity: Option<String>,
@@ -160,7 +162,13 @@ fn next_machine_progress_message(
     run_id: Option<&str>,
     activity: Option<&str>,
 ) -> Option<String> {
-    if state.emitted_lines >= MAX_MACHINE_PROGRESS_LINES {
+    // Preserve one final bounded outcome line even when heartbeat sampling has
+    // consumed the progress budget. The initial pointer remains the stable
+    // recovery command if the caller is interrupted before this point.
+    let terminal = phase == "terminal";
+    if (terminal && state.terminal_emitted)
+        || (state.emitted_lines >= MAX_MACHINE_PROGRESS_LINES && !terminal)
+    {
         return None;
     }
     let identity = run_id
@@ -202,6 +210,7 @@ fn next_machine_progress_message(
         return None;
     };
     state.last_phase = Some(phase.to_string());
+    state.terminal_emitted |= terminal;
     state.emitted_lines += 1;
     Some(message)
 }
@@ -449,6 +458,67 @@ mod progress_tests {
             MAX_MACHINE_PROGRESS_LINES,
             "changing activity is still capped by the machine progress budget"
         );
+    }
+
+    #[test]
+    fn terminal_machine_progress_is_emitted_after_the_heartbeat_budget() {
+        let mut state = CookProgressState::default();
+        for heartbeat in 0..MAX_MACHINE_PROGRESS_LINES {
+            let activity = format!("sample {heartbeat}");
+            assert!(next_machine_progress_message(
+                &mut state,
+                "heartbeat",
+                None,
+                Some("run-123"),
+                Some(&activity),
+            )
+            .is_some());
+        }
+
+        let terminal = next_machine_progress_message(
+            &mut state,
+            "terminal",
+            None,
+            Some("run-123"),
+            Some("failed"),
+        )
+        .expect("terminal outcome remains visible");
+
+        assert!(terminal.contains("Cook terminal: durable run `run-123`"));
+        assert!(terminal.contains("homeboy agent-task status run-123"));
+        assert_eq!(state.emitted_lines, MAX_MACHINE_PROGRESS_LINES + 1);
+        assert!(next_machine_progress_message(
+            &mut state,
+            "terminal",
+            None,
+            Some("run-123"),
+            Some("failed"),
+        )
+        .is_none());
+        assert_eq!(state.emitted_lines, MAX_MACHINE_PROGRESS_LINES + 1);
+    }
+
+    #[test]
+    fn terminal_machine_progress_is_emitted_once_before_the_heartbeat_budget() {
+        let mut state = CookProgressState::default();
+
+        assert!(next_machine_progress_message(
+            &mut state,
+            "terminal",
+            None,
+            Some("run-123"),
+            Some("failed"),
+        )
+        .is_some());
+        assert!(next_machine_progress_message(
+            &mut state,
+            "terminal",
+            None,
+            Some("run-123"),
+            Some("failed"),
+        )
+        .is_none());
+        assert_eq!(state.emitted_lines, 1);
     }
 }
 
