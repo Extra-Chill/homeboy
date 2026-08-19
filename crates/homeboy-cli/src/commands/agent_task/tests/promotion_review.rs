@@ -458,13 +458,16 @@ fn detached_cook_parent_status_projects_its_materializing_child_before_index_pub
             }]);
         })
         .expect("record provider boundary");
-        agent_task_lifecycle::record_cook_progress(
-            child_run_id,
-            "provider_start",
-            1,
-            Some("fixture provider"),
-        )
-        .expect("record provider start");
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("resolve lifecycle store")
+            .record_cook_progress_with_activity(
+                child_run_id,
+                "provider_start",
+                1,
+                Some("fixture provider"),
+                None,
+            )
+            .expect("record provider start");
 
         let (materializing_status, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
