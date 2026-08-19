@@ -384,7 +384,7 @@ EOF
     else
         # This is a Homeboy-owned cache, so converge a stale or dead origin to
         # the caller's requested source before fetching its requested ref.
-        git -C "${repo_dir}" remote set-url origin -- "${source}"
+        git -C "${repo_dir}" remote set-url -- origin "${source}"
     fi
 
     git -C "${repo_dir}" fetch --quiet origin "${ref}"

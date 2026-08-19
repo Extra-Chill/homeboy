@@ -249,6 +249,27 @@ git -C "${REQUESTED_WORKTREE}" commit --quiet -m 'requested source fixture'
 REQUESTED_SHA="$(git -C "${REQUESTED_WORKTREE}" rev-parse HEAD)"
 git -C "${REQUESTED_WORKTREE}" push --quiet origin HEAD:main
 
+# `--` after the remote name is parsed as the replacement URL, not an option
+# terminator. Keep this fixture dash-prefixed so the old ordering must fail.
+if git -C "${STALE_ORIGIN_REPO_DIR}" remote set-url origin -- "${REQUESTED_SOURCE}"; then
+    echo "Expected the previous git remote set-url delimiter ordering to fail" >&2
+    exit 1
+fi
+
+if [ "$(git -C "${STALE_ORIGIN_REPO_DIR}" remote get-url origin)" != "${DIFFERENT_SOURCE}" ]; then
+    echo "Expected failed delimiter ordering to leave the stale origin unchanged" >&2
+    exit 1
+fi
+
+git -C "${STALE_ORIGIN_REPO_DIR}" remote set-url -- origin "${REQUESTED_SOURCE}"
+if [ "$(git -C "${STALE_ORIGIN_REPO_DIR}" remote get-url origin)" != "${REQUESTED_SOURCE}" ]; then
+    echo "Expected corrected git remote set-url delimiter ordering to replace the stale origin" >&2
+    exit 1
+fi
+
+# Restore the stale cache so setup itself must perform the same repair.
+git -C "${STALE_ORIGIN_REPO_DIR}" remote set-url -- origin "${DIFFERENT_SOURCE}"
+
 (
     cd "${EXTENSION_DIR}"
     HOME="${TMPDIR}/stale-origin-home" \
